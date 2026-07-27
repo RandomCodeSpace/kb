@@ -1,48 +1,180 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import type { Board, Status, Task } from './lib/model';
 import { parse, serialize } from './lib/markdown';
-import { bumpShipped, LocalStore, seedBoard, shippedToday } from './lib/store';
+import { bumpShipped, loadDirty, LocalStore, seedBoard, setDirty, shippedToday } from './lib/store';
+import type { Identity } from './lib/auth';
+import { clearIdentity, loadIdentity, ReauthRequiredError, sanitizeUser, saveIdentity } from './lib/auth';
+import { RemoteStore } from './lib/remote';
 import { burst } from './lib/confetti';
 import { BoardView } from './components/Board';
 import { CardModal } from './components/CardModal';
 import type { ModalState } from './components/CardModal';
 import { Confetti } from './components/Confetti';
+import { IdentityGate } from './components/IdentityGate';
 
-const store = new LocalStore();
+type SyncState = 'off' | 'ok' | 'error' | 'expired';
+
+const SYNC_TITLE: Record<SyncState, string> = {
+  off: 'sync off — local only',
+  ok: 'synced to server',
+  error: 'last save to server failed',
+  expired: 'session expired — sign out and sign in again',
+};
 
 export default function App() {
+  const [identity, setIdentity] = useState<Identity | null>(() => loadIdentity());
+
+  if (!identity) {
+    return (
+      <IdentityGate
+        onIdentity={(i) => {
+          saveIdentity(i);
+          setIdentity(i);
+        }}
+      />
+    );
+  }
+  return (
+    <BoardApp
+      key={identity.id}
+      identity={identity}
+      onSignOut={() => {
+        clearIdentity();
+        setIdentity(null);
+      }}
+    />
+  );
+}
+
+interface BoardAppProps {
+  identity: Identity;
+  onSignOut: () => void;
+}
+
+function BoardApp({ identity, onSignOut }: BoardAppProps) {
+  const ns = sanitizeUser(identity.id);
+  const store = useMemo(() => new LocalStore(ns), [ns]);
+  const remote = useMemo(() => new RemoteStore(), []);
   const [board, setBoard] = useState<Board>(() => store.load() ?? seedBoard());
   const [modal, setModal] = useState<ModalState | null>(null);
-  const [streak, setStreak] = useState<number>(() => shippedToday());
+  const [streak, setStreak] = useState<number>(() => shippedToday(ns));
+  const [sync, setSync] = useState<SyncState>('off');
   const fileRef = useRef<HTMLInputElement>(null);
   const boardRef = useRef(board);
   boardRef.current = board;
+  const syncOnRef = useRef(false);
+  // Last board that did NOT come from a user edit (initial load or server
+  // adoption). The save effect uses identity against this to tell user edits
+  // (mark dirty, push) from adopted state (neither).
+  const cleanBoardRef = useRef(board);
+
+  const onSaveError = useCallback((err: unknown) => {
+    setSync(err instanceof ReauthRequiredError ? 'expired' : 'error');
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Local edits that never reached the server win over the remote copy:
+    // push them instead of silently adopting (and destroying) newer local work.
+    const pushLocal = () => {
+      syncOnRef.current = true;
+      remote.saveRemote(
+        identity,
+        boardRef.current,
+        (err) => {
+          if (!cancelled) onSaveError(err);
+        },
+        () => {
+          setDirty(ns, false);
+          if (!cancelled) setSync('ok');
+        },
+      );
+    };
+    void (async () => {
+      const present = await remote.detect();
+      if (cancelled || !present) return;
+      let remoteBoard: Board | null = null;
+      if (!loadDirty(ns)) {
+        try {
+          remoteBoard = await remote.loadRemote(identity);
+        } catch (err) {
+          // Server present but board fetch failed — keep the local board,
+          // report the failure, and do not enable autosave over broken auth.
+          if (!cancelled) onSaveError(err);
+          return;
+        }
+      }
+      if (cancelled) return;
+      // Re-check dirtiness after the fetch: an edit may have landed while the
+      // remote copy was in flight (boardRef catches commits whose save effect
+      // has not flushed yet).
+      if (loadDirty(ns) || boardRef.current !== cleanBoardRef.current) {
+        pushLocal();
+        return;
+      }
+      if (remoteBoard) {
+        // Adopted state, not a user edit — don't echo it back to the server.
+        cleanBoardRef.current = remoteBoard;
+        // parse() regenerates task ids; drop modal state holding old ones so
+        // a later Save cannot append a duplicate of an existing task.
+        setModal(null);
+        setBoard(remoteBoard);
+      }
+      syncOnRef.current = true;
+      setSync('ok');
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [identity, remote, ns, onSaveError]);
 
   useEffect(() => {
     store.save(board);
-  }, [board]);
+    if (board === cleanBoardRef.current) return; // initial load / server adoption
+    setDirty(ns, true);
+    if (!syncOnRef.current) return;
+    remote.saveRemoteDebounced(identity, board, onSaveError, () => {
+      setDirty(ns, false);
+      setSync('ok');
+    });
+  }, [board, store, remote, identity, ns, onSaveError]);
 
-  const move = useCallback((taskId: string, to: Status) => {
-    const prev = boardRef.current.tasks.find((t) => t.id === taskId);
-    if (!prev || prev.status === to) return;
-    const movedAt = new Date().toISOString();
-    setBoard((b) => ({
-      ...b,
-      tasks: b.tasks.map((t) =>
-        t.id === taskId ? { ...t, status: to, movedAt } : t,
-      ),
-    }));
-    if (to === 'done') {
-      setStreak(bumpShipped());
-      const r = document
-        .querySelector(`[data-task="${taskId}"]`)
-        ?.getBoundingClientRect();
-      const x = r ? r.left + r.width / 2 : window.innerWidth / 2;
-      const y = r ? r.top + r.height / 2 : window.innerHeight / 2;
-      burst(x, y, 70);
-    }
-  }, []);
+  useEffect(() => {
+    // Flush the pending debounced save when the page goes away so edits made
+    // <800ms before close/reload still reach the server; cancel on
+    // unmount/sign-out so no PUT fires with a stale identity afterwards.
+    const flush = () => remote.flush();
+    window.addEventListener('pagehide', flush);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      remote.cancel();
+    };
+  }, [remote]);
+
+  const move = useCallback(
+    (taskId: string, to: Status) => {
+      const prev = boardRef.current.tasks.find((t) => t.id === taskId);
+      if (!prev || prev.status === to) return;
+      const movedAt = new Date().toISOString();
+      setBoard((b) => ({
+        ...b,
+        tasks: b.tasks.map((t) =>
+          t.id === taskId ? { ...t, status: to, movedAt } : t,
+        ),
+      }));
+      if (to === 'done') {
+        setStreak(bumpShipped(ns));
+        const r = document
+          .querySelector(`[data-task="${taskId}"]`)
+          ?.getBoundingClientRect();
+        const x = r ? r.left + r.width / 2 : window.innerWidth / 2;
+        const y = r ? r.top + r.height / 2 : window.innerHeight / 2;
+        burst(x, y, 70);
+      }
+    },
+    [ns],
+  );
 
   const handleTick = useCallback(
     (taskId: string, checkIdx: number, pos: { x: number; y: number }) => {
@@ -140,11 +272,23 @@ export default function App() {
         <h1>webtui</h1>
         <div className="hactions">
           {streak > 0 && <span className="streak">×{streak} shipped today</span>}
+          <span className="who" title={identity.id}>
+            {identity.id}
+          </span>
+          <span
+            className={`dot ${sync}`}
+            title={SYNC_TITLE[sync]}
+            role="status"
+            aria-label={SYNC_TITLE[sync]}
+          />
           <button type="button" onClick={handleExport}>
             Export
           </button>
           <button type="button" onClick={() => fileRef.current?.click()}>
             Import
+          </button>
+          <button type="button" onClick={onSignOut}>
+            Sign out
           </button>
           <input
             ref={fileRef}
