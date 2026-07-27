@@ -99,3 +99,38 @@ with fixed dates. UI verified by build + manual pass.
 
 Multi-board, sync backend, auth, offline service worker, keyboard shortcuts,
 column customization. All deferred deliberately.
+
+## Addendum (same day): identity + single-binary server
+
+Pulls the v1.1 sync service forward and pins its shape ("kb"):
+
+- **Single Go binary** (`go install github.com/RandomCodeSpace/kb@latest`)
+  embedding the built SPA. `dist/` is committed so `go install` — which builds
+  from module source — has the frontend to embed. Run:
+  `kb --port 8080 --data ~/boards`.
+- **API contract**: `GET /api/health` → 200 `{"ok":true}`;
+  `GET /api/board` → 200 `text/markdown` or 404 if none saved;
+  `PUT /api/board` (body `text/markdown`) → 204. Auth applies to `/api/board`
+  only, never to `/api/health` or static files.
+- **Auth modes** (chosen from env at startup, in precedence order):
+  1. `KB_AZURE_TENANT_ID` + `KB_AZURE_CLIENT_ID` → require
+     `Authorization: Bearer <Entra ID token>` (the SPA's ID token). Server-side
+     validation only: RS256 signature vs tenant JWKS
+     (`https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys`),
+     `iss == https://login.microsoftonline.com/<tenant>/v2.0`,
+     `aud == client id`, `exp`/`nbf`. Identity = `email` claim, falling back
+     to `preferred_username`. **No Microsoft Graph calls anywhere** — token
+     decode/verify only.
+  2. else `KB_TOKEN` → require `Authorization: Bearer <KB_TOKEN>`
+     (constant-time compare, crypto/subtle). Identity = required non-empty
+     `X-KB-User` header (a manual unique id).
+  3. else open/localhost mode → identity = `X-KB-User` or `default`.
+- **Frontend build-time pair**: `VITE_AZURE_TENANT_ID` /
+  `VITE_AZURE_CLIENT_ID` baked in at `npm run build` to enable the MSAL SPA
+  flow (PKCE; no client secret; only openid/profile/email).
+- **Storage**: one board file per identity at `<dataDir>/<sanitize(user)>.md`.
+  `sanitize` lowercases and replaces every char outside `[a-z0-9._@-]` with
+  `-`, rejects empty names and names starting with `.`, and never allows path
+  separators (no traversal).
+- **Sync**: last-write-wins on the whole file; no merge, versioning, or
+  conflict detection.
