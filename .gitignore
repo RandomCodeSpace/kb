@@ -1,8 +1,3 @@
+# dist is committed intentionally: `go install` builds from the module source,
+# and the server embeds the built SPA from dist/ at compile time.
 node_modules
-
-# dist/ is a build artifact; only .gitkeep is tracked so that the
-# //go:embed all:dist directive still resolves in a fresh clone.
-/dist/*
-!/dist/.gitkeep
-
-/docs/
