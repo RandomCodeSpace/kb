@@ -1,0 +1,3 @@
+# dist is committed intentionally: `go install` builds from the module source,
+# and the server embeds the built SPA from dist/ at compile time.
+node_modules
