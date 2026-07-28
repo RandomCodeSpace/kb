@@ -1,4 +1,4 @@
-export type Status = 'todo' | 'doing' | 'done';
+export type Status = 'todo' | 'doing' | 'done' | 'cancelled';
 export type Effort = 'S' | 'M' | 'L';
 export type Prio = 1 | 2 | 3 | 4;
 
@@ -13,6 +13,7 @@ export interface Task {
   title: string;
   desc: string;
   status: Status;
+  blocked: boolean;
   prio: Prio;
   due?: string; // YYYY-MM-DD
   effort?: Effort;
@@ -27,11 +28,12 @@ export interface Board {
   tasks: Task[];
 }
 
-export const STATUSES: Status[] = ['todo', 'doing', 'done'];
+export const STATUSES: Status[] = ['todo', 'doing', 'done', 'cancelled'];
 export const STATUS_LABEL: Record<Status, string> = {
   todo: 'To Do',
   doing: 'Doing',
   done: 'Done',
+  cancelled: 'Cancelled',
 };
 
 export function newTask(partial: Partial<Task> & { title: string }): Task {
@@ -41,6 +43,7 @@ export function newTask(partial: Partial<Task> & { title: string }): Task {
     emoji: '',
     desc: '',
     status: 'todo',
+    blocked: false,
     prio: 3,
     tags: [],
     checks: [],

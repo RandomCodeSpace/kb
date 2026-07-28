@@ -65,6 +65,12 @@ export interface AIStoryRequest {
   task?: Record<string, unknown>;
 }
 
+/** ADR to split into stories; `max` is clamped to 1..20 by the server. */
+export interface AIStoriesRequest {
+  adr: string;
+  max?: number;
+}
+
 /** Card draft returned by POST /api/ai/story, clamped into form-safe values. */
 export interface StoryDraft {
   title: string;
@@ -165,12 +171,64 @@ export async function aiStory(
   return coerceStoryDraft(await res.json());
 }
 
+/**
+ * Split an ADR into proposed stories (POST /api/ai/stories). Every draft goes
+ * through the same coercion as a single draft; a draft that coercion leaves
+ * title-less is dropped — it could not round-trip through the codec.
+ */
+export async function aiStories(
+  identity: Identity,
+  req: AIStoriesRequest,
+): Promise<StoryDraft[]> {
+  const res = await authedFetch(identity, '/api/ai/stories', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) throw new Error(await errText(res, `split failed: ${res.status}`));
+  const body: unknown = await res.json();
+  const stories =
+    typeof body === 'object' && body !== null
+      ? (body as Record<string, unknown>).stories
+      : undefined;
+  if (!Array.isArray(stories)) return [];
+  return stories.map(coerceStoryDraft).filter((d) => d.title !== '');
+}
+
 const DUE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// C0/C1 control characters, including the CR/LF that would let an upstream
+// reply open a new markdown line, plus the separators the wire treats as
+// whitespace.
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+
+/**
+ * Wire safety: fields that occupy one line on the wire (title, tag, check
+ * text) get their control characters folded to spaces and whitespace runs
+ * collapsed, matching what the codec does on read.
+ */
+function oneLine(s: string): string {
+  return s.replace(CONTROL_RE, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Descriptions are multi-line on the wire (each line is indented, and the
+ * codec escapes lines that would re-parse as checklist items), so newlines
+ * survive — every other control character does not.
+ */
+function multiLine(s: string): string {
+  return s
+    .split(/\r\n|\r|\n/)
+    .map((line) => line.replace(CONTROL_RE, ' ').replace(/[^\S\n]+/g, ' ').trim())
+    .join('\n')
+    .trim();
+}
 
 /**
  * Clamp an untrusted draft body into form-safe values. The server already
  * coerces, but the form types (Prio union, Effort union) must never trust
  * the wire: prio 1-4 (default 3), effort S/M/L or '', due YYYY-MM-DD or ''.
+ * Every string field additionally passes wire-safety validation so a hostile
+ * upstream reply cannot inject markdown lines into the board.
  */
 export function coerceStoryDraft(body: unknown): StoryDraft {
   const b = (typeof body === 'object' && body !== null ? body : {}) as Record<
@@ -182,23 +240,28 @@ export function coerceStoryDraft(body: unknown): StoryDraft {
   const effort =
     b.effort === 'S' || b.effort === 'M' || b.effort === 'L' ? b.effort : '';
   const due = typeof b.due === 'string' && DUE_RE.test(b.due) ? b.due : '';
+  // A tag is one whitespace-delimited '#'-prefixed token on the wire, so a
+  // tag with inner whitespace would split into title words: drop it rather
+  // than silently rewriting what the model asked for.
   const tags = Array.isArray(b.tags)
     ? b.tags
         .filter((t): t is string => typeof t === 'string')
-        .map((t) => t.trim())
-        .filter(Boolean)
+        .map((t) => oneLine(t).replace(/^#+/, ''))
+        .filter((t) => t !== '' && !/\s/.test(t))
     : [];
   const checks = Array.isArray(b.checks)
     ? b.checks.flatMap((c): { text: string; done: boolean }[] => {
         if (typeof c !== 'object' || c === null) return [];
         const o = c as Record<string, unknown>;
-        if (typeof o.text !== 'string' || o.text.trim() === '') return [];
-        return [{ text: o.text.trim(), done: o.done === true }];
+        if (typeof o.text !== 'string') return [];
+        const text = oneLine(o.text);
+        if (text === '') return [];
+        return [{ text, done: o.done === true }];
       })
     : [];
   return {
-    title: typeof b.title === 'string' ? b.title.trim() : '',
-    desc: typeof b.desc === 'string' ? b.desc : '',
+    title: typeof b.title === 'string' ? oneLine(b.title) : '',
+    desc: typeof b.desc === 'string' ? multiLine(b.desc) : '',
     prio,
     due,
     effort,

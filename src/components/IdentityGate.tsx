@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { Identity } from '../lib/auth';
-import { azureConfigured, signInAzure } from '../lib/auth';
+import { azureAvailable, signInAzure } from '../lib/auth';
 
 export interface IdentityGateProps {
   onIdentity: (identity: Identity) => void;
@@ -12,7 +12,25 @@ export function IdentityGate({ onIdentity }: IdentityGateProps) {
   const [error, setError] = useState<string | null>(null);
   const [id, setId] = useState('');
   const [token, setToken] = useState('');
-  const configured = azureConfigured();
+  // The server's GET /api/config decides, so this is only known after a
+  // round trip; null means "still asking" and keeps the button disabled
+  // without yet claiming Azure is unconfigured.
+  const [configured, setConfigured] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    azureAvailable().then(
+      (ok) => {
+        if (!cancelled) setConfigured(ok);
+      },
+      () => {
+        if (!cancelled) setConfigured(false);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleAzure = async () => {
     setBusy(true);
@@ -57,13 +75,15 @@ export function IdentityGate({ onIdentity }: IdentityGateProps) {
         <button
           type="button"
           className="gate-btn ms"
-          disabled={!configured || busy}
+          disabled={configured !== true || busy}
           onClick={handleAzure}
         >
           {busy ? 'Signing in…' : 'Sign in with Microsoft'}
         </button>
-        {!configured && (
-          <p className="gate-note">not configured — set VITE_AZURE_* env</p>
+        {configured === false && (
+          <p className="gate-note">
+            not configured — set KB_AZURE_CLIENT_ID / KB_AZURE_TENANT_ID
+          </p>
         )}
         {error && <p className="gate-error">{error}</p>}
         <div className="gate-divider">

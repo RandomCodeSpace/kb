@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RandomCodeSpace/kb/internal/server"
 	"github.com/RandomCodeSpace/kb/internal/store"
@@ -51,6 +52,9 @@ func TestWiring(t *testing.T) {
 	get := func(target, user string) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest("GET", target, nil)
+		// httptest defaults Host to example.com; open mode accepts loopback
+		// only (see internal/server: DNS-rebinding guard).
+		r.Host = "127.0.0.1:8080"
 		if user != "" {
 			r.Header.Set("X-KB-User", user)
 		}
@@ -71,5 +75,68 @@ func TestWiring(t *testing.T) {
 	}
 	if w := get("/api/board", ""); w.Code != http.StatusNotFound {
 		t.Errorf("GET board for fresh user: got %d, want 404", w.Code)
+	}
+}
+
+// A zero-byte or truncated secret would encrypt every stored provider key
+// under SHA-256 of a value an attacker can guess, so startup must stop rather
+// than proceed with a known key.
+func TestCheckSecret(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name    string
+		secret  []byte
+		wantErr bool
+	}{
+		{"empty file", []byte{}, true},
+		{"nil", nil, true},
+		{"whitespace only", []byte("\n"), true},
+		{"short passphrase", []byte("hunter2"), true},
+		{"one byte short", make([]byte, 15), true},
+		{"minimum", make([]byte, 16), false},
+		{"generated length", make([]byte, 32), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkSecret(tt.secret, dir)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("checkSecret(%d bytes) error = %v, wantErr %v", len(tt.secret), err, tt.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), filepath.Join(dir, "secret")) {
+				t.Errorf("error %q does not name the secret file", err)
+			}
+		})
+	}
+}
+
+// http.ListenAndServe leaves every timeout at zero, which lets one stalled
+// connection be held open forever.
+func TestHTTPServerTimeouts(t *testing.T) {
+	srv := newHTTPServer("127.0.0.1:8080", http.NotFoundHandler())
+	for _, tt := range []struct {
+		name string
+		got  time.Duration
+		want time.Duration
+	}{
+		{"ReadHeaderTimeout", srv.ReadHeaderTimeout, 10 * time.Second},
+		{"ReadTimeout", srv.ReadTimeout, 30 * time.Second},
+		// Strictly longer than the AI proxy's upstream round trip (asserted
+		// below), so the handler still has budget to write its answer.
+		{"WriteTimeout", srv.WriteTimeout, 90 * time.Second},
+		{"IdleTimeout", srv.IdleTimeout, 120 * time.Second},
+	} {
+		if tt.got != tt.want {
+			t.Errorf("%s = %v, want %v", tt.name, tt.got, tt.want)
+		}
+	}
+	// The write deadline is armed when the request headers are read, not when
+	// the handler starts writing: with an equal budget the AI proxy spends it
+	// all upstream and the 502 it produces on a timeout can never be sent.
+	if srv.WriteTimeout <= server.AITimeout {
+		t.Errorf("WriteTimeout = %v, want more than the AI upstream timeout (%v)",
+			srv.WriteTimeout, server.AITimeout)
+	}
+	if srv.Addr != "127.0.0.1:8080" || srv.Handler == nil {
+		t.Errorf("server addr/handler = %q/%v, want the arguments through", srv.Addr, srv.Handler)
 	}
 }

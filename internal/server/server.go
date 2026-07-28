@@ -9,7 +9,9 @@
 //  2. Token -> shared-secret bearer token, identity from X-KB-User.
 //  3. otherwise -> open mode, identity from X-KB-User or "default".
 //
-// Every /api/* route except /api/health sits behind that auth check.
+// Every /api/* route except /api/health and /api/config sits behind that
+// auth check, and every /api/* request first passes the Host/Origin guard in
+// security.go.
 package server
 
 import (
@@ -17,6 +19,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +48,11 @@ type Config struct {
 	TenantID string // KB_AZURE_TENANT_ID
 	ClientID string // KB_AZURE_CLIENT_ID
 
+	// AllowedHosts is the comma-separated KB_ALLOWED_HOSTS value: extra Host
+	// header values the API accepts. Loopback and localhost are always
+	// accepted, so this is only needed when kb is served on a real hostname.
+	AllowedHosts string
+
 	// JWKSURL and Issuer default from TenantID when empty; overridable so
 	// tests can point at a fake IdP.
 	JWKSURL string
@@ -60,6 +68,34 @@ type server struct {
 	issuer       string
 	jwks         *jwksCache
 	authenticate func(*http.Request) (string, error)
+	allowedHosts map[string]bool
+	pinHost      bool
+
+	// boardLocks serializes the read-compare-write of an If-Match board PUT
+	// so two in-flight PUTs cannot both pass the version check.
+	boardLocks boardLocks
+}
+
+// boardLocks hands out one mutex per board. Per-user rather than global so a
+// slow write for one identity does not serialize every other identity; the
+// map only grows with the number of distinct users the deployment serves.
+type boardLocks struct {
+	mu sync.Mutex
+	m  map[string]*sync.Mutex
+}
+
+func (l *boardLocks) get(user string) *sync.Mutex {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.m == nil {
+		l.m = make(map[string]*sync.Mutex)
+	}
+	mu, ok := l.m[user]
+	if !ok {
+		mu = new(sync.Mutex)
+		l.m[user] = mu
+	}
+	return mu
 }
 
 // New builds the full HTTP handler (API + embedded SPA) for cfg backed by st.
@@ -71,11 +107,12 @@ func New(cfg Config, static fs.FS, st *store.Store) http.Handler {
 // into the struct (e.g. to swap aiClient) before building the handler.
 func newServer(cfg Config, static fs.FS, st *store.Store) *server {
 	s := &server{
-		cfg:        cfg,
-		static:     static,
-		fileServer: http.FileServerFS(static),
-		store:      st,
-		aiClient:   newAIClient(),
+		cfg:          cfg,
+		static:       static,
+		fileServer:   http.FileServerFS(static),
+		store:        st,
+		aiClient:     newAIClient(),
+		allowedHosts: parseAllowedHosts(cfg.AllowedHosts),
 	}
 	switch {
 	case cfg.TenantID != "" && cfg.ClientID != "":
@@ -93,6 +130,12 @@ func newServer(cfg Config, static fs.FS, st *store.Store) *server {
 		s.authenticate = s.authToken
 	default:
 		s.authenticate = s.authOpen
+		// Nothing else stands between a rebound name and the API here, so
+		// open mode always pins Host. See withAPIGuard.
+		s.pinHost = true
+	}
+	if len(s.allowedHosts) > 0 {
+		s.pinHost = true
 	}
 	return s
 }
@@ -101,6 +144,7 @@ func newServer(cfg Config, static fs.FS, st *store.Store) *server {
 func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/config", s.handleConfig)
 	mux.HandleFunc("GET /api/board", s.withAuth(s.handleGetBoard))
 	mux.HandleFunc("PUT /api/board", s.withAuth(s.handlePutBoard))
 	mux.HandleFunc("GET /api/labels", s.withAuth(s.handleLabels))
@@ -108,8 +152,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("PUT /api/settings", s.withAuth(s.handlePutSettings))
 	mux.HandleFunc("POST /api/ai/test", s.withAuth(s.handleAITest))
 	mux.HandleFunc("POST /api/ai/story", s.withAuth(s.handleAIStory))
+	mux.HandleFunc("POST /api/ai/stories", s.withAuth(s.handleAIStories))
 	mux.HandleFunc("/", s.handleStatic)
-	return withLogging(mux)
+	return withLogging(s.withAPIGuard(mux))
 }
 
 // --- auth ---
@@ -357,38 +402,129 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
-func (s *server) handleGetBoard(w http.ResponseWriter, _ *http.Request, user string) {
+// boardETag is the board's version token: a strong ETag over the serialized
+// wire form, so any write by any surface (SPA, CLI, MCP) changes it.
+func boardETag(md string) string {
+	sum := sha256.Sum256([]byte(md))
+	return `"` + hex.EncodeToString(sum[:16]) + `"`
+}
+
+// currentBoard returns the stored board's wire form and version token. A
+// user with no board yet has the empty wire form, so a client that has never
+// seen a board and a client whose board was deleted agree on the token.
+func (s *server) currentBoard(user string) (string, string, error) {
 	has, err := s.store.HasBoard(user)
 	if err != nil {
-		log.Printf("read board for %s: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
-		return
+		return "", "", err
 	}
 	if !has {
-		http.Error(w, "no board saved", http.StatusNotFound)
-		return
+		return "", boardETag(""), nil
 	}
 	b, err := s.store.Board(user)
 	if err != nil {
+		return "", "", err
+	}
+	md := board.Serialize(b)
+	return md, boardETag(md), nil
+}
+
+func (s *server) handleGetBoard(w http.ResponseWriter, _ *http.Request, user string) {
+	md, etag, err := s.currentBoard(user)
+	if err != nil {
 		log.Printf("read board for %s: %v", user, err)
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		return
 	}
+	// The 404 carries the token too: it is the version of "no board", and a
+	// client that never got one would send no If-Match at all, making its
+	// first PUT unconditional — the very write most likely to land on a board
+	// the CLI or MCP created in the meantime.
+	w.Header().Set("ETag", etag)
+	if md == "" {
+		http.Error(w, "no board saved", http.StatusNotFound)
+		return
+	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	_, _ = io.WriteString(w, board.Serialize(b))
+	_, _ = io.WriteString(w, md)
 }
 
+// handlePutBoard replaces the whole board. A full-board PUT would otherwise
+// silently delete tasks the CLI or MCP created since the client last read,
+// so a client that sends If-Match with the token from its GET is told 409
+// instead, and can refetch and merge. Clients that send no If-Match keep the
+// old last-writer-wins behavior.
+//
+// The token is content-derived rather than a store-side counter on purpose:
+// the CLI and MCP write to SQLite in their own processes, where no counter
+// this server keeps would ever be bumped. If the store later grows a
+// compare-and-swap ReplaceBoard, the lock and the re-read below are the two
+// places that would collapse into it.
 func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user string) {
 	body, ok := readBody(w, r)
 	if !ok {
 		return
+	}
+	// Held across the compare and the write, and the compare re-reads the
+	// store inside the lock: comparing against anything cached from the
+	// client's earlier GET would leave a window for a cross-process write.
+	mu := s.boardLocks.get(user)
+	mu.Lock()
+	defer mu.Unlock()
+	if want := strings.TrimSpace(r.Header.Get("If-Match")); want != "" {
+		_, etag, err := s.currentBoard(user)
+		if err != nil {
+			log.Printf("read board for %s: %v", user, err)
+			http.Error(w, "storage error", http.StatusInternalServerError)
+			return
+		}
+		if want != "*" && !etagMatches(want, etag) {
+			w.Header().Set("ETag", etag)
+			http.Error(w, "board changed since it was read", http.StatusConflict)
+			return
+		}
 	}
 	if err := s.store.ReplaceBoard(user, board.Parse(string(body))); err != nil {
 		log.Printf("write board for %s: %v", user, err)
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		return
 	}
+	_, etag, err := s.currentBoard(user)
+	if err != nil {
+		log.Printf("read board for %s: %v", user, err)
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("ETag", etag)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// etagMatches reports whether any entry of an If-Match list equals etag. The
+// weak prefix is stripped so a proxy that weakened the tag still matches;
+// the token is content-derived either way.
+func etagMatches(ifMatch, etag string) bool {
+	for _, tag := range strings.Split(ifMatch, ",") {
+		if strings.TrimPrefix(strings.TrimSpace(tag), "W/") == etag {
+			return true
+		}
+	}
+	return false
+}
+
+// configResponse carries the browser-side Entra IDs. Both are public by
+// design — every MSAL SPA ships them in its bundle — but the endpoint must
+// stay minimal: it is unauthenticated (the SPA needs it before login), so
+// nothing else may ever be added here.
+type configResponse struct {
+	AzureClientID string `json:"azure_client_id"`
+	AzureTenantID string `json:"azure_tenant_id"`
+}
+
+// handleConfig serves the runtime Entra configuration. The released binary
+// is built without VITE_* values, so the SPA cannot learn them at build
+// time; it reads them here instead. Unset env yields empty strings, which
+// the SPA treats as "no Entra configured".
+func (s *server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, configResponse{AzureClientID: s.cfg.ClientID, AzureTenantID: s.cfg.TenantID})
 }
 
 func (s *server) handleLabels(w http.ResponseWriter, _ *http.Request, user string) {
@@ -474,10 +610,11 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 // handleStatic serves the embedded SPA with an index.html fallback for
 // unknown non-/api paths (client-side routing).
 func (s *server) handleStatic(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+	if isAPIPath(r.URL.Path) {
 		http.NotFound(w, r)
 		return
 	}
+	setFrameGuards(w.Header())
 	name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 	if name == "" {
 		name = "index.html"

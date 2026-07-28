@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -88,23 +89,23 @@ func newServer(st *store.Store, user string) *mcp.Server {
 	k := &kb{st: st, user: user}
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_tasks",
-		Description: "List kanban tasks on the board, ordered by column (todo, doing, done) then position. Optionally filter to a single column. Returns each task's id, title, status, prio, due, effort, tags, checks, and desc.",
+		Description: "List kanban tasks on the board, ordered by column (todo, doing, done, cancelled) then position. Optionally filter to a single column. Cancelled tasks are soft-deleted ones; they are included unless a status filter excludes them. Returns each task's id, title, status, blocked, prio, due, effort, tags, checks, and desc.",
 	}, k.listTasks)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "add_task",
-		Description: "Add a new task to the kanban board. Only title is required; status defaults to \"todo\" and prio to 3. Returns the created task including its id.",
+		Description: "Add a new task to the kanban board. Only title is required; status defaults to \"todo\", prio to 3, and blocked to false. Returns the created task including its id.",
 	}, k.addTask)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "update_task",
-		Description: "Update fields of an existing task identified by its id (a unique id prefix is accepted). Only the provided fields change; tags and checks replace the whole list when given. Returns the updated task.",
+		Description: "Update fields of an existing task identified by its id (a unique id prefix is accepted). Only the provided fields change; tags and checks replace the whole list when given. Setting status to done fails, changing nothing at all, when checklist items are open or the task is blocked after this update is applied, unless force is true. Returns the updated task.",
 	}, k.updateTask)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "move_task",
-		Description: "Move a task identified by its id (a unique id prefix is accepted) to another column: todo, doing, or done. The task is appended to the end of the target column. Returns the moved task.",
+		Description: "Move a task identified by its id (a unique id prefix is accepted) to another column: todo, doing, done, or cancelled. The task is appended to the end of the target column. Moving to done fails with an error naming the open checklist items, or reporting the blocked flag, unless force is true. Returns the moved task.",
 	}, k.moveTask)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "delete_task",
-		Description: "Delete a task identified by its id (a unique id prefix is accepted). Returns the deleted task.",
+		Description: "Delete a task identified by its id (a unique id prefix is accepted). By default this is a soft delete: the task moves to the cancelled column and can be moved back. Pass soft: false to remove the row permanently, which cannot be undone. Returns the deleted task.",
 	}, k.deleteTask)
 	return srv
 }
@@ -119,29 +120,31 @@ type check struct {
 
 // taskJSON is the task shape returned by every tool.
 type taskJSON struct {
-	ID     string   `json:"id"`
-	Emoji  string   `json:"emoji,omitempty"`
-	Title  string   `json:"title"`
-	Desc   string   `json:"desc,omitempty"`
-	Status string   `json:"status"`
-	Prio   int      `json:"prio"`
-	Due    string   `json:"due,omitempty"`
-	Effort string   `json:"effort,omitempty"`
-	Tags   []string `json:"tags,omitempty"`
-	Checks []check  `json:"checks,omitempty"`
+	ID      string   `json:"id"`
+	Emoji   string   `json:"emoji,omitempty"`
+	Title   string   `json:"title"`
+	Desc    string   `json:"desc,omitempty"`
+	Status  string   `json:"status"`
+	Blocked bool     `json:"blocked,omitempty"`
+	Prio    int      `json:"prio"`
+	Due     string   `json:"due,omitempty"`
+	Effort  string   `json:"effort,omitempty"`
+	Tags    []string `json:"tags,omitempty"`
+	Checks  []check  `json:"checks,omitempty"`
 }
 
 func toTaskJSON(t board.Task) taskJSON {
 	out := taskJSON{
-		ID:     t.ID,
-		Emoji:  t.Emoji,
-		Title:  t.Title,
-		Desc:   t.Desc,
-		Status: string(t.Status),
-		Prio:   t.Prio,
-		Due:    t.Due,
-		Effort: t.Effort,
-		Tags:   t.Tags,
+		ID:      t.ID,
+		Emoji:   t.Emoji,
+		Title:   t.Title,
+		Desc:    t.Desc,
+		Status:  string(t.Status),
+		Blocked: t.Blocked,
+		Prio:    t.Prio,
+		Due:     t.Due,
+		Effort:  t.Effort,
+		Tags:    t.Tags,
 	}
 	for _, c := range t.Checks {
 		out.Checks = append(out.Checks, check{Text: c.Text, Done: c.Done})
@@ -160,7 +163,7 @@ func toBoardChecks(cs []check) []board.Check {
 // --- tool inputs/outputs ---
 
 type listTasksInput struct {
-	Status string `json:"status,omitempty" jsonschema:"optional column filter: todo, doing, or done; omit for all columns"`
+	Status string `json:"status,omitempty" jsonschema:"optional column filter: todo, doing, done, or cancelled; omit for all columns"`
 }
 
 type listTasksOutput struct {
@@ -168,37 +171,42 @@ type listTasksOutput struct {
 }
 
 type addTaskInput struct {
-	Title  string   `json:"title" jsonschema:"task title (required, non-empty)"`
-	Desc   string   `json:"desc,omitempty" jsonschema:"longer markdown description"`
-	Status string   `json:"status,omitempty" jsonschema:"column: todo, doing, or done (default todo)"`
-	Prio   int      `json:"prio,omitempty" jsonschema:"priority 1 (highest) to 4 (lowest); default 3"`
-	Due    string   `json:"due,omitempty" jsonschema:"due date as YYYY-MM-DD"`
-	Effort string   `json:"effort,omitempty" jsonschema:"effort estimate: S, M, or L"`
-	Tags   []string `json:"tags,omitempty" jsonschema:"labels, plain (backend) or scoped (type::bug)"`
-	Checks []check  `json:"checks,omitempty" jsonschema:"checklist items"`
-	Emoji  string   `json:"emoji,omitempty" jsonschema:"single emoji shown on the card"`
+	Title   string   `json:"title" jsonschema:"task title (required, non-empty)"`
+	Desc    string   `json:"desc,omitempty" jsonschema:"longer markdown description"`
+	Status  string   `json:"status,omitempty" jsonschema:"column: todo, doing, done, or cancelled (default todo)"`
+	Blocked bool     `json:"blocked,omitempty" jsonschema:"true when the task is blocked by something else; default false"`
+	Prio    int      `json:"prio,omitempty" jsonschema:"priority 1 (highest) to 4 (lowest); default 3"`
+	Due     string   `json:"due,omitempty" jsonschema:"due date as YYYY-MM-DD"`
+	Effort  string   `json:"effort,omitempty" jsonschema:"effort estimate: S, M, or L"`
+	Tags    []string `json:"tags,omitempty" jsonschema:"labels, plain (backend) or scoped (type::bug)"`
+	Checks  []check  `json:"checks,omitempty" jsonschema:"checklist items"`
+	Emoji   string   `json:"emoji,omitempty" jsonschema:"single emoji shown on the card"`
 }
 
 type updateTaskInput struct {
-	ID     string    `json:"id" jsonschema:"task id or unique id prefix"`
-	Title  *string   `json:"title,omitempty" jsonschema:"new title"`
-	Desc   *string   `json:"desc,omitempty" jsonschema:"new markdown description (empty string clears it)"`
-	Status *string   `json:"status,omitempty" jsonschema:"new column: todo, doing, or done"`
-	Prio   *int      `json:"prio,omitempty" jsonschema:"new priority 1 (highest) to 4 (lowest)"`
-	Due    *string   `json:"due,omitempty" jsonschema:"new due date as YYYY-MM-DD (empty string clears it)"`
-	Effort *string   `json:"effort,omitempty" jsonschema:"new effort estimate: S, M, or L (empty string clears it)"`
-	Tags   *[]string `json:"tags,omitempty" jsonschema:"replacement label list"`
-	Checks *[]check  `json:"checks,omitempty" jsonschema:"replacement checklist"`
-	Emoji  *string   `json:"emoji,omitempty" jsonschema:"new emoji (empty string clears it)"`
+	ID      string    `json:"id" jsonschema:"task id or unique id prefix"`
+	Title   *string   `json:"title,omitempty" jsonschema:"new title"`
+	Desc    *string   `json:"desc,omitempty" jsonschema:"new markdown description (empty string clears it)"`
+	Status  *string   `json:"status,omitempty" jsonschema:"new column: todo, doing, done, or cancelled"`
+	Blocked *bool     `json:"blocked,omitempty" jsonschema:"true to flag the task as blocked, false to clear the flag"`
+	Prio    *int      `json:"prio,omitempty" jsonschema:"new priority 1 (highest) to 4 (lowest)"`
+	Due     *string   `json:"due,omitempty" jsonschema:"new due date as YYYY-MM-DD (empty string clears it)"`
+	Effort  *string   `json:"effort,omitempty" jsonschema:"new effort estimate: S, M, or L (empty string clears it)"`
+	Tags    *[]string `json:"tags,omitempty" jsonschema:"replacement label list"`
+	Checks  *[]check  `json:"checks,omitempty" jsonschema:"replacement checklist"`
+	Emoji   *string   `json:"emoji,omitempty" jsonschema:"new emoji (empty string clears it)"`
+	Force   bool      `json:"force,omitempty" jsonschema:"set true to move to done even when checklist items are open or the task is blocked"`
 }
 
 type moveTaskInput struct {
 	ID     string `json:"id" jsonschema:"task id or unique id prefix"`
-	Status string `json:"status" jsonschema:"target column: todo, doing, or done"`
+	Status string `json:"status" jsonschema:"target column: todo, doing, done, or cancelled"`
+	Force  bool   `json:"force,omitempty" jsonschema:"set true to move to done even when checklist items are open or the task is blocked"`
 }
 
 type deleteTaskInput struct {
-	ID string `json:"id" jsonschema:"task id or unique id prefix"`
+	ID   string `json:"id" jsonschema:"task id or unique id prefix"`
+	Soft *bool  `json:"soft,omitempty" jsonschema:"true (the default) moves the task to the cancelled column; false deletes the row permanently and cannot be undone"`
 }
 
 // --- handlers ---
@@ -228,14 +236,15 @@ func (k *kb) addTask(_ context.Context, _ *mcp.CallToolRequest, in addTaskInput)
 		return nil, taskJSON{}, errors.New("title must not be empty")
 	}
 	t := board.Task{
-		Emoji:  in.Emoji,
-		Title:  in.Title,
-		Desc:   in.Desc,
-		Prio:   in.Prio,
-		Due:    in.Due,
-		Effort: in.Effort,
-		Tags:   in.Tags,
-		Checks: toBoardChecks(in.Checks),
+		Emoji:   in.Emoji,
+		Title:   in.Title,
+		Desc:    in.Desc,
+		Blocked: in.Blocked,
+		Prio:    in.Prio,
+		Due:     in.Due,
+		Effort:  in.Effort,
+		Tags:    in.Tags,
+		Checks:  toBoardChecks(in.Checks),
 	}
 	if in.Status != "" {
 		st, err := parseStatus(in.Status)
@@ -256,13 +265,14 @@ func (k *kb) addTask(_ context.Context, _ *mcp.CallToolRequest, in addTaskInput)
 
 func (k *kb) updateTask(_ context.Context, _ *mcp.CallToolRequest, in updateTaskInput) (*mcp.CallToolResult, taskJSON, error) {
 	patch := store.TaskPatch{
-		Emoji:  in.Emoji,
-		Title:  in.Title,
-		Desc:   in.Desc,
-		Due:    in.Due,
-		Effort: in.Effort,
-		Prio:   in.Prio,
-		Tags:   in.Tags,
+		Emoji:   in.Emoji,
+		Title:   in.Title,
+		Desc:    in.Desc,
+		Due:     in.Due,
+		Effort:  in.Effort,
+		Blocked: in.Blocked,
+		Prio:    in.Prio,
+		Tags:    in.Tags,
 	}
 	if in.Prio != nil && (*in.Prio < 1 || *in.Prio > 4) {
 		return nil, taskJSON{}, fmt.Errorf("invalid prio %d: must be 1 (highest) to 4 (lowest)", *in.Prio)
@@ -271,18 +281,31 @@ func (k *kb) updateTask(_ context.Context, _ *mcp.CallToolRequest, in updateTask
 		bc := toBoardChecks(*in.Checks)
 		patch.Checks = &bc
 	}
-	t, err := k.st.UpdateTask(k.user, in.ID, patch)
-	if err != nil {
-		return nil, taskJSON{}, k.idError(err, in.ID)
-	}
+	// Status is parsed before anything is written: a bad status now rejects
+	// the whole call instead of persisting the field patch and then failing.
+	var moveTo *board.Status
 	if in.Status != nil {
 		st, err := parseStatus(*in.Status)
 		if err != nil {
 			return nil, taskJSON{}, err
 		}
-		if t, err = k.st.MoveTask(k.user, t.ID, st); err != nil {
-			return nil, taskJSON{}, k.idError(err, in.ID)
+		moveTo = &st
+	}
+	// The same done guard move_task applies, evaluated on the post-patch task
+	// so that checking off the last item and moving to done in one call
+	// succeeds. A refusal rolls the patch back with the move.
+	var guard func(board.Task) error
+	if moveTo != nil && *moveTo == board.StatusDone && !in.Force {
+		guard = func(t board.Task) error {
+			if warn := doneWarning(t); warn != "" {
+				return fmt.Errorf("refusing to finish %q: %s — resolve it first, or call update_task again with force: true", t.Title, warn)
+			}
+			return nil
 		}
+	}
+	t, err := k.st.UpdateAndMoveTask(k.user, in.ID, patch, moveTo, guard)
+	if err != nil {
+		return nil, taskJSON{}, k.idError(err, in.ID)
 	}
 	return nil, toTaskJSON(t), nil
 }
@@ -292,6 +315,15 @@ func (k *kb) moveTask(_ context.Context, _ *mcp.CallToolRequest, in moveTaskInpu
 	if err != nil {
 		return nil, taskJSON{}, err
 	}
+	if st == board.StatusDone && !in.Force {
+		t, err := k.findTask(in.ID)
+		if err != nil {
+			return nil, taskJSON{}, err
+		}
+		if warn := doneWarning(t); warn != "" {
+			return nil, taskJSON{}, fmt.Errorf("refusing to finish %q: %s — resolve it first, or call move_task again with force: true", t.Title, warn)
+		}
+	}
 	t, err := k.st.MoveTask(k.user, in.ID, st)
 	if err != nil {
 		return nil, taskJSON{}, k.idError(err, in.ID)
@@ -299,7 +331,17 @@ func (k *kb) moveTask(_ context.Context, _ *mcp.CallToolRequest, in moveTaskInpu
 	return nil, toTaskJSON(t), nil
 }
 
+// deleteTask soft-deletes by default: the task moves to the cancelled column
+// so an agent cannot destroy work by reflex. soft: false is the only path to
+// a row delete.
 func (k *kb) deleteTask(_ context.Context, _ *mcp.CallToolRequest, in deleteTaskInput) (*mcp.CallToolResult, taskJSON, error) {
+	if in.Soft == nil || *in.Soft {
+		t, err := k.st.MoveTask(k.user, in.ID, board.StatusCancelled)
+		if err != nil {
+			return nil, taskJSON{}, k.idError(err, in.ID)
+		}
+		return nil, toTaskJSON(t), nil
+	}
 	t, err := k.st.DeleteTask(k.user, in.ID)
 	if err != nil {
 		return nil, taskJSON{}, k.idError(err, in.ID)
@@ -313,9 +355,60 @@ func (k *kb) deleteTask(_ context.Context, _ *mcp.CallToolRequest, in deleteTask
 func parseStatus(s string) (board.Status, error) {
 	st := board.Status(s)
 	if !st.Valid() {
-		return "", fmt.Errorf("invalid status %q: must be todo, doing, or done", s)
+		return "", fmt.Errorf("invalid status %q: must be todo, doing, done, or cancelled", s)
 	}
 	return st, nil
+}
+
+// doneWarning names what makes finishing t questionable — the open checklist
+// items, a blocked flag, or both — and returns "" when the task is clear to
+// ship.
+func doneWarning(t board.Task) string {
+	var open []string
+	for _, c := range t.Checks {
+		if !c.Done {
+			open = append(open, strconv.Quote(c.Text))
+		}
+	}
+	var parts []string
+	if len(open) > 0 {
+		parts = append(parts, fmt.Sprintf("%d of %d checklist items are still open (%s)",
+			len(open), len(t.Checks), strings.Join(open, ", ")))
+	}
+	if t.Blocked {
+		parts = append(parts, "the task is flagged blocked")
+	}
+	return strings.Join(parts, "; ")
+}
+
+// findTask resolves an id prefix to the task it names with the store's rules
+// (an exact id wins, otherwise the prefix must match exactly one task),
+// without mutating anything.
+func (k *kb) findTask(prefix string) (board.Task, error) {
+	if prefix == "" {
+		return board.Task{}, k.idError(store.ErrNotFound, prefix)
+	}
+	tasks, err := k.st.ListTasks(k.user, "")
+	if err != nil {
+		return board.Task{}, err
+	}
+	var match board.Task
+	n := 0
+	for _, t := range tasks {
+		if t.ID == prefix {
+			return t, nil
+		}
+		if strings.HasPrefix(t.ID, prefix) {
+			match, n = t, n+1
+		}
+	}
+	switch n {
+	case 0:
+		return board.Task{}, k.idError(store.ErrNotFound, prefix)
+	case 1:
+		return match, nil
+	}
+	return board.Task{}, k.idError(store.ErrAmbiguous, prefix)
 }
 
 // idError rewrites store ID-resolution sentinels into actionable tool errors;

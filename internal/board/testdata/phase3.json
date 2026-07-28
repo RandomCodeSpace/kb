@@ -1,0 +1,80 @@
+{
+  "title": "Phase 3 Board",
+  "tasks": [
+    {
+      "emoji": "🚧",
+      "title": "Waiting on legal",
+      "desc": "Blocked until the contract lands.\n- [ ] this stays description text",
+      "status": "todo",
+      "blocked": true,
+      "prio": 1,
+      "due": "2026-09-01",
+      "effort": "L",
+      "tags": ["legal", "env::stage"],
+      "checks": [
+        { "text": "draft the addendum", "done": false },
+        { "text": "file the ticket", "done": true }
+      ]
+    },
+    {
+      "emoji": "",
+      "title": "Why %blocked matters",
+      "desc": "",
+      "status": "todo",
+      "blocked": false,
+      "prio": 3,
+      "due": "",
+      "effort": "",
+      "tags": ["docs"],
+      "checks": []
+    },
+    {
+      "emoji": "",
+      "title": "日本語 café 🚀",
+      "desc": "Unicode round trip.",
+      "status": "doing",
+      "blocked": false,
+      "prio": 3,
+      "due": "",
+      "effort": "M",
+      "tags": [],
+      "checks": []
+    },
+    {
+      "emoji": "⚙️",
+      "title": "Ship crates",
+      "desc": "",
+      "status": "done",
+      "blocked": false,
+      "prio": 4,
+      "due": "",
+      "effort": "",
+      "tags": [],
+      "checks": []
+    },
+    {
+      "emoji": "",
+      "title": "#hashtag !2 ~S @2026-01-01 \\raw",
+      "desc": "",
+      "status": "done",
+      "blocked": false,
+      "prio": 3,
+      "due": "",
+      "effort": "",
+      "tags": [],
+      "checks": []
+    },
+    {
+      "emoji": "",
+      "title": "Dropped experiment",
+      "desc": "Superseded by the ADR.",
+      "status": "cancelled",
+      "blocked": true,
+      "prio": 3,
+      "due": "",
+      "effort": "",
+      "tags": ["spike"],
+      "checks": []
+    }
+  ]
+}

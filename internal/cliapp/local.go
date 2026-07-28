@@ -84,23 +84,19 @@ func (l *localBackend) add(t board.Task) (item, error) {
 }
 
 // update applies the field patch and then, when moveTo is set, the status
-// move (MoveTask stamps MovedAt, which a plain column-field update must
-// not).
-func (l *localBackend) update(ref string, p store.TaskPatch, moveTo *board.Status) (item, error) {
-	var out board.Task
-	if p != (store.TaskPatch{}) {
-		t, err := l.st.UpdateTask(l.user, ref, p)
-		if err != nil {
-			return item{}, friendlyIDErr(err, ref)
-		}
-		out = t
+// move (MoveTask stamps MovedAt, which a plain column-field update must not)
+// — both in one store transaction, so a refused move rolls the patch back
+// with it rather than leaving the task half-updated.
+func (l *localBackend) update(ref string, p store.TaskPatch, moveTo *board.Status, force bool) (item, error) {
+	var guard func(board.Task) error
+	if moveTo != nil && *moveTo == board.StatusDone && !force {
+		// Judged after the patch lands: closing the last checklist item and
+		// moving to done in a single update is a legitimate finish.
+		guard = func(t board.Task) error { return doneGuardErr(t.ID, t) }
 	}
-	if moveTo != nil {
-		t, err := l.st.MoveTask(l.user, ref, *moveTo)
-		if err != nil {
-			return item{}, friendlyIDErr(err, ref)
-		}
-		out = t
+	out, err := l.st.UpdateAndMoveTask(l.user, ref, p, moveTo, guard)
+	if err != nil {
+		return item{}, friendlyIDErr(err, ref)
 	}
 	return item{ref: out.ID, task: out}, nil
 }

@@ -28,37 +28,41 @@ const doc = `# Ops Board
 `
 
 // taskProj is the id/timestamp/position-free projection used for
-// round-trip equality, mirroring projection() in the TS tests.
+// round-trip equality, mirroring projection() in the TS tests. The JSON tags
+// name the shared codec fixtures in testdata/*.json, which both this package
+// and src/lib/markdown.test.ts decode.
 type taskProj struct {
-	Emoji  string
-	Title  string
-	Desc   string
-	Status Status
-	Prio   int
-	Due    string
-	Effort string
-	Tags   []string
-	Checks []Check
+	Emoji   string   `json:"emoji"`
+	Title   string   `json:"title"`
+	Desc    string   `json:"desc"`
+	Status  Status   `json:"status"`
+	Blocked bool     `json:"blocked"`
+	Prio    int      `json:"prio"`
+	Due     string   `json:"due"`
+	Effort  string   `json:"effort"`
+	Tags    []string `json:"tags"`
+	Checks  []Check  `json:"checks"`
 }
 
 type boardProj struct {
-	Title string
-	Tasks []taskProj
+	Title string     `json:"title"`
+	Tasks []taskProj `json:"tasks"`
 }
 
 func projection(b Board) boardProj {
 	p := boardProj{Title: b.Title}
 	for _, t := range b.Tasks {
 		p.Tasks = append(p.Tasks, taskProj{
-			Emoji:  t.Emoji,
-			Title:  t.Title,
-			Desc:   t.Desc,
-			Status: t.Status,
-			Prio:   t.Prio,
-			Due:    t.Due,
-			Effort: t.Effort,
-			Tags:   t.Tags,
-			Checks: t.Checks,
+			Emoji:   t.Emoji,
+			Title:   t.Title,
+			Desc:    t.Desc,
+			Status:  t.Status,
+			Blocked: t.Blocked,
+			Prio:    t.Prio,
+			Due:     t.Due,
+			Effort:  t.Effort,
+			Tags:    t.Tags,
+			Checks:  t.Checks,
 		})
 	}
 	return p
@@ -219,12 +223,13 @@ func TestUnknownHeadersMapByPosition(t *testing.T) {
 		"## Backlog", "", "- [ ] a", "",
 		"## In Progress", "", "- [ ] b", "",
 		"## Shipped", "", "- [ ] c", "",
-		"## Overflow", "", "- [ ] d",
+		"## Overflow", "", "- [ ] d", "",
+		"## Beyond", "", "- [ ] e",
 	}, "\n"))
-	if len(b.Tasks) != 4 {
-		t.Fatalf("len(tasks) = %d, want 4", len(b.Tasks))
+	if len(b.Tasks) != 5 {
+		t.Fatalf("len(tasks) = %d, want 5", len(b.Tasks))
 	}
-	want := []Status{StatusTodo, StatusDoing, StatusDone, StatusDone}
+	want := []Status{StatusTodo, StatusDoing, StatusDone, StatusCancelled, StatusCancelled}
 	for i, w := range want {
 		if b.Tasks[i].Status != w {
 			t.Errorf("task %d status = %q, want %q", i, b.Tasks[i].Status, w)
@@ -260,6 +265,109 @@ func TestEscapingRoundTrip(t *testing.T) {
 	// The wire form is stable across repeated round trips.
 	if s1, s2 := Serialize(in), Serialize(got); s1 != s2 {
 		t.Errorf("serialize not stable:\nfirst:  %q\nsecond: %q", s1, s2)
+	}
+}
+
+func TestBlockedTokenRoundTrip(t *testing.T) {
+	in := Board{Title: "B", Tasks: []Task{
+		{Title: "Waiting on legal", Status: StatusDoing, Blocked: true, Prio: 3, Effort: "M", Tags: []string{"infra"}},
+		{Title: "Free to go", Status: StatusDoing, Prio: 3},
+	}}
+	wire := Serialize(in)
+	if !strings.Contains(wire, "- [ ] Waiting on legal ~M %blocked #infra\n") {
+		t.Errorf("blocked token missing or misplaced:\n%s", wire)
+	}
+	if strings.Contains(wire, "Free to go %blocked") {
+		t.Errorf("unblocked task carries the token:\n%s", wire)
+	}
+	got := Parse(wire)
+	if len(got.Tasks) != 2 {
+		t.Fatalf("len(tasks) = %d, want 2", len(got.Tasks))
+	}
+	if !got.Tasks[0].Blocked {
+		t.Error("blocked task parsed as unblocked")
+	}
+	if got.Tasks[0].Title != "Waiting on legal" {
+		t.Errorf("title = %q, want %q", got.Tasks[0].Title, "Waiting on legal")
+	}
+	if got.Tasks[1].Blocked {
+		t.Error("unblocked task parsed as blocked")
+	}
+}
+
+func TestLiteralBlockedWordStaysInTitle(t *testing.T) {
+	for _, title := range []string{`%blocked`, `Why %blocked matters`, `\%blocked`, `%blockedish`} {
+		in := Board{Title: "B", Tasks: []Task{{Title: title, Status: StatusTodo, Prio: 3}}}
+		got := Parse(Serialize(in))
+		if len(got.Tasks) != 1 {
+			t.Fatalf("title %q: len(tasks) = %d, want 1", title, len(got.Tasks))
+		}
+		if got.Tasks[0].Title != title {
+			t.Errorf("title = %q, want %q", got.Tasks[0].Title, title)
+		}
+		if got.Tasks[0].Blocked {
+			t.Errorf("title %q leaked into the blocked flag", title)
+		}
+	}
+}
+
+func TestCancelledSection(t *testing.T) {
+	in := Board{Title: "B", Tasks: []Task{
+		{Title: "Landed", Status: StatusDone, Prio: 3},
+		{Title: "Dropped", Status: StatusCancelled, Prio: 3},
+	}}
+	wire := Serialize(in)
+	want := "# B\n\n## To Do\n\n\n## Doing\n\n\n## Done\n\n- [x] Landed\n\n## Cancelled\n\n- [ ] Dropped\n"
+	if wire != want {
+		t.Errorf("wire =\n%q\nwant\n%q", wire, want)
+	}
+	got := Parse(wire)
+	if len(got.Tasks) != 2 {
+		t.Fatalf("len(tasks) = %d, want 2", len(got.Tasks))
+	}
+	if got.Tasks[1].Status != StatusCancelled {
+		t.Errorf("status = %q, want cancelled", got.Tasks[1].Status)
+	}
+	if !reflect.DeepEqual(projection(Parse(Serialize(got))), projection(got)) {
+		t.Error("cancelled section does not round trip")
+	}
+}
+
+func TestLegacyThreeSectionBoardIsByteIdentical(t *testing.T) {
+	if got := Serialize(Parse(doc)); got != doc {
+		t.Errorf("legacy three-section board changed on round trip:\n--- got ---\n%s\n--- want ---\n%s", got, doc)
+	}
+	if strings.Contains(Serialize(Parse(doc)), "Cancelled") {
+		t.Error("empty cancelled section leaked into a legacy board")
+	}
+}
+
+// TestEveryTaskLineParsesBack is the codec side of the empty-title fix
+// (store.ValidateTaskFields): as long as a task's title is not blank, its
+// serialized line is one Parse reads back as a task rather than as
+// description text grafted onto the task before it.
+func TestEveryTaskLineParsesBack(t *testing.T) {
+	tasks := []Task{
+		{Title: "plain", Status: StatusTodo, Prio: 3},
+		{Title: "0", Status: StatusTodo, Prio: 4},
+		{Title: `\`, Status: StatusTodo, Prio: 3},
+		{Title: "%blocked", Status: StatusTodo, Prio: 3, Blocked: true},
+		{Title: "- [x] forged", Status: StatusTodo, Prio: 3},
+		{Title: "#tag !1 ~S @2026-01-01", Status: StatusDoing, Prio: 2, Blocked: true},
+		{Title: "日本語 café 🚀", Emoji: "🔥", Status: StatusDone, Prio: 1, Due: "2026-02-03", Effort: "L", Tags: []string{"a", "k::v"}},
+		{Title: "cancelled one", Status: StatusCancelled, Prio: 3, Checks: []Check{{Text: "step", Done: true}}},
+	}
+	for _, task := range tasks {
+		in := Board{Title: "B", Tasks: []Task{{Title: "anchor", Status: task.Status, Prio: 3}, task}}
+		got := Parse(Serialize(in))
+		if len(got.Tasks) != 2 {
+			t.Errorf("task %q: len(tasks) = %d, want 2 (line not read back as a task)", task.Title, len(got.Tasks))
+			continue
+		}
+		if !reflect.DeepEqual(projection(got).Tasks[1], projection(in).Tasks[1]) {
+			t.Errorf("task %q changed on round trip:\ngot  %#v\nwant %#v",
+				task.Title, projection(got).Tasks[1], projection(in).Tasks[1])
+		}
 	}
 }
 

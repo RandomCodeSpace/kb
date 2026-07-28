@@ -2,10 +2,14 @@ package store
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -223,6 +227,131 @@ func TestTaskCRUD(t *testing.T) {
 	}
 }
 
+// TestMigrateExistingDatabase opens a database left at schema v1 by an
+// earlier release and checks the pending migrations run over it, giving the
+// old row the blocked default rather than failing or losing data.
+func TestMigrateExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kb.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, q := range []string{
+		`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)`,
+		migrations[0],
+		`INSERT INTO meta (k, v) VALUES ('schema_version', '1')`,
+		`INSERT INTO tasks (id, user, title, status, created_at, moved_at) VALUES ('old', 'u', 'Legacy', 'todo', '` + stamp + `', '` + stamp + `')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("seed v1 schema: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	s, err := Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatalf("Open on a v1 database: %v", err)
+	}
+	defer s.Close()
+	got, err := s.ListTasks("u", "")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("ListTasks = %v, %v, want the legacy task", got, err)
+	}
+	if got[0].Title != "Legacy" || got[0].Blocked {
+		t.Errorf("migrated task = %+v, want Legacy and blocked=false", got[0])
+	}
+}
+
+func TestBlockedFlag(t *testing.T) {
+	s := newStore(t)
+	t1, err := s.AddTask("u", board.Task{Title: "Waiting", Blocked: true})
+	if err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	if !t1.Blocked {
+		t.Error("AddTask dropped the blocked flag")
+	}
+	t2, err := s.AddTask("u", board.Task{Title: "Free"})
+	if err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	if t2.Blocked {
+		t.Error("default task came back blocked")
+	}
+	got, err := s.ListTasks("u", "")
+	if err != nil || len(got) != 2 {
+		t.Fatalf("ListTasks = %v, %v", got, err)
+	}
+	if !got[0].Blocked || got[1].Blocked {
+		t.Errorf("blocked did not persist: %v, %v", got[0].Blocked, got[1].Blocked)
+	}
+	no := false
+	un, err := s.UpdateTask("u", t1.ID, TaskPatch{Blocked: &no})
+	if err != nil || un.Blocked {
+		t.Fatalf("UpdateTask(blocked=false) = %+v, %v", un, err)
+	}
+	// A nil patch field leaves the flag alone.
+	same, err := s.UpdateTask("u", t2.ID, TaskPatch{Desc: sptr("x")})
+	if err != nil || same.Blocked {
+		t.Fatalf("UpdateTask without Blocked = %+v, %v", same, err)
+	}
+	yes := true
+	if re, err := s.UpdateTask("u", t2.ID, TaskPatch{Blocked: &yes}); err != nil || !re.Blocked {
+		t.Fatalf("UpdateTask(blocked=true) = %+v, %v", re, err)
+	}
+	// The flag survives the markdown wire.
+	b, err := s.Board("u")
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	wire := board.Parse(board.Serialize(b))
+	if len(wire.Tasks) != 2 || wire.Tasks[0].Blocked || !wire.Tasks[1].Blocked {
+		t.Errorf("blocked lost on the wire: %+v", wire.Tasks)
+	}
+}
+
+func TestCancelledStatus(t *testing.T) {
+	s := newStore(t)
+	t1, err := s.AddTask("u", board.Task{Title: "Dropped", Status: board.StatusCancelled})
+	if err != nil {
+		t.Fatalf("AddTask(cancelled): %v", err)
+	}
+	if t1.Status != board.StatusCancelled {
+		t.Errorf("status = %q, want cancelled", t1.Status)
+	}
+	t2, err := s.AddTask("u", board.Task{Title: "Live"})
+	if err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	if _, err := s.MoveTask("u", t2.ID, board.StatusCancelled); err != nil {
+		t.Fatalf("MoveTask(cancelled): %v", err)
+	}
+	only, err := s.ListTasks("u", board.StatusCancelled)
+	if err != nil || len(only) != 2 {
+		t.Fatalf("ListTasks(cancelled) = %v, %v", only, err)
+	}
+	// Cancelled sorts after the other columns on the board.
+	if _, err := s.AddTask("u", board.Task{Title: "Todo one"}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	b, err := s.Board("u")
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	want := []board.Status{board.StatusTodo, board.StatusCancelled, board.StatusCancelled}
+	for i, w := range want {
+		if b.Tasks[i].Status != w {
+			t.Errorf("task %d status = %q, want %q", i, b.Tasks[i].Status, w)
+		}
+	}
+	if !strings.Contains(board.Serialize(b), "## Cancelled\n") {
+		t.Error("cancelled section missing from the wire")
+	}
+}
+
 func TestPrefixResolution(t *testing.T) {
 	s := newStore(t)
 	a, err := s.AddTask("u", board.Task{Title: "A"})
@@ -375,6 +504,9 @@ func TestBaseURLChangeClearsKey(t *testing.T) {
 func TestTaskFieldValidation(t *testing.T) {
 	s := newStore(t)
 	bad := []board.Task{
+		{Title: ""},
+		{Title: "   "},
+		{Title: "\ufeff"}, // whitespace to the wire's token splitter
 		{Title: "innocent\n- [x] Forged task !1 #prod"},
 		{Title: "x", Emoji: "🚀\n- [x] forged"},
 		{Title: "x", Due: "soon"},
@@ -400,6 +532,9 @@ func TestTaskFieldValidation(t *testing.T) {
 	}
 	if _, err := s.UpdateTask("u", ok.ID, TaskPatch{Title: sptr("bad\ntitle")}); err == nil {
 		t.Error("UpdateTask with newline title should fail")
+	}
+	if _, err := s.UpdateTask("u", ok.ID, TaskPatch{Title: sptr("  ")}); err == nil {
+		t.Error("UpdateTask with blank title should fail")
 	}
 	if _, err := s.UpdateTask("u", ok.ID, TaskPatch{Due: sptr("nope")}); err == nil {
 		t.Error("UpdateTask with invalid due should fail")
@@ -527,6 +662,100 @@ func TestLoadOrCreateSecret(t *testing.T) {
 		s2, err := LoadOrCreateSecret(dataDir)
 		if err != nil || !bytes.Equal(s1, s2) {
 			t.Fatalf("second call = %x, %v, want same as first %x", s2, err, s1)
+		}
+	})
+	// A zero-byte secret derives the AES key from SHA-256("") — a key anyone
+	// can compute. Refuse rather than use it, and refuse rather than
+	// regenerate: a new secret would orphan whatever is already encrypted.
+	t.Run("short or empty file refused", func(t *testing.T) {
+		for _, n := range []int{0, 1, 31} {
+			dataDir := t.TempDir()
+			t.Setenv("KB_SECRET", "")
+			path := filepath.Join(dataDir, "secret")
+			if err := os.WriteFile(path, bytes.Repeat([]byte("x"), n), 0o600); err != nil {
+				t.Fatalf("write %d-byte secret: %v", n, err)
+			}
+			got, err := LoadOrCreateSecret(dataDir)
+			if err == nil {
+				t.Errorf("%d-byte secret accepted as %q, want an error", n, got)
+				continue
+			}
+			// The file is left alone so a backup can still be restored.
+			if fi, statErr := os.Stat(path); statErr != nil || fi.Size() != int64(n) {
+				t.Errorf("%d-byte secret file was rewritten (size=%v, err=%v)", n, fi, statErr)
+			}
+		}
+	})
+}
+
+// captureStderr runs fn with os.Stderr redirected and returns what it wrote.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	func() {
+		defer func() {
+			os.Stderr = orig
+			w.Close()
+		}()
+		fn()
+	}()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	return string(out)
+}
+
+// A short KB_SECRET must not be fatal here — kb (serve) refuses to boot with
+// one, but making the shared path fail would lock a CLI or MCP user out of
+// the AI key already encrypted under it. It has to be loud all the same, so
+// every entry point reports the same weakness rather than only serve.
+func TestLoadOrCreateSecretShortEnvSecret(t *testing.T) {
+	resetWarning := func(t *testing.T) {
+		warnShortSecretOnce = sync.Once{}
+		t.Cleanup(func() { warnShortSecretOnce = sync.Once{} })
+	}
+
+	t.Run("warns once and keeps going", func(t *testing.T) {
+		resetWarning(t)
+		t.Setenv("KB_SECRET", "short")
+		dir := t.TempDir()
+		var got, again []byte
+		var err1, err2 error
+		out := captureStderr(t, func() {
+			got, err1 = LoadOrCreateSecret(dir)
+			again, err2 = LoadOrCreateSecret(dir)
+		})
+		if err1 != nil || err2 != nil {
+			t.Fatalf("LoadOrCreateSecret errored on a short env secret: %v, %v", err1, err2)
+		}
+		if !bytes.Equal(got, []byte("short")) || !bytes.Equal(again, []byte("short")) {
+			t.Errorf("secret = %q / %q, want the env value both times", got, again)
+		}
+		if n := strings.Count(out, "warning"); n != 1 {
+			t.Errorf("want exactly one warning across both loads, got %d:\n%s", n, out)
+		}
+		if !strings.Contains(out, "KB_SECRET") {
+			t.Errorf("warning does not name KB_SECRET: %q", out)
+		}
+	})
+
+	t.Run("stays quiet at the threshold", func(t *testing.T) {
+		resetWarning(t)
+		t.Setenv("KB_SECRET", strings.Repeat("s", EnvSecretMinBytes))
+		out := captureStderr(t, func() {
+			if _, err := LoadOrCreateSecret(t.TempDir()); err != nil {
+				t.Errorf("LoadOrCreateSecret: %v", err)
+			}
+		})
+		if out != "" {
+			t.Errorf("unexpected stderr output for a %d-byte secret: %q", EnvSecretMinBytes, out)
 		}
 	})
 }

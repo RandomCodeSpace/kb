@@ -8,11 +8,13 @@ package main
 import (
 	"embed"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/RandomCodeSpace/kb/internal/server"
 	"github.com/RandomCodeSpace/kb/internal/store"
@@ -21,11 +23,59 @@ import (
 //go:embed all:dist
 var distFS embed.FS
 
+// minSecretBytes is the shortest settings-encryption secret that is accepted;
+// the generated one is 32 random bytes. It tracks the threshold the shared
+// secret path warns at, so serve and the other entry points draw the line in
+// the same place — serve refuses, they warn and continue.
+const minSecretBytes = store.EnvSecretMinBytes
+
+// HTTP timeouts. A request that stalls without these pins a connection
+// forever, so an idle browser tab or a half-open socket is a free denial of
+// service. writeTimeout is the loose one on purpose: it has to cover the AI
+// proxy's upstream round trip *and* leave budget to write the answer. Go arms
+// the write deadline when the request headers are read, not when the handler
+// starts writing, so a budget merely equal to server.AITimeout is spent
+// entirely upstream and the 502 the proxy produces on a timeout — its most
+// common failure — dies as a killed connection instead of reaching the client.
+const (
+	readHeaderTimeout = 10 * time.Second
+	readTimeout       = 30 * time.Second
+	writeTimeout      = server.AITimeout + 30*time.Second
+	idleTimeout       = 120 * time.Second
+)
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return def
+}
+
+// checkSecret rejects a truncated or hand-made settings-encryption secret. An
+// empty <data>/secret derives the AES key from SHA-256("") — a key anyone can
+// compute — and the store would use it without complaint. Refusing to start
+// is the only safe answer: regenerating silently would orphan whatever is
+// already encrypted under the old secret.
+func checkSecret(secret []byte, dataDir string) error {
+	if len(secret) >= minSecretBytes {
+		return nil
+	}
+	return fmt.Errorf("secret is %d bytes, need at least %d: set KB_SECRET, or delete %s to have a new one generated (any stored AI keys become unreadable)",
+		len(secret), minSecretBytes, filepath.Join(dataDir, "secret"))
+}
+
+// newHTTPServer applies the timeouts a bare http.ListenAndServe leaves off.
+// Without them a stalled or half-open connection is held forever, so an idle
+// tab or a slowloris client is a free denial of service.
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
 }
 
 func main() {
@@ -37,9 +87,10 @@ func main() {
 	flag.Parse()
 
 	cfg := server.Config{
-		Token:    os.Getenv("KB_TOKEN"),
-		TenantID: os.Getenv("KB_AZURE_TENANT_ID"),
-		ClientID: os.Getenv("KB_AZURE_CLIENT_ID"),
+		Token:        os.Getenv("KB_TOKEN"),
+		TenantID:     os.Getenv("KB_AZURE_TENANT_ID"),
+		ClientID:     os.Getenv("KB_AZURE_CLIENT_ID"),
+		AllowedHosts: os.Getenv("KB_ALLOWED_HOSTS"),
 	}
 	if (cfg.TenantID != "") != (cfg.ClientID != "") {
 		log.Fatal("KB_AZURE_TENANT_ID and KB_AZURE_CLIENT_ID must be set together")
@@ -50,6 +101,9 @@ func main() {
 	secret, err := store.LoadOrCreateSecret(*dataDir)
 	if err != nil {
 		log.Fatalf("load secret: %v", err)
+	}
+	if err := checkSecret(secret, *dataDir); err != nil {
+		log.Fatal(err)
 	}
 	st, err := store.Open(filepath.Join(*dataDir, "kb.db"), secret)
 	if err != nil {
@@ -82,7 +136,10 @@ func main() {
 	}
 	addr := host + ":" + *port
 	log.Printf("kb listening on %s (auth: %s, data: %s)", addr, mode, *dataDir)
-	if err := http.ListenAndServe(addr, server.New(cfg, static, st)); err != nil {
+	if mode == "open" && cfg.AllowedHosts == "" && host != "127.0.0.1" && host != "localhost" {
+		log.Printf("warning: open mode accepts only loopback Host headers; set KB_ALLOWED_HOSTS to serve the API on another hostname")
+	}
+	if err := newHTTPServer(addr, server.New(cfg, static, st)).ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }

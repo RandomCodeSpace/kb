@@ -16,10 +16,18 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+
+	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
-// aiTimeout bounds one upstream chat-completion round trip.
-const aiTimeout = 60 * time.Second
+// AITimeout bounds one upstream chat-completion round trip. It is exported so
+// the serve command can keep its HTTP write timeout strictly above it: Go arms
+// the write deadline when the request headers are read, not when the handler
+// starts writing, so an equal budget lets the proxy consume it all and the
+// error response never reaches the client.
+const AITimeout = 60 * time.Second
 
 // newAIClient builds the HTTP client used for user-configured AI endpoints.
 // Because the destination is user-controlled, the dialer rejects loopback,
@@ -49,7 +57,7 @@ func newAIClient() *http.Client {
 		},
 	}
 	return &http.Client{
-		Timeout:   aiTimeout,
+		Timeout:   AITimeout,
 		Transport: &http.Transport{DialContext: dialer.DialContext},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if req.URL.Host != via[0].URL.Host {
@@ -76,6 +84,21 @@ func (e *aiError) Error() string { return e.msg }
 const storySystemPrompt = `You write kanban cards. Respond with a single JSON object only — no prose, no code fences — using exactly these keys:
 {"title":"short imperative title","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}]}
 prio is an integer from 1 (highest) to 4 (lowest); 3 is the default.`
+
+// storiesSystemPrompt asks for the same card shape, many at a time, wrapped
+// in a {"stories": [...]} object because json_object mode forbids a bare
+// top-level array.
+const storiesSystemPrompt = `You split an architecture decision record into kanban cards. Respond with a single JSON object only — no prose, no code fences — of the form:
+{"stories":[{"title":"short imperative title","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}]}]}
+prio is an integer from 1 (highest) to 4 (lowest); 3 is the default. Each story must be independently deliverable. Tags are single words with no spaces.`
+
+// Bounds for POST /api/ai/stories: an ADR is prose, not a payload, and the
+// story count is clamped so one request cannot fan out unboundedly.
+const (
+	maxADRBytes       = 64 << 10 // 64 KiB
+	defaultStoryCount = 8
+	maxStoryCount     = 20
+)
 
 // storyDraft is the coerced card draft returned by POST /api/ai/story.
 type storyDraft struct {
@@ -251,12 +274,7 @@ func (s *server) handleAIStory(w http.ResponseWriter, r *http.Request, user stri
 	}
 	content, err := s.chatCompletion(user, msgs, 0, true)
 	if err != nil {
-		code := http.StatusBadGateway
-		var ae *aiError
-		if errors.As(err, &ae) {
-			code = ae.code
-		}
-		http.Error(w, err.Error(), code)
+		writeAIError(w, user, "story", err)
 		return
 	}
 	draft, err := coerceDraft(content)
@@ -267,30 +285,164 @@ func (s *server) handleAIStory(w http.ResponseWriter, r *http.Request, user stri
 	writeJSON(w, draft)
 }
 
+// writeAIError renders a chatCompletion failure. Every upstream outcome
+// collapses to one opaque message, matching handleAITest: err.Error() names
+// the connect failure or the upstream status, which turns the endpoint into
+// a host/port reachability oracle for any page that reaches it. The detail
+// goes to the server log only. Configuration errors (400: no or invalid base
+// URL) describe the caller's own settings and pass through.
+func writeAIError(w http.ResponseWriter, user, op string, err error) {
+	code, msg := http.StatusBadGateway, "connection failed"
+	var ae *aiError
+	if errors.As(err, &ae) {
+		code = ae.code
+		if code != http.StatusBadGateway {
+			msg = ae.msg
+		}
+	}
+	if code == http.StatusBadGateway {
+		log.Printf("ai: %s for %s failed: %v", op, user, err)
+	}
+	http.Error(w, msg, code)
+}
+
+// handleAIStories splits one ADR into several card drafts. It shares the
+// proxy client, timeout, SSRF guard and opaque error mapping with
+// /api/ai/story — there is deliberately no second HTTP path — and the ADR
+// text itself is never stored.
+func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user string) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	var req struct {
+		ADR string `json:"adr"`
+		Max int    `json:"max"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if len(req.ADR) > maxADRBytes {
+		http.Error(w, "adr too large (max 64 KiB)", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if strings.TrimSpace(req.ADR) == "" {
+		http.Error(w, "adr required", http.StatusBadRequest)
+		return
+	}
+	max := req.Max
+	if max == 0 {
+		max = defaultStoryCount
+	}
+	if max < 1 {
+		max = 1
+	}
+	if max > maxStoryCount {
+		max = maxStoryCount
+	}
+	msgs := []chatMessage{
+		{Role: "system", Content: storiesSystemPrompt},
+		{Role: "user", Content: fmt.Sprintf("Split this ADR into at most %d stories:\n\n%s", max, req.ADR)},
+	}
+	content, err := s.chatCompletion(user, msgs, 0, true)
+	if err != nil {
+		writeAIError(w, user, "stories", err)
+		return
+	}
+	stories, err := coerceDrafts(content, max)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string][]storyDraft{"stories": stories})
+}
+
 var draftDueRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+// decodeJSONObject parses assistant content as a single JSON object,
+// tolerating stray prose or code fences around it.
+func decodeJSONObject(content string) (map[string]any, error) {
+	raw := strings.TrimSpace(content)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}")
+		if start < 0 || end <= start {
+			return nil, errors.New("assistant reply is not JSON")
+		}
+		if err := json.Unmarshal([]byte(raw[start:end+1]), &m); err != nil {
+			return nil, errors.New("assistant reply is not valid JSON")
+		}
+	}
+	return m, nil
+}
 
 // coerceDraft parses assistant content as JSON and clamps every field into
 // the draft contract: prio 1-4, effort S/M/L or empty, due YYYY-MM-DD or
 // empty, tags as non-empty strings, checks as {text,done}.
 func coerceDraft(content string) (storyDraft, error) {
-	raw := strings.TrimSpace(content)
-	var m map[string]any
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		// Tolerate stray prose or fences around a single JSON object.
-		start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}")
-		if start < 0 || end <= start {
-			return storyDraft{}, errors.New("assistant reply is not JSON")
-		}
-		if err := json.Unmarshal([]byte(raw[start:end+1]), &m); err != nil {
-			return storyDraft{}, errors.New("assistant reply is not valid JSON")
-		}
+	m, err := decodeJSONObject(content)
+	if err != nil {
+		return storyDraft{}, err
 	}
+	return coerceDraftMap(m), nil
+}
+
+// coerceDrafts reads a {"stories":[...]} reply into at most max drafts. The
+// upstream reply is untrusted, so anything that is not an object, or that
+// cannot be made wire-safe (validateDraft), is dropped rather than returned.
+func coerceDrafts(content string, max int) ([]storyDraft, error) {
+	m, err := decodeJSONObject(content)
+	if err != nil {
+		return nil, err
+	}
+	vs, ok := m["stories"].([]any)
+	if !ok {
+		return nil, errors.New("assistant reply has no stories array")
+	}
+	out := []storyDraft{}
+	for _, v := range vs {
+		if len(out) >= max {
+			break
+		}
+		sm, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		d := coerceDraftMap(sm)
+		if err := validateDraft(d); err != nil {
+			log.Printf("ai: dropping unusable story: %v", err)
+			continue
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// validateDraft runs a coerced draft through the same field rules every
+// other write path uses, so a hostile reply cannot reach the board even if
+// coerceDraftMap ever loosens. A draft that fails is dropped, not repaired.
+func validateDraft(d storyDraft) error {
+	return store.ValidateTaskFields(board.Task{
+		Title:  d.Title,
+		Desc:   d.Desc,
+		Due:    d.Due,
+		Effort: d.Effort,
+		Prio:   d.Prio,
+		Tags:   d.Tags,
+	})
+}
+
+// coerceDraftMap clamps one decoded object into the draft contract. Every
+// string that lands on a single markdown line is stripped of control
+// characters first: an upstream reply is untrusted, and a title of
+// "x\n- [x] forged !1" would otherwise serialize as an extra board line.
+func coerceDraftMap(m map[string]any) storyDraft {
 	d := storyDraft{Prio: 3, Tags: []string{}, Checks: []draftCheck{}}
 	if v, ok := m["title"].(string); ok {
-		d.Title = strings.TrimSpace(v)
+		d.Title = strings.TrimSpace(stripControl(v))
 	}
 	if v, ok := m["desc"].(string); ok {
-		d.Desc = v
+		// Descriptions are serialized as indented lines, so newlines survive
+		// the wire; every other control character is still stripped.
+		d.Desc = stripControlKeepLines(v)
 	}
 	switch v := m["prio"].(type) {
 	case float64:
@@ -301,8 +453,13 @@ func coerceDraft(content string) (storyDraft, error) {
 		}
 	}
 	if v, ok := m["due"].(string); ok {
-		if due := strings.TrimSpace(v); draftDueRe.MatchString(due) {
-			d.Due = due
+		due := strings.TrimSpace(v)
+		// Shape and calendar validity both: "2026-13-45" matches the pattern
+		// but is not a date, and every write path rejects it.
+		if draftDueRe.MatchString(due) {
+			if _, err := time.Parse("2006-01-02", due); err == nil {
+				d.Due = due
+			}
 		}
 	}
 	if v, ok := m["effort"].(string); ok {
@@ -313,11 +470,17 @@ func coerceDraft(content string) (storyDraft, error) {
 	}
 	if vs, ok := m["tags"].([]any); ok {
 		for _, v := range vs {
-			if tag, ok := v.(string); ok {
-				if tag = strings.TrimSpace(tag); tag != "" {
-					d.Tags = append(d.Tags, tag)
-				}
+			tag, ok := v.(string)
+			if !ok {
+				continue
 			}
+			// A tag is one wire token: no whitespace (a space would start a
+			// second token) and no leading '#' (already the tag sigil).
+			tag = strings.TrimSpace(stripControl(tag))
+			if tag == "" || board.ContainsSpace(tag) || tag[0] == '#' {
+				continue
+			}
+			d.Tags = append(d.Tags, tag)
 		}
 	}
 	if vs, ok := m["checks"].([]any); ok {
@@ -327,14 +490,39 @@ func coerceDraft(content string) (storyDraft, error) {
 				continue
 			}
 			text, _ := cm["text"].(string)
-			if text = strings.TrimSpace(text); text == "" {
+			if text = strings.TrimSpace(stripControl(text)); text == "" {
 				continue
 			}
 			done, _ := cm["done"].(bool)
 			d.Checks = append(d.Checks, draftCheck{Text: text, Done: done})
 		}
 	}
-	return d, nil
+	return d
+}
+
+// stripControl removes every control character, including the CR/LF that
+// would break a value out of its markdown line.
+func stripControl(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// stripControlKeepLines is stripControl for multi-line values: newlines are
+// kept (the serializer indents each one), tabs and everything else are not.
+func stripControlKeepLines(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' {
+			return r
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, strings.ReplaceAll(s, "\r\n", "\n"))
 }
 
 func clampPrio(n int) int {
