@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Prio, Task } from '../lib/model';
 import { isScoped, progress } from '../lib/model';
 import { ageChip, dueChip, ymd } from '../lib/urgency';
-import { CONFETTI_COLORS } from '../lib/confetti';
+import { tagColor } from '../lib/labels';
 import type { InlineTok } from '../lib/inlineMd';
 import { parseDesc, tokenizeInline } from '../lib/inlineMd';
 
@@ -65,11 +65,6 @@ const PRIO_COLOR: Record<Prio, string> = {
   3: '#4f8ef7',
   4: '#b8bdc7',
 };
-
-/** Stable tag color: same hash the approved prototype used, over the shared palette. */
-function tagColor(tag: string): string {
-  return CONFETTI_COLORS[(tag.length + (tag.charCodeAt(0) || 0)) % CONFETTI_COLORS.length];
-}
 
 export function Card({ task, ghost, onTick, onEdit }: CardProps) {
   const [open, setOpen] = useState(false);

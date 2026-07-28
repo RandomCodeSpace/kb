@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { Check, Effort, Prio, Status, Task } from '../lib/model';
 import { newTask, STATUS_LABEL } from '../lib/model';
+import type { AIStoryRequest, StoryDraft } from '../lib/api';
+import { LabelsCombobox } from './LabelsCombobox';
 
 export type ModalState =
   | { mode: 'add'; status: Status }
@@ -8,6 +10,10 @@ export type ModalState =
 
 export interface CardModalProps {
   state: ModalState;
+  /** Suggestions for the labels combobox (server labels ∪ board tags). */
+  labels: string[];
+  /** When set, shows the "Draft with AI" section; undefined hides it. */
+  aiDraft?: (req: AIStoryRequest) => Promise<StoryDraft>;
   onSave: (task: Task) => void;
   onDelete: (taskId: string) => void;
   onClose: () => void;
@@ -29,7 +35,14 @@ function textToChecks(src: string): Check[] {
     );
 }
 
-export function CardModal({ state, onSave, onDelete, onClose }: CardModalProps) {
+export function CardModal({
+  state,
+  labels,
+  aiDraft,
+  onSave,
+  onDelete,
+  onClose,
+}: CardModalProps) {
   const base = state.mode === 'edit' ? state.task : null;
   const [emoji, setEmoji] = useState(base?.emoji ?? '');
   const [title, setTitle] = useState(base?.title ?? '');
@@ -37,8 +50,11 @@ export function CardModal({ state, onSave, onDelete, onClose }: CardModalProps) 
   const [prio, setPrio] = useState<Prio>(base?.prio ?? 3);
   const [due, setDue] = useState(base?.due ?? '');
   const [effort, setEffort] = useState<Effort | ''>(base?.effort ?? '');
-  const [tags, setTags] = useState(base ? base.tags.join(' ') : '');
+  const [tags, setTags] = useState<string[]>(base ? base.tags : []);
   const [checks, setChecks] = useState(base ? checksToText(base.checks) : '');
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -57,13 +73,49 @@ export function CardModal({ state, onSave, onDelete, onClose }: CardModalProps) 
       prio,
       due: due || undefined,
       effort: effort === '' ? undefined : effort,
-      tags: tags.split(/\s+/).filter(Boolean),
+      tags,
       checks: textToChecks(checks),
     };
     if (state.mode === 'add') {
       onSave(newTask({ ...fields, status: state.status }));
     } else {
       onSave({ ...state.task, ...fields });
+    }
+  };
+
+  const runDraft = async () => {
+    if (!aiDraft || aiBusy || !aiPrompt.trim()) return;
+    setAiBusy(true);
+    setAiError(null);
+    const req: AIStoryRequest = {
+      mode: state.mode === 'add' ? 'create' : 'update',
+      prompt: aiPrompt.trim(),
+    };
+    if (state.mode === 'edit') {
+      req.task = {
+        title: title.trim(),
+        desc: desc.trim(),
+        prio,
+        due,
+        effort,
+        tags,
+        checks: textToChecks(checks),
+      };
+    }
+    try {
+      const d = await aiDraft(req);
+      // Prefill the form only — the user still reviews and presses Save.
+      if (d.title !== '') setTitle(d.title);
+      setDesc(d.desc);
+      setPrio(d.prio);
+      setDue(d.due);
+      setEffort(d.effort);
+      setTags(d.tags);
+      setChecks(checksToText(d.checks));
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : 'draft failed');
+    } finally {
+      setAiBusy(false);
     }
   };
 
@@ -80,6 +132,41 @@ export function CardModal({ state, onSave, onDelete, onClose }: CardModalProps) 
             ? `New task · ${STATUS_LABEL[state.status]}`
             : 'Edit task'}
         </h2>
+        {aiDraft && (
+          <div className="ai-box">
+            <label htmlFor="f-ai">✨ Draft with AI</label>
+            <textarea
+              id="f-ai"
+              rows={2}
+              value={aiPrompt}
+              onChange={(e) => setAiPrompt(e.target.value)}
+              placeholder={
+                state.mode === 'add'
+                  ? 'Describe the task to draft…'
+                  : 'How should this card change?'
+              }
+              disabled={aiBusy}
+            />
+            <div className="ai-row">
+              <button
+                type="button"
+                className="ai-go"
+                onClick={() => void runDraft()}
+                disabled={aiBusy || !aiPrompt.trim()}
+              >
+                {aiBusy ? 'Drafting…' : 'Draft'}
+              </button>
+              <span className="ai-note">
+                {aiBusy ? 'asking the model…' : 'fills the form below — review, then Save'}
+              </span>
+            </div>
+            {aiError && (
+              <p className="flash err" role="alert">
+                {aiError}
+              </p>
+            )}
+          </div>
+        )}
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -150,12 +237,12 @@ export function CardModal({ state, onSave, onDelete, onClose }: CardModalProps) 
               </select>
             </div>
           </div>
-          <label htmlFor="f-tags">Tags (space-separated, key::value for scoped)</label>
-          <input
-            id="f-tags"
+          <label htmlFor="f-tags">Labels (key::value for scoped)</label>
+          <LabelsCombobox
+            inputId="f-tags"
             value={tags}
-            onChange={(e) => setTags(e.target.value)}
-            placeholder="infra env::prod"
+            suggestions={labels}
+            onChange={setTags}
           />
           <label htmlFor="f-checks">Checklist (one per line, prefix "x " when done)</label>
           <textarea

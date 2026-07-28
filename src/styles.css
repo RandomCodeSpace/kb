@@ -354,6 +354,111 @@ body {
 }
 .modal .actions .del { margin-left: auto; background: var(--red); color: #fff; }
 
+/* ---------- labels combobox ---------- */
+.labelbox { position: relative; }
+.labelchips {
+  box-sizing: border-box;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-height: 38px;
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: 5px 8px;
+  cursor: text;
+}
+.labelchips:focus-within { box-shadow: 2px 2px 0 var(--ink); }
+.modal .labelchips input {
+  flex: 1;
+  min-width: 90px;
+  width: auto;
+  border: none;
+  border-radius: 0;
+  padding: 2px 2px;
+}
+.modal .labelchips input:focus { box-shadow: none; }
+.labelchips .tag,
+.labelchips .slabel { flex: none; }
+.labelchips .rm {
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 800;
+  font-size: 11px;
+  line-height: 1;
+  padding: 0 0 0 5px;
+  cursor: pointer;
+}
+.labeldrop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 5;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  box-shadow: 4px 4px 0 var(--ink);
+  max-height: 180px;
+  overflow-y: auto;
+}
+.labeldrop li {
+  padding: 6px 10px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.labeldrop li.hi { background: var(--ink); color: #fff; }
+
+/* ---------- AI draft box + inline status ---------- */
+.ai-box {
+  border: 2px solid var(--ink);
+  border-radius: 12px;
+  box-shadow: 3px 3px 0 var(--ink);
+  background: #fff4ec;
+  padding: 4px 12px 10px;
+  margin-top: 10px;
+}
+.ai-box textarea { min-height: 40px; }
+.ai-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.ai-go {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: 5px 12px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+.ai-go:active { transform: translate(2px, 2px); box-shadow: none; }
+.ai-go:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+.ai-note { font-size: 11px; font-weight: 700; color: var(--dim); }
+.flash { margin: 8px 0 0; font-size: 12px; font-weight: 700; }
+.flash.ok { color: var(--green); }
+.flash.err { color: var(--red); }
+.mnote {
+  margin: 8px 0 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--dim);
+}
+
 /* ---------- header identity cluster ---------- */
 .who {
   font-size: 12px;

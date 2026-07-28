@@ -1,48 +1,10 @@
 import type { Board } from './model';
 import { parse, serialize } from './markdown';
 import type { Identity } from './auth';
-import { getApiToken, ReauthRequiredError } from './auth';
+import { authedFetch } from './api';
 
 const HEALTH_TIMEOUT_MS = 1500;
 const SAVE_DEBOUNCE_MS = 800;
-
-async function authHeaders(
-  identity: Identity,
-  forceRefresh = false,
-): Promise<Record<string, string>> {
-  const headers: Record<string, string> = {};
-  const token = await getApiToken(identity, { forceRefresh });
-  if (token) headers.Authorization = `Bearer ${token}`;
-  if (identity.kind === 'manual') headers['X-KB-User'] = identity.id;
-  return headers;
-}
-
-/**
- * fetch with auth headers. On a 401 an Azure identity retries once with a
- * force-refreshed token; a repeat 401 (or any manual-identity 401) throws
- * ReauthRequiredError so the UI shows "session expired" rather than a
- * generic sync error.
- */
-async function authedFetch(
-  identity: Identity,
-  input: string,
-  init: RequestInit = {},
-): Promise<Response> {
-  const attempt = async (forceRefresh: boolean) =>
-    fetch(input, {
-      ...init,
-      headers: {
-        ...(init.headers as Record<string, string> | undefined),
-        ...(await authHeaders(identity, forceRefresh)),
-      },
-    });
-  let res = await attempt(false);
-  if (res.status === 401 && identity.kind === 'azure') {
-    res = await attempt(true);
-  }
-  if (res.status === 401) throw new ReauthRequiredError();
-  return res;
-}
 
 type PendingSave = {
   identity: Identity;

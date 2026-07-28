@@ -3,6 +3,10 @@ import { STATUS_LABEL, STATUSES, newTask } from './model';
 
 const EMOJI_RE = /^\p{Extended_Pictographic}(?:️)?/u;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Description lines that would re-parse as checklist items get one escaping
+// backslash on the wire (stripped by parse). The leading \* keeps
+// already-escaped lines stable across repeated round trips.
+const DESC_CHECKBOX_RE = /^\\*- \[[ xX]\] /;
 
 export function serialize(board: Board): string {
   let out = `# ${board.title}\n`;
@@ -11,7 +15,9 @@ export function serialize(board: Board): string {
     for (const t of board.tasks.filter((x) => x.status === status)) {
       out += `- [${status === 'done' ? 'x' : ' '}] ${titleLine(t)}\n`;
       for (const line of t.desc.split('\n')) {
-        if (line.trim()) out += `  ${line.trim()}\n`;
+        const trimmed = line.trim();
+        if (trimmed)
+          out += `  ${DESC_CHECKBOX_RE.test(trimmed) ? `\\${trimmed}` : trimmed}\n`;
       }
       for (const c of t.checks) {
         out += `  - [${c.done ? 'x' : ' '}] ${c.text}\n`;
@@ -21,13 +27,34 @@ export function serialize(board: Board): string {
   return out;
 }
 
+/**
+ * Render the single-line form of a task. Title words that parse() would lift
+ * into metadata are backslash-escaped; whitespace runs collapse to single
+ * spaces, matching what parse() does on read.
+ */
 export function titleLine(t: Task): string {
-  let s = t.emoji ? `${t.emoji} ${t.title}` : t.title;
+  const title = t.title.split(/\s+/).filter(Boolean).map(escapeToken).join(' ');
+  let s = t.emoji ? `${t.emoji} ${title}` : title;
   if (t.prio !== 3) s += ` !${t.prio}`;
   if (t.due) s += ` @${t.due}`;
   if (t.effort) s += ` ~${t.effort}`;
   for (const tag of t.tags) s += ` #${tag}`;
   return s;
+}
+
+/**
+ * Escape a title word that parse() would otherwise consume as metadata
+ * (!prio, @due, ~effort, #tag) — or that starts with the escape character
+ * itself — by prefixing one backslash, which parse() strips.
+ */
+function escapeToken(tok: string): string {
+  const needsEscape =
+    tok.startsWith('\\') ||
+    /^![1-4]$/.test(tok) ||
+    /^~[SML]$/.test(tok) ||
+    (tok.startsWith('@') && DATE_RE.test(tok.slice(1))) ||
+    (tok.length > 1 && tok.startsWith('#'));
+  return needsEscape ? `\\${tok}` : tok;
 }
 
 export function parse(input: string): Board {
@@ -69,7 +96,14 @@ export function parse(input: string): Board {
     if (check && indented) {
       current.checks.push({ text: check.rest, done: check.done } satisfies Check);
     } else {
-      descLines.get(current.id)!.push(line.trim());
+      const text = line.trim();
+      descLines
+        .get(current.id)!
+        .push(
+          text.startsWith('\\') && DESC_CHECKBOX_RE.test(text.slice(1))
+            ? text.slice(1)
+            : text,
+        );
     }
   }
   for (const t of board.tasks) {
@@ -96,7 +130,9 @@ export function parseTitleLine(raw: string, status: Status, done: boolean): Task
   const t = newTask({ title: '', status: done ? 'done' : status, emoji });
   const words: string[] = [];
   for (const tok of rest.split(/\s+/)) {
-    if (/^![1-4]$/.test(tok)) t.prio = Number(tok.slice(1)) as Prio;
+    // Escaped word: strip one backslash, keep it as title text.
+    if (tok.startsWith('\\')) words.push(tok.slice(1));
+    else if (/^![1-4]$/.test(tok)) t.prio = Number(tok.slice(1)) as Prio;
     else if (tok.startsWith('@') && DATE_RE.test(tok.slice(1))) t.due = tok.slice(1);
     else if (/^~[SML]$/.test(tok)) t.effort = tok.slice(1) as Effort;
     else if (tok.length > 1 && tok.startsWith('#')) t.tags.push(tok.slice(1));

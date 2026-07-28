@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parse, serialize } from './markdown';
 import type { Board } from './model';
+import { newTask } from './model';
 
 const DOC = `# Ops Board
 
@@ -127,5 +128,36 @@ describe('parse', () => {
     expect(board.tasks).toHaveLength(1);
     expect(board.tasks[0].title).toBe('Something someday');
     expect(board.tasks[0].status).toBe('todo');
+  });
+});
+
+describe('escaping', () => {
+  it('round-trips metadata-shaped title words (#tag, !prio, ~effort, @due, \\) as text', () => {
+    const board: Board = {
+      title: 'B',
+      tasks: [
+        newTask({ title: 'Fix #123 login !2 ~S @2026-01-01 \\raw', status: 'todo' }),
+      ],
+    };
+    const again = parse(serialize(board));
+    expect(again.tasks).toHaveLength(1);
+    const t = again.tasks[0];
+    expect(t.title).toBe('Fix #123 login !2 ~S @2026-01-01 \\raw');
+    expect(t.tags).toEqual([]);
+    expect(t.prio).toBe(3);
+    expect(t.due).toBeUndefined();
+    expect(t.effort).toBeUndefined();
+    // The wire form is stable across repeated round trips.
+    expect(serialize(again)).toBe(serialize(board));
+  });
+
+  it('keeps checkbox-shaped description lines in the description', () => {
+    const board: Board = {
+      title: 'B',
+      tasks: [newTask({ title: 'T', desc: 'first\n- [ ] buy milk\n- [x] paid' })],
+    };
+    const again = parse(serialize(board));
+    expect(again.tasks[0].desc).toBe('first\n- [ ] buy milk\n- [x] paid');
+    expect(again.tasks[0].checks).toEqual([]);
   });
 });
