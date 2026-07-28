@@ -75,17 +75,18 @@ export function ShipDialog({
             {line}
           </p>
         ))}
+        {/* Cancel on the left, the primary action on the right. */}
         <div className="actions">
-          <button type="button" className="save" onClick={onShip}>
-            Ship anyway
+          <button type="button" onClick={onCancel}>
+            Cancel
           </button>
           {warning.open > 0 && (
             <button type="button" onClick={onTickAll}>
               Tick everything
             </button>
           )}
-          <button type="button" onClick={onCancel}>
-            Cancel
+          <button type="button" className="save" onClick={onShip}>
+            Ship anyway
           </button>
         </div>
       </div>

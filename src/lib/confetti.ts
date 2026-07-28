@@ -7,7 +7,31 @@ interface Particle {
 
 const parts: Particle[] = [];
 
+/** Re-arms the parked animation loop; set by startLoop while it is mounted. */
+let wake: (() => void) | null = null;
+
+/**
+ * Whether the user has asked for reduced motion. Read per call rather than
+ * cached: the setting can change while the page is open, and a stale answer
+ * would either keep animating at someone who asked us not to, or silently
+ * disable the effect for the rest of the session.
+ */
+export function reducedMotion(): boolean {
+  try {
+    return (
+      typeof matchMedia === 'function' &&
+      matchMedia('(prefers-reduced-motion: reduce)').matches
+    );
+  } catch {
+    // No matchMedia (tests, very old browsers): assume no preference.
+    return false;
+  }
+}
+
 export function burst(x: number, y: number, n: number): void {
+  // Confetti is decoration and nothing else, so reduced motion means none of
+  // it — and with no particles the loop never wakes, which costs nothing.
+  if (reducedMotion()) return;
   for (let i = 0; i < n; i++) {
     const a = Math.random() * Math.PI * 2;
     const sp = 100 + Math.random() * 430;
@@ -20,6 +44,12 @@ export function burst(x: number, y: number, n: number): void {
       c: CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)],
     });
   }
+  wake?.();
+}
+
+/** Particles still in flight — the loop parks itself when this reaches 0. */
+export function pending(): number {
+  return parts.length;
 }
 
 let minFrameMs = 0;
@@ -42,9 +72,15 @@ export function frameDue(now: number, last: number): boolean {
   return minFrameMs <= 0 || now - last >= minFrameMs - 1;
 }
 
-/** Drives the overlay canvas; called once from the Confetti component. */
+/**
+ * Drives the overlay canvas; called once from the Confetti component. The
+ * loop only runs while particles exist: an idle board must not spend a
+ * requestAnimationFrame callback and a full-viewport clearRect on every
+ * display refresh for the rest of the session. burst() wakes it again.
+ */
 export function startLoop(canvas: HTMLCanvasElement): () => void {
   const ctx = canvas.getContext('2d')!;
+  // 0 means parked — no frame is scheduled.
   let raf = 0;
   let last = performance.now();
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -59,6 +95,7 @@ export function startLoop(canvas: HTMLCanvasElement): () => void {
   window.addEventListener('resize', resize);
 
   const loop = (now: number) => {
+    raf = 0;
     // Frame skipped by the cap: `last` stays put, so the next rendered frame
     // integrates the full elapsed time and the motion keeps its real speed.
     if (!frameDue(now, last)) {
@@ -89,11 +126,26 @@ export function startLoop(canvas: HTMLCanvasElement): () => void {
       ctx.restore();
     }
     ctx.globalAlpha = 1;
+    // The frame that removed the last particle has already cleared the
+    // canvas, so parking here leaves nothing drawn behind.
+    if (parts.length > 0) raf = requestAnimationFrame(loop);
+  };
+
+  const schedule = () => {
+    if (raf !== 0) return;
+    // A parked loop has no meaningful `last`; restart the clock so the first
+    // frame after a wake integrates one frame's worth of time, not the gap.
+    last = performance.now();
     raf = requestAnimationFrame(loop);
   };
-  raf = requestAnimationFrame(loop);
+  wake = schedule;
+  // Particles may already be in flight if the canvas remounted mid-burst.
+  if (parts.length > 0) schedule();
+
   return () => {
-    cancelAnimationFrame(raf);
+    if (raf !== 0) cancelAnimationFrame(raf);
+    raf = 0;
+    if (wake === schedule) wake = null;
     window.removeEventListener('resize', resize);
   };
 }

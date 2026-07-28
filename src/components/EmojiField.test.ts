@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { emojiRejection, firstEmoji } from './EmojiField';
+import { emojiRejection, firstEmoji, perLine } from './EmojiField';
 
 describe('firstEmoji', () => {
   it('keeps a hand-typed emoji', () => {
@@ -45,5 +45,20 @@ describe('emojiRejection', () => {
     for (const bad of ['🇯🇵', '1️⃣', '#️⃣', '👨‍💻', '🏳️‍🌈', '🧑‍🚀', '👍🏽', '🔧🔨', 'nope']) {
       expect(emojiRejection(bad)).not.toBe('');
     }
+  });
+});
+
+describe('perLine', () => {
+  // The picker's grid is a fixed column count, not a reflowing one: at the
+  // default 9 it is wider than the modal on a phone, and the frame around it
+  // would cut the last column off.
+  it('narrows the grid on a phone-width viewport', () => {
+    expect(perLine(375)).toBe(7);
+    expect(perLine(479)).toBe(7);
+  });
+
+  it('keeps the full grid everywhere it fits', () => {
+    expect(perLine(480)).toBe(9);
+    expect(perLine(1280)).toBe(9);
   });
 });

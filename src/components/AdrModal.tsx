@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import type { Effort, Prio, Status, Task } from '../lib/model';
 import { newTask, STATUS_LABEL, STATUSES } from '../lib/model';
 import type { StoryDraft } from '../lib/api';
+import { isAbortError } from '../lib/api';
 
 /** Same ceiling the server enforces on the ADR body. */
 export const ADR_MAX_BYTES = 64 * 1024;
@@ -66,8 +67,16 @@ export function rowsToTasks(rows: readonly StoryRow[], status: Status): Task[] {
 }
 
 export interface AdrModalProps {
-  /** Splitter from the API layer; already validates every returned draft. */
-  onSplit: (adr: string, max: number) => Promise<StoryDraft[]>;
+  /**
+   * Splitter from the API layer; already validates every returned draft. The
+   * signal is how Cancel aborts a split in flight rather than only hiding
+   * the busy state.
+   */
+  onSplit: (
+    adr: string,
+    max: number,
+    signal?: AbortSignal,
+  ) => Promise<StoryDraft[]>;
   onAdd: (tasks: Task[]) => void;
   onClose: () => void;
 }
@@ -84,14 +93,24 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
   const [error, setError] = useState<string | null>(null);
   const [rows, setRows] = useState<StoryRow[] | null>(null);
   const [dest, setDest] = useState<Status>('todo');
+  const splitAbort = useRef<AbortController | null>(null);
+
+  const cancelSplit = () => splitAbort.current?.abort();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key !== 'Escape') return;
+      // Mid-split, Escape cancels the request instead of closing the modal:
+      // closing would throw away the ADR the user pasted.
+      if (splitAbort.current) splitAbort.current.abort();
+      else onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
+
+  // Closed mid-split: don't leave the request running with nowhere to land.
+  useEffect(() => () => splitAbort.current?.abort(), []);
 
   const tooBig = adrBytes(adr) > ADR_MAX_BYTES;
 
@@ -112,16 +131,23 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
     if (busy || adr.trim() === '' || tooBig) return;
     setBusy(true);
     setError(null);
+    const ctrl = new AbortController();
+    splitAbort.current = ctrl;
     try {
-      const drafts = await onSplit(adr, clampMax(max));
+      const drafts = await onSplit(adr, clampMax(max), ctrl.signal);
       if (drafts.length === 0) {
         setError('the model returned no usable stories');
         return;
       }
       setRows(toRows(drafts));
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'split failed');
+      // A cancel is not a failure, and nothing was consumed: the ADR and the
+      // options are exactly as they were, so say nothing.
+      if (!isAbortError(err)) {
+        setError(err instanceof Error ? err.message : 'split failed');
+      }
     } finally {
+      splitAbort.current = null;
       setBusy(false);
     }
   };
@@ -138,10 +164,12 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
     <div
       className="modal-backdrop"
       onPointerDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        // A stray click outside must not discard a split the user is waiting
+        // for; Cancel (or Escape) is the way out while a request is running.
+        if (e.target === e.currentTarget && !busy) onClose();
       }}
     >
-      <div className="modal adr" role="dialog" aria-modal="true">
+      <div className="modal adr" role="dialog" aria-modal="true" aria-busy={busy}>
         <h2>Split an ADR into stories</h2>
         {rows === null ? (
           <>
@@ -153,7 +181,9 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
               placeholder="# ADR 0007: adopt …"
               disabled={busy}
             />
-            <div className="mrow">
+            {/* Inert while a split runs, so nothing here can change under the
+                request; the textarea above is disabled for the same reason. */}
+            <div className="mrow" inert={busy}>
               <div>
                 <label htmlFor="f-adr-file">…or upload a file</label>
                 <input
@@ -187,7 +217,19 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
                 {error}
               </p>
             )}
+            {busy && (
+              <p className="flash busy" role="status">
+                Splitting the ADR…
+              </p>
+            )}
+            {/* Cancel on the left, the primary action on the right. */}
             <div className="actions">
+              <button
+                type="button"
+                onClick={busy ? cancelSplit : onClose}
+              >
+                {busy ? 'Cancel split' : 'Cancel'}
+              </button>
               <button
                 type="button"
                 className="save"
@@ -195,9 +237,6 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
                 disabled={busy || adr.trim() === '' || tooBig}
               >
                 {busy ? 'Splitting…' : 'Propose stories'}
-              </button>
-              <button type="button" onClick={onClose}>
-                Cancel
               </button>
             </div>
           </>
@@ -260,7 +299,14 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
                 </option>
               ))}
             </select>
+            {/* Cancel and Back on the left, the primary action on the right. */}
             <div className="actions">
+              <button type="button" onClick={onClose}>
+                Cancel
+              </button>
+              <button type="button" onClick={() => setRows(null)}>
+                Back
+              </button>
               <button
                 type="button"
                 className="save"
@@ -268,12 +314,6 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
                 onClick={() => onAdd(selected)}
               >
                 Add selected ({selected.length})
-              </button>
-              <button type="button" onClick={() => setRows(null)}>
-                Back
-              </button>
-              <button type="button" onClick={onClose}>
-                Cancel
               </button>
             </div>
           </>

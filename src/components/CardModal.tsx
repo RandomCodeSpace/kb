@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Check, Effort, Prio, Status, Task } from '../lib/model';
 import { newTask, STATUS_LABEL } from '../lib/model';
 import type { AIStoryRequest, StoryDraft } from '../lib/api';
+import { isAbortError } from '../lib/api';
 import { EmojiField, firstEmoji } from './EmojiField';
 import { LabelsCombobox } from './LabelsCombobox';
 
@@ -13,8 +14,12 @@ export interface CardModalProps {
   state: ModalState;
   /** Suggestions for the labels combobox (server labels ∪ board tags). */
   labels: string[];
-  /** When set, shows the "Draft with AI" section; undefined hides it. */
-  aiDraft?: (req: AIStoryRequest) => Promise<StoryDraft>;
+  /**
+   * When set, shows the "Draft with AI" section; undefined hides it. The
+   * signal is how Cancel aborts the request in flight rather than only
+   * hiding the busy state.
+   */
+  aiDraft?: (req: AIStoryRequest, signal?: AbortSignal) => Promise<StoryDraft>;
   onSave: (task: Task) => void;
   onDelete: (taskId: string) => void;
   onClose: () => void;
@@ -57,14 +62,25 @@ export function CardModal({
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const draftAbort = useRef<AbortController | null>(null);
+
+  const cancelDraft = () => draftAbort.current?.abort();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key !== 'Escape') return;
+      // Mid-draft, Escape cancels the request instead of closing the card:
+      // closing would throw away the form the user is waiting to have filled.
+      if (draftAbort.current) draftAbort.current.abort();
+      else onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
+
+  // A card closed mid-draft (a server refresh can do it) must not leave the
+  // request running with nowhere to land.
+  useEffect(() => () => draftAbort.current?.abort(), []);
 
   const save = () => {
     if (!title.trim()) return;
@@ -105,8 +121,10 @@ export function CardModal({
         checks: textToChecks(checks),
       };
     }
+    const ctrl = new AbortController();
+    draftAbort.current = ctrl;
     try {
-      const d = await aiDraft(req);
+      const d = await aiDraft(req, ctrl.signal);
       // Prefill the form only — the user still reviews and presses Save.
       if (d.title !== '') setTitle(d.title);
       setDesc(d.desc);
@@ -116,8 +134,13 @@ export function CardModal({
       setTags(d.tags);
       setChecks(checksToText(d.checks));
     } catch (err) {
-      setAiError(err instanceof Error ? err.message : 'draft failed');
+      // A cancel is not a failure, and nothing was written: the form is
+      // exactly as it was, so say nothing.
+      if (!isAbortError(err)) {
+        setAiError(err instanceof Error ? err.message : 'draft failed');
+      }
     } finally {
+      draftAbort.current = null;
       setAiBusy(false);
     }
   };
@@ -126,10 +149,12 @@ export function CardModal({
     <div
       className="modal-backdrop"
       onPointerDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        // A stray click outside must not discard a draft the user is waiting
+        // for; Cancel (or Escape) is the way out while a request is running.
+        if (e.target === e.currentTarget && !aiBusy) onClose();
       }}
     >
-      <div className="modal" role="dialog" aria-modal="true">
+      <div className="modal" role="dialog" aria-modal="true" aria-busy={aiBusy}>
         <h2>
           {state.mode === 'add'
             ? `New task · ${STATUS_LABEL[state.status]}`
@@ -159,9 +184,20 @@ export function CardModal({
               >
                 {aiBusy ? 'Drafting…' : 'Draft'}
               </button>
-              <span className="ai-note">
-                {aiBusy ? 'asking the model…' : 'fills the form below — review, then Save'}
-              </span>
+              {aiBusy && (
+                <button type="button" className="ai-stop" onClick={cancelDraft}>
+                  Cancel
+                </button>
+              )}
+              {aiBusy ? (
+                <span className="ai-note busy" role="status">
+                  Drafting the card…
+                </span>
+              ) : (
+                <span className="ai-note">
+                  fills the form below — review, then Save
+                </span>
+              )}
             </div>
             {aiError && (
               <p className="flash err" role="alert">
@@ -170,7 +206,12 @@ export function CardModal({
             )}
           </div>
         )}
+        {/* Inert while a draft is running: these fields are about to be
+            overwritten, and Save/Delete would act on values the reply is
+            about to replace. It blocks this form only — the page still
+            scrolls, and the draft's own Cancel above stays live. */}
         <form
+          inert={aiBusy}
           onSubmit={(e) => {
             e.preventDefault();
             save();
@@ -258,13 +299,8 @@ export function CardModal({
             onChange={(e) => setChecks(e.target.value)}
             placeholder={'write failing test\nx reproduce locally'}
           />
+          {/* Delete and Cancel on the left, the primary action on the right. */}
           <div className="actions">
-            <button type="submit" className="save" disabled={!title.trim()}>
-              Save
-            </button>
-            <button type="button" onClick={onClose}>
-              Cancel
-            </button>
             {state.mode === 'edit' && state.task.status !== 'cancelled' && (
               // Soft delete: the card moves to Cancelled, so this needs no
               // confirmation — the only irreversible delete lives in that
@@ -278,6 +314,12 @@ export function CardModal({
                 Delete
               </button>
             )}
+            <button type="button" onClick={onClose}>
+              Cancel
+            </button>
+            <button type="submit" className="save" disabled={!title.trim()}>
+              Save
+            </button>
           </div>
         </form>
       </div>

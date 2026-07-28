@@ -59,6 +59,30 @@ export interface AITestResult {
   error?: string;
 }
 
+/**
+ * Values to test instead of the stored ones, so a connection can be checked
+ * before an unvalidated key is saved. `ai_key` is omitted to test the key the
+ * server already holds; a key sent here is used for that one request and is
+ * never persisted.
+ */
+export interface AITestProbe {
+  ai_base_url: string;
+  ai_model: string;
+  ai_key?: string;
+}
+
+/**
+ * True for the rejection `fetch` produces when its signal is aborted — a
+ * user-initiated cancel, not a failure worth showing.
+ */
+export function isAbortError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { name?: unknown }).name === 'AbortError'
+  );
+}
+
 export interface AIStoryRequest {
   mode: 'create' | 'update';
   prompt: string;
@@ -141,9 +165,22 @@ export async function putSettings(
   }
 }
 
-/** 1-token chat completion against the saved settings; never throws for upstream failures. */
-export async function aiTest(identity: Identity): Promise<AITestResult> {
-  const res = await authedFetch(identity, '/api/ai/test', { method: 'POST' });
+/**
+ * 1-token chat completion; never throws for upstream failures. With no probe
+ * it tests the saved settings, which is what the endpoint has always meant;
+ * with one it tests those values instead without touching what is stored.
+ */
+export async function aiTest(
+  identity: Identity,
+  probe?: AITestProbe,
+  signal?: AbortSignal,
+): Promise<AITestResult> {
+  const init: RequestInit = { method: 'POST', signal };
+  if (probe) {
+    init.headers = { 'Content-Type': 'application/json' };
+    init.body = JSON.stringify(probe);
+  }
+  const res = await authedFetch(identity, '/api/ai/test', init);
   if (!res.ok) {
     return { ok: false, error: await errText(res, `test failed: ${res.status}`) };
   }
@@ -161,11 +198,13 @@ export async function aiTest(identity: Identity): Promise<AITestResult> {
 export async function aiStory(
   identity: Identity,
   req: AIStoryRequest,
+  signal?: AbortSignal,
 ): Promise<StoryDraft> {
   const res = await authedFetch(identity, '/api/ai/story', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
+    signal,
   });
   if (!res.ok) throw new Error(await errText(res, `draft failed: ${res.status}`));
   return coerceStoryDraft(await res.json());
@@ -179,11 +218,13 @@ export async function aiStory(
 export async function aiStories(
   identity: Identity,
   req: AIStoriesRequest,
+  signal?: AbortSignal,
 ): Promise<StoryDraft[]> {
   const res = await authedFetch(identity, '/api/ai/stories', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
+    signal,
   });
   if (!res.ok) throw new Error(await errText(res, `split failed: ${res.status}`));
   const body: unknown = await res.json();

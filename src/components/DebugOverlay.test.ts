@@ -54,4 +54,15 @@ describe('setDebugEnabled', () => {
     setDebugEnabled(false);
     expect(debugEnabled('')).toBe(false);
   });
+
+  it('the settings toggle turns it on, and it stays on across a reload', () => {
+    setDebugEnabled(true);
+    expect(mem.get('kb.debug.v1')).toBe('1');
+    expect(debugEnabled('')).toBe(true);
+  });
+
+  it('?debug=1 still overrides a toggle left off', () => {
+    setDebugEnabled(false);
+    expect(debugEnabled('?debug=1')).toBe(true);
+  });
 });

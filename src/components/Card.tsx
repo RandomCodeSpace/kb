@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import type { Prio, Task } from '../lib/model';
 import { isScoped, progress } from '../lib/model';
 import { ageChip, dueChip, ymd } from '../lib/urgency';
@@ -52,14 +52,20 @@ function Desc({ text }: { text: string }) {
   );
 }
 
+/**
+ * The handlers take the task id rather than closing over it, so a column can
+ * hand every card the *same* function reference. That is what lets the memo
+ * below actually bail out: a per-card arrow function would be new on every
+ * render and re-render all of them anyway.
+ */
 export interface CardProps {
   task: Task;
-  onTick?: (checkIdx: number, pos: { x: number; y: number }) => void;
-  onEdit?: () => void;
+  onTick?: (taskId: string, checkIdx: number, pos: { x: number; y: number }) => void;
+  onEdit?: (taskId: string) => void;
   /** Cancelled column only: put the card back in To Do. */
-  onRestore?: () => void;
+  onRestore?: (taskId: string) => void;
   /** Cancelled column only: the one path to a real delete. */
-  onPurge?: () => void;
+  onPurge?: (taskId: string) => void;
 }
 
 const PRIO_COLOR: Record<Prio, string> = {
@@ -69,7 +75,18 @@ const PRIO_COLOR: Record<Prio, string> = {
   4: '#b8bdc7',
 };
 
-export function Card({ task, onTick, onEdit, onRestore, onPurge }: CardProps) {
+/**
+ * Memoised: a drag re-renders the board on every drop-target change, and an
+ * edit re-renders it once per keystroke-committed change. Neither touches the
+ * other cards' task objects, so they should not re-render at all.
+ */
+export const Card = memo(function Card({
+  task,
+  onTick,
+  onEdit,
+  onRestore,
+  onPurge,
+}: CardProps) {
   const [open, setOpen] = useState(false);
   const checksRef = useRef<HTMLDivElement>(null);
 
@@ -94,7 +111,7 @@ export function Card({ task, onTick, onEdit, onRestore, onPurge }: CardProps) {
       onClick={(e) => {
         if ((e.target as Element).closest('.chev,.check,.bx,.grip,button,input'))
           return;
-        onEdit?.();
+        onEdit?.(task.id);
       }}
     >
       <div className="head">
@@ -140,7 +157,7 @@ export function Card({ task, onTick, onEdit, onRestore, onPurge }: CardProps) {
                 onPointerDown={(e) => {
                   e.stopPropagation();
                   const r = e.currentTarget.getBoundingClientRect();
-                  onTick?.(i, { x: r.left + 8, y: r.top + 8 });
+                  onTick?.(task.id, i, { x: r.left + 8, y: r.top + 8 });
                 }}
               >
                 <div className="bx">✓</div>
@@ -177,12 +194,12 @@ export function Card({ task, onTick, onEdit, onRestore, onPurge }: CardProps) {
       {(onRestore || onPurge) && (
         <div className="cardacts">
           {onRestore && (
-            <button type="button" onClick={onRestore}>
+            <button type="button" onClick={() => onRestore(task.id)}>
               Restore
             </button>
           )}
           {onPurge && (
-            <button type="button" className="purge" onClick={onPurge}>
+            <button type="button" className="purge" onClick={() => onPurge(task.id)}>
               Delete permanently
             </button>
           )}
@@ -190,4 +207,4 @@ export function Card({ task, onTick, onEdit, onRestore, onPurge }: CardProps) {
       )}
     </div>
   );
-}
+});
