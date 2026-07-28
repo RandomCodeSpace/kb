@@ -3,6 +3,54 @@ import type { Prio, Task } from '../lib/model';
 import { isScoped, progress } from '../lib/model';
 import { ageChip, dueChip, ymd } from '../lib/urgency';
 import { CONFETTI_COLORS } from '../lib/confetti';
+import type { InlineTok } from '../lib/inlineMd';
+import { parseDesc, tokenizeInline } from '../lib/inlineMd';
+
+function InlineText({ toks }: { toks: InlineTok[] }) {
+  return (
+    <>
+      {toks.map((t, i) => {
+        switch (t.kind) {
+          case 'code':
+            return <code key={i}>{t.text}</code>;
+          case 'bold':
+            return <strong key={i}>{t.text}</strong>;
+          case 'italic':
+            return <em key={i}>{t.text}</em>;
+          case 'link':
+            return (
+              <a
+                key={i}
+                href={t.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {t.text}
+              </a>
+            );
+          default:
+            return <span key={i}>{t.text}</span>;
+        }
+      })}
+    </>
+  );
+}
+
+function Desc({ text }: { text: string }) {
+  return (
+    <div className="desc">
+      {parseDesc(text).map((l, i) => (
+        <div key={i} className={l.bullet ? 'dline bullet' : 'dline'}>
+          {l.bullet && <span className="bdot">•</span>}
+          <span>
+            <InlineText toks={l.toks} />
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export interface CardProps {
   task: Task;
@@ -51,12 +99,14 @@ export function Card({ task, ghost, onTick, onEdit }: CardProps) {
     >
       <div className="head">
         <span className="emo">{task.emoji}</span>
-        <span className="t">{task.title}</span>
+        <span className="t">
+          <InlineText toks={tokenizeInline(task.title)} />
+        </span>
         <span className="age">
           {ageChip(task.status, task.createdAt, task.movedAt, Date.now())}
         </span>
       </div>
-      {task.desc !== '' && <div className="desc">{task.desc}</div>}
+      {task.desc !== '' && <Desc text={task.desc} />}
       {p && (
         <>
           <div className="prog">
@@ -88,7 +138,9 @@ export function Card({ task, ghost, onTick, onEdit }: CardProps) {
                 }}
               >
                 <div className="bx">✓</div>
-                <span>{c.text}</span>
+                <span>
+                  <InlineText toks={tokenizeInline(c.text)} />
+                </span>
               </div>
             ))}
           </div>
