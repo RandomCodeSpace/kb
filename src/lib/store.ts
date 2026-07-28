@@ -177,13 +177,33 @@ export function shippedToday(ns: string = 'default'): number {
 /**
  * Record the card `key` (see shipKey) as shipped today and return the day's
  * count. Storing keys rather than a counter makes this idempotent per card:
- * dragging one card Done → Doing → Done still counts once, and so does
- * shipping it again after a reload. Moving a card out of Done never
- * decrements — it did ship today.
+ * dragging one card Done → Doing → Done → … still counts once, and so does
+ * shipping it again after a reload.
  */
 export function bumpShipped(ns: string, key: string): number {
   const streak = loadStreak(ns);
   if (!streak.ids.includes(key)) streak.ids.push(key);
+  return saveStreak(ns, streak);
+}
+
+/**
+ * Drop the card `key` from today's tally, for when it leaves Done, and return
+ * the day's count.
+ *
+ * A reopened card is not shipped: the counter says what is done today, so it
+ * has to be able to go down. Re-shipping the same card later adds it back and
+ * it still counts once, so this cannot be farmed by moving a card back and
+ * forth. Unknown keys are a no-op.
+ */
+export function unshipToday(ns: string, key: string): number {
+  const streak = loadStreak(ns);
+  const at = streak.ids.indexOf(key);
+  if (at === -1) return streak.ids.length;
+  streak.ids.splice(at, 1);
+  return saveStreak(ns, streak);
+}
+
+function saveStreak(ns: string, streak: Streak): number {
   try {
     localStorage.setItem(nsKey(STREAK_KEY, ns), JSON.stringify(streak));
   } catch {

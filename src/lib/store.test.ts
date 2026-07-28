@@ -85,9 +85,24 @@ describe('shipped counter', () => {
   it('counts one card once across Done -> Doing -> Done', async () => {
     const store = await freshStore();
     expect(store.bumpShipped('default', 't1')).toBe(1); // dropped on Done
-    // moved back to Doing — no bump, and no decrement either
-    expect(store.shippedToday()).toBe(1);
+    expect(store.unshipToday('default', 't1')).toBe(0); // reopened
     expect(store.bumpShipped('default', 't1')).toBe(1); // dropped on Done again
+    expect(store.shippedToday()).toBe(1); // still one card, not three
+  });
+
+  it('takes a reopened card back off the tally', async () => {
+    const store = await freshStore();
+    store.bumpShipped('default', 't1');
+    store.bumpShipped('default', 't2');
+    expect(store.shippedToday()).toBe(2);
+    expect(store.unshipToday('default', 't1')).toBe(1);
+    expect(store.shippedToday()).toBe(1);
+  });
+
+  it('ignores unshipping a card that never shipped today', async () => {
+    const store = await freshStore();
+    store.bumpShipped('default', 't1');
+    expect(store.unshipToday('default', 'never-shipped')).toBe(1);
     expect(store.shippedToday()).toBe(1);
   });
 
