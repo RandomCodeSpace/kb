@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import type { Task } from '../lib/model';
+import { useDialogFocus } from '../lib/focus';
 
 /** Why a move to Done deserves a confirmation. */
 export interface ShipWarning {
@@ -53,6 +54,11 @@ export function ShipDialog({
   onTickAll,
   onCancel,
 }: ShipDialogProps) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const onDialogKeyDown = useDialogFocus(boxRef);
+  const titleId = useId();
+  const bodyId = useId();
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onCancel();
@@ -68,13 +74,24 @@ export function ShipDialog({
         if (e.target === e.currentTarget) onCancel();
       }}
     >
-      <div className="modal ship" role="alertdialog" aria-modal="true">
-        <h2>Move “{title}” to Done?</h2>
-        {shipWarningLines(warning).map((line) => (
-          <p key={line} className="mnote">
-            {line}
-          </p>
-        ))}
+      <div
+        className="modal ship"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={bodyId}
+        tabIndex={-1}
+        ref={boxRef}
+        onKeyDown={onDialogKeyDown}
+      >
+        <h2 id={titleId}>Move “{title}” to Done?</h2>
+        <div id={bodyId}>
+          {shipWarningLines(warning).map((line) => (
+            <p key={line} className="mnote">
+              {line}
+            </p>
+          ))}
+        </div>
         {/* Cancel on the left, the primary action on the right. */}
         <div className="actions">
           <button type="button" onClick={onCancel}>

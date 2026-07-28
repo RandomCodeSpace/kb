@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { Identity } from '../lib/auth';
 import type { AISettings, AITestProbe, SettingsPatch } from '../lib/api';
 import { aiTest, getSettings, isAbortError, putSettings } from '../lib/api';
+import { useDialogFocus } from '../lib/focus';
 
 export interface SettingsModalProps {
   identity: Identity;
@@ -77,7 +78,19 @@ export function SettingsModal({
   const [save, setSave] = useState<Flash>({ kind: 'idle' });
   const [test, setTest] = useState<Flash>({ kind: 'idle' });
   const testAbort = useRef<AbortController | null>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const onDialogKeyDown = useDialogFocus(boxRef);
+  const errorId = useId();
   const busy = save.kind === 'busy' || test.kind === 'busy';
+  // Save and test failures are about the connection these three fields
+  // describe, so all three point at whichever messages are showing rather than
+  // leaving a keyboard user to find them by chance.
+  const errorIds: string[] = [];
+  if (loadError) errorIds.push(`${errorId}-load`);
+  if (save.kind === 'err') errorIds.push(`${errorId}-save`);
+  if (test.kind === 'err') errorIds.push(`${errorId}-test`);
+  const failed = errorIds.length > 0;
+  const describedBy = failed ? errorIds.join(' ') : undefined;
   // The Escape handler is bound once, so it reads the save through a ref;
   // state captured in that closure would be the value at subscription time.
   const savingRef = useRef(false);
@@ -198,8 +211,17 @@ export function SettingsModal({
         aria-modal="true"
         aria-label="Settings"
         aria-busy={busy}
+        tabIndex={-1}
+        ref={boxRef}
+        onKeyDown={onDialogKeyDown}
       >
         <h2>Settings</h2>
+        {/* The header shows a short name and truncates a long one, and its
+            full value is otherwise only a hover tooltip — which a keyboard or
+            a touch has no way to reach. It is printed in full here. */}
+        <p className="mnote">
+          Signed in as <code>{identity.id}</code>
+        </p>
         {/* Applies immediately and is remembered on this device — it is a
             display preference, not part of the AI form's Save. */}
         <label className="checkline" htmlFor="s-debug">
@@ -233,7 +255,7 @@ export function SettingsModal({
           </>
         )}
         {loadError && (
-          <p className="flash err" role="alert">
+          <p className="flash err" id={`${errorId}-load`} role="alert">
             could not load settings — try reopening
           </p>
         )}
@@ -255,6 +277,8 @@ export function SettingsModal({
               placeholder="https://api.openai.com/v1"
               autoComplete="off"
               disabled={busy}
+              aria-invalid={failed || undefined}
+              aria-describedby={describedBy}
               autoFocus
             />
             <label htmlFor="s-model">Model</label>
@@ -265,6 +289,8 @@ export function SettingsModal({
               placeholder="gpt-4o-mini"
               autoComplete="off"
               disabled={busy}
+              aria-invalid={failed || undefined}
+              aria-describedby={describedBy}
             />
             <label htmlFor="s-key">API key</label>
             <input
@@ -275,6 +301,8 @@ export function SettingsModal({
               placeholder={hasKey ? '••• saved — leave blank to keep' : 'sk-…'}
               autoComplete="off"
               disabled={busy}
+              aria-invalid={failed || undefined}
+              aria-describedby={describedBy}
             />
             {test.kind === 'busy' && (
               <p className="flash busy" role="status">
@@ -306,15 +334,23 @@ export function SettingsModal({
                 {save.kind === 'busy' ? 'Saving…' : 'Save'}
               </button>
             </div>
-            {save.kind === 'ok' && <p className="flash ok">{save.msg}</p>}
-            {save.kind === 'err' && (
-              <p className="flash err" role="alert">
+            {save.kind === 'ok' && (
+              <p className="flash ok" role="status">
                 {save.msg}
               </p>
             )}
-            {test.kind === 'ok' && <p className="flash ok">✓ {test.msg}</p>}
+            {save.kind === 'err' && (
+              <p className="flash err" id={`${errorId}-save`} role="alert">
+                {save.msg}
+              </p>
+            )}
+            {test.kind === 'ok' && (
+              <p className="flash ok" role="status">
+                ✓ {test.msg}
+              </p>
+            )}
             {test.kind === 'err' && (
-              <p className="flash err" role="alert">
+              <p className="flash err" id={`${errorId}-test`} role="alert">
                 {test.msg}
               </p>
             )}

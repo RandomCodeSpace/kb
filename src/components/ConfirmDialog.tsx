@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { focusWrapIndex, restoreFocus, useFocusTrigger } from '../lib/focus';
 
 /**
  * Focus-trap ring members. The dialog renders nothing but buttons, so this is
@@ -7,21 +8,9 @@ import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
  */
 const FOCUSABLE = 'button:not([disabled])';
 
-/**
- * Where Tab moves inside the trap. `current` is -1 when focus is not on any of
- * the dialog's own controls (it never should be, but a stale/removed node
- * would land here): Tab then enters at the first control, Shift+Tab at the
- * last. Anything else wraps around the ring.
- */
-export function focusWrapIndex(
-  count: number,
-  current: number,
-  backwards: boolean,
-): number {
-  if (count <= 0) return -1;
-  if (current < 0 || current >= count) return backwards ? count - 1 : 0;
-  return (current + (backwards ? -1 : 1) + count) % count;
-}
+// Every dialog traps focus the same way; the wrap arithmetic lives with the
+// shared helper and is re-exported here for the tests that named it.
+export { focusWrapIndex };
 
 export interface ConfirmDialogProps {
   /** The question, in one line — it labels the dialog for screen readers. */
@@ -67,17 +56,16 @@ export function ConfirmDialog({
   const titleId = useId();
   const bodyId = useId();
 
+  // Whatever opened the dialog gets focus back when it closes; without this a
+  // keyboard user is dumped at the top of the document. Read while rendering,
+  // before the page behind goes inert and blurs it onto <body>.
+  const triggerRef = useFocusTrigger();
+
   useEffect(() => {
-    // Whatever opened the dialog gets focus back when it closes; without this
-    // a keyboard user is dumped at the top of the document.
-    const trigger = document.activeElement;
+    const trigger = triggerRef.current;
     confirmRef.current?.focus();
-    return () => {
-      if (trigger instanceof HTMLElement && document.contains(trigger)) {
-        trigger.focus();
-      }
-    };
-  }, []);
+    return () => restoreFocus(trigger);
+  }, [triggerRef]);
 
   const accept = useCallback(() => {
     onConfirm?.();

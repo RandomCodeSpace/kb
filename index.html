@@ -2,7 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <!-- No maximum-scale and no user-scalable=no: both lock out pinch zoom, which
+         is WCAG 2.2 SC 1.4.4 Resize Text. The board does not need the lock — the
+         drag grip already opts out of browser gestures with `touch-action: none`
+         and the card body keeps `pan-y`, so a pinch is never mistaken for a drag. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f3f6f2" />
     <title>kb — board</title>
   </head>

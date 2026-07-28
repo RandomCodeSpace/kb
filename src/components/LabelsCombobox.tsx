@@ -125,7 +125,9 @@ export function LabelsCombobox({
           value={text}
           role="combobox"
           aria-expanded={showDrop}
-          aria-controls={listId}
+          // Only while the list exists: a reference to an unmounted id is a
+          // broken one, and some screen readers report it as such.
+          aria-controls={showDrop ? listId : undefined}
           aria-autocomplete="list"
           aria-activedescendant={showDrop ? `${listId}-${hiIdx}` : undefined}
           autoComplete="off"
@@ -141,7 +143,7 @@ export function LabelsCombobox({
         />
       </div>
       {showDrop && (
-        <ul className="labeldrop" id={listId} role="listbox">
+        <ul className="labeldrop" id={listId} role="listbox" aria-label="Label suggestions">
           {filtered.map((l, i) => (
             <li
               key={l}

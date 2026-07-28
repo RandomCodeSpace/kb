@@ -61,3 +61,25 @@ export function progress(t: Task): { done: number; total: number } | null {
 export function isScoped(tag: string): boolean {
   return tag.includes('::');
 }
+
+/**
+ * What a card announces to a screen reader: what it is, which column it is in,
+ * where it sits in that column, and the state a sighted user reads off the
+ * chips (blocked, checklist progress). `index` is 0-based; the name says
+ * "2 of 4" because that is how a person counts.
+ */
+export function cardLabel(
+  task: Task,
+  index: number,
+  total: number,
+  lifted = false,
+): string {
+  const parts = [task.title, STATUS_LABEL[task.status], `${index + 1} of ${total}`];
+  if (task.blocked) parts.push('blocked');
+  const p = progress(task);
+  if (p) parts.push(`${p.done} of ${p.total} checklist items done`);
+  // Said last so the state a keyboard move puts the card in is the freshest
+  // thing heard when focus returns to it mid-move.
+  if (lifted) parts.push('lifted');
+  return parts.join(', ');
+}

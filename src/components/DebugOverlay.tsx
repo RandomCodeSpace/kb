@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { setFrameCap } from '../lib/confetti';
 
 const DEBUG_KEY = 'kb.debug.v1';
@@ -71,6 +71,49 @@ function rendererCaps(): RendererCaps {
 
 export interface DebugOverlayProps {
   onClose: () => void;
+  /** Set while a dialog owns the page, so Tab cannot land in here behind it. */
+  inert?: boolean;
+}
+
+/** The four numbers an overlap needs; DOMRect satisfies it. */
+export interface Box {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+/**
+ * Whether the panel would sit on top of the focused element. The panel is
+ * opaque, so anything under it is not merely dimmed but gone — which is exactly
+ * what 2.4.11 Focus Not Obscured forbids for the element that has focus.
+ */
+export function overlaps(a: Box, b: Box): boolean {
+  return (
+    a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
+  );
+}
+
+/** Distance from the viewport edges, matching `.debug` in the stylesheet. */
+const DEBUG_INSET = 12;
+
+/**
+ * Where the panel sits when it is not stepping aside — bottom right. Computed
+ * rather than measured so the decision is always about the *resting* place:
+ * measuring the moved panel would find no overlap, move it back, and flap.
+ */
+export function restingBox(
+  width: number,
+  height: number,
+  viewport: { width: number; height: number },
+  inset: number = DEBUG_INSET,
+): Box {
+  return {
+    left: viewport.width - inset - width,
+    right: viewport.width - inset,
+    top: viewport.height - inset - height,
+    bottom: viewport.height - inset,
+  };
 }
 
 /**
@@ -78,10 +121,36 @@ export interface DebugOverlayProps {
  * cap for the confetti loop. Mounted only when the flag is on, so a disabled
  * overlay costs nothing — no requestAnimationFrame runs.
  */
-export function DebugOverlay({ onClose }: DebugOverlayProps) {
+export function DebugOverlay({ onClose, inert }: DebugOverlayProps) {
   const [fps, setFps] = useState<number | null>(null);
   const [target, setTarget] = useState<FrameTarget>('uncapped');
+  // Moved to the opposite corner while it would otherwise cover the focused
+  // element (the cancelled column's Restore / Delete permanently buttons sit
+  // right under its resting place).
+  const [aside, setAside] = useState(false);
+  const boxRef = useRef<HTMLElement>(null);
   const caps = useMemo(rendererCaps, []);
+
+  useEffect(() => {
+    const check = () => {
+      const box = boxRef.current;
+      const el = document.activeElement;
+      if (!box || !(el instanceof HTMLElement) || el === document.body) return;
+      if (box.contains(el)) return;
+      const r = box.getBoundingClientRect();
+      const rest = restingBox(r.width, r.height, {
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+      setAside(overlaps(rest, el.getBoundingClientRect()));
+    };
+    window.addEventListener('focusin', check);
+    window.addEventListener('focusout', check);
+    return () => {
+      window.removeEventListener('focusin', check);
+      window.removeEventListener('focusout', check);
+    };
+  }, []);
 
   useEffect(() => {
     setFrameCap(target === 'uncapped' ? null : target);
@@ -113,6 +182,11 @@ export function DebugOverlay({ onClose }: DebugOverlayProps) {
     <aside
       className="debug"
       aria-label="Debug overlay"
+      ref={boxRef}
+      inert={inert}
+      // Out of the focused element's way; `bottom: auto` releases the resting
+      // corner declared in the stylesheet.
+      style={aside ? { top: DEBUG_INSET, bottom: 'auto' } : undefined}
       onKeyDown={(e) => {
         if (e.key === 'Escape') onClose();
       }}
