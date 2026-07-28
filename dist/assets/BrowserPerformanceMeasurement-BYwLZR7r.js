@@ -1,0 +1,1 @@
+import{BrowserPerformanceMeasurement as e}from"./dist-CXePRMvn.js";export{e as BrowserPerformanceMeasurement};
