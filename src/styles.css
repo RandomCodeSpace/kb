@@ -881,9 +881,40 @@ body {
 
 /* Shown in the Entra sign-in popup while MSAL finishes and closes it. */
 .auth-return {
-  margin: 0;
+  margin: 0 auto;
+  max-width: 560px;
   padding: 40px 24px;
   text-align: center;
   font-weight: 700;
   color: var(--ink);
+}
+
+.auth-return h1 {
+  margin: 0 0 16px;
+  font-size: 22px;
+}
+
+.auth-return p {
+  margin: 0 0 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: left;
+}
+
+.auth-return.bad h1 {
+  color: var(--prio1, #ff5a48);
+}
+
+.auth-return code {
+  padding: 1px 5px;
+  border: 2px solid var(--ink);
+  background: var(--paper);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.auth-return .auth-note {
+  font-weight: 600;
+  font-size: 13px;
+  opacity: 0.75;
 }
