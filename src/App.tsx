@@ -6,12 +6,16 @@ import { bumpShipped, loadDirty, LocalStore, seedBoard, setDirty, shippedToday }
 import type { Identity } from './lib/auth';
 import { clearIdentity, loadIdentity, ReauthRequiredError, sanitizeUser, saveIdentity } from './lib/auth';
 import { RemoteStore } from './lib/remote';
+import type { AISettings, AIStoryRequest } from './lib/api';
+import { aiStory, getLabels, getSettings } from './lib/api';
+import { boardLabels, unionLabels } from './lib/labels';
 import { burst } from './lib/confetti';
 import { BoardView } from './components/Board';
 import { CardModal } from './components/CardModal';
 import type { ModalState } from './components/CardModal';
 import { Confetti } from './components/Confetti';
 import { IdentityGate } from './components/IdentityGate';
+import { SettingsModal } from './components/SettingsModal';
 
 type SyncState = 'off' | 'ok' | 'error' | 'expired';
 
@@ -60,6 +64,10 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
   const [modal, setModal] = useState<ModalState | null>(null);
   const [streak, setStreak] = useState<number>(() => shippedToday(ns));
   const [sync, setSync] = useState<SyncState>('off');
+  const [serverPresent, setServerPresent] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [serverLabels, setServerLabels] = useState<string[]>([]);
+  const [aiSettings, setAiSettings] = useState<AISettings | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const boardRef = useRef(board);
   boardRef.current = board;
@@ -68,6 +76,13 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
   // adoption). The save effect uses identity against this to tell user edits
   // (mark dirty, push) from adopted state (neither).
   const cleanBoardRef = useRef(board);
+  // Monotonically increasing edit generation. Save acknowledgements capture
+  // the generation at dispatch and may clear the dirty flag only when it is
+  // still current — a stale success (edit B landed while edit A's PUT was in
+  // flight) must not clear dirtiness that belongs to the newer edit, or a
+  // later failed save plus reload would silently adopt the remote copy and
+  // destroy B.
+  const editGenRef = useRef(0);
 
   const onSaveError = useCallback((err: unknown) => {
     setSync(err instanceof ReauthRequiredError ? 'expired' : 'error');
@@ -79,6 +94,7 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     // push them instead of silently adopting (and destroying) newer local work.
     const pushLocal = () => {
       syncOnRef.current = true;
+      const gen = editGenRef.current;
       remote.saveRemote(
         identity,
         boardRef.current,
@@ -86,6 +102,8 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
           if (!cancelled) onSaveError(err);
         },
         () => {
+          // Only an ack for the newest edit may clear the dirty flag.
+          if (editGenRef.current !== gen) return;
           setDirty(ns, false);
           if (!cancelled) setSync('ok');
         },
@@ -94,6 +112,7 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     void (async () => {
       const present = await remote.detect();
       if (cancelled || !present) return;
+      setServerPresent(true);
       let remoteBoard: Board | null = null;
       if (!loadDirty(ns)) {
         try {
@@ -132,13 +151,38 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
   useEffect(() => {
     store.save(board);
     if (board === cleanBoardRef.current) return; // initial load / server adoption
+    editGenRef.current += 1;
+    const gen = editGenRef.current;
     setDirty(ns, true);
     if (!syncOnRef.current) return;
     remote.saveRemoteDebounced(identity, board, onSaveError, () => {
+      // A stale ack (a newer edit exists) must not clear the dirty flag the
+      // newer edit depends on for crash/offline safety.
+      if (editGenRef.current !== gen) return;
       setDirty(ns, false);
       setSync('ok');
     });
   }, [board, store, remote, identity, ns, onSaveError]);
+
+  useEffect(() => {
+    // Server-only extras: label suggestions and AI settings. Failures degrade
+    // silently — labels fall back to board tags, the AI section stays hidden.
+    if (!serverPresent) return;
+    let cancelled = false;
+    getLabels(identity)
+      .then((ls) => {
+        if (!cancelled) setServerLabels(ls);
+      })
+      .catch(() => {});
+    getSettings(identity)
+      .then((s) => {
+        if (!cancelled) setAiSettings(s);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [serverPresent, identity]);
 
   useEffect(() => {
     // Flush the pending debounced save when the page goes away so edits made
@@ -266,6 +310,24 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     }
   };
 
+  // Combobox suggestions: server labels merged with tags already on the
+  // board, so offline (or pre-fetch) still suggests everything in sight.
+  const allLabels = useMemo(
+    () => unionLabels(serverLabels, boardLabels(board)),
+    [serverLabels, board],
+  );
+  const aiEnabled =
+    serverPresent &&
+    aiSettings !== null &&
+    (aiSettings.has_key || aiSettings.ai_base_url.trim() !== '');
+  const aiDraft = useMemo(
+    () =>
+      aiEnabled
+        ? (req: AIStoryRequest) => aiStory(identity, req)
+        : undefined,
+    [aiEnabled, identity],
+  );
+
   return (
     <>
       <header className="app-header">
@@ -281,6 +343,16 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
             role="status"
             aria-label={SYNC_TITLE[sync]}
           />
+          {serverPresent && (
+            <button
+              type="button"
+              aria-label="Settings"
+              title="AI settings"
+              onClick={() => setShowSettings(true)}
+            >
+              ⚙
+            </button>
+          )}
           <button type="button" onClick={handleExport}>
             Export
           </button>
@@ -312,9 +384,18 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
       {modal && (
         <CardModal
           state={modal}
+          labels={allLabels}
+          aiDraft={aiDraft}
           onSave={handleSave}
           onDelete={handleDelete}
           onClose={() => setModal(null)}
+        />
+      )}
+      {showSettings && serverPresent && (
+        <SettingsModal
+          identity={identity}
+          onClose={() => setShowSettings(false)}
+          onSaved={setAiSettings}
         />
       )}
       <Confetti />
