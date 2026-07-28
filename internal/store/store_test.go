@@ -759,3 +759,23 @@ func TestLoadOrCreateSecretShortEnvSecret(t *testing.T) {
 		}
 	})
 }
+
+// TestConnectionPragmas pins the DSN pragmas that carry a promise: WAL and
+// foreign keys for correctness, and temp_store(2) so SQLite never spills board
+// text to $TMPDIR — user content lives in the data directory and nowhere else.
+func TestConnectionPragmas(t *testing.T) {
+	s := newStore(t)
+	for _, tc := range []struct{ pragma, want string }{
+		{"journal_mode", "wal"},
+		{"foreign_keys", "1"},
+		{"temp_store", "2"},
+	} {
+		var got string
+		if err := s.db.QueryRow("PRAGMA " + tc.pragma).Scan(&got); err != nil {
+			t.Fatalf("PRAGMA %s: %v", tc.pragma, err)
+		}
+		if !strings.EqualFold(got, tc.want) {
+			t.Errorf("PRAGMA %s = %q, want %q", tc.pragma, got, tc.want)
+		}
+	}
+}

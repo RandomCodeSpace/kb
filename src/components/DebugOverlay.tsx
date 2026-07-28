@@ -28,10 +28,11 @@ export function setDebugEnabled(on: boolean): void {
 }
 
 /**
- * Whether the overlay should mount. `?debug=1` turns it on and `?debug=0` off,
- * both persisted; with no parameter the stored flag decides. Reading has the
- * side effect of persisting an explicit URL choice — that is what makes the
- * flag survive the next reload.
+ * Whether the overlay should mount. The settings modal writes the stored flag
+ * and is the normal way in; `?debug=1` / `?debug=0` stay as a support override
+ * for a machine nobody can click through, and win for that load. Both are
+ * persisted, so reading has the side effect of making an explicit URL choice
+ * survive the next reload.
  */
 export function debugEnabled(
   search: string = typeof location === 'undefined' ? '' : location.search,

@@ -64,6 +64,15 @@ function loadPicker(): Promise<PickerModule> {
   return pickerPromise;
 }
 
+/**
+ * Emoji per row. The picker's grid is a fixed number of columns wide, not a
+ * reflowing one, so on a narrow phone the default 9 is wider than the modal
+ * and the last column would be cut off by the frame around it. 7 fits.
+ */
+export function perLine(width: number): number {
+  return width < 480 ? 7 : 9;
+}
+
 export interface EmojiFieldProps {
   inputId: string;
   value: string;
@@ -154,7 +163,11 @@ export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
               // emoji-mart fetches the table from a CDN at runtime.
               data={picker.data}
               autoFocus
+              // kb is one light paper palette and has no dark variant, so the
+              // picker is pinned rather than left on 'auto' — which would go
+              // dark inside a light form whenever the OS is dark.
               theme="light"
+              perLine={perLine(window.innerWidth)}
               previewPosition="none"
               // A skin-tone modifier is a second code point, which the title
               // line cannot carry — don't offer what would be dropped.

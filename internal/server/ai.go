@@ -143,6 +143,13 @@ func aiEndpoint(base string) (string, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", errors.New("AI base URL scheme must be http or https")
 	}
+	// The base URL is stored unencrypted and echoed back by GET /api/settings,
+	// so a credential in the userinfo would be a key leaked to the browser —
+	// the one thing the server-side AI proxy exists to prevent. Keys go in the
+	// key field, which is encrypted at rest and never returned.
+	if u.User != nil {
+		return "", errors.New("AI base URL must not contain a username or password — put the key in the API key field")
+	}
 	p := strings.TrimRight(u.Path, "/")
 	if !strings.HasSuffix(p, "/v1") {
 		p += "/v1"
@@ -152,28 +159,55 @@ func aiEndpoint(base string) (string, error) {
 	return u.String(), nil
 }
 
-// chatCompletion runs one chat completion against the user's configured
-// endpoint and returns the assistant content. Errors are *aiError with a
-// key-free message: 400 for configuration problems, 502 for upstream ones.
-func (s *server) chatCompletion(user string, msgs []chatMessage, maxTokens int, jsonMode bool) (string, error) {
+// aiConfig is one resolved AI endpoint configuration: where a chat completion
+// goes and what it authenticates with. It is assembled per request and never
+// written back, so POST /api/ai/test can build one from form values the user
+// has not saved.
+type aiConfig struct {
+	baseURL string
+	model   string
+	key     string
+}
+
+// storedAIConfig loads the user's saved AI configuration.
+func (s *server) storedAIConfig(user string) (aiConfig, error) {
 	set, err := s.store.AISettings(user)
 	if err != nil {
 		log.Printf("ai: settings for %s: %v", user, err)
-		return "", &aiError{http.StatusInternalServerError, "storage error"}
-	}
-	if strings.TrimSpace(set.BaseURL) == "" {
-		return "", &aiError{http.StatusBadRequest, "AI base URL not configured"}
-	}
-	endpoint, err := aiEndpoint(set.BaseURL)
-	if err != nil {
-		return "", &aiError{http.StatusBadRequest, err.Error()}
+		return aiConfig{}, &aiError{http.StatusInternalServerError, "storage error"}
 	}
 	key, err := s.store.AIKey(user)
 	if err != nil {
 		log.Printf("ai: key for %s: %v", user, err)
-		return "", &aiError{http.StatusInternalServerError, "storage error"}
+		return aiConfig{}, &aiError{http.StatusInternalServerError, "storage error"}
 	}
-	payload := chatRequest{Model: set.Model, Messages: msgs, MaxTokens: maxTokens}
+	return aiConfig{baseURL: set.BaseURL, model: set.Model, key: key}, nil
+}
+
+// chatCompletion runs one chat completion against the user's configured
+// endpoint and returns the assistant content. Errors are *aiError with a
+// key-free message: 400 for configuration problems, 502 for upstream ones.
+func (s *server) chatCompletion(user string, msgs []chatMessage, maxTokens int, jsonMode bool) (string, error) {
+	cfg, err := s.storedAIConfig(user)
+	if err != nil {
+		return "", err
+	}
+	return s.chat(user, cfg, msgs, maxTokens, jsonMode)
+}
+
+// chat performs one chat completion against cfg. Every caller goes through
+// here, so the SSRF-guarded client, the timeout and the key-free error
+// mapping apply to a supplied configuration exactly as to a stored one; user
+// is for logging only.
+func (s *server) chat(user string, cfg aiConfig, msgs []chatMessage, maxTokens int, jsonMode bool) (string, error) {
+	if strings.TrimSpace(cfg.baseURL) == "" {
+		return "", &aiError{http.StatusBadRequest, "AI base URL not configured"}
+	}
+	endpoint, err := aiEndpoint(cfg.baseURL)
+	if err != nil {
+		return "", &aiError{http.StatusBadRequest, err.Error()}
+	}
+	payload := chatRequest{Model: cfg.model, Messages: msgs, MaxTokens: maxTokens}
 	if jsonMode {
 		payload.ResponseFormat = &responseFormat{Type: "json_object"}
 	}
@@ -186,8 +220,8 @@ func (s *server) chatCompletion(user string, msgs []chatMessage, maxTokens int, 
 		return "", &aiError{http.StatusBadRequest, "invalid AI endpoint"}
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
+	if cfg.key != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.key)
 	}
 	resp, err := s.aiClient.Do(req)
 	if err != nil {
@@ -218,18 +252,61 @@ func (s *server) chatCompletion(user string, msgs []chatMessage, maxTokens int, 
 	return out.Choices[0].Message.Content, nil
 }
 
-// handleAITest runs a 1-token completion against the configured endpoint and
-// reports reachability; failures come back as ok:false, not error statuses.
-// Every upstream outcome (connect failure, non-2xx status, bad body)
-// collapses to one opaque message so the endpoint cannot be used as a
+// aiTestRequest is the optional body of POST /api/ai/test: the values the
+// user currently has in the settings form, which may not be saved yet. It is
+// used for that one request and never written to the store — testing a key
+// must not be a way to persist an unvalidated one.
+type aiTestRequest struct {
+	BaseURL string `json:"ai_base_url"`
+	Model   string `json:"ai_model"`
+	Key     string `json:"ai_key"`
+}
+
+// merge overlays the supplied values onto the stored ones. A blank field
+// means "keep what is stored", which is what lets the form test a new model
+// against the already-saved key without the user retyping it — the key is
+// write-only in the settings response, so the form cannot send it back.
+// Whether the stored key may travel to a supplied base URL at all is
+// runAITest's decision, made before this is called.
+func (c aiConfig) merge(req aiTestRequest) aiConfig {
+	if v := strings.TrimSpace(req.BaseURL); v != "" {
+		c.baseURL = v
+	}
+	if v := strings.TrimSpace(req.Model); v != "" {
+		c.model = v
+	}
+	if v := strings.TrimSpace(req.Key); v != "" {
+		c.key = v
+	}
+	return c
+}
+
+// handleAITest runs a 1-token completion and reports reachability; failures
+// come back as ok:false, not error statuses. With no body it tests the saved
+// settings; with an aiTestRequest body it tests those values instead, so the
+// form can be validated before it is saved. Either way the request goes
+// through chat, which means the same SSRF-guarded client, timeout and opaque
+// errors: every upstream outcome (connect failure, non-2xx status, bad body)
+// collapses to one message so a supplied URL cannot turn the endpoint into a
 // host/port reachability oracle; the detail goes to the server log only.
 // Configuration errors (no/invalid base URL) pass through unchanged.
-func (s *server) handleAITest(w http.ResponseWriter, _ *http.Request, user string) {
+func (s *server) handleAITest(w http.ResponseWriter, r *http.Request, user string) {
 	type result struct {
 		OK    bool   `json:"ok"`
 		Error string `json:"error,omitempty"`
 	}
-	if _, err := s.chatCompletion(user, []chatMessage{{Role: "user", Content: "ping"}}, 1, false); err != nil {
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var req aiTestRequest
+	if len(bytes.TrimSpace(body)) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+	}
+	if err := s.runAITest(user, req); err != nil {
 		msg := err.Error()
 		var ae *aiError
 		if errors.As(err, &ae) && ae.code == http.StatusBadGateway {
@@ -240,6 +317,32 @@ func (s *server) handleAITest(w http.ResponseWriter, _ *http.Request, user strin
 		return
 	}
 	writeJSON(w, result{OK: true})
+}
+
+// runAITest resolves one connection test — the stored configuration overlaid
+// with whatever the caller supplied — and pings it. Nothing is written back,
+// so a key supplied only for the test lives no longer than this call.
+//
+// The stored key may only be used against the stored origin. Store.
+// SetAISettings enforces exactly that on save (a base-URL host change without
+// a key in the same call clears the stored key), and a test that skipped the
+// rule would be the same leak by another door: a blank key field is the
+// normal state of the form, so anyone who can reach this endpoint could
+// otherwise point it at a host they control and be handed the decrypted key —
+// without writing anything, so without leaving a trace. The SSRF guard does
+// not help here; it only blocks private targets.
+func (s *server) runAITest(user string, req aiTestRequest) error {
+	cfg, err := s.storedAIConfig(user)
+	if err != nil {
+		return err
+	}
+	supplied := strings.TrimSpace(req.BaseURL)
+	if strings.TrimSpace(req.Key) == "" && supplied != "" && cfg.key != "" &&
+		!store.SameAIOrigin(cfg.baseURL, supplied) {
+		return &aiError{http.StatusBadRequest, "enter the API key to test a different endpoint"}
+	}
+	_, err = s.chat(user, cfg.merge(req), []chatMessage{{Role: "user", Content: "ping"}}, 1, false)
+	return err
 }
 
 func (s *server) handleAIStory(w http.ResponseWriter, r *http.Request, user string) {
@@ -408,7 +511,10 @@ func coerceDrafts(content string, max int) ([]storyDraft, error) {
 		}
 		d := coerceDraftMap(sm)
 		if err := validateDraft(d); err != nil {
-			log.Printf("ai: dropping unusable story: %v", err)
+			// Deliberately without the error: validation quotes the offending
+			// field value, and that value is card text derived from the
+			// user's document. Board content never reaches the log.
+			log.Print("ai: dropping a story the assistant returned unusable")
 			continue
 		}
 		out = append(out, d)

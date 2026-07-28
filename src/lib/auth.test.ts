@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Identity } from './auth';
-import { isAuthRedirect, loadIdentity, sanitizeUser, saveIdentity } from './auth';
+import {
+  displayName,
+  isAuthRedirect,
+  loadIdentity,
+  sanitizeUser,
+  saveIdentity,
+} from './auth';
 
 const IDENTITY_KEY = 'kb.identity.v1';
 const TOKEN_KEY = 'kb.serverToken.v1';
@@ -83,6 +89,41 @@ describe('sanitizeUser', () => {
 
   it("maps dot-only input to 'default'", () => {
     expect(sanitizeUser('...')).toBe('default');
+  });
+});
+
+describe('displayName', () => {
+  it('shows the Entra display name, not the email', () => {
+    expect(
+      displayName({ kind: 'azure', id: 'a.person@example.com', name: 'A Person' }),
+    ).toBe('A Person');
+  });
+
+  it('falls back to the email when there is no name claim', () => {
+    expect(displayName({ kind: 'azure', id: 'a.person@example.com' })).toBe(
+      'a.person@example.com',
+    );
+    expect(
+      displayName({ kind: 'azure', id: 'a.person@example.com', name: '  ' }),
+    ).toBe('a.person@example.com');
+  });
+
+  it('shows a manual identity exactly as the user typed it', () => {
+    expect(displayName({ kind: 'manual', id: 'alice', name: 'Ignored' })).toBe(
+      'alice',
+    );
+  });
+
+  it('does not change the stored identity', () => {
+    const identity: Identity = {
+      kind: 'azure',
+      id: 'a.person@example.com',
+      name: 'A Person',
+    };
+    saveIdentity(identity);
+    displayName(identity);
+    // The server keys boards on the id, so it must survive untouched.
+    expect(loadIdentity()?.id).toBe('a.person@example.com');
   });
 });
 

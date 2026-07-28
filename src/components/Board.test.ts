@@ -3,7 +3,9 @@ import type { Status, Task } from '../lib/model';
 import { newTask } from '../lib/model';
 import {
   canStartDrag,
+  dropIndex,
   insertionIndex,
+  pastThreshold,
   moveTask,
   setShowCancelledFlag,
   showCancelledFlag,
@@ -59,6 +61,51 @@ describe('insertionIndex', () => {
 
   it('appends when the pointer is below every card', () => {
     expect(insertionIndex([100, 200, 300], 999)).toBe(3);
+  });
+});
+
+describe('dropIndex', () => {
+  // Columns are hit-tested against whatever is rendered, and the dragged card
+  // is only pulled out of its column once the drag goes active. A flick that
+  // presses, crosses the threshold and releases inside one animation frame
+  // drops while the card is still there, so it has to be excluded here — or
+  // the index lands one slot too low against the list moveTask works on
+  // (which has already removed it).
+  const column = [
+    { taskId: 'a', mid: 158 },
+    { taskId: 'b', mid: 294 },
+    { taskId: 'c', mid: 436 },
+  ];
+
+  it('ignores the dragged card while it is still rendered', () => {
+    // Between b and c: 1 over [b, c], not 2 over [a, b, c].
+    expect(dropIndex(column, 'a', 350)).toBe(1);
+    expect(dropIndex(column, 'a', 100)).toBe(0);
+    expect(dropIndex(column, 'a', 999)).toBe(2);
+  });
+
+  it('matches insertionIndex once the card has left the column', () => {
+    expect(dropIndex(column.slice(1), 'a', 350)).toBe(1);
+    expect(dropIndex(column, 'a', 350)).toBe(
+      insertionIndex([294, 436], 350),
+    );
+  });
+
+  it('counts every card when the drag came from another column', () => {
+    expect(dropIndex(column, 'z', 350)).toBe(2);
+  });
+
+  // End to end: [a, b, c], flick a down past b's midpoint and release before
+  // the first animation frame. It belongs between b and c, not after c.
+  it('reorders a flicked card to where it was released', () => {
+    const tasks = [task('a', 'todo'), task('b', 'todo'), task('c', 'todo')];
+    const cards = tasks.map((t, i) => ({ taskId: t.id, mid: 158 + i * 138 }));
+    const at = dropIndex(cards, tasks[0].id, 350);
+    expect(layout(moveTask(tasks, tasks[0].id, 'todo', at, NOW)).todo).toEqual([
+      'b',
+      'a',
+      'c',
+    ]);
   });
 });
 
@@ -133,5 +180,29 @@ describe('showCancelledFlag', () => {
     expect(showCancelledFlag()).toBe(true);
     setShowCancelledFlag(false);
     expect(showCancelledFlag()).toBe(false);
+  });
+});
+
+describe('pastThreshold', () => {
+  it('ignores the wobble of a tap', () => {
+    expect(pastThreshold(0, 0)).toBe(false);
+    expect(pastThreshold(4, 4)).toBe(false);
+    expect(pastThreshold(-6, 6)).toBe(false);
+  });
+
+  it('accepts a real drag in any direction', () => {
+    expect(pastThreshold(9, 0)).toBe(true);
+    expect(pastThreshold(0, -9)).toBe(true);
+    expect(pastThreshold(-7, -7)).toBe(true);
+  });
+
+  // Release is measured against the same line as the move that starts the
+  // drag: a flick that presses, crosses and releases inside a single frame
+  // has no animation frame to mark it active, and would otherwise be dropped
+  // as a click on the card.
+  it('is the same line for the move that starts a drag and the release', () => {
+    const dx = 40;
+    const dy = 120;
+    expect(pastThreshold(dx, dy)).toBe(true);
   });
 });

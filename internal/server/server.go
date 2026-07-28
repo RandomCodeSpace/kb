@@ -70,6 +70,7 @@ type server struct {
 	authenticate func(*http.Request) (string, error)
 	allowedHosts map[string]bool
 	pinHost      bool
+	csp          string // SPA Content-Security-Policy, fixed at construction
 
 	// boardLocks serializes the read-compare-write of an If-Match board PUT
 	// so two in-flight PUTs cannot both pass the version check.
@@ -137,6 +138,9 @@ func newServer(cfg Config, static fs.FS, st *store.Store) *server {
 	if len(s.allowedHosts) > 0 {
 		s.pinHost = true
 	}
+	// Entra mode is the only mode whose SPA may reach off-origin, so the
+	// policy is decided once, from the same condition that selects authEntra.
+	s.csp = contentSecurityPolicy(cfg.TenantID != "" && cfg.ClientID != "")
 	return s
 }
 
@@ -614,7 +618,7 @@ func (s *server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	setFrameGuards(w.Header())
+	s.setSecurityHeaders(w.Header())
 	name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 	if name == "" {
 		name = "index.html"

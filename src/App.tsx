@@ -11,7 +11,14 @@ import {
   shippedToday,
 } from './lib/store';
 import type { Identity } from './lib/auth';
-import { clearIdentity, loadIdentity, ReauthRequiredError, sanitizeUser, saveIdentity } from './lib/auth';
+import {
+  clearIdentity,
+  displayName,
+  loadIdentity,
+  ReauthRequiredError,
+  sanitizeUser,
+  saveIdentity,
+} from './lib/auth';
 import { RemoteStore } from './lib/remote';
 import type { AISettings, AIStoryRequest } from './lib/api';
 import { aiStories, aiStory, getLabels, getSettings } from './lib/api';
@@ -29,6 +36,7 @@ import type { ModalState } from './components/CardModal';
 import { ShipDialog, shipWarning } from './components/ShipDialog';
 import type { ShipWarning } from './components/ShipDialog';
 import { Confetti } from './components/Confetti';
+import { ConfirmDialog } from './components/ConfirmDialog';
 import { DebugOverlay, debugEnabled, setDebugEnabled } from './components/DebugOverlay';
 import { IdentityGate } from './components/IdentityGate';
 import { SettingsModal } from './components/SettingsModal';
@@ -93,6 +101,21 @@ function shippable(status: Status): boolean {
   return status !== 'done' && status !== 'cancelled';
 }
 
+/** A pending in-app confirmation or acknowledgement (never a browser dialog). */
+interface ConfirmState {
+  title: string;
+  body?: string;
+  confirmLabel?: string;
+  destructive?: boolean;
+  /** Omitted for an acknowledgement: the dialog then only closes. */
+  onConfirm?: () => void;
+}
+
+/** "3 tasks", "1 task" — the import confirmation names what it would replace. */
+function taskCount(n: number): string {
+  return `${n} ${n === 1 ? 'task' : 'tasks'}`;
+}
+
 interface BoardAppProps {
   identity: Identity;
   onSignOut: () => void;
@@ -115,12 +138,16 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
   const [showCancelled, setShowCancelled] = useState<boolean>(showCancelledFlag);
   const [serverLabels, setServerLabels] = useState<string[]>([]);
   const [aiSettings, setAiSettings] = useState<AISettings | null>(null);
-  // Hidden unless ?debug=1 (or a previously persisted flag): nothing mounts,
-  // so a disabled overlay drives no requestAnimationFrame at all.
+  // Off unless the settings toggle turned it on (persisted) or ?debug=1
+  // overrides: nothing mounts, so a disabled overlay drives no
+  // requestAnimationFrame at all.
   const [debug, setDebug] = useState<boolean>(() => debugEnabled());
   // Set when a server refresh had to drop something the user was in the
   // middle of; see adopt.
   const [notice, setNotice] = useState<string | null>(null);
+  // Pending in-app confirmation. Never window.confirm/window.alert: those
+  // freeze the page, cannot be styled, and name the origin rather than kb.
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const boardRef = useRef(board);
   boardRef.current = board;
@@ -457,11 +484,16 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
 
   /** The one path to a real row delete — so it keeps its confirmation. */
   const handlePurge = useCallback((taskId: string) => {
-    if (!window.confirm('Delete this card permanently? This cannot be undone.')) {
-      return;
-    }
-    setBoard((b) => ({ ...b, tasks: b.tasks.filter((t) => t.id !== taskId) }));
-    setModal(null);
+    setConfirm({
+      title: 'Delete this card permanently?',
+      body: 'The card is removed from the board for good. This cannot be undone.',
+      confirmLabel: 'Delete permanently',
+      destructive: true,
+      onConfirm: () => {
+        setBoard((b) => ({ ...b, tasks: b.tasks.filter((t) => t.id !== taskId) }));
+        setModal(null);
+      },
+    });
   }, []);
 
   const handleAddStories = useCallback((tasks: Task[]) => {
@@ -493,15 +525,18 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     try {
       const text = await file.text();
       const next = parse(text);
-      if (
-        window.confirm(
-          `Replace current board with "${next.title}" (${next.tasks.length} tasks)? This cannot be undone.`,
-        )
-      ) {
-        setBoard(next);
-      }
+      setConfirm({
+        title: 'Replace the current board?',
+        body: `“${next.title}” carries ${taskCount(next.tasks.length)}. Everything on the board now is discarded, and this cannot be undone.`,
+        confirmLabel: 'Replace board',
+        destructive: true,
+        onConfirm: () => setBoard(next),
+      });
     } catch {
-      window.alert('Could not read that file as a board.');
+      setConfirm({
+        title: 'Import failed',
+        body: 'Could not read that file as a board.',
+      });
     }
   };
 
@@ -515,10 +550,13 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     serverPresent &&
     aiSettings !== null &&
     (aiSettings.has_key || aiSettings.ai_base_url.trim() !== '');
+  // The signal comes from the modal: an AI call takes seconds, so the user
+  // must be able to abort it rather than only hide the spinner.
   const aiDraft = useMemo(
     () =>
       aiEnabled
-        ? (req: AIStoryRequest) => aiStory(identity, req)
+        ? (req: AIStoryRequest, signal?: AbortSignal) =>
+            aiStory(identity, req, signal)
         : undefined,
     [aiEnabled, identity],
   );
@@ -532,8 +570,10 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
           <h1>kb</h1>
           <div className="hactions">
             {streak > 0 && <span className="streak">×{streak} shipped today</span>}
+            {/* The name is what a person recognises; the full email stays as
+                the tooltip, and the stored identity is untouched. */}
             <span className="who" title={identity.id}>
-              {identity.id}
+              {displayName(identity)}
             </span>
             <span
               className={`dot ${sync}`}
@@ -561,16 +601,17 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
                 ✨ Split ADR
               </button>
             )}
-            {serverPresent && (
-              <button
-                type="button"
-                aria-label="Settings"
-                title="AI settings"
-                onClick={() => setShowSettings(true)}
-              >
-                ⚙
-              </button>
-            )}
+            {/* Always present: the modal also carries the debug-overlay
+                toggle, which is a local display preference — needing it is
+                most likely exactly when no server is reachable. */}
+            <button
+              type="button"
+              aria-label="Settings"
+              title="Settings"
+              onClick={() => setShowSettings(true)}
+            >
+              ⚙
+            </button>
             <button type="button" onClick={handleExport}>
               Export
             </button>
@@ -633,16 +674,32 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
       )}
       {showAdr && aiEnabled && (
         <AdrModal
-          onSplit={(adr, max) => aiStories(identity, { adr, max })}
+          onSplit={(adr, max, signal) => aiStories(identity, { adr, max }, signal)}
           onAdd={handleAddStories}
           onClose={() => setShowAdr(false)}
         />
       )}
-      {showSettings && serverPresent && (
+      {showSettings && (
         <SettingsModal
           identity={identity}
+          serverPresent={serverPresent}
+          debug={debug}
+          onDebugChange={(on) => {
+            setDebugEnabled(on);
+            setDebug(on);
+          }}
           onClose={() => setShowSettings(false)}
           onSaved={setAiSettings}
+        />
+      )}
+      {confirm && (
+        <ConfirmDialog
+          title={confirm.title}
+          body={confirm.body}
+          confirmLabel={confirm.confirmLabel}
+          destructive={confirm.destructive}
+          onConfirm={confirm.onConfirm}
+          onClose={() => setConfirm(null)}
         />
       )}
       <Confetti />

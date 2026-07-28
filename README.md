@@ -327,7 +327,16 @@ reaches the board until you press **Add selected**.
 Configure it on the gear screen (or via `PUT /api/settings`): an
 OpenAI-compatible base URL, a model name, and an API key. The base URL is
 accepted with or without `/v1`; the server appends `/v1/chat/completions`.
-A test-connection button (`POST /api/ai/test`) runs a 1-token ping. Examples:
+A test-connection button (`POST /api/ai/test`) runs a 1-token ping. It accepts
+an optional body `{"ai_base_url","ai_model","ai_key"}` and tests those values
+instead of the stored ones, so the gear screen can check a key *before* you
+save it; a key sent this way is used for that one request and never persisted,
+and leaving the key field blank tests the stored key against the form's URL and
+model — but only while that URL keeps the stored scheme and host. Testing a
+*different* origin with a blank key is refused ("enter the API key to test a
+different endpoint"), for the same reason a save re-points: the stored key
+never follows an endpoint you moved. With no body it tests the saved settings.
+Examples:
 
 | Provider                  | Base URL                     | Model example       | Key      |
 | ------------------------- | ---------------------------- | ------------------- | -------- |
@@ -358,17 +367,18 @@ labels (`key::value`, e.g. `env::prod`) render as two-tone pills.
 
 ## Debug overlay
 
-A hidden performance and capability readout, opened by adding `?debug=1` to
-the board's URL:
+A performance and capability readout. Turn it on in the app: **⚙ Settings →
+Show debug overlay**. The choice is persisted in localStorage (`kb.debug.v1`),
+so the overlay stays as you left it across reloads. Untick the same box, or
+press the `×` on the overlay itself, to turn it off.
+
+A URL parameter does the same thing for support on a machine you cannot click
+through — it overrides the stored flag for that load, and persists it:
 
 ```
 http://localhost:8080/?debug=1     # on
 http://localhost:8080/?debug=0     # off
 ```
-
-The flag is persisted in localStorage (`kb.debug.v1`), so once you have turned
-it on the overlay stays on across reloads at a plain `http://localhost:8080/`
-— turn it off with `?debug=0` or the `×` on the overlay itself.
 
 When active, the overlay displays:
 - **FPS meter** — rolling average frame rate over the last ~60 frames, updated
@@ -382,7 +392,37 @@ When active, the overlay displays:
   and can only *limit* the display refresh rate, never raise it.
 
 The overlay is keyboard-dismissible, does not intercept pointer events over the
-board, and carries zero performance cost when disabled.
+board, and carries zero performance cost when disabled. The ⚙ button is always
+in the header, including when no server is reachable — the overlay is a local
+display preference, and needing it is likeliest exactly then.
+
+## Native controls kb does not draw
+
+Everything in the board is styled to one visual system, with one deliberate
+exception: parts of a few native controls belong to the browser or the OS and
+cannot be reached from CSS. kb styles the *closed* control and stops there —
+hand-rolling replacements (a calendar widget, a listbox) would be far more
+surface than the consistency is worth. What remains browser-drawn:
+
+- **The date field's calendar panel.** The field itself, its segments and the
+  picker trigger are styled; the panel that opens from the trigger is browser
+  chrome. Those hooks (`::-webkit-datetime-edit`,
+  `::-webkit-calendar-picker-indicator`) are Chromium-only, so on Firefox and
+  Safari the whole date field renders as that browser's own control. This is
+  expected, not a regression.
+- **The `<select>` option list.** The closed select carries kb's border, paper
+  and drop arrow; the list that drops out of it is drawn by the browser.
+  `color-scheme: light` is what keeps it legible under a dark OS theme.
+- **The file chooser.** The "Choose file" button on the import input is styled
+  (`::file-selector-button`); the dialog it opens is the operating system's.
+- **Number spinners.** The `Max stories` field in the ADR modal keeps the
+  browser's own increment/decrement buttons.
+- **The Entra sign-in popup**, which is a Microsoft page — see "What kb sends
+  over the network" below.
+
+Both light and dark OS themes are covered: kb pins `color-scheme: light` so
+the UA-drawn parts stay legible on paper rather than inverting into a dark
+slab under a dark system theme.
 
 ## Identity modes
 
@@ -535,6 +575,103 @@ correct ownership; the database (`kb.db`) and the encryption secret file live
 there. If you prefer a fixed account, replace `DynamicUser=yes` with
 `User=kb` and create the user and data directory yourself. Terminate TLS in
 front of the binary (Caddy, nginx, etc.) — kb itself speaks plain HTTP.
+
+## What kb sends over the network
+
+kb is an on-device app with zero telemetry. There is no analytics, no crash
+reporting, no font or asset CDN, and no update check. This section is the
+exhaustive list of traffic kb can originate, including the parts that are not
+entirely ours to control.
+
+**1. Same-origin requests to kb's own API.** The only traffic a signed-in
+board generates. Loading the app fetches `/assets/*.js`, `/assets/*.css` and
+`/favicon.ico`; the app then calls `/api/config`, `/api/health`, `/api/board`,
+`/api/labels` and `/api/settings`, plus `/api/ai/story`, `/api/ai/stories` and
+`/api/ai/test` when you use AI assist. Nothing else. The emoji table is
+compiled into the bundle (`@emoji-mart/data`), so the picker fetches neither
+its data nor a spritesheet — it renders system emoji glyphs. All fonts are
+system stacks; there is no `@font-face` pointing off-origin.
+
+This is enforced, not merely observed. The SPA response carries a
+Content-Security-Policy that blocks cross-origin requests:
+
+```
+default-src 'self'; connect-src 'self'; script-src 'self';
+style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';
+frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none';
+frame-ancestors 'none'
+```
+
+`style-src` allows inline styles for two reasons: kb's own React
+`style={{…}}` attributes carry values that have to be computed (the drag
+clone's position, progress-bar widths, tag colours), and emoji-mart styles its
+shadow-DOM picker by setting the text of a `<style>` element. Vite's own output
+is a linked stylesheet and needs nothing.
+
+Two channels are **not** covered by that policy, in any browser, so they are
+named here rather than left implied:
+
+- **WebRTC.** `connect-src` does not govern `RTCPeerConnection` anywhere, and
+  a `stun:`/`turn:` URL is not http(s) either. CSP3 defines `webrtc 'block'`,
+  but no shipping engine implements it — Chrome 151 opens a peer connection
+  under it and logs "Unrecognized Content-Security-Policy directive 'webrtc'"
+  — so kb does not send a directive that would only dirty the console.
+- **Resource hints** (`<link rel="preconnect">`, `dns-prefetch`). No directive
+  covers them. MSAL adds one in Azure mode — see below.
+
+Both are covered by the repo guard instead: `src/egress.test.ts` fails the
+build if an absolute URL, an off-origin `href`/`src`/`url()`, or a network API
+(including `RTCPeerConnection`) appears anywhere in the shipping frontend —
+the modules, `src/styles.css` and `index.html` — outside a small commented
+allowlist.
+
+**2. The Entra sign-in handshake — only when Azure auth is configured.** With
+`KB_AZURE_TENANT_ID`/`KB_AZURE_CLIENT_ID` set, `connect-src` and `frame-src`
+gain `https://login.microsoftonline.com` and nothing else, because:
+
+- The browser (MSAL) opens a sign-in popup at that host and later renews the
+  token there, through a hidden iframe when the session cookie still holds.
+- The server fetches the tenant JWKS
+  (`https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys`) to verify
+  token signatures. It caches the keys and calls no other Microsoft endpoint —
+  no Microsoft Graph, no profile lookup.
+
+Two things about MSAL are worth stating plainly rather than omitting:
+
+- The sign-in **popup is a Microsoft page**, not a kb page. Our CSP does not
+  and cannot govern it, so it loads Microsoft's own assets and reports to
+  Microsoft's own telemetry, exactly as signing in at `office.com` would. It
+  never receives your board — kb's board data is never sent to Microsoft.
+- MSAL injects a `<link rel="preconnect">` to `login.microsoftonline.com` when
+  it initialises. That is a DNS lookup and TLS handshake only, carrying no kb
+  data, and no CSP directive can suppress it.
+
+Without Azure configured, MSAL is never loaded at all (it is a lazy chunk) and
+the policy has no cross-origin entry.
+
+**3. Your own configured LLM endpoint — server-side only.** If you set an AI
+base URL in Settings, the *server* posts chat completions to it; the browser
+only ever talks to `/api/ai/*`, so the API key never reaches the browser and is
+stored AES-256-GCM encrypted at rest. The request contains the prompt you
+typed and, for an ADR split, the document you pasted — nothing else about your
+board. The endpoint is SSRF-guarded: the resolved IP may not be loopback,
+private, link-local or unspecified (unless `KB_AI_ALLOW_PRIVATE=1` opts in for
+a local model server such as Ollama), redirects may not change host, the round
+trip is capped at 60s, and a base URL containing a username or password is
+rejected outright so a credential cannot be stored in the clear. This client
+ignores `HTTP_PROXY`/`HTTPS_PROXY`; it dials the endpoint directly.
+
+**4. CLI remote mode.** `kb` with `KB_SERVER` set talks to that server and only
+that server — every request carries your token and replays the whole board, so
+redirects to another host are refused. Without `KB_SERVER` the CLI is purely
+local, and `kb mcp` never opens a socket at all: it speaks stdio.
+
+Unlike the AI client, the JWKS and CLI remote clients use Go's default
+transport and therefore honour `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`. If those
+are set in kb's environment, that proxy sees those requests.
+
+Everything else is on-device: boards, labels and settings live in the SQLite
+database under the data directory and nowhere else.
 
 ## Security notes
 

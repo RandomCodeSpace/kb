@@ -22,5 +22,9 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],
+    // Vitest replaces CSS modules with an empty string by default, which also
+    // empties a `?raw` import of the stylesheet — and would make the egress
+    // guard's scan of src/styles.css silently vacuous.
+    css: true,
   },
 });

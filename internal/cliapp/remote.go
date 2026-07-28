@@ -1,6 +1,7 @@
 package cliapp
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,8 +25,22 @@ type remoteBackend struct {
 	client            *http.Client
 }
 
+// newRemote builds the client for `KB_SERVER` mode. Every request carries the
+// server token and replays the whole board, so a redirect to another host
+// would hand both to that host; redirects may therefore never change host.
 func newRemote(base, token, user string) backend {
-	return &remoteBackend{base: base, token: token, user: user, client: &http.Client{Timeout: 30 * time.Second}}
+	return &remoteBackend{base: base, token: token, user: user, client: &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if req.URL.Host != via[0].URL.Host {
+				return errors.New("refusing cross-host redirect")
+			}
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		},
+	}}
 }
 
 func (r *remoteBackend) close() error { return nil }

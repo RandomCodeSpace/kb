@@ -105,6 +105,20 @@ export function clearIdentity(): void {
 }
 
 /**
+ * What the header shows for an identity. An Entra sign-in carries the
+ * account's display name, which is what a person recognises; the raw email is
+ * not. Display only — `id` stays exactly what it was, because the server keys
+ * boards on it (and, in Azure mode, on the immutable `oid` claim behind it).
+ * Falls back to the id when there is no name claim, and a manual identity
+ * always shows the id the user typed.
+ */
+export function displayName(i: Identity): string {
+  if (i.kind !== 'azure') return i.id;
+  const name = i.name?.trim() ?? '';
+  return name === '' ? i.id : name;
+}
+
+/**
  * Local-storage namespace for an identity: lowercase, keep [a-z0-9._@-],
  * replace everything else with '-', strip leading dots, empty becomes
  * 'default'. Used only to key local state — the server, by contrast, rejects

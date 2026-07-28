@@ -17,6 +17,12 @@ export interface BoardProps {
   onPurge: (taskId: string) => void;
 }
 
+/**
+ * The parts of a drag that change what is *rendered*. The live pointer
+ * position is deliberately not here: it changes on every pointermove, and
+ * putting it in state would re-render the whole board dozens of times per
+ * frame. It lives in a ref and moves the clone with a transform instead.
+ */
 interface DragState {
   /** The pointer that started this drag; every other pointer is ignored. */
   pointerId: number;
@@ -28,8 +34,6 @@ interface DragState {
   top: number;
   width: number;
   height: number;
-  x: number;
-  y: number;
   active: boolean;
   /** Column under the pointer, highlighted as the drop target. */
   over: Status | null;
@@ -59,6 +63,16 @@ export function setShowCancelledFlag(on: boolean): void {
 }
 
 /**
+ * Whether a pointer has travelled far enough from where it was pressed for
+ * this to be a drag rather than a tap. Both the move handler (which starts
+ * the drag) and the release handler (which may have to decide before a single
+ * animation frame has run) go through here, so they cannot disagree.
+ */
+export function pastThreshold(dx: number, dy: number): boolean {
+  return Math.hypot(dx, dy) >= DRAG_THRESHOLD;
+}
+
+/**
  * Slot a card released at `y` should take, given the vertical midpoints of
  * the cards already in that column (ascending, dragged card excluded).
  */
@@ -66,6 +80,31 @@ export function insertionIndex(mids: readonly number[], y: number): number {
   let i = 0;
   while (i < mids.length && y >= mids[i]) i++;
   return i;
+}
+
+/** A card rendered in a column, as the drop needs to see it. */
+export interface CardMid {
+  taskId: string;
+  /** Vertical midpoint in viewport coordinates. */
+  mid: number;
+}
+
+/**
+ * Slot a card released at `y` takes in a column, given every card currently
+ * rendered in it. The dragged card is filtered out here rather than assumed
+ * absent: it only leaves its column once the drag goes *active*, which the
+ * animation frame sets — and a flick that presses, crosses the threshold and
+ * releases inside a single frame drops while the card is still rendered.
+ * Counting it there would push every same-column drop one slot too low, since
+ * `moveTask` applies the index to a list the card has already left.
+ */
+export function dropIndex(
+  cards: readonly CardMid[],
+  draggedId: string,
+  y: number,
+): number {
+  const mids = cards.filter((c) => c.taskId !== draggedId).map((c) => c.mid);
+  return insertionIndex(mids, y);
 }
 
 /**
@@ -124,6 +163,9 @@ export function BoardView(props: BoardProps) {
   const cloneRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
+  // Live pointer position, written by every pointermove and read once per
+  // animation frame. Not state: see DragState.
+  const posRef = useRef({ x: 0, y: 0 });
   const onMoveRef = useRef(props.onMove);
   onMoveRef.current = props.onMove;
 
@@ -131,6 +173,10 @@ export function BoardView(props: BoardProps) {
     dragRef.current = d;
     setDrag(d);
   };
+
+  /** Where the clone sits now, relative to where the card started. */
+  const cloneShift = (d: DragState) =>
+    `translate3d(${posRef.current.x - d.startX}px, ${posRef.current.y - d.startY}px, 0)`;
 
   const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (dragRef.current) return;
@@ -144,6 +190,7 @@ export function BoardView(props: BoardProps) {
     const task = board.tasks.find((t) => t.id === taskId);
     if (!task) return;
     const r = cardEl.getBoundingClientRect();
+    posRef.current = { x: e.clientX, y: e.clientY };
     update({
       pointerId: e.pointerId,
       taskId,
@@ -154,8 +201,6 @@ export function BoardView(props: BoardProps) {
       top: r.top,
       width: r.width,
       height: r.height,
-      x: e.clientX,
-      y: e.clientY,
       active: false,
       over: null,
       overIndex: 0,
@@ -170,7 +215,11 @@ export function BoardView(props: BoardProps) {
      * Column under the pointer plus the slot the card would take in it, or
      * null when the pointer is outside every column (a release there cancels).
      */
-    const hitTest = (x: number, y: number): { to: Status; index: number } | null => {
+    const hitTest = (
+      x: number,
+      y: number,
+      draggedId: string,
+    ): { to: Status; index: number } | null => {
       const root = rootRef.current;
       if (!root) return null;
       for (const col of root.querySelectorAll<HTMLElement>('.col')) {
@@ -178,15 +227,15 @@ export function BoardView(props: BoardProps) {
         if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
         const to = col.dataset.status as Status | undefined;
         if (!to) continue;
-        // The dragged card is not rendered in its column while dragging (the
-        // clone lives outside the board), so these are exactly the cards the
-        // drop is positioned against.
-        const mids: number[] = [];
+        // An active drag has already pulled the dragged card out of its
+        // column, but a sub-frame flick drops before that happens — so the
+        // card is identified and dropIndex excludes it either way.
+        const cards: CardMid[] = [];
         col.querySelectorAll<HTMLElement>('.card').forEach((c) => {
           const cr = c.getBoundingClientRect();
-          mids.push(cr.top + cr.height / 2);
+          cards.push({ taskId: c.dataset.task ?? '', mid: cr.top + cr.height / 2 });
         });
-        return { to, index: insertionIndex(mids, y) };
+        return { to, index: dropIndex(cards, draggedId, y) };
       }
       return null;
     };
@@ -199,12 +248,40 @@ export function BoardView(props: BoardProps) {
       // A second touch must not finish (or hijack) a drag it did not start.
       if (d && e.pointerId !== d.pointerId) return;
       update(null);
-      if (!d || !d.active) return;
+      // `active` is set by the animation frame, which a quick flick can beat:
+      // press, move past the threshold and release inside one frame. Measure
+      // the release point too, or that drag would silently land as a click.
+      if (!d) return;
+      if (!d.active && !pastThreshold(e.clientX - d.startX, e.clientY - d.startY))
+        return;
       if (swallow) swallowNextClick();
       if (!drop) return;
       // Released outside every column: the card returns, nothing changes.
-      const hit = hitTest(e.clientX, e.clientY);
+      const hit = hitTest(e.clientX, e.clientY, d.taskId);
       if (hit) onMoveRef.current(d.taskId, hit.to, hit.index);
+    };
+
+    // One frame's worth of drag work, however many pointermoves arrived: move
+    // the clone on its own layer, and hit-test once. hitTest reads layout for
+    // every column and card, so doing it per event forced that many layouts.
+    let raf = 0;
+    const runFrame = () => {
+      raf = 0;
+      const d = dragRef.current;
+      if (!d) return;
+      const { x, y } = posRef.current;
+      const el = cloneRef.current;
+      if (el) el.style.transform = cloneShift(d);
+      const hit = hitTest(x, y, d.taskId);
+      const over = hit?.to ?? null;
+      const overIndex = hit?.index ?? 0;
+      // Re-render only when what is drawn actually changes — the placeholder
+      // moving, a new column lighting up, or the drag becoming active.
+      if (d.active && d.over === over && d.overIndex === overIndex) return;
+      update({ ...d, active: true, over, overIndex });
+    };
+    const schedule = () => {
+      if (raf === 0) raf = requestAnimationFrame(runFrame);
     };
 
     const onPointerMove = (e: PointerEvent) => {
@@ -216,18 +293,10 @@ export function BoardView(props: BoardProps) {
         finish(e, false);
         return;
       }
-      const dx = e.clientX - d.startX;
-      const dy = e.clientY - d.startY;
-      if (!d.active && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
-      const hit = hitTest(e.clientX, e.clientY);
-      update({
-        ...d,
-        active: true,
-        x: e.clientX,
-        y: e.clientY,
-        over: hit?.to ?? null,
-        overIndex: hit?.index ?? 0,
-      });
+      posRef.current = { x: e.clientX, y: e.clientY };
+      if (!d.active && !pastThreshold(e.clientX - d.startX, e.clientY - d.startY))
+        return;
+      schedule();
       e.preventDefault();
     };
 
@@ -240,6 +309,7 @@ export function BoardView(props: BoardProps) {
     window.addEventListener('pointercancel', onPointerCancel);
     window.addEventListener('blur', onWindowBlur);
     return () => {
+      if (raf !== 0) cancelAnimationFrame(raf);
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointercancel', onPointerCancel);
@@ -280,13 +350,17 @@ export function BoardView(props: BoardProps) {
         />
       ))}
       {drag && dragTask && (
+        // left/top pin the clone where the card was; the live offset is a
+        // transform, written straight to the node once per frame (and
+        // repeated here so a re-render never puts it back a frame).
         <div
           className="dragwrap"
           ref={cloneRef}
           style={{
-            left: drag.left + (drag.x - drag.startX),
-            top: drag.top + (drag.y - drag.startY),
+            left: drag.left,
+            top: drag.top,
             width: drag.width,
+            transform: cloneShift(drag),
           }}
         >
           <Card task={dragTask} />
@@ -339,15 +413,17 @@ function Column({
           +
         </button>
       </div>
+      {/* The handlers go through untouched — wrapping them per card would
+          mint a new function on every render and defeat Card's memo. */}
       {tasks.map((t, i) => (
         <Fragment key={t.id}>
           {placeholder === i && slot}
           <Card
             task={t}
-            onTick={(checkIdx, pos) => onTick(t.id, checkIdx, pos)}
-            onEdit={() => onEdit(t.id)}
-            onRestore={status === 'cancelled' ? () => onRestore(t.id) : undefined}
-            onPurge={status === 'cancelled' ? () => onPurge(t.id) : undefined}
+            onTick={onTick}
+            onEdit={onEdit}
+            onRestore={status === 'cancelled' ? onRestore : undefined}
+            onPurge={status === 'cancelled' ? onPurge : undefined}
           />
         </Fragment>
       ))}

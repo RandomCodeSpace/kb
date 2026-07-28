@@ -58,7 +58,7 @@ func (s *Store) SetAISettings(user string, baseURL, model *string, apiKey *strin
 			return fmt.Errorf("store: read ai settings: %w", err)
 		}
 		if baseURL != nil {
-			if apiKey == nil && len(enc) > 0 && !sameAIOrigin(base, *baseURL) {
+			if apiKey == nil && len(enc) > 0 && !SameAIOrigin(base, *baseURL) {
 				enc = nil
 				keyCleared = true
 			}
@@ -91,10 +91,14 @@ func (s *Store) SetAISettings(user string, baseURL, model *string, apiKey *strin
 	return keyCleared, nil
 }
 
-// sameAIOrigin reports whether two base URLs share scheme and host (incl.
+// SameAIOrigin reports whether two base URLs share scheme and host (incl.
 // port) — the condition under which a stored API key may be kept across a
 // base-URL change. Unparsable URLs count as a different origin.
-func sameAIOrigin(a, b string) bool {
+//
+// Exported because the same rule has to hold for a base URL that is never
+// saved: POST /api/ai/test would otherwise send the stored key to any host a
+// caller names.
+func SameAIOrigin(a, b string) bool {
 	ua, errA := url.Parse(strings.TrimSpace(a))
 	ub, errB := url.Parse(strings.TrimSpace(b))
 	if errA != nil || errB != nil {

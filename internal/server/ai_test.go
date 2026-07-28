@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,10 @@ func TestAIEndpoint(t *testing.T) {
 		{"https://api.example.com/v1/", "https://api.example.com/v1/chat/completions", false},
 		{"http://localhost:1234/proxy", "http://localhost:1234/proxy/v1/chat/completions", false},
 		{" https://api.example.com/v1 ", "https://api.example.com/v1/chat/completions", false},
+		// Userinfo would be a credential stored in the clear and echoed back
+		// to the browser by GET /api/settings.
+		{"https://user:pass@api.example.com/v1", "", true},
+		{"https://token@api.example.com/v1", "", true},
 		{"ftp://api.example.com", "", true},
 		{"file:///etc/passwd", "", true},
 		{"not a url", "", true},
@@ -509,5 +514,207 @@ func TestAITestEndpoint(t *testing.T) {
 	}
 	if fake.auth != "Bearer sk-t" {
 		t.Errorf("Authorization = %q, want Bearer sk-t", fake.auth)
+	}
+}
+
+// aiTestResult decodes POST /api/ai/test, which reports failure in the body
+// rather than the status.
+type aiTestResult struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error"`
+}
+
+func postAITest(t *testing.T, h http.Handler, body string) aiTestResult {
+	t.Helper()
+	w := doReq(t, h, "POST", "/api/ai/test", body, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/ai/test: got %d, want 200 (body=%s)", w.Code, w.Body)
+	}
+	var res aiTestResult
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("test JSON: %v", err)
+	}
+	return res
+}
+
+// The point of the optional body: a connection can be tested before it is
+// saved, so nobody has to store a key to find out whether it works. The
+// supplied values must reach the upstream and must not reach the store.
+func TestAITestUsesSuppliedValuesWithoutSaving(t *testing.T) {
+	stored := &fakeOpenAI{content: "pong"}
+	storedUp := httptest.NewServer(stored.handler())
+	defer storedUp.Close()
+	candidate := &fakeOpenAI{content: "pong"}
+	candidateUp := httptest.NewServer(candidate.handler())
+	defer candidateUp.Close()
+
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1") // test upstreams are on loopback
+	h, st := newTestServer(t, Config{})
+	configureAI(t, h, storedUp.URL, "stored-model", "sk-stored")
+
+	body := fmt.Sprintf(`{"ai_base_url":%q,"ai_model":"new-model","ai_key":"sk-new"}`, candidateUp.URL)
+	if res := postAITest(t, h, body); !res.OK || res.Error != "" {
+		t.Fatalf("supplied-values test = %+v, want ok:true", res)
+	}
+	if stored.reqBody != nil {
+		t.Error("the saved endpoint was called; the supplied one was ignored")
+	}
+	if candidate.auth != "Bearer sk-new" {
+		t.Errorf("candidate Authorization = %q, want Bearer sk-new", candidate.auth)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(candidate.reqBody, &sent); err != nil {
+		t.Fatalf("candidate request JSON: %v", err)
+	}
+	if sent["model"] != "new-model" {
+		t.Errorf("model = %v, want new-model", sent["model"])
+	}
+
+	// Nothing about the test was persisted — least of all the key, which the
+	// user has only just typed and may well have typed wrong.
+	if key, err := st.AIKey("default"); err != nil || key != "sk-stored" {
+		t.Errorf("stored key = %q, %v, want sk-stored (a tested key must never be saved)", key, err)
+	}
+	w := doReq(t, h, "GET", "/api/settings", "", nil)
+	var set settingsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &set); err != nil {
+		t.Fatalf("settings JSON: %v", err)
+	}
+	if set.BaseURL != storedUp.URL || set.Model != "stored-model" || !set.HasKey {
+		t.Errorf("settings after test = %+v, want the saved values untouched", set)
+	}
+
+	// And with no body the endpoint still means "test what is saved".
+	stored.reqBody, candidate.reqBody = nil, nil
+	if res := postAITest(t, h, ""); !res.OK {
+		t.Fatalf("bodyless test = %+v, want ok:true", res)
+	}
+	if stored.reqBody == nil {
+		t.Error("bodyless test did not reach the saved endpoint")
+	}
+	if stored.auth != "Bearer sk-stored" {
+		t.Errorf("bodyless test Authorization = %q, want Bearer sk-stored", stored.auth)
+	}
+	if candidate.reqBody != nil {
+		t.Error("bodyless test reached the candidate endpoint")
+	}
+}
+
+// The settings response never returns the key, so a form that has one saved
+// shows a blank key field. Blank therefore has to mean "use the saved key",
+// or changing only the model would force the user to retype it.
+func TestAITestBlankKeyFallsBackToStoredKey(t *testing.T) {
+	candidate := &fakeOpenAI{content: "pong"}
+	candidateUp := httptest.NewServer(candidate.handler())
+	defer candidateUp.Close()
+
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, _ := newTestServer(t, Config{})
+	configureAI(t, h, candidateUp.URL, "stored-model", "sk-stored")
+
+	body := fmt.Sprintf(`{"ai_base_url":%q,"ai_model":"new-model","ai_key":""}`, candidateUp.URL)
+	if res := postAITest(t, h, body); !res.OK || res.Error != "" {
+		t.Fatalf("blank-key test = %+v, want ok:true", res)
+	}
+	if candidate.auth != "Bearer sk-stored" {
+		t.Errorf("Authorization = %q, want the stored Bearer sk-stored", candidate.auth)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(candidate.reqBody, &sent); err != nil {
+		t.Fatalf("request JSON: %v", err)
+	}
+	if sent["model"] != "new-model" {
+		t.Errorf("model = %v, want the supplied new-model", sent["model"])
+	}
+}
+
+// A stored key must never follow a re-pointed endpoint. Saving enforces that
+// (SetAISettings drops the key when the host changes without one), and a test
+// has to enforce it too: the key field is blank by default — the settings
+// response never returns the key — so without this, one form edit plus "Test
+// connection" would hand the decrypted key to any host named in the body, and
+// nothing would be written to show it happened.
+func TestAITestBlankKeyRefusesADifferentOrigin(t *testing.T) {
+	stored := &fakeOpenAI{content: "pong"}
+	storedUp := httptest.NewServer(stored.handler())
+	defer storedUp.Close()
+	attacker := &fakeOpenAI{content: "pong"}
+	attackerUp := httptest.NewServer(attacker.handler())
+	defer attackerUp.Close()
+
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, st := newTestServer(t, Config{})
+	configureAI(t, h, storedUp.URL, "stored-model", "sk-stored")
+
+	res := postAITest(t, h, fmt.Sprintf(`{"ai_base_url":%q}`, attackerUp.URL))
+	if res.OK {
+		t.Fatal("a blank key must not be tested against another origin")
+	}
+	if !strings.Contains(res.Error, "API key") {
+		t.Errorf("error = %q, want one asking for the key", res.Error)
+	}
+	if attacker.reqBody != nil {
+		t.Errorf("the other origin was called with Authorization %q", attacker.auth)
+	}
+
+	// Supplying a key makes it deliberate, and only that key travels.
+	res = postAITest(t, h, fmt.Sprintf(`{"ai_base_url":%q,"ai_key":"sk-typed"}`, attackerUp.URL))
+	if !res.OK {
+		t.Fatalf("supplied-key test = %+v, want ok:true", res)
+	}
+	if attacker.auth != "Bearer sk-typed" {
+		t.Errorf("Authorization = %q, want Bearer sk-typed", attacker.auth)
+	}
+	if key, err := st.AIKey("default"); err != nil || key != "sk-stored" {
+		t.Errorf("stored key = %q, %v, want sk-stored untouched", key, err)
+	}
+
+	// With no key stored there is nothing to leak, so a bare URL still tests.
+	h2, _ := newTestServer(t, Config{})
+	configureAI(t, h2, storedUp.URL, "stored-model", "")
+	attacker.reqBody, attacker.auth = nil, ""
+	if res = postAITest(t, h2, fmt.Sprintf(`{"ai_base_url":%q}`, attackerUp.URL)); !res.OK {
+		t.Fatalf("keyless test = %+v, want ok:true", res)
+	}
+	if attacker.auth != "" {
+		t.Errorf("Authorization = %q, want none", attacker.auth)
+	}
+}
+
+// A caller-supplied URL must not buy anything a saved one does not: same
+// SSRF guard, same opaque failure. Otherwise the endpoint is a port scanner
+// that reports its findings one request at a time.
+func TestAITestSuppliedURLKeepsGuards(t *testing.T) {
+	blocked := &fakeOpenAI{content: "pong"}
+	blockedUp := httptest.NewServer(blocked.handler())
+	defer blockedUp.Close()
+
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "")
+	h, _ := newTestServer(t, Config{})
+
+	res := postAITest(t, h, fmt.Sprintf(`{"ai_base_url":%q}`, blockedUp.URL))
+	if res.OK {
+		t.Fatal("a supplied private upstream must be refused")
+	}
+	if res.Error != "connection failed" {
+		t.Errorf("error = %q, want the opaque %q", res.Error, "connection failed")
+	}
+	if blocked.reqBody != nil {
+		t.Error("request reached the private upstream")
+	}
+
+	// A malformed URL is the caller's own configuration, so it stays legible
+	// — and it is rejected before anything is dialed.
+	res = postAITest(t, h, `{"ai_base_url":"ftp://api.example.com"}`)
+	if res.OK || !strings.Contains(res.Error, "scheme") {
+		t.Errorf("bad-scheme test = %+v, want ok:false naming the scheme", res)
+	}
+	if res = postAITest(t, h, `{"ai_base_url":"file:///etc/passwd"}`); res.OK {
+		t.Errorf("file:// test = %+v, want ok:false", res)
+	}
+
+	// An unparseable body is a client bug, not a failed connection.
+	if w := doReq(t, h, "POST", "/api/ai/test", `{"ai_base_url":`, nil); w.Code != http.StatusBadRequest {
+		t.Errorf("malformed body: got %d, want 400", w.Code)
 	}
 }

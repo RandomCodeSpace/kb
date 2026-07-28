@@ -828,3 +828,39 @@ func TestRemoteDoneWarning(t *testing.T) {
 		t.Errorf("done --force did not ship the task:\n%q", doc)
 	}
 }
+
+// TestRemoteRefusesCrossHostRedirect pins the egress promise for `KB_SERVER`
+// mode: every request carries the server token and replays the whole board, so
+// a redirect off the configured host would hand both to a third party.
+func TestRemoteRefusesCrossHostRedirect(t *testing.T) {
+	var sinkHits int
+	var mu sync.Mutex
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sinkHits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sink.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, sink.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	t.Setenv("KB_SERVER", redirector.URL)
+	t.Setenv("KB_SERVER_TOKEN", "sekrit")
+
+	_, errS, code := runCmd(t, "list")
+	if code == 0 {
+		t.Fatalf("list followed a cross-host redirect (code %d)", code)
+	}
+	if !strings.Contains(errS, "refusing cross-host redirect") {
+		t.Errorf("stderr = %q, want it to name the refused redirect", errS)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if sinkHits != 0 {
+		t.Errorf("the other host was contacted %d times, want 0", sinkHits)
+	}
+}
