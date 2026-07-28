@@ -358,9 +358,17 @@ labels (`key::value`, e.g. `env::prod`) render as two-tone pills.
 
 ## Debug overlay
 
-A hidden performance and capability readout overlay, enabled by the URL query
-`?debug=1`. The flag is persisted in localStorage (`kb.debug.v1`) so it
-survives reloads, and is dismissible from the overlay itself.
+A hidden performance and capability readout, opened by adding `?debug=1` to
+the board's URL:
+
+```
+http://localhost:8080/?debug=1     # on
+http://localhost:8080/?debug=0     # off
+```
+
+The flag is persisted in localStorage (`kb.debug.v1`), so once you have turned
+it on the overlay stays on across reloads at a plain `http://localhost:8080/`
+— turn it off with `?debug=0` or the `×` on the overlay itself.
 
 When active, the overlay displays:
 - **FPS meter** — rolling average frame rate over the last ~60 frames, updated
@@ -420,9 +428,21 @@ You need one app registration; no client secret, no Graph permissions.
    registration**. Name it (e.g. `kb`), pick the supported account types for
    your tenant.
 2. Under **Authentication**, add a **Single-page application (SPA)** platform
-   with your redirect URI (e.g. `https://kb.example.com/` — and
-   `http://localhost:5173/` for dev). SPA platform means PKCE; **do not create
-   a client secret**.
+   and set the redirect URI to **exactly the origin kb is served from, with no
+   trailing slash and no path**:
+
+   | How you run kb | Redirect URI to register |
+   | --- | --- |
+   | the binary, default port | `http://localhost:8080` |
+   | the binary, `KB_PORT=9000` | `http://localhost:9000` |
+   | behind a domain | `https://kb.example.com` |
+   | `npm run dev` (Vite) | `http://localhost:5173` |
+
+   kb sends `window.location.origin` as its redirect URI, and Entra matches
+   redirect URIs **exactly** — `https://kb.example.com/` with a trailing slash
+   is a different URI and fails with `AADSTS50011`. Register every origin you
+   actually use; a dev URI does not cover production. SPA platform means PKCE;
+   **do not create a client secret**.
 3. Under **API permissions**, the default delegated `openid`, `profile`,
    `email` scopes are all kb needs. **Do not add Microsoft Graph or any other
    permission.**

@@ -878,3 +878,12 @@ body {
   flex: 1;
   border-top: 2px solid var(--gray);
 }
+
+/* Shown in the Entra sign-in popup while MSAL finishes and closes it. */
+.auth-return {
+  margin: 0;
+  padding: 40px 24px;
+  text-align: center;
+  font-weight: 700;
+  color: var(--ink);
+}

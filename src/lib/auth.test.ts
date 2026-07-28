@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Identity } from './auth';
-import { loadIdentity, sanitizeUser, saveIdentity } from './auth';
+import { isAuthRedirect, loadIdentity, sanitizeUser, saveIdentity } from './auth';
 
 const IDENTITY_KEY = 'kb.identity.v1';
 const TOKEN_KEY = 'kb.serverToken.v1';
@@ -229,5 +229,28 @@ describe('azureConfig', () => {
     );
     const auth = await freshAuth();
     expect(await auth.azureConfig()).toBeNull();
+  });
+});
+
+describe('isAuthRedirect', () => {
+  it('is false for a normal load', () => {
+    expect(isAuthRedirect('', '')).toBe(false);
+    expect(isAuthRedirect('?debug=1', '')).toBe(false);
+  });
+
+  it('is true for an Entra code response', () => {
+    expect(isAuthRedirect('?code=abc&state=xyz', '')).toBe(true);
+  });
+
+  it('is true for an Entra error response', () => {
+    expect(isAuthRedirect('?error=access_denied&state=xyz', '')).toBe(true);
+  });
+
+  it('reads a fragment response too', () => {
+    expect(isAuthRedirect('', '#code=abc&state=xyz')).toBe(true);
+  });
+
+  it('ignores an unrelated code parameter with no state', () => {
+    expect(isAuthRedirect('?code=PROMO2026', '')).toBe(false);
   });
 });

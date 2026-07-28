@@ -181,6 +181,31 @@ export async function azureAvailable(): Promise<boolean> {
 }
 
 /**
+ * True when this document is the tail end of an MSAL sign-in rather than a
+ * normal page load.
+ *
+ * The redirect URI is the app's own origin, so Entra sends the popup back to
+ * `/?code=…&state=…`. Without this check the whole SPA boots inside that
+ * popup and renders the identity gate, which looks to the user like a second
+ * login page that never closes. MSAL (running in the opener) reads the
+ * parameters off the popup and closes it, so the popup only has to avoid
+ * getting in the way.
+ *
+ * Deliberately narrow: `state` must be present alongside `code`/`error`, so an
+ * ordinary URL carrying an unrelated `code` parameter still loads the board.
+ */
+export function isAuthRedirect(
+  search: string = typeof location === 'undefined' ? '' : location.search,
+  hash: string = typeof location === 'undefined' ? '' : location.hash,
+): boolean {
+  const params = new URLSearchParams(
+    search || (hash.startsWith('#') ? hash.slice(1) : hash),
+  );
+  if (!params.has('state')) return false;
+  return params.has('code') || params.has('error');
+}
+
+/**
  * msal is imported lazily so the chunk stays out of the critical path and the
  * app loads fine when Azure is unconfigured.
  */
