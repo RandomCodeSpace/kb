@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import { AuthReturn } from './components/AuthReturn';
 import { isAuthRedirect } from './lib/auth';
 import './styles.css';
 
@@ -12,7 +13,7 @@ const root = createRoot(document.getElementById('root')!);
 // closes. MSAL runs in the opener, reads those parameters off the popup and
 // closes it, so here we only show a placeholder and stay out of its way.
 if (isAuthRedirect()) {
-  root.render(<p className="auth-return">Completing sign-in…</p>);
+  root.render(<AuthReturn />);
 } else {
   root.render(
     <StrictMode>

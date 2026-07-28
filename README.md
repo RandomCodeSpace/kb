@@ -443,6 +443,13 @@ You need one app registration; no client secret, no Graph permissions.
    is a different URI and fails with `AADSTS50011`. Register every origin you
    actually use; a dev URI does not cover production. SPA platform means PKCE;
    **do not create a client secret**.
+
+   > **The platform matters as much as the URI.** Registered under **Web**
+   > instead of **SPA**, Entra returns the authorization code in the query
+   > string rather than the fragment. MSAL watches the fragment, so sign-in
+   > hangs forever on "Completing sign-in…" with no error. kb detects this
+   > exact case and says so in the popup. Same URI, wrong platform, silent
+   > stall — check this first if sign-in never completes.
 3. Under **API permissions**, the default delegated `openid`, `profile`,
    `email` scopes are all kb needs. **Do not add Microsoft Graph or any other
    permission.**
