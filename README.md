@@ -450,6 +450,11 @@ You need one app registration; no client secret, no Graph permissions.
    > hangs forever on "Completing sign-in…" with no error. kb detects this
    > exact case and says so in the popup. Same URI, wrong platform, silent
    > stall — check this first if sign-in never completes.
+
+   One app registration can serve several applications: add each app's origin
+   as its own SPA redirect URI on the same registration. Sharing the client id
+   is fine — kb only ever reads the ID token's `oid` claim to key your board,
+   and never calls Graph.
 3. Under **API permissions**, the default delegated `openid`, `profile`,
    `email` scopes are all kb needs. **Do not add Microsoft Graph or any other
    permission.**

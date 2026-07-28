@@ -30,13 +30,36 @@ export function AuthReturn({
   hash = typeof location === 'undefined' ? '' : location.hash,
 }: AuthReturnProps) {
   const [stalled, setStalled] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  // msal-browser v5 does NOT poll the popup's URL the way v3 did — it waits on
+  // a BroadcastChannel, and the redirect page is responsible for parsing the
+  // response and publishing it. Skip this and the opener waits forever while
+  // this window sits on "Completing sign-in…" with a perfectly good response
+  // in its address bar. The same call covers the redirect flow, where it
+  // navigates back to the app instead of broadcasting.
+  useEffect(() => {
+    let live = true;
+    import('@azure/msal-browser/redirect-bridge')
+      .then((m) => m.broadcastResponseToMainFrame())
+      .catch((err: unknown) => {
+        if (live) {
+          setFailed(err instanceof Error ? err.message : String(err));
+        }
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useEffect(() => {
     const t = setTimeout(() => setStalled(true), STALL_MS);
     return () => clearTimeout(t);
   }, []);
 
-  const diag = diagnose(search, hash);
+  const diag = failed
+    ? ({ kind: 'error', detail: failed } as const)
+    : diagnose(search, hash);
 
   if (diag.kind === 'web-platform') {
     return (
