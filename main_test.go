@@ -63,7 +63,13 @@ func TestWiring(t *testing.T) {
 		return w
 	}
 
-	if w := get("/", ""); w.Code != http.StatusOK {
+	// dist/ is a build artifact and is not tracked on the branch (only
+	// dist/.gitkeep is, so the go:embed directive still resolves). A
+	// source-only checkout therefore embeds no index.html and cannot serve
+	// the SPA; release commits and any tree where `vite build` has run can.
+	if _, err := fs.Stat(static, "index.html"); err != nil {
+		t.Log("no embedded index.html — source-only checkout, skipping the SPA check (run `npx vite build` to cover it)")
+	} else if w := get("/", ""); w.Code != http.StatusOK {
 		t.Errorf("GET / (embedded SPA): got %d, want 200", w.Code)
 	}
 	w := get("/api/board", "alice")
