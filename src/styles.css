@@ -146,6 +146,26 @@ body {
   margin: 6px 0 0 26px;
   font-weight: 600;
 }
+.card .desc strong { color: var(--ink); }
+.card .desc code,
+.check code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--ink);
+  background: #e9edf2;
+  border: 1px solid #d5d9df;
+  border-radius: 5px;
+  padding: 0 4px;
+}
+.card .desc a,
+.check a {
+  color: var(--blue);
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.card .desc .dline.bullet { display: flex; gap: 6px; }
+.card .desc .bdot { color: var(--gray); }
 .prog { display: flex; align-items: center; gap: 8px; margin: 9px 0 0 26px; }
 .bar {
   flex: 1;
