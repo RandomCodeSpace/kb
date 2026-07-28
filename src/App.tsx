@@ -28,6 +28,7 @@ import { burst } from './lib/confetti';
 import { AdrModal } from './components/AdrModal';
 import {
   BoardView,
+  movedAnnouncement,
   moveTask,
   setShowCancelledFlag,
   showCancelledFlag,
@@ -149,6 +150,16 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
   // Pending in-app confirmation. Never window.confirm/window.alert: those
   // freeze the page, cannot be styled, and name the origin rather than kb.
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  // What the polite live region says. `seq` remounts the text node so the same
+  // sentence twice running is still a DOM change, which is what a screen
+  // reader announces on — identical text rewritten in place says nothing.
+  const [said, setSaid] = useState<{ text: string; seq: number }>({
+    text: '',
+    seq: 0,
+  });
+  const announce = useCallback((text: string) => {
+    setSaid((s) => ({ text, seq: s.seq + 1 }));
+  }, []);
   const fileRef = useRef<HTMLInputElement>(null);
   const boardRef = useRef(board);
   boardRef.current = board;
@@ -331,6 +342,20 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     };
   }, [remote]);
 
+  // A save that failed is the one thing the dot could never tell anyone who is
+  // not looking at it. Recovery is announced too, so "it broke" is not the last
+  // word; a first successful sync is not — nothing went wrong to report.
+  const prevSync = useRef<SyncState>(sync);
+  useEffect(() => {
+    const was = prevSync.current;
+    prevSync.current = sync;
+    if (sync === was) return;
+    if (sync === 'error' || sync === 'expired') announce(SYNC_TITLE[sync]);
+    else if (sync === 'ok' && (was === 'error' || was === 'expired')) {
+      announce(SYNC_TITLE[sync]);
+    }
+  }, [sync, announce]);
+
   /**
    * Commit a move. `index` is the slot within `to` (array order, which is what
    * the codec persists). Shipping bookkeeping only fires when the card was not
@@ -343,6 +368,12 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
       const at = index ?? appendIndex(boardRef.current, to);
       if (prev.status === to && index === undefined) return;
       const movedAt = new Date().toISOString();
+      // Where the card ends up, by the same arithmetic moveTask uses — said
+      // out loud below, because a move is otherwise a silent visual event.
+      const others = boardRef.current.tasks.filter(
+        (t) => t.status === to && t.id !== taskId,
+      ).length;
+      const slot = Math.max(0, Math.min(at, others));
       setBoard((b) => {
         const tasks = moveTask(b.tasks, taskId, to, at, movedAt);
         // A drop that changes nothing (same column, same slot) must not mint a
@@ -351,6 +382,7 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
           tasks.length === b.tasks.length && tasks.every((t, i) => t === b.tasks[i]);
         return same ? b : { ...b, tasks };
       });
+      announce(movedAnnouncement(prev.title, to, slot, others + 1));
       // Reopening a card takes it back off today's tally: "shipped today"
       // means done, and a card that is open again is not done.
       if (to !== 'done' && prev.status === 'done') {
@@ -366,7 +398,7 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
         burst(x, y, 70);
       }
     },
-    [ns],
+    [ns, announce],
   );
 
   /**
@@ -567,11 +599,17 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     [aiEnabled, identity],
   );
 
+  // A dialog is open, so everything behind it is out of play: `inert` keeps
+  // Tab (and the screen reader's cursor) inside the dialog rather than walking
+  // out onto board controls that aria-modal has already hidden.
+  const dialogOpen =
+    modal !== null || ship !== null || showAdr || showSettings || confirm !== null;
+
   return (
     <>
       {/* Column flex shell: the header keeps its height, the board takes the
           rest of the viewport and scrolls inside its columns. */}
-      <div className="app-shell">
+      <div className="app-shell" inert={dialogOpen}>
         <header className="app-header">
           <h1>kb</h1>
           <div className="hactions">
@@ -581,10 +619,13 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
             <span className="who" title={identity.id}>
               {displayName(identity)}
             </span>
+            {/* The dot is a picture of the sync state, not a live region: its
+                content never changes, so swapping its aria-label announced
+                nothing. The state is spoken by the live region below. */}
             <span
               className={`dot ${sync}`}
               title={SYNC_TITLE[sync]}
-              role="status"
+              role="img"
               aria-label={SYNC_TITLE[sync]}
             />
             <button
@@ -653,11 +694,24 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
           showCancelled={showCancelled}
           onRestore={handleRestore}
           onPurge={handlePurge}
+          announce={announce}
         />
+        {/* In the shell's flow rather than fixed over it: the hint's height
+            grows with the text size, and a fixed one printed itself over the
+            bottom row of the last card as soon as it did. */}
+        <div className="foot">
+          drag cards between columns (⠿ on touch) · or focus a card and press
+          Space to pick it up, arrows to move, Enter to drop · tap ▾ to expand
+          checklists
+        </div>
       </div>
-      <div className="foot">
-        drag cards between columns (⠿ on touch) · tap ▾ to expand checklists · tap
-        a card to edit
+      {/* The app's one polite live region: every board move, every sync state
+          change, every outcome that only showed on screen. Outside the shell
+          on purpose — the shell goes `inert` whenever a dialog opens, which
+          takes its whole subtree out of the accessibility tree, and a save
+          failure while a card is open is exactly when this has to be heard. */}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        <span key={said.seq}>{said.text}</span>
       </div>
       {modal && (
         <CardModal
@@ -711,6 +765,7 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
       <Confetti />
       {debug && (
         <DebugOverlay
+          inert={dialogOpen}
           onClose={() => {
             setDebugEnabled(false);
             setDebug(false);

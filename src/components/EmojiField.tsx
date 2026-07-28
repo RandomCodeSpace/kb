@@ -89,6 +89,17 @@ export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
   // store, and picking one used to close the popover and write nothing).
   const [reason, setReason] = useState('');
   const wrapRef = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  /**
+   * Close the popover and put focus back on the button that opened it —
+   * otherwise Escape (or picking an emoji) drops focus onto <body>, inside a
+   * dialog the user is still filling in.
+   */
+  const close = () => {
+    setOpen(false);
+    btnRef.current?.focus();
+  };
 
   /** Take `raw` if the codec can store it, otherwise explain why not. */
   const apply = (raw: string) => {
@@ -122,11 +133,13 @@ export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       e.stopPropagation();
-      setOpen(false);
+      close();
     };
     const onDown = (e: PointerEvent) => {
       if (wrapRef.current?.contains(e.target as Node)) return;
       e.stopPropagation();
+      // A press elsewhere is already choosing where focus goes; don't steal it
+      // back to the button.
       setOpen(false);
     };
     window.addEventListener('keydown', onKey, true);
@@ -147,6 +160,7 @@ export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
         aria-describedby={reason ? `${inputId}-note` : undefined}
       />
       <button
+        ref={btnRef}
         type="button"
         className="emojibtn"
         aria-label="Pick an emoji"
@@ -176,7 +190,7 @@ export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
                 // Closed either way, so a refusal is not hidden behind the
                 // popover that caused it.
                 apply(e.native ?? '');
-                setOpen(false);
+                close();
               }}
             />
           ) : (

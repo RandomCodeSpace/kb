@@ -7,6 +7,9 @@ export interface IdentityGateProps {
   onIdentity: (identity: Identity) => void;
 }
 
+/** The gate renders once, so a constant id is enough to point the field at. */
+const ERROR_ID = 'g-error';
+
 export function IdentityGate({ onIdentity }: IdentityGateProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,7 +69,9 @@ export function IdentityGate({ onIdentity }: IdentityGateProps) {
   };
 
   return (
-    <div className="gate">
+    // The sign-in card is the whole page here: without a landmark none of it
+    // sits in one.
+    <main className="gate">
       <div className="gate-card">
         <h1>kb</h1>
         <p className="gate-tagline">
@@ -85,7 +90,11 @@ export function IdentityGate({ onIdentity }: IdentityGateProps) {
             not configured — set KB_AZURE_CLIENT_ID / KB_AZURE_TENANT_ID
           </p>
         )}
-        {error && <p className="gate-error">{error}</p>}
+        {error && (
+          <p className="gate-error" id={ERROR_ID} role="alert">
+            {error}
+          </p>
+        )}
         <div className="gate-divider">
           <span>or</span>
         </div>
@@ -97,6 +106,10 @@ export function IdentityGate({ onIdentity }: IdentityGateProps) {
             onChange={(e) => setId(e.target.value)}
             placeholder="alice@example.com"
             autoComplete="username"
+            // The only rejection this form produces is about this field, and
+            // the message says which characters are allowed.
+            aria-invalid={error !== null || undefined}
+            aria-describedby={error ? ERROR_ID : undefined}
           />
           <label htmlFor="g-token">server token (if the server requires one)</label>
           <input
@@ -116,6 +129,6 @@ export function IdentityGate({ onIdentity }: IdentityGateProps) {
           </button>
         </form>
       </div>
-    </div>
+    </main>
   );
 }

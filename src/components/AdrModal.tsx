@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import type { Effort, Prio, Status, Task } from '../lib/model';
 import { newTask, STATUS_LABEL, STATUSES } from '../lib/model';
 import type { StoryDraft } from '../lib/api';
 import { isAbortError } from '../lib/api';
+import { useDialogFocus } from '../lib/focus';
 
 /** Same ceiling the server enforces on the ADR body. */
 export const ADR_MAX_BYTES = 64 * 1024;
@@ -94,6 +95,11 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
   const [rows, setRows] = useState<StoryRow[] | null>(null);
   const [dest, setDest] = useState<Status>('todo');
   const splitAbort = useRef<AbortController | null>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const onDialogKeyDown = useDialogFocus(boxRef);
+  const titleId = useId();
+  const errorId = useId();
+  const sizeErrorId = useId();
 
   const cancelSplit = () => splitAbort.current?.abort();
 
@@ -169,8 +175,17 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
         if (e.target === e.currentTarget && !busy) onClose();
       }}
     >
-      <div className="modal adr" role="dialog" aria-modal="true" aria-busy={busy}>
-        <h2>Split an ADR into stories</h2>
+      <div
+        className="modal adr"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-busy={busy}
+        tabIndex={-1}
+        ref={boxRef}
+        onKeyDown={onDialogKeyDown}
+      >
+        <h2 id={titleId}>Split an ADR into stories</h2>
         {rows === null ? (
           <>
             <label htmlFor="f-adr">Architecture decision record (markdown)</label>
@@ -180,6 +195,13 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
               onChange={(e) => setAdr(e.target.value)}
               placeholder="# ADR 0007: adopt …"
               disabled={busy}
+              // Both failures are about this text, so they are attached to it.
+              aria-invalid={tooBig || error !== null || undefined}
+              aria-describedby={
+                [tooBig ? sizeErrorId : '', error ? errorId : '']
+                  .filter(Boolean)
+                  .join(' ') || undefined
+              }
             />
             {/* Inert while a split runs, so nothing here can change under the
                 request; the textarea above is disabled for the same reason. */}
@@ -207,13 +229,13 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
               </div>
             </div>
             {tooBig && (
-              <p className="flash err" role="alert">
+              <p className="flash err" id={sizeErrorId} role="alert">
                 that ADR is over {Math.round(ADR_MAX_BYTES / 1024)} KiB — trim it
                 first
               </p>
             )}
             {error && (
-              <p className="flash err" role="alert">
+              <p className="flash err" id={errorId} role="alert">
                 {error}
               </p>
             )}

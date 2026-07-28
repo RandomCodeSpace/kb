@@ -1,10 +1,19 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Status, Task } from '../lib/model';
-import { newTask } from '../lib/model';
+import { cardLabel, newTask, STATUSES } from '../lib/model';
+import type { LiftPos } from './Board';
 import {
+  cancelAnnouncement,
   canStartDrag,
+  columnSizes,
   dropIndex,
   insertionIndex,
+  isLiftKey,
+  liftAnnouncement,
+  liftSurvivesFocus,
+  liftMoveAnnouncement,
+  moveLift,
+  movedAnnouncement,
   pastThreshold,
   moveTask,
   setShowCancelledFlag,
@@ -180,6 +189,270 @@ describe('showCancelledFlag', () => {
     expect(showCancelledFlag()).toBe(true);
     setShowCancelledFlag(false);
     expect(showCancelledFlag()).toBe(false);
+  });
+});
+
+describe('columnSizes', () => {
+  it('counts every column with the lifted card left out', () => {
+    const tasks = [
+      task('a', 'todo'),
+      task('b', 'todo'),
+      task('c', 'doing'),
+    ];
+    expect(columnSizes(tasks, tasks[0].id)).toEqual({
+      todo: 1,
+      doing: 1,
+      done: 0,
+      cancelled: 0,
+    });
+  });
+});
+
+describe('moveLift', () => {
+  const columns: Status[] = ['todo', 'doing', 'done'];
+  const sizes = { todo: 2, doing: 3, done: 0, cancelled: 0 };
+  const at = (to: Status, index: number): LiftPos => ({ to, index });
+
+  it('reorders inside a column and stops at both ends', () => {
+    expect(moveLift(at('todo', 0), 'ArrowDown', columns, sizes)).toEqual(
+      at('todo', 1),
+    );
+    expect(moveLift(at('todo', 2), 'ArrowDown', columns, sizes)).toEqual(
+      at('todo', 2),
+    );
+    expect(moveLift(at('todo', 1), 'ArrowUp', columns, sizes)).toEqual(
+      at('todo', 0),
+    );
+    expect(moveLift(at('todo', 0), 'ArrowUp', columns, sizes)).toEqual(
+      at('todo', 0),
+    );
+  });
+
+  it('crosses columns, keeping the slot where it exists', () => {
+    expect(moveLift(at('todo', 1), 'ArrowRight', columns, sizes)).toEqual(
+      at('doing', 1),
+    );
+    expect(moveLift(at('doing', 2), 'ArrowRight', columns, sizes)).toEqual(
+      // Done is empty: the only slot there is the first one.
+      at('done', 0),
+    );
+  });
+
+  // A card that jumped from the last column back to the first would be a move
+  // nobody asked for, so both ends are walls.
+  it('does not wrap past the first or last column', () => {
+    expect(moveLift(at('todo', 0), 'ArrowLeft', columns, sizes)).toEqual(
+      at('todo', 0),
+    );
+    expect(moveLift(at('done', 0), 'ArrowRight', columns, sizes)).toEqual(
+      at('done', 0),
+    );
+  });
+
+  it('ignores a column that is not on the board', () => {
+    expect(moveLift(at('cancelled', 0), 'ArrowLeft', columns, sizes)).toEqual(
+      at('cancelled', 0),
+    );
+  });
+});
+
+describe('move announcements', () => {
+  it('says where the card landed and how far down', () => {
+    expect(movedAnnouncement('Fix login', 'doing', 1, 4)).toBe(
+      'Fix login moved to Doing, position 2 of 4',
+    );
+  });
+
+  it('teaches the keys when the card is picked up', () => {
+    const said = liftAnnouncement('Fix login', { to: 'todo', index: 0 }, 3);
+    expect(said).toContain('Fix login lifted from To Do, position 1 of 3');
+    expect(said).toContain('arrow keys');
+    expect(said).toContain('Escape');
+  });
+
+  it('names the position on every arrow press', () => {
+    expect(liftMoveAnnouncement('Fix login', { to: 'done', index: 2 }, 5)).toBe(
+      'Fix login, Done, position 3 of 5',
+    );
+  });
+
+  it('says the card is back where it started when the move is cancelled', () => {
+    expect(cancelAnnouncement('Fix login', { to: 'todo', index: 1 }, 3)).toBe(
+      'Move cancelled. Fix login is back in To Do, position 2 of 3.',
+    );
+  });
+});
+
+/**
+ * The board's keyboard move, driven through exactly the functions BoardView
+ * drives: pick up, arrow, drop or cancel. Nothing is committed until a drop,
+ * which is what makes Escape a restore rather than an undo.
+ */
+function keyboardMove(
+  tasks: readonly Task[],
+  taskId: string,
+  keys: readonly string[],
+  columns: readonly Status[] = STATUSES,
+): { tasks: Task[]; said: string[]; lifted: boolean } {
+  const moving = tasks.find((t) => t.id === taskId);
+  if (!moving) throw new Error('no such task');
+  const column = tasks.filter((t) => t.status === moving.status);
+  const start: LiftPos = {
+    to: moving.status,
+    index: column.findIndex((t) => t.id === taskId),
+  };
+  const sizes = columnSizes(tasks, taskId);
+  const total = (s: Status) => (sizes[s] ?? 0) + 1;
+  const said: string[] = [];
+  let lift: LiftPos | null = null;
+  let out = [...tasks];
+  for (const key of keys) {
+    if (key === ' ' || key === 'Enter') {
+      if (lift) {
+        out = moveTask(out, taskId, lift.to, lift.index, NOW);
+        const slot = Math.min(lift.index, sizes[lift.to] ?? 0);
+        said.push(movedAnnouncement(moving.title, lift.to, slot, total(lift.to)));
+        lift = null;
+      } else {
+        lift = start;
+        said.push(liftAnnouncement(moving.title, start, total(start.to)));
+      }
+      continue;
+    }
+    if (key === 'Escape') {
+      if (!lift) continue;
+      lift = null;
+      said.push(cancelAnnouncement(moving.title, start, total(start.to)));
+      continue;
+    }
+    if (!isLiftKey(key) || !lift) continue;
+    const next = moveLift(lift, key, columns, sizes);
+    if (next.to === lift.to && next.index === lift.index) continue;
+    lift = next;
+    said.push(liftMoveAnnouncement(moving.title, next, total(next.to)));
+  }
+  return { tasks: out, said, lifted: lift !== null };
+}
+
+describe('keyboard move', () => {
+  // [a, b, d] in To Do, [c] in Doing — the same board moveTask is tested on.
+  const base = [
+    task('a', 'todo'),
+    task('b', 'todo'),
+    task('c', 'doing'),
+    task('d', 'todo'),
+  ];
+
+  it('picks a card up without moving anything', () => {
+    const r = keyboardMove(base, base[0].id, [' ']);
+    expect(r.lifted).toBe(true);
+    expect(layout(r.tasks)).toEqual(layout(base));
+    expect(r.said).toEqual([
+      liftAnnouncement('a', { to: 'todo', index: 0 }, 3),
+    ]);
+  });
+
+  it('moves a card to the next column and announces where it landed', () => {
+    const r = keyboardMove(base, base[0].id, [' ', 'ArrowRight', 'Enter']);
+    expect(layout(r.tasks)).toEqual({ todo: ['b', 'd'], doing: ['a', 'c'] });
+    expect(r.said.at(-1)).toBe('a moved to Doing, position 1 of 2');
+    expect(r.lifted).toBe(false);
+  });
+
+  it('reorders within a column', () => {
+    const r = keyboardMove(base, base[0].id, [
+      ' ',
+      'ArrowDown',
+      'ArrowDown',
+      ' ',
+    ]);
+    expect(layout(r.tasks).todo).toEqual(['b', 'd', 'a']);
+    expect(r.said).toEqual([
+      liftAnnouncement('a', { to: 'todo', index: 0 }, 3),
+      'a, To Do, position 2 of 3',
+      'a, To Do, position 3 of 3',
+      'a moved to To Do, position 3 of 3',
+    ]);
+  });
+
+  it('restores the original position on Escape', () => {
+    const r = keyboardMove(base, base[0].id, [
+      ' ',
+      'ArrowRight',
+      'ArrowDown',
+      'Escape',
+    ]);
+    expect(layout(r.tasks)).toEqual(layout(base));
+    expect(r.lifted).toBe(false);
+    expect(r.said.at(-1)).toBe(
+      'Move cancelled. a is back in To Do, position 1 of 3.',
+    );
+  });
+
+  // The card is never taken out of the board until it is dropped, so an
+  // arrow press costs no save and Escape has nothing to undo.
+  it('commits nothing until the card is dropped', () => {
+    const r = keyboardMove(base, base[3].id, [' ', 'ArrowUp', 'ArrowUp']);
+    expect(r.tasks).toEqual(base);
+    expect(r.lifted).toBe(true);
+  });
+});
+
+/**
+ * A lift is a preview of a move nobody has committed: while it is up, the
+ * board draws — and every column and card name reports — an order that is not
+ * the saved one. Every key that can commit or cancel it lives on the card, so
+ * the moment focus is anywhere else the preview is unreachable. It has to end
+ * there rather than sit on screen misreporting the board.
+ */
+describe('liftSurvivesFocus', () => {
+  it('survives while the lifted card itself has focus', () => {
+    expect(liftSurvivesFocus('t1', 't1', true)).toBe(true);
+  });
+
+  it('ends when Tab moves focus to another card', () => {
+    expect(liftSurvivesFocus('t1', 't2', true)).toBe(false);
+  });
+
+  it('ends when focus lands inside the lifted card', () => {
+    // A link in the description or the chevron: the card's key handler
+    // deliberately ignores keys that did not come from the card itself, so a
+    // lift left running there answers to nothing.
+    expect(liftSurvivesFocus('t1', 't1', false)).toBe(false);
+  });
+
+  it('ends when focus leaves the board entirely', () => {
+    // A header button (Settings, Export) or anything else off the board.
+    expect(liftSurvivesFocus('t1', null, false)).toBe(false);
+  });
+});
+
+describe('cardLabel', () => {
+  it('names the card, its column, its place and its state', () => {
+    const t = task('Fix login', 'doing');
+    expect(cardLabel(t, 1, 4)).toBe('Fix login, Doing, 2 of 4');
+    expect(cardLabel({ ...t, blocked: true }, 1, 4)).toBe(
+      'Fix login, Doing, 2 of 4, blocked',
+    );
+    expect(
+      cardLabel(
+        {
+          ...t,
+          checks: [
+            { text: 'one', done: true },
+            { text: 'two', done: false },
+          ],
+        },
+        0,
+        1,
+      ),
+    ).toBe('Fix login, Doing, 1 of 1, 1 of 2 checklist items done');
+  });
+
+  it('says so while the card is lifted', () => {
+    expect(cardLabel(task('a', 'todo'), 0, 2, true)).toBe(
+      'a, To Do, 1 of 2, lifted',
+    );
   });
 });
 

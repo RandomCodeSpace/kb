@@ -424,6 +424,183 @@ Both light and dark OS themes are covered: kb pins `color-scheme: light` so
 the UA-drawn parts stay legible on paper rather than inverting into a dark
 slab under a dark system theme.
 
+## Accessibility
+
+**Standard targeted: WCAG 2.2 Level AA.** This section records what was
+measured, how, and what is still open. It is not a conformance claim — kb has
+not been audited against 2.2 AA in full, and the gaps below are real.
+
+### Moving a card with the keyboard
+
+Every card is a focusable object (`tabindex="0"`, `role="group"`,
+`aria-roledescription="draggable card"`) whose accessible name is its title,
+its column, its slot in that column, and its state — for example
+"Fix login, Doing, 2 of 4, blocked, 1 of 3 checklist items done". Each card is
+described by a hint that spells the key model out, so it is discoverable
+without reading this file.
+
+| Key | When | What it does |
+| --- | --- | --- |
+| <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | anywhere | Move between cards and controls in reading order |
+| <kbd>Space</kbd> | card focused, not lifted | Pick the card up |
+| <kbd>Enter</kbd> | card focused, not lifted | Open the card for editing |
+| <kbd>↑</kbd> / <kbd>↓</kbd> | card lifted | Move it up or down within its column |
+| <kbd>←</kbd> / <kbd>→</kbd> | card lifted | Move it to the previous or next column |
+| <kbd>Enter</kbd> or <kbd>Space</kbd> | card lifted | Drop it where it now sits |
+| <kbd>Esc</kbd> | card lifted | Cancel and put it back where it was picked up |
+| <kbd>Tab</kbd> | card lifted | Move focus on — which cancels the move (see below) |
+| <kbd>Space</kbd> / <kbd>Enter</kbd> | checklist item focused | Tick or untick it |
+| <kbd>Esc</kbd> | modal open | Close the modal and return focus to what opened it |
+
+Nothing is committed while a card is lifted: the board is previewed locally, so
+<kbd>Esc</kbd> restores the original order exactly and no save happens per
+arrow press. A pointer drag started mid-lift drops the lift rather than running
+two moves of the same card at once.
+
+A lift lives only while the lifted card itself has focus. Every key of the
+model is on the card, so focus anywhere else — <kbd>Tab</kbd> to the next card,
+to a link inside this one, or to a header button that opens a dialog — would
+leave a preview on screen that nothing could commit or cancel, while every
+column and card name reported a position the board had not saved. Focus leaving
+the card therefore cancels the move and says so, exactly as <kbd>Esc</kbd>
+would. Every step of a cross-column move re-parents the card in the DOM; focus
+is put back on it after each one, including when several arrow presses arrive
+in the same tick.
+
+Every pick-up, every arrow step, every drop and every cancel is announced
+through one polite, atomic live region — "Fix login moved to Doing, position 2
+of 4", "Move cancelled. Fix login is back in To Do, position 1 of 3." Sync
+state changes and async errors reach the same region. It is rendered outside
+the app shell on purpose: the shell goes `inert` while a dialog is open, which
+takes its whole subtree out of the accessibility tree, and a save failure or an
+expired session while a card is open is exactly when the region has to be
+heard.
+
+The pointer drag is unchanged and still authoritative for mouse and touch: the
+grip (`touch-action: none`) is what a touch drag starts from, while the card
+body keeps `pan-y` so a finger can still scroll the column.
+
+### What was verified, and how
+
+Measured in headless Chrome against the built binary, in-page via
+`getComputedStyle` / `getBoundingClientRect`, at viewport widths of 320, 375,
+1280 and 1920 CSS px:
+
+- **1.4.3 Contrast (Minimum)** — every text/background pair that renders was
+  computed, including the generated label colours. All pass. The tightest are
+  ink `#20242c` on the green chip `#3f9d58` at **4.57:1** and on the blue chip
+  `#4f8ef7` at **4.85:1** (both need 4.5:1); secondary text `--dim` `#63697a`
+  measures **5.48:1** on the white card and **5.03:1** on the paper. Body text
+  on paper is 14.28:1.
+- **1.4.11 Non-text Contrast** — the focus ring (ink) measures **15.55:1** on
+  the card, **14.28:1** on paper and **12.81–13.26:1** on the three column
+  pastels; the checked-box fill and the progress fill measure **3.40:1** on
+  white. The progress track is white-on-white and is made perceivable by its
+  2px ink border at 15.55:1, not by fill contrast.
+- **2.1.1 / 2.1.2 Keyboard** — every interactive element on the board, in the
+  card modal, in Settings and in the debug overlay was focused in turn: all
+  reachable, all operable, no trap. Modals trap focus deliberately (nothing
+  outside is focusable) and return focus to their opener on <kbd>Esc</kbd>.
+  That includes the ship warning raised by a keyboard drop, whose opener is a
+  card the move has already re-rendered into another column: the restore finds
+  the card again by its task id rather than focusing a node that is no longer
+  in the document. Measured on all three exits (Cancel, <kbd>Esc</kbd>, "Ship
+  anyway"): focus lands on the card, not on `<body>`.
+- **2.4.7 Focus Visible** — every focusable element carries a 3px ink outline
+  at `:focus-visible`, measured with real <kbd>Tab</kbd> presses on the board,
+  the modals, the sign-in form and the debug overlay. Four fields (the modal
+  inputs, the sign-in id and token fields, the debug frame cap) suppress the
+  outline on plain `:focus` to draw a hard shadow instead, and each restores
+  the ring at `:focus-visible` — the restore has to sit *after* the rule that
+  removed it, because the two have equal specificity. Measuring with a
+  programmatic `.focus()` after a click will show no ring, which is correct
+  `:focus-visible` behaviour and not a defect.
+- **2.4.11 Focus Not Obscured (Minimum)** — the debug overlay is an opaque
+  fixed panel in the bottom-right corner, and it does rest over board content:
+  with nine cards in Done, four of them overlap its resting rectangle
+  (measured at 1280×720). It steps aside to the top of the viewport whenever
+  the focused element would be under its resting place, which is what keeps the
+  criterion satisfied — the focused element is never entirely hidden. While it
+  is stepped aside it covers the header's Export, Import and Sign out buttons
+  instead; those are not the focused element at that moment, so Minimum still
+  passes, but this is a small panel that overlaps real controls in both
+  positions, not one that stays out of the way.
+- **2.5.7 Dragging Movements** — satisfied by the keyboard move above; the
+  pointer drag is no longer the single path.
+- **2.5.8 Target Size (Minimum)** — with one exception below, no interactive
+  target measures under 24×24 CSS px at 320, 375, 1280 and 1920px. Small glyphs
+  reach it through an absolute `::after` hit area rather than by growing: the
+  chevron is a 20×20 box, the add button a 24×24 chip and the drag grip a 10×18
+  glyph, and all three measure **40×40** by walking `elementFromPoint` outwards
+  from their centre at each of those widths. The hit areas are sized outright
+  (`--hit: 40px`, centred) rather than by a negative `inset`, which resolves
+  against the *padding* box and quietly lost 2px per side on the two bordered
+  buttons. The "Blocked" checkbox is browser-drawn at 16×16 and reaches the
+  minimum through its `<label>`, which is pinned to `min-height: var(--tap)`
+  (24px) — exactly at the threshold, so it is the first thing to re-check if
+  that label changes.
+  The exception: a link inside a card description measures about 65×14, since
+  its height is the line box of the sentence around it. That is the SC's own
+  *Inline* exception (a target in a sentence, sized by the text flow), so it
+  conforms — but it is a target under 24×24 and an audit that enumerates every
+  target will find it.
+- **1.4.4 Resize Text / 1.4.10 Reflow / 1.4.12 Text Spacing** — at 320px there
+  is no horizontal page scroll and nothing overflows outside a scroll
+  container; the same holds with text scaled to 200% (measured by doubling the
+  seven `--fs-*` tokens, since kb sizes text in px) and with the 1.4.12 spacing
+  overrides applied. Two things that make that true are worth naming, because
+  both failed before: the footer hint is in the shell's flow rather than fixed
+  over the board — its height is text and grows with it, and no fixed board
+  padding could keep pace — and the card's title row wraps, because the emoji,
+  the age chip and the grip do not shrink and a column clips horizontally. At
+  200% text on a 320px screen the shell is taller than the viewport and the
+  page scrolls vertically, which is the intended reflow behaviour; the board
+  keeps a 200px floor rather than being squeezed to a sliver. The viewport meta
+  deliberately sets no `maximum-scale` and no `user-scalable=no`, so pinch zoom
+  works; a test guards that.
+- **Long values are not lost to a hover-only tooltip.** The header shows the
+  signed-in id in a box measured in `ch`, so it grows with the text size rather
+  than truncating at 200%; a genuinely long address still ellipses there, and
+  Settings prints the id in full — reachable by keyboard and by touch, which a
+  `title` tooltip is not.
+- **2.3.3 Animation from Interactions** — under
+  `prefers-reduced-motion: reduce` all eight transitions and animations
+  measured zero. Confetti is additionally suppressed in JS.
+- **1.3.1 Info and Relationships** — `header`/`main` landmarks, `h1` → `h2`
+  with no skipped level, each column a labelled `region` containing a real
+  `ul`/`li`, form controls associated by `<label for>`.
+- **3.3.1 / 3.3.3 Error Identification** — field errors set `aria-invalid` and
+  point at a `role="alert"` message through `aria-describedby`.
+- **Colour is never the only carrier** — priority is a text label *and* a
+  distinct shape (rotated square / square / circle / pill), blocked is a
+  "⛔ blocked" chip, the sync dot is an `img` with a name.
+
+### Known not to conform, or not yet checked
+
+- **No screen reader has been run against kb.** Everything above is measured
+  from the DOM and computed styles. Names, roles and live-region text are
+  correct by construction and by inspection of the accessibility tree, but
+  NVDA, JAWS and VoiceOver behaviour is untested — live-region verbosity during
+  a fast sequence of arrow presses is the likeliest rough edge.
+- **The checklist is a group of `role="checkbox"` items, not a list.** This
+  satisfies 4.1.2 but is a weaker structure than `ul`/`li` would be.
+- **Browser-drawn controls are not fully in scope.** The date picker panel, the
+  `<select>` option list, the file chooser and the number spinners are the
+  browser's; their contrast and target size are whatever the browser does. See
+  "Native controls kb does not draw".
+- **1.4.13 Content on Hover or Focus** was not evaluated. kb uses `title`
+  tooltips in a few places, and browser-drawn tooltips are not dismissible
+  without moving the pointer.
+- **2.4.1 Bypass Blocks** — there is no skip link. The board has a shallow tab
+  order and no repeated navigation block, so the criterion is arguably not
+  applicable, but this has not been confirmed against a long board.
+- **1.2.x (time-based media)** and **3.1.2 (language of parts)** are not
+  applicable: kb ships no audio or video, and its interface is English-only.
+  User content in another language is not marked up as such.
+- **Contrast headroom is thin.** The green chip at 4.57:1 clears 4.5:1 by
+  0.07. Any darkening of the ink or lightening of that green fails it, so the
+  palette is not free to drift.
+
 ## Identity modes
 
 The server picks its mode from environment variables at startup:

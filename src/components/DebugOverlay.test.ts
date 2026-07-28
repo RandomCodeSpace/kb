@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { debugEnabled, setDebugEnabled } from './DebugOverlay';
+import {
+  debugEnabled,
+  overlaps,
+  restingBox,
+  setDebugEnabled,
+} from './DebugOverlay';
 
 // Node test environment has no Web Storage — stub it on globalThis.
 const mem = new Map<string, string>();
@@ -45,6 +50,35 @@ describe('debugEnabled', () => {
 
   it('reads other parameters without turning on', () => {
     expect(debugEnabled('?other=1')).toBe(false);
+  });
+});
+
+// 2.4.11: the panel is opaque, so anything it covers is gone rather than
+// dimmed. It steps aside when the focused element is underneath it.
+describe('stepping aside from the focused element', () => {
+  const viewport = { width: 1280, height: 577 };
+  const rest = restingBox(232, 221, viewport);
+
+  it('sits in the bottom-right corner at rest', () => {
+    expect(rest).toEqual({ left: 1036, right: 1268, top: 344, bottom: 565 });
+  });
+
+  // The measured case from the audit: "Delete permanently" on a cancelled
+  // card, 119x22 at (1083, 464) — entirely inside the panel.
+  it('finds a focused button underneath it', () => {
+    expect(
+      overlaps(rest, { left: 1083, right: 1202, top: 464, bottom: 486 }),
+    ).toBe(true);
+  });
+
+  it('leaves anything outside the corner alone', () => {
+    expect(overlaps(rest, { left: 20, right: 200, top: 40, bottom: 66 })).toBe(
+      false,
+    );
+    // Touching edges is not covering.
+    expect(
+      overlaps(rest, { left: 900, right: 1036, top: 344, bottom: 400 }),
+    ).toBe(false);
   });
 });
 

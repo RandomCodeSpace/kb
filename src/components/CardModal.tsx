@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { Check, Effort, Prio, Status, Task } from '../lib/model';
 import { newTask, STATUS_LABEL } from '../lib/model';
 import type { AIStoryRequest, StoryDraft } from '../lib/api';
 import { isAbortError } from '../lib/api';
+import { useDialogFocus } from '../lib/focus';
 import { EmojiField, firstEmoji } from './EmojiField';
 import { LabelsCombobox } from './LabelsCombobox';
 
@@ -63,6 +64,12 @@ export function CardModal({
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const draftAbort = useRef<AbortController | null>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const aiErrorId = useId();
+  // The emoji picker is a custom element with its own keyboard grid; the trap
+  // stays out of it, or Tab inside the picker would jump back to the form.
+  const onDialogKeyDown = useDialogFocus(boxRef, { skipWithin: '.emojipop' });
 
   const cancelDraft = () => draftAbort.current?.abort();
 
@@ -154,8 +161,19 @@ export function CardModal({
         if (e.target === e.currentTarget && !aiBusy) onClose();
       }}
     >
-      <div className="modal" role="dialog" aria-modal="true" aria-busy={aiBusy}>
-        <h2>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-busy={aiBusy}
+        // Focus lands here for a press on the dialog's own text, so the Tab
+        // trap on this node keeps working (see ConfirmDialog).
+        tabIndex={-1}
+        ref={boxRef}
+        onKeyDown={onDialogKeyDown}
+      >
+        <h2 id={titleId}>
           {state.mode === 'add'
             ? `New task · ${STATUS_LABEL[state.status]}`
             : 'Edit task'}
@@ -174,6 +192,10 @@ export function CardModal({
                   : 'How should this card change?'
               }
               disabled={aiBusy}
+              // The failure is about this request, so it is attached to the
+              // field the request came from rather than left floating.
+              aria-invalid={aiError !== null}
+              aria-describedby={aiError ? aiErrorId : undefined}
             />
             <div className="ai-row">
               <button
@@ -200,7 +222,7 @@ export function CardModal({
               )}
             </div>
             {aiError && (
-              <p className="flash err" role="alert">
+              <p className="flash err" id={aiErrorId} role="alert">
                 {aiError}
               </p>
             )}
