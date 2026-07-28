@@ -1,9 +1,9 @@
 // Package cliapp implements the kb command-line interface: add, list,
-// update, move, done, and rm against either the local SQLite store or, when
-// KB_SERVER is set, a remote kb server over the markdown wire API
-// (GET/PUT /api/board). In remote mode task ids are ephemeral listing
-// indexes ("i1", "i2", ...); in local mode they are UUIDs addressable by
-// unique prefix.
+// update, move, done, cancel, restore, and rm against either the local
+// SQLite store or, when KB_SERVER is set, a remote kb server over the
+// markdown wire API (GET/PUT /api/board). In remote mode task ids are
+// ephemeral listing indexes ("i1", "i2", ...); in local mode they are UUIDs
+// addressable by unique prefix.
 package cliapp
 
 import (
@@ -28,9 +28,13 @@ commands:
   add "title"            add a task
   list                   list tasks
   update <id>            patch a task (only provided flags change)
-  move <id> <status>     move a task to todo, doing, or done
+  move <id> <status>     move a task to todo, doing, done, or cancelled
   done <id>              shorthand for: move <id> done
-  rm <id>                delete a task (requires --yes)
+  cancel <id>            soft delete: move a task to cancelled, undo with
+                         restore (this is the one you usually want)
+  restore <id>           move a cancelled task back to todo
+  rm <id>                hard delete: erase a task for good, no undo
+                         (requires --yes)
   help                   show this help
 
 common flags (every command):
@@ -39,18 +43,42 @@ common flags (every command):
 
 card flags (add and update):
   --desc text    description
-  --status s     todo, doing, or done
+  --status s     todo, doing, done, or cancelled
   --prio n       priority 1-4 (default 3)
   --due date     due date, YYYY-MM-DD
   --effort e     effort: S, M, or L
   --emoji e      leading emoji
   --tag t        tag (repeat for several)
-  --check text   checklist item (repeat for several)
+  --check text   checklist item (repeat for several). Prefix "x " to add it
+                 already ticked: --check "x reproduce locally", the same
+                 convention the card's checklist box uses.
+                 The space is required, so "xml parser fails" stays an open
+                 item with its text intact; write \x for an item that really
+                 does start with "x ".
+                 On update the list is replaced, so pass every item you want
+                 to keep, ticked or not.
+  --blocked      flag the task as blocked
+  --no-blocked   clear the blocked flag
   --title text   new title (update only; add takes the title as argument)
 
 list flags:
   --status s     show one column only
+  --all          include cancelled tasks (hidden by default)
   --json         print full tasks as JSON
+
+move, done, and update flags:
+  --force        finish a task that still has open checklist items or is
+                 flagged blocked; without it kb refuses (it never prompts).
+                 Applies to done <id>, move <id> done, and update <id>
+                 --status done alike. The check reads the task as it will be
+                 once the update lands, so closing the last item and
+                 finishing in one update needs no --force; when it does
+                 refuse, nothing is written at all.
+
+rm flags:
+  --yes          confirm the delete. rm erases the row: the task leaves the
+                 board and restore cannot bring it back. cancel is the
+                 reversible alternative and is not a synonym for rm.
 
 remote mode:
   KB_SERVER=http://host:port operates over the HTTP API instead of the
@@ -82,6 +110,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return a.cmdMove(rest)
 	case "done":
 		return a.cmdDone(rest)
+	case "cancel":
+		return a.cmdCancel(rest)
+	case "restore":
+		return a.cmdRestore(rest)
 	case "rm":
 		return a.cmdRm(rest)
 	}
@@ -136,7 +168,11 @@ func (a *app) withBackend(user, data string, fn func(backend) error) int {
 type backend interface {
 	list(status board.Status) ([]item, error)
 	add(t board.Task) (item, error)
-	update(ref string, p store.TaskPatch, moveTo *board.Status) (item, error)
+	// update applies the field patch and the optional status move as one
+	// atomic step. Moving to done is guarded exactly as move and done are:
+	// refused unless force, judged on the post-patch task, and rolled back
+	// whole so a refusal persists neither the move nor the patch.
+	update(ref string, p store.TaskPatch, moveTo *board.Status, force bool) (item, error)
 	move(ref string, to board.Status) (item, error)
 	remove(ref string) (item, error)
 	close() error
@@ -189,6 +225,7 @@ func (a *app) newFlagSet(name string) (fs *flag.FlagSet, user, data *string) {
 type cardFlags struct {
 	title, desc, status, due, effort, emoji string
 	prio                                    int
+	blocked, noBlocked                      bool
 	tags, checks                            stringList
 }
 
@@ -199,13 +236,31 @@ func registerCardFlags(fs *flag.FlagSet, c *cardFlags, withTitle bool) {
 		fs.StringVar(&c.title, "title", "", "task title")
 	}
 	fs.StringVar(&c.desc, "desc", "", "description")
-	fs.StringVar(&c.status, "status", "", "todo|doing|done")
+	fs.StringVar(&c.status, "status", "", "todo|doing|done|cancelled")
 	fs.IntVar(&c.prio, "prio", 0, "priority 1-4")
 	fs.StringVar(&c.due, "due", "", "due date YYYY-MM-DD")
 	fs.StringVar(&c.effort, "effort", "", "effort S|M|L")
 	fs.StringVar(&c.emoji, "emoji", "", "leading emoji")
+	fs.BoolVar(&c.blocked, "blocked", false, "flag the task as blocked")
+	fs.BoolVar(&c.noBlocked, "no-blocked", false, "clear the blocked flag")
 	fs.Var(&c.tags, "tag", "tag (repeatable)")
 	fs.Var(&c.checks, "check", "checklist item (repeatable)")
+}
+
+// resolveBlocked folds the --blocked/--no-blocked pair into one tri-state:
+// nil when neither flag was given, so update leaves the field alone.
+func resolveBlocked(set map[string]bool, c *cardFlags) (*bool, error) {
+	switch {
+	case set["blocked"] && set["no-blocked"]:
+		return nil, errors.New("--blocked and --no-blocked cannot be combined")
+	case set["blocked"]:
+		v := c.blocked
+		return &v, nil
+	case set["no-blocked"]:
+		v := !c.noBlocked
+		return &v, nil
+	}
+	return nil, nil
 }
 
 // parseInterleaved parses args allowing flags and positional arguments in
@@ -239,9 +294,63 @@ var dueRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 func parseStatus(s string) (board.Status, error) {
 	st := board.Status(strings.ToLower(strings.TrimSpace(s)))
 	if !st.Valid() {
-		return "", fmt.Errorf("invalid status %q (want todo, doing, or done)", s)
+		return "", fmt.Errorf("invalid status %q (want todo, doing, done, or cancelled)", s)
 	}
 	return st, nil
+}
+
+// doneWarning explains why finishing t deserves a second look — open
+// checklist items, a blocked flag, or both — and returns "" when the task is
+// clear to ship. The CLI never prompts: it refuses and points at --force.
+func doneWarning(t board.Task) string {
+	open := 0
+	for _, c := range t.Checks {
+		if !c.Done {
+			open++
+		}
+	}
+	var parts []string
+	if open > 0 {
+		parts = append(parts, fmt.Sprintf("%d of %d checklist items are still open", open, len(t.Checks)))
+	}
+	if t.Blocked {
+		parts = append(parts, "the task is flagged blocked")
+	}
+	return strings.Join(parts, " and ")
+}
+
+// doneGuardErr is the refusal for finishing t under ref, or nil when the task
+// is clear to ship. Callers evaluate it against the *post-patch* task and
+// inside whatever transaction persists the change, so a refusal leaves
+// nothing written — and so a patch that closes the last checklist item on its
+// way to done is allowed rather than refused.
+func doneGuardErr(ref string, t board.Task) error {
+	warn := doneWarning(t)
+	if warn == "" {
+		return nil
+	}
+	return fmt.Errorf("%s on %s %q; re-run with --force to finish it anyway", warn, displayRef(ref), t.Title)
+}
+
+// parseCheckFlag decodes one --check value with the convention the card
+// modal's checklist box already teaches ("one per line, prefix \"x \" when
+// done"): "x reproduce locally" is a ticked item, "write failing test" is an
+// open one. It mirrors src/components/CardModal.tsx's textToChecks, and the
+// "- [x]" form the markdown wire uses underneath.
+//
+// The space after the x is required, so an item that merely starts with the
+// letter ("xml parser fails") keeps its text and stays open. A leading
+// backslash escapes the marker the same way it escapes metadata-shaped words
+// in a title: `\x ray` is the open item "x ray".
+func parseCheckFlag(s string) board.Check {
+	s = strings.TrimSpace(s)
+	if rest, ok := strings.CutPrefix(s, `\`); ok {
+		return board.Check{Text: strings.TrimSpace(rest)}
+	}
+	if len(s) > 1 && (s[0] == 'x' || s[0] == 'X') && s[1] == ' ' {
+		return board.Check{Text: strings.TrimSpace(s[2:]), Done: true}
+	}
+	return board.Check{Text: s}
 }
 
 // parseDue validates a due date; empty is allowed (clears / unset).
@@ -312,9 +421,16 @@ func (a *app) cmdAdd(args []string) int {
 		return a.usageErr(err)
 	}
 	t.Effort = eff
+	blocked, err := resolveBlocked(set, &cf)
+	if err != nil {
+		return a.usageErr(err)
+	}
+	if blocked != nil {
+		t.Blocked = *blocked
+	}
 	t.Tags = append([]string(nil), cf.tags...)
 	for _, c := range cf.checks {
-		t.Checks = append(t.Checks, board.Check{Text: c})
+		t.Checks = append(t.Checks, parseCheckFlag(c))
 	}
 	return a.withBackend(*user, *data, func(be backend) error {
 		it, err := be.add(t)
@@ -329,6 +445,7 @@ func (a *app) cmdAdd(args []string) int {
 func (a *app) cmdList(args []string) int {
 	fs, user, data := a.newFlagSet("list")
 	statusF := fs.String("status", "", "show one column only")
+	allF := fs.Bool("all", false, "include cancelled tasks")
 	jsonF := fs.Bool("json", false, "print full tasks as JSON")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
@@ -350,6 +467,17 @@ func (a *app) cmdList(args []string) int {
 		if err != nil {
 			return err
 		}
+		// Cancelled tasks are soft-deleted: they stay on the board but out of
+		// the way until asked for by --all or by name.
+		if st == "" && !*allF {
+			kept := make([]item, 0, len(items))
+			for _, it := range items {
+				if it.task.Status != board.StatusCancelled {
+					kept = append(kept, it)
+				}
+			}
+			items = kept
+		}
 		if *jsonF {
 			return writeJSON(a.stdout, items)
 		}
@@ -362,6 +490,7 @@ func (a *app) cmdUpdate(args []string) int {
 	fs, user, data := a.newFlagSet("update")
 	var cf cardFlags
 	registerCardFlags(fs, &cf, true)
+	force := fs.Bool("force", false, "finish a task with open checklist items or a blocked flag")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -403,6 +532,11 @@ func (a *app) cmdUpdate(args []string) int {
 		}
 		p.Effort = &e
 	}
+	blocked, err := resolveBlocked(set, &cf)
+	if err != nil {
+		return a.usageErr(err)
+	}
+	p.Blocked = blocked
 	if set["tag"] {
 		tags := append([]string(nil), cf.tags...)
 		p.Tags = &tags
@@ -410,7 +544,7 @@ func (a *app) cmdUpdate(args []string) int {
 	if set["check"] {
 		checks := make([]board.Check, 0, len(cf.checks))
 		for _, c := range cf.checks {
-			checks = append(checks, board.Check{Text: c})
+			checks = append(checks, parseCheckFlag(c))
 		}
 		p.Checks = &checks
 	}
@@ -426,7 +560,7 @@ func (a *app) cmdUpdate(args []string) int {
 		return a.usageErr(errors.New("update needs at least one field flag"))
 	}
 	return a.withBackend(*user, *data, func(be backend) error {
-		it, err := be.update(pos[0], p, moveTo)
+		it, err := be.update(pos[0], p, moveTo, *force)
 		if err != nil {
 			return err
 		}
@@ -437,22 +571,24 @@ func (a *app) cmdUpdate(args []string) int {
 
 func (a *app) cmdMove(args []string) int {
 	fs, user, data := a.newFlagSet("move")
+	force := fs.Bool("force", false, "finish a task with open checklist items or a blocked flag")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
 	}
 	if len(pos) != 2 {
-		return a.usageErr(errors.New("move needs <id-prefix> and <todo|doing|done> arguments"))
+		return a.usageErr(errors.New("move needs <id-prefix> and <todo|doing|done|cancelled> arguments"))
 	}
 	st, err := parseStatus(pos[1])
 	if err != nil {
 		return a.usageErr(err)
 	}
-	return a.moveTo(*user, *data, pos[0], st)
+	return a.moveTo(*user, *data, pos[0], st, *force)
 }
 
 func (a *app) cmdDone(args []string) int {
 	fs, user, data := a.newFlagSet("done")
+	force := fs.Bool("force", false, "finish a task with open checklist items or a blocked flag")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -460,12 +596,55 @@ func (a *app) cmdDone(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("done needs exactly one <id-prefix> argument"))
 	}
-	return a.moveTo(*user, *data, pos[0], board.StatusDone)
+	return a.moveTo(*user, *data, pos[0], board.StatusDone, *force)
 }
 
-// moveTo is the shared body of move and done.
-func (a *app) moveTo(user, data, ref string, to board.Status) int {
+// cmdCancel soft-deletes a task: it moves to the cancelled column and stays
+// on the board, unlike rm --yes which deletes the row for good.
+func (a *app) cmdCancel(args []string) int {
+	fs, user, data := a.newFlagSet("cancel")
+	pos, err := parseInterleaved(fs, args)
+	if code, done := a.parseResult(err); done {
+		return code
+	}
+	if len(pos) != 1 {
+		return a.usageErr(errors.New("cancel needs exactly one <id-prefix> argument"))
+	}
+	return a.moveTo(*user, *data, pos[0], board.StatusCancelled, false)
+}
+
+// cmdRestore undoes a cancel, putting the task back at the end of To Do.
+func (a *app) cmdRestore(args []string) int {
+	fs, user, data := a.newFlagSet("restore")
+	pos, err := parseInterleaved(fs, args)
+	if code, done := a.parseResult(err); done {
+		return code
+	}
+	if len(pos) != 1 {
+		return a.usageErr(errors.New("restore needs exactly one <id-prefix> argument"))
+	}
+	return a.moveTo(*user, *data, pos[0], board.StatusTodo, false)
+}
+
+// moveTo is the shared body of move, done, cancel, and restore. Moving to
+// done with open checklist items or a blocked flag is refused unless force
+// is set: the CLI has no interactive confirmation, so it errors out rather
+// than shipping something the user may not have meant to.
+func (a *app) moveTo(user, data, ref string, to board.Status, force bool) int {
 	return a.withBackend(user, data, func(be backend) error {
+		if to == board.StatusDone && !force {
+			items, err := be.list("")
+			if err != nil {
+				return err
+			}
+			// A failed lookup is not reported here: be.move below resolves ref
+			// itself and phrases id errors in the backend's own terms.
+			if it, ferr := findItem(items, ref); ferr == nil {
+				if err := doneGuardErr(it.ref, it.task); err != nil {
+					return err
+				}
+			}
+		}
 		it, err := be.move(ref, to)
 		if err != nil {
 			return err
@@ -548,14 +727,18 @@ func displayRef(ref string) string {
 	return ref
 }
 
-// writeTable renders items as an aligned table: id, status, prio, title,
-// tags.
+// writeTable renders items as an aligned table: id, status, prio, blocked
+// marker, title, tags.
 func writeTable(w io.Writer, items []item) {
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tSTATUS\tPRIO\tTITLE\tTAGS")
+	fmt.Fprintln(tw, "ID\tSTATUS\tPRIO\tBLOCKED\tTITLE\tTAGS")
 	for _, it := range items {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n",
-			displayRef(it.ref), it.task.Status, it.task.Prio, it.task.Title, strings.Join(it.task.Tags, ","))
+		blocked := "-"
+		if it.task.Blocked {
+			blocked = "yes"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n",
+			displayRef(it.ref), it.task.Status, it.task.Prio, blocked, it.task.Title, strings.Join(it.task.Tags, ","))
 	}
 	tw.Flush()
 }
@@ -571,6 +754,7 @@ type taskJSON struct {
 	Title     string      `json:"title"`
 	Desc      string      `json:"desc,omitempty"`
 	Status    string      `json:"status"`
+	Blocked   bool        `json:"blocked,omitempty"`
 	Prio      int         `json:"prio"`
 	Due       string      `json:"due,omitempty"`
 	Effort    string      `json:"effort,omitempty"`
@@ -589,8 +773,8 @@ func writeJSON(w io.Writer, items []item) error {
 		t := it.task
 		j := taskJSON{
 			ID: t.ID, Emoji: t.Emoji, Title: t.Title, Desc: t.Desc,
-			Status: string(t.Status), Prio: t.Prio, Due: t.Due, Effort: t.Effort,
-			Tags: t.Tags, Position: t.Position,
+			Status: string(t.Status), Blocked: t.Blocked, Prio: t.Prio, Due: t.Due,
+			Effort: t.Effort, Tags: t.Tags, Position: t.Position,
 		}
 		if j.ID == "" {
 			j.ID = it.ref

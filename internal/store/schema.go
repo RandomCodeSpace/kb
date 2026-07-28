@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS settings (
 	ai_key_enc  BLOB
 );
 `,
+	// v2: blocked flag (wire token "%blocked"); the "cancelled" status needs
+	// no DDL because status is stored as free text.
+	`
+ALTER TABLE tasks ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 // migrate creates the meta table and applies any pending schema versions.

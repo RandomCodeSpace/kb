@@ -59,15 +59,22 @@ func validateTaskLines(t board.Task) error {
 	return nil
 }
 
-// validateTaskFields enforces, for the direct task writers (AddTask,
-// UpdateTask — the MCP and CLI paths), the field formats a task must satisfy
-// to survive the markdown wire unchanged: a real YYYY-MM-DD due date, S/M/L
+// ValidateTaskFields enforces, for the direct task writers (AddTask,
+// UpdateTask, and the remote-mode CLI and MCP paths that build the wire
+// themselves), the field formats a task must satisfy to survive the markdown
+// wire unchanged: a non-blank title, a real YYYY-MM-DD due date, S/M/L
 // effort, single-token tags without a leading '#', and a single-emoji Emoji.
 // ReplaceBoard deliberately skips these checks: it ingests board.Parse
 // output, which is defined to be tolerant of odd-but-representable values.
-func validateTaskFields(t board.Task) error {
+func ValidateTaskFields(t board.Task) error {
 	if err := validateTaskLines(t); err != nil {
 		return err
+	}
+	// A blank title serializes to a bare "- [ ] " line that board.Parse reads
+	// back as description text, silently losing the task and grafting its
+	// desc and checks onto the task before it.
+	if board.IsBlank(t.Title) {
+		return errors.New("store: title must not be empty")
 	}
 	if t.Due != "" {
 		if !dueRe.MatchString(t.Due) {
@@ -102,6 +109,7 @@ func validateTaskFields(t board.Task) error {
 type TaskPatch struct {
 	Emoji, Title, Desc, Due, Effort *string
 	Prio                            *int
+	Blocked                         *bool
 	Tags                            *[]string
 	Checks                          *[]board.Check
 }
@@ -170,10 +178,11 @@ func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
 }
 
 // taskCols is the canonical select list matched by scanTask.
-const taskCols = `id, emoji, title, "desc", status, prio, due, effort, tags, checks, position, created_at, moved_at`
+const taskCols = `id, emoji, title, "desc", status, blocked, prio, due, effort, tags, checks, position, created_at, moved_at`
 
-// statusRank orders rows by board column order (todo, doing, done).
-const statusRank = `CASE status WHEN 'todo' THEN 0 WHEN 'doing' THEN 1 WHEN 'done' THEN 2 ELSE 3 END`
+// statusRank orders rows by board column order (todo, doing, done,
+// cancelled).
+const statusRank = `CASE status WHEN 'todo' THEN 0 WHEN 'doing' THEN 1 WHEN 'done' THEN 2 WHEN 'cancelled' THEN 3 ELSE 4 END`
 
 func titleKey(user string) string { return "board_title:" + user }
 
@@ -333,7 +342,7 @@ func loadExisting(tx *sql.Tx, user string) (byStatusTitle, byTitle map[string][]
 // AddTask inserts t for user, assigning a fresh UUID and timestamps and
 // appending it to its column. An empty status defaults to todo; an
 // out-of-range Prio defaults to 3. Field values the markdown wire cannot
-// represent are rejected (see validateTaskFields). Labels are upserted from
+// represent are rejected (see ValidateTaskFields). Labels are upserted from
 // t.Tags.
 func (s *Store) AddTask(user string, t board.Task) (board.Task, error) {
 	if t.Status == "" {
@@ -345,7 +354,7 @@ func (s *Store) AddTask(user string, t board.Task) (board.Task, error) {
 	if t.Prio < 1 || t.Prio > 4 {
 		t.Prio = 3
 	}
-	if err := validateTaskFields(t); err != nil {
+	if err := ValidateTaskFields(t); err != nil {
 		return board.Task{}, err
 	}
 	now := time.Now().UTC()
@@ -369,63 +378,43 @@ func (s *Store) AddTask(user string, t board.Task) (board.Task, error) {
 }
 
 // UpdateTask applies patch to the task matching idPrefix and returns the
-// updated task. The merged task must pass validateTaskFields. Setting Tags
+// updated task. The merged task must pass ValidateTaskFields. Setting Tags
 // upserts labels.
 func (s *Store) UpdateTask(user, idPrefix string, patch TaskPatch) (board.Task, error) {
+	return s.UpdateAndMoveTask(user, idPrefix, patch, nil, nil)
+}
+
+// UpdateAndMoveTask applies patch and then, when moveTo is non-nil, moves the
+// task to that column — both inside a single transaction.
+//
+// guard, when non-nil, is called with the post-patch task after the patch is
+// written but before the move. The ordering is deliberate: a patch can itself
+// be what clears the way for the move (checking off the last checklist item
+// while sending the task to done in one call), so the guard must judge the
+// state the caller is actually asking for, not the state it started from.
+// A non-nil error from guard aborts the transaction, rolling back the patch
+// too: a refused move never leaves a partial update behind.
+func (s *Store) UpdateAndMoveTask(user, idPrefix string, patch TaskPatch, moveTo *board.Status, guard func(board.Task) error) (board.Task, error) {
+	if moveTo != nil && !moveTo.Valid() {
+		return board.Task{}, fmt.Errorf("store: invalid status %q", *moveTo)
+	}
 	var out board.Task
 	err := s.withTx(func(tx *sql.Tx) error {
 		id, err := resolveID(tx, user, idPrefix)
 		if err != nil {
 			return err
 		}
-		t, err := getTask(tx, user, id)
+		t, err := s.patchTask(tx, user, id, patch)
 		if err != nil {
 			return err
 		}
-		if patch.Emoji != nil {
-			t.Emoji = *patch.Emoji
-		}
-		if patch.Title != nil {
-			t.Title = *patch.Title
-		}
-		if patch.Desc != nil {
-			t.Desc = *patch.Desc
-		}
-		if patch.Due != nil {
-			t.Due = *patch.Due
-		}
-		if patch.Effort != nil {
-			t.Effort = *patch.Effort
-		}
-		if patch.Prio != nil {
-			if *patch.Prio < 1 || *patch.Prio > 4 {
-				return fmt.Errorf("store: invalid prio %d", *patch.Prio)
+		if guard != nil {
+			if err := guard(t); err != nil {
+				return err
 			}
-			t.Prio = *patch.Prio
 		}
-		if patch.Tags != nil {
-			t.Tags = *patch.Tags
-		}
-		if patch.Checks != nil {
-			t.Checks = *patch.Checks
-		}
-		if err := validateTaskFields(t); err != nil {
-			return err
-		}
-		tags, err := json.Marshal(t.Tags)
-		if err != nil {
-			return fmt.Errorf("store: marshal tags: %w", err)
-		}
-		checks, err := json.Marshal(t.Checks)
-		if err != nil {
-			return fmt.Errorf("store: marshal checks: %w", err)
-		}
-		if _, err := tx.Exec(`UPDATE tasks SET emoji = ?, title = ?, "desc" = ?, prio = ?, due = ?, effort = ?, tags = ?, checks = ? WHERE user = ? AND id = ?`,
-			t.Emoji, t.Title, t.Desc, t.Prio, t.Due, t.Effort, string(tags), string(checks), user, id); err != nil {
-			return fmt.Errorf("store: update task: %w", err)
-		}
-		if patch.Tags != nil {
-			if err := s.upsertLabels(tx, user, t.Tags); err != nil {
+		if moveTo != nil {
+			if t, err = moveTask(tx, user, t, *moveTo); err != nil {
 				return err
 			}
 		}
@@ -438,39 +427,89 @@ func (s *Store) UpdateTask(user, idPrefix string, patch TaskPatch) (board.Task, 
 	return out, nil
 }
 
-// MoveTask moves the task matching idPrefix to status to, appending it to
-// that column and stamping MovedAt.
-func (s *Store) MoveTask(user, idPrefix string, to board.Status) (board.Task, error) {
-	if !to.Valid() {
-		return board.Task{}, fmt.Errorf("store: invalid status %q", to)
-	}
-	var out board.Task
-	err := s.withTx(func(tx *sql.Tx) error {
-		id, err := resolveID(tx, user, idPrefix)
-		if err != nil {
-			return err
-		}
-		t, err := getTask(tx, user, id)
-		if err != nil {
-			return err
-		}
-		pos, err := nextPosition(tx, user, to)
-		if err != nil {
-			return err
-		}
-		now := time.Now().UTC()
-		if _, err := tx.Exec(`UPDATE tasks SET status = ?, position = ?, moved_at = ? WHERE user = ? AND id = ?`,
-			string(to), pos, now.Format(time.RFC3339Nano), user, id); err != nil {
-			return fmt.Errorf("store: move task: %w", err)
-		}
-		t.Status, t.Position, t.MovedAt = to, pos, now
-		out = t
-		return nil
-	})
+// patchTask merges patch into the task with id and writes it back, returning
+// the post-patch task. An empty patch is a plain read: nothing is written.
+func (s *Store) patchTask(tx *sql.Tx, user, id string, patch TaskPatch) (board.Task, error) {
+	t, err := getTask(tx, user, id)
 	if err != nil {
 		return board.Task{}, err
 	}
-	return out, nil
+	if patch == (TaskPatch{}) {
+		return t, nil
+	}
+	if patch.Emoji != nil {
+		t.Emoji = *patch.Emoji
+	}
+	if patch.Title != nil {
+		t.Title = *patch.Title
+	}
+	if patch.Desc != nil {
+		t.Desc = *patch.Desc
+	}
+	if patch.Due != nil {
+		t.Due = *patch.Due
+	}
+	if patch.Effort != nil {
+		t.Effort = *patch.Effort
+	}
+	if patch.Blocked != nil {
+		t.Blocked = *patch.Blocked
+	}
+	if patch.Prio != nil {
+		if *patch.Prio < 1 || *patch.Prio > 4 {
+			return board.Task{}, fmt.Errorf("store: invalid prio %d", *patch.Prio)
+		}
+		t.Prio = *patch.Prio
+	}
+	if patch.Tags != nil {
+		t.Tags = *patch.Tags
+	}
+	if patch.Checks != nil {
+		t.Checks = *patch.Checks
+	}
+	if err := ValidateTaskFields(t); err != nil {
+		return board.Task{}, err
+	}
+	tags, err := json.Marshal(t.Tags)
+	if err != nil {
+		return board.Task{}, fmt.Errorf("store: marshal tags: %w", err)
+	}
+	checks, err := json.Marshal(t.Checks)
+	if err != nil {
+		return board.Task{}, fmt.Errorf("store: marshal checks: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE tasks SET emoji = ?, title = ?, "desc" = ?, blocked = ?, prio = ?, due = ?, effort = ?, tags = ?, checks = ? WHERE user = ? AND id = ?`,
+		t.Emoji, t.Title, t.Desc, boolToInt(t.Blocked), t.Prio, t.Due, t.Effort, string(tags), string(checks), user, id); err != nil {
+		return board.Task{}, fmt.Errorf("store: update task: %w", err)
+	}
+	if patch.Tags != nil {
+		if err := s.upsertLabels(tx, user, t.Tags); err != nil {
+			return board.Task{}, err
+		}
+	}
+	return t, nil
+}
+
+// MoveTask moves the task matching idPrefix to status to, appending it to
+// that column and stamping MovedAt.
+func (s *Store) MoveTask(user, idPrefix string, to board.Status) (board.Task, error) {
+	return s.UpdateAndMoveTask(user, idPrefix, TaskPatch{}, &to, nil)
+}
+
+// moveTask appends t to column to and stamps MovedAt, returning the moved
+// task.
+func moveTask(tx *sql.Tx, user string, t board.Task, to board.Status) (board.Task, error) {
+	pos, err := nextPosition(tx, user, to)
+	if err != nil {
+		return board.Task{}, err
+	}
+	now := time.Now().UTC()
+	if _, err := tx.Exec(`UPDATE tasks SET status = ?, position = ?, moved_at = ? WHERE user = ? AND id = ?`,
+		string(to), pos, now.Format(time.RFC3339Nano), user, t.ID); err != nil {
+		return board.Task{}, fmt.Errorf("store: move task: %w", err)
+	}
+	t.Status, t.Position, t.MovedAt = to, pos, now
+	return t, nil
 }
 
 // DeleteTask removes the task matching idPrefix and returns it.
@@ -601,6 +640,14 @@ func nextPosition(q dbtx, user string, st board.Status) (int, error) {
 	return int(n.Int64) + 1, nil
 }
 
+// boolToInt renders a Go bool as the 0/1 SQLite stores in an INTEGER column.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // insertTask inserts one fully populated task row.
 func insertTask(q dbtx, user string, t board.Task) error {
 	tags, err := json.Marshal(t.Tags)
@@ -611,9 +658,9 @@ func insertTask(q dbtx, user string, t board.Task) error {
 	if err != nil {
 		return fmt.Errorf("store: marshal checks: %w", err)
 	}
-	if _, err := q.Exec(`INSERT INTO tasks (id, user, emoji, title, "desc", status, prio, due, effort, tags, checks, position, created_at, moved_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, user, t.Emoji, t.Title, t.Desc, string(t.Status), t.Prio, t.Due, t.Effort, string(tags), string(checks), t.Position,
+	if _, err := q.Exec(`INSERT INTO tasks (id, user, emoji, title, "desc", status, blocked, prio, due, effort, tags, checks, position, created_at, moved_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, user, t.Emoji, t.Title, t.Desc, string(t.Status), boolToInt(t.Blocked), t.Prio, t.Due, t.Effort, string(tags), string(checks), t.Position,
 		t.CreatedAt.UTC().Format(time.RFC3339Nano), t.MovedAt.UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("store: insert task %s: %w", t.ID, err)
 	}
@@ -624,13 +671,15 @@ func insertTask(q dbtx, user string, t board.Task) error {
 func scanTask(row interface{ Scan(dest ...any) error }) (board.Task, error) {
 	var t board.Task
 	var status, tags, checks, created, moved string
-	if err := row.Scan(&t.ID, &t.Emoji, &t.Title, &t.Desc, &status, &t.Prio, &t.Due, &t.Effort, &tags, &checks, &t.Position, &created, &moved); err != nil {
+	var blocked int
+	if err := row.Scan(&t.ID, &t.Emoji, &t.Title, &t.Desc, &status, &blocked, &t.Prio, &t.Due, &t.Effort, &tags, &checks, &t.Position, &created, &moved); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return board.Task{}, ErrNotFound
 		}
 		return board.Task{}, fmt.Errorf("store: scan task: %w", err)
 	}
 	t.Status = board.Status(status)
+	t.Blocked = blocked != 0
 	if err := json.Unmarshal([]byte(tags), &t.Tags); err != nil {
 		return board.Task{}, fmt.Errorf("store: task %s tags: %w", t.ID, err)
 	}

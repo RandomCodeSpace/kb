@@ -2,6 +2,7 @@ import type {
   AccountInfo,
   PublicClientApplication,
 } from '@azure/msal-browser';
+import { migrateLegacyKeys } from './store';
 
 export type Identity = {
   kind: 'azure' | 'manual';
@@ -10,9 +11,29 @@ export type Identity = {
   serverToken?: string;
 };
 
-const IDENTITY_KEY = 'webtui.identity.v1';
-const TOKEN_KEY = 'webtui.serverToken.v1';
+const IDENTITY_KEY = 'kb.identity.v1';
+const TOKEN_KEY = 'kb.serverToken.v1';
+const MIGRATED_KEY = 'kb.migrated.identity.v1';
 const SCOPES = ['openid', 'profile', 'email'];
+const CONFIG_TIMEOUT_MS = 1500;
+
+let migrated = false;
+
+/** Copy the pre-rename `webtui.*` identity/token values forward, once. */
+function ensureMigrated(): void {
+  if (migrated) return;
+  migrated = true;
+  try {
+    migrateLegacyKeys(localStorage, MIGRATED_KEY, [IDENTITY_KEY]);
+  } catch {
+    // Storage unavailable — nothing to migrate.
+  }
+  try {
+    migrateLegacyKeys(sessionStorage, MIGRATED_KEY, [TOKEN_KEY]);
+  } catch {
+    // Storage unavailable — nothing to migrate.
+  }
+}
 
 /**
  * Thrown when no usable API token can be obtained without user interaction
@@ -28,6 +49,7 @@ export class ReauthRequiredError extends Error {
 }
 
 export function loadIdentity(): Identity | null {
+  ensureMigrated();
   try {
     const raw = localStorage.getItem(IDENTITY_KEY);
     if (!raw) return null;
@@ -48,6 +70,9 @@ export function loadIdentity(): Identity | null {
 }
 
 export function saveIdentity(i: Identity): void {
+  // Migrate first: a copy running afterwards would skip keys we just wrote but
+  // could still resurrect a legacy token this call deliberately cleared.
+  ensureMigrated();
   const { serverToken, ...persisted } = i;
   try {
     localStorage.setItem(IDENTITY_KEY, JSON.stringify(persisted));
@@ -65,6 +90,8 @@ export function saveIdentity(i: Identity): void {
 }
 
 export function clearIdentity(): void {
+  // Same reason as saveIdentity: sign-out must not be undone by a later copy.
+  ensureMigrated();
   try {
     localStorage.removeItem(IDENTITY_KEY);
   } catch {
@@ -92,14 +119,65 @@ export function sanitizeUser(id: string): string {
   return cleaned === '' ? 'default' : cleaned;
 }
 
-function azureEnv(): { clientId: string; tenantId: string } | null {
+export interface AzureConfig {
+  clientId: string;
+  tenantId: string;
+}
+
+/**
+ * Build-time config. Only a dev-server fallback: `VITE_*` is baked into the
+ * bundle, so a released binary can never pick it up — the server's
+ * `GET /api/config` is the runtime source.
+ */
+function azureEnv(): AzureConfig | null {
   const clientId = import.meta.env.VITE_AZURE_CLIENT_ID as string | undefined;
   const tenantId = import.meta.env.VITE_AZURE_TENANT_ID as string | undefined;
   return clientId && tenantId ? { clientId, tenantId } : null;
 }
 
+/** Env-only view; kept for callers that cannot await. Prefer azureAvailable(). */
 export function azureConfigured(): boolean {
   return azureEnv() !== null;
+}
+
+let serverConfig: Promise<AzureConfig | null> | null = null;
+
+/**
+ * The client/tenant ids the server was started with. Both are public by
+ * design (they ship in every MSAL SPA bundle) and the endpoint needs no auth —
+ * the SPA reads it before login. Any failure (no server, dev mode, 404)
+ * resolves to null so the env fallback applies. Cached for the page's life.
+ */
+function fetchServerConfig(): Promise<AzureConfig | null> {
+  serverConfig ??= (async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), CONFIG_TIMEOUT_MS);
+    try {
+      const res = await fetch('/api/config', { signal: ctrl.signal });
+      if (!res.ok) return null;
+      const b = (await res.json()) as Record<string, unknown>;
+      const clientId =
+        typeof b.azure_client_id === 'string' ? b.azure_client_id.trim() : '';
+      const tenantId =
+        typeof b.azure_tenant_id === 'string' ? b.azure_tenant_id.trim() : '';
+      return clientId && tenantId ? { clientId, tenantId } : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+  return serverConfig;
+}
+
+/** Runtime server config wins; the build-time env is the dev fallback. */
+export async function azureConfig(): Promise<AzureConfig | null> {
+  return (await fetchServerConfig()) ?? azureEnv();
+}
+
+/** True when either source supplies both ids. */
+export async function azureAvailable(): Promise<boolean> {
+  return (await azureConfig()) !== null;
 }
 
 /**
@@ -114,13 +192,15 @@ let pcaPromise: Promise<PublicClientApplication> | null = null;
 
 function getPca(): Promise<PublicClientApplication> {
   pcaPromise ??= (async () => {
-    const env = azureEnv();
-    if (!env) throw new Error('Azure sign-in is not configured');
+    // Runtime config first: MSAL must not be constructed before the server has
+    // had its say, or a released binary would build the app with no ids.
+    const cfg = await azureConfig();
+    if (!cfg) throw new Error('Azure sign-in is not configured');
     const msal = await loadMsal();
     const app = new msal.PublicClientApplication({
       auth: {
-        clientId: env.clientId,
-        authority: `https://login.microsoftonline.com/${env.tenantId}`,
+        clientId: cfg.clientId,
+        authority: `https://login.microsoftonline.com/${cfg.tenantId}`,
         redirectUri: window.location.origin,
       },
       // MSAL's default sessionStorage cache is kept deliberately: refresh/ID
@@ -167,7 +247,7 @@ export async function getApiToken(
   opts?: { forceRefresh?: boolean },
 ): Promise<string | null> {
   if (identity.kind === 'manual') return identity.serverToken ?? null;
-  if (!azureConfigured()) return null;
+  if (!(await azureConfig())) return null;
   const msal = await loadMsal();
   const app = await getPca();
   const account = pickAccount(app, identity.id);

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // AISettings is the client-visible view of a user's AI configuration; the
@@ -158,17 +159,51 @@ func (s *Store) openSealed(enc []byte) ([]byte, error) {
 	return plain, nil
 }
 
+// secretFileBytes is the size of the generated secret file, and the minimum
+// a existing one must have: the file is machine-written, so anything shorter
+// is truncation or a hand-made file, not a choice.
+const secretFileBytes = 32
+
+// EnvSecretMinBytes is the shortest KB_SECRET worth trusting. It is only a
+// warning threshold here: kb (serve) refuses to start below it, but the CLI
+// and the MCP server keep going, because a user already holding AI keys
+// encrypted under a short secret would otherwise be locked out of them.
+const EnvSecretMinBytes = 16
+
+// warnShortSecretOnce keeps the warning to one line per process no matter how
+// many times the secret is loaded.
+var warnShortSecretOnce sync.Once
+
 // LoadOrCreateSecret returns the AES secret: the raw bytes of the KB_SECRET
 // environment variable when set and non-empty, otherwise the contents of
 // <dataDir>/secret, which is created with 32 random bytes and mode 0600
 // (dataDir included, mode 0700) when absent.
+//
+// A short or empty secret file is an error rather than something to work
+// around. An empty one derives the AES key from SHA-256("") — a key anyone
+// can compute — and silently regenerating instead would orphan every AI key
+// already encrypted under the old secret, so the caller has to decide.
+//
+// A short KB_SECRET only warns, on stderr and once. Every entry point shares
+// this path, so the CLI and the MCP server report the same weak secret that
+// stops kb (serve) from booting instead of using it in silence.
 func LoadOrCreateSecret(dataDir string) ([]byte, error) {
 	if v, ok := os.LookupEnv("KB_SECRET"); ok && v != "" {
+		if len(v) < EnvSecretMinBytes {
+			warnShortSecretOnce.Do(func() {
+				fmt.Fprintf(os.Stderr, "kb: warning: KB_SECRET is %d bytes, want at least %d — stored AI keys are encrypted with a guessable key; set a longer KB_SECRET (re-enter the AI key afterwards) or unset it to use the generated %s\n",
+					len(v), EnvSecretMinBytes, filepath.Join(dataDir, "secret"))
+			})
+		}
 		return []byte(v), nil
 	}
 	path := filepath.Join(dataDir, "secret")
 	b, err := os.ReadFile(path)
 	if err == nil {
+		if len(b) < secretFileBytes {
+			return nil, fmt.Errorf("store: secret file %s is %d bytes, want at least %d: delete it to generate a new one (any stored AI keys become unreadable) or restore it from a backup",
+				path, len(b), secretFileBytes)
+		}
 		return b, nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
@@ -177,7 +212,7 @@ func LoadOrCreateSecret(dataDir string) ([]byte, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("store: create data dir: %w", err)
 	}
-	b = make([]byte, 32)
+	b = make([]byte, secretFileBytes)
 	if _, err := rand.Read(b); err != nil {
 		return nil, fmt.Errorf("store: generate secret: %w", err)
 	}

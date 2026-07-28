@@ -54,9 +54,12 @@ function Desc({ text }: { text: string }) {
 
 export interface CardProps {
   task: Task;
-  ghost?: boolean;
   onTick?: (checkIdx: number, pos: { x: number; y: number }) => void;
   onEdit?: () => void;
+  /** Cancelled column only: put the card back in To Do. */
+  onRestore?: () => void;
+  /** Cancelled column only: the one path to a real delete. */
+  onPurge?: () => void;
 }
 
 const PRIO_COLOR: Record<Prio, string> = {
@@ -66,7 +69,7 @@ const PRIO_COLOR: Record<Prio, string> = {
   4: '#b8bdc7',
 };
 
-export function Card({ task, ghost, onTick, onEdit }: CardProps) {
+export function Card({ task, onTick, onEdit, onRestore, onPurge }: CardProps) {
   const [open, setOpen] = useState(false);
   const checksRef = useRef<HTMLDivElement>(null);
 
@@ -80,15 +83,17 @@ export function Card({ task, ghost, onTick, onEdit }: CardProps) {
 
   const cls = ['card'];
   if (task.status === 'done') cls.push('done-card');
+  if (task.status === 'cancelled') cls.push('cancelled-card');
+  if (task.blocked) cls.push('blocked-card');
   if (open) cls.push('open');
-  if (ghost) cls.push('ghost');
 
   return (
     <div
       className={cls.join(' ')}
       data-task={task.id}
       onClick={(e) => {
-        if ((e.target as Element).closest('.chev,.check,.bx,button,input')) return;
+        if ((e.target as Element).closest('.chev,.check,.bx,.grip,button,input'))
+          return;
         onEdit?.();
       }}
     >
@@ -99,6 +104,12 @@ export function Card({ task, ghost, onTick, onEdit }: CardProps) {
         </span>
         <span className="age">
           {ageChip(task.status, task.createdAt, task.movedAt, Date.now())}
+        </span>
+        {/* Drag handle. The card body stays pannable so a finger can scroll
+            the column; this opts out of that (touch-action: none) so a touch
+            drag reorders instead of scrolling. */}
+        <span className="grip" aria-hidden="true" title="Drag to move">
+          ⠿
         </span>
       </div>
       {task.desc !== '' && <Desc text={task.desc} />}
@@ -143,6 +154,7 @@ export function Card({ task, ghost, onTick, onEdit }: CardProps) {
       )}
       <div className="meta">
         <span className="pdot" style={{ background: PRIO_COLOR[task.prio] }} />
+        {task.blocked && <span className="chip blk">⛔ blocked</span>}
         {due && (
           <span className={due.overdue ? 'chip ovd' : 'chip due'}>{due.label}</span>
         )}
@@ -162,6 +174,20 @@ export function Card({ task, ghost, onTick, onEdit }: CardProps) {
           ),
         )}
       </div>
+      {(onRestore || onPurge) && (
+        <div className="cardacts">
+          {onRestore && (
+            <button type="button" onClick={onRestore}>
+              Restore
+            </button>
+          )}
+          {onPurge && (
+            <button type="button" className="purge" onClick={onPurge}>
+              Delete permanently
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

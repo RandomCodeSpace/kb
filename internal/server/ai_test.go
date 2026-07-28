@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -182,11 +183,30 @@ func TestAIStoryUpstreamError(t *testing.T) {
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("upstream 500: got %d, want 502 (body=%s)", w.Code, w.Body)
 	}
-	if !strings.Contains(w.Body.String(), "upstream returned status 500") {
-		t.Errorf("error body = %q, want short upstream status message", w.Body.String())
+	// Same opaque mapping as /api/ai/test: the upstream status stays in the
+	// log, or the endpoint becomes a host/port reachability oracle.
+	if got := strings.TrimSpace(w.Body.String()); got != "connection failed" {
+		t.Errorf("error body = %q, want the opaque %q", got, "connection failed")
+	}
+	if strings.Contains(w.Body.String(), "500") {
+		t.Errorf("error response leaks the upstream status: %q", w.Body.String())
 	}
 	if strings.Contains(w.Body.String(), "sk-super-secret") {
 		t.Errorf("error response leaks the key: %q", w.Body.String())
+	}
+}
+
+// A misconfigured base URL is the caller's own setting, not a probe result,
+// so it must still say what is wrong instead of collapsing to 502.
+func TestAIStoryConfigErrorsStayVisible(t *testing.T) {
+	h, _ := newTestServer(t, Config{})
+
+	w := doReq(t, h, "POST", "/api/ai/story", `{"mode":"create","prompt":"p"}`, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unconfigured: got %d, want 400 (body=%s)", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), "not configured") {
+		t.Errorf("error body = %q, want the configuration reason", w.Body.String())
 	}
 }
 
@@ -222,6 +242,207 @@ func TestAITestBlocksPrivateUpstreamOpaquely(t *testing.T) {
 	if fake.reqBody != nil {
 		t.Error("request reached the private upstream")
 	}
+}
+
+// An upstream reply is untrusted input. Every value that lands on a single
+// markdown line must come back stripped, or the reply forges board lines.
+func TestAIStoryRejectsWireBreakingReply(t *testing.T) {
+	hostile := map[string]any{
+		"title": "Ship it\n- [x] forged !1 @2026-01-01",
+		"desc":  "line one\nline two",
+		"tags":  []any{"back\nend", "two words", "#hash", "ok"},
+		"checks": []any{
+			map[string]any{"text": "step\n- [ ] forged check", "done": false},
+			map[string]any{"text": "clean step", "done": true},
+		},
+	}
+	body, err := json.Marshal(hostile)
+	if err != nil {
+		t.Fatalf("marshal hostile draft: %v", err)
+	}
+	fake := &fakeOpenAI{content: string(body)}
+	upstream := httptest.NewServer(fake.handler())
+	defer upstream.Close()
+
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, _ := newTestServer(t, Config{})
+	configureAI(t, h, upstream.URL, "m", "")
+
+	w := doReq(t, h, "POST", "/api/ai/story", `{"mode":"create","prompt":"p"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST story: got %d (body=%s)", w.Code, w.Body)
+	}
+	var draft storyDraft
+	if err := json.Unmarshal(w.Body.Bytes(), &draft); err != nil {
+		t.Fatalf("draft JSON: %v", err)
+	}
+	if strings.ContainsAny(draft.Title, "\r\n") {
+		t.Errorf("title kept a newline: %q", draft.Title)
+	}
+	if draft.Title != "Ship it- [x] forged !1 @2026-01-01" {
+		t.Errorf("title = %q, want the newline stripped, not the text dropped", draft.Title)
+	}
+	// Multi-line descriptions are legal — the serializer indents each line.
+	if draft.Desc != "line one\nline two" {
+		t.Errorf("desc = %q, want both lines kept", draft.Desc)
+	}
+	// A tag is one wire token: newlines stripped, and the values that could
+	// not survive as tokens are dropped rather than mangled into new ones.
+	if want := []string{"backend", "ok"}; !reflect.DeepEqual(draft.Tags, want) {
+		t.Errorf("tags = %v, want %v", draft.Tags, want)
+	}
+	for _, c := range draft.Checks {
+		if strings.ContainsAny(c.Text, "\r\n") {
+			t.Errorf("check text kept a newline: %q", c.Text)
+		}
+	}
+	// The whole draft must survive the shared field validation used by every
+	// other write path.
+	if err := validateDraft(draft); err != nil {
+		t.Errorf("coerced draft still fails wire validation: %v", err)
+	}
+}
+
+func TestAIStories(t *testing.T) {
+	const adr = "# ADR 7: adopt SQLite\n\nWe will store boards in SQLite.\n"
+
+	t.Run("splits an ADR into validated drafts", func(t *testing.T) {
+		fake := &fakeOpenAI{content: `{"stories":[
+			{"title":"Add the store package","prio":1,"effort":"s","tags":["backend"],"checks":[{"text":"open the db","done":false}]},
+			{"title":"Write migrations","prio":9,"due":"2026-13-45"},
+			{"title":"Bad\nnewline","desc":"still fine"},
+			{"title":"   "},
+			"not an object"
+		]}`}
+		upstream := httptest.NewServer(fake.handler())
+		defer upstream.Close()
+
+		t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+		h, _ := newTestServer(t, Config{})
+		configureAI(t, h, upstream.URL, "m", "sk-t")
+
+		w := doReq(t, h, "POST", "/api/ai/stories", `{"adr":`+strconv.Quote(adr)+`}`, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("POST stories: got %d (body=%s)", w.Code, w.Body)
+		}
+		var res struct {
+			Stories []storyDraft `json:"stories"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+			t.Fatalf("stories JSON: %v (body=%s)", err, w.Body)
+		}
+		// The blank-title story and the non-object are dropped; everything
+		// returned passes the shared validation.
+		if len(res.Stories) != 3 {
+			t.Fatalf("got %d stories, want 3: %+v", len(res.Stories), res.Stories)
+		}
+		for _, d := range res.Stories {
+			if err := validateDraft(d); err != nil {
+				t.Errorf("returned story fails wire validation: %v (%+v)", err, d)
+			}
+		}
+		want := storyDraft{
+			Title: "Add the store package", Prio: 1, Effort: "S",
+			Tags: []string{"backend"}, Checks: []draftCheck{{Text: "open the db"}},
+		}
+		if !reflect.DeepEqual(res.Stories[0], want) {
+			t.Errorf("story[0] = %+v, want %+v", res.Stories[0], want)
+		}
+		if res.Stories[1].Prio != 4 || res.Stories[1].Due != "" {
+			t.Errorf("story[1] = %+v, want prio clamped to 4 and the impossible date dropped", res.Stories[1])
+		}
+		if res.Stories[2].Title != "Badnewline" {
+			t.Errorf("story[2] title = %q, want the newline stripped", res.Stories[2].Title)
+		}
+		// The ADR reached the model, and the request rode the shared proxy.
+		if !strings.Contains(string(fake.reqBody), "adopt SQLite") {
+			t.Errorf("ADR not passed upstream: %s", fake.reqBody)
+		}
+		if fake.auth != "Bearer sk-t" {
+			t.Errorf("Authorization = %q, want the stored key", fake.auth)
+		}
+		if fake.path != "/v1/chat/completions" {
+			t.Errorf("upstream path = %q, want /v1/chat/completions", fake.path)
+		}
+	})
+
+	t.Run("story count is clamped and capped", func(t *testing.T) {
+		fake := &fakeOpenAI{content: `{"stories":[{"title":"a"},{"title":"b"},{"title":"c"}]}`}
+		upstream := httptest.NewServer(fake.handler())
+		defer upstream.Close()
+
+		t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+		h, _ := newTestServer(t, Config{})
+		configureAI(t, h, upstream.URL, "m", "")
+
+		asked := func(t *testing.T, max string) string {
+			t.Helper()
+			body := `{"adr":"x"` + max + `}`
+			if w := doReq(t, h, "POST", "/api/ai/stories", body, nil); w.Code != http.StatusOK {
+				t.Fatalf("POST stories: got %d (body=%s)", w.Code, w.Body)
+			}
+			var sent struct {
+				Messages []chatMessage `json:"messages"`
+			}
+			if err := json.Unmarshal(fake.reqBody, &sent); err != nil {
+				t.Fatalf("upstream request JSON: %v", err)
+			}
+			return sent.Messages[len(sent.Messages)-1].Content
+		}
+		if got := asked(t, ""); !strings.Contains(got, "at most 8 stories") {
+			t.Errorf("absent max: prompt = %q, want the default of 8", got)
+		}
+		if got := asked(t, `,"max":3`); !strings.Contains(got, "at most 3 stories") {
+			t.Errorf("max 3: prompt = %q", got)
+		}
+		if got := asked(t, `,"max":999`); !strings.Contains(got, "at most 20 stories") {
+			t.Errorf("max 999: prompt = %q, want the cap of 20", got)
+		}
+		// Only an absent max takes the default; a supplied one is clamped
+		// into 1..20, so a negative value asks for one story, not eight.
+		if got := asked(t, `,"max":-5`); !strings.Contains(got, "at most 1 stories") {
+			t.Errorf("negative max: prompt = %q, want the floor of 1", got)
+		}
+
+		// The cap also bounds what a model returning more than asked can add.
+		w := doReq(t, h, "POST", "/api/ai/stories", `{"adr":"x","max":2}`, nil)
+		var res struct {
+			Stories []storyDraft `json:"stories"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+			t.Fatalf("stories JSON: %v", err)
+		}
+		if len(res.Stories) != 2 {
+			t.Errorf("got %d stories for max 2, want 2", len(res.Stories))
+		}
+	})
+
+	t.Run("bad requests", func(t *testing.T) {
+		h, _ := newTestServer(t, Config{})
+
+		big, err := json.Marshal(map[string]string{"adr": strings.Repeat("x", maxADRBytes+1)})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if w := doReq(t, h, "POST", "/api/ai/stories", string(big), nil); w.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("oversized ADR: got %d, want 413", w.Code)
+		}
+		if w := doReq(t, h, "POST", "/api/ai/stories", `{"adr":"   "}`, nil); w.Code != http.StatusBadRequest {
+			t.Errorf("blank ADR: got %d, want 400", w.Code)
+		}
+		if w := doReq(t, h, "POST", "/api/ai/stories", `not json`, nil); w.Code != http.StatusBadRequest {
+			t.Errorf("bad JSON: got %d, want 400", w.Code)
+		}
+		// An ADR exactly at the bound is accepted by the guard and only then
+		// fails on the unconfigured endpoint.
+		ok, err := json.Marshal(map[string]string{"adr": strings.Repeat("x", maxADRBytes)})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if w := doReq(t, h, "POST", "/api/ai/stories", string(ok), nil); w.Code != http.StatusBadRequest {
+			t.Errorf("ADR at the 64 KiB bound: got %d, want 400 (unconfigured)", w.Code)
+		}
+	})
 }
 
 func TestAIStoryBadRequests(t *testing.T) {

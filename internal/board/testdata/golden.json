@@ -1,0 +1,71 @@
+{
+  "title": "Ops Board",
+  "tasks": [
+    {
+      "emoji": "🚚",
+      "title": "Ship crates",
+      "desc": "Coordinate with the warehouse team.\nConfirm the loading dock slot.",
+      "status": "todo",
+      "blocked": false,
+      "prio": 1,
+      "due": "2026-07-21",
+      "effort": "L",
+      "tags": ["infra", "env::prod"],
+      "checks": [
+        { "text": "pack boxes", "done": false },
+        { "text": "book truck", "done": true }
+      ]
+    },
+    {
+      "emoji": "",
+      "title": "Write launch notes",
+      "desc": "",
+      "status": "todo",
+      "blocked": false,
+      "prio": 4,
+      "due": "",
+      "effort": "S",
+      "tags": ["docs"],
+      "checks": []
+    },
+    {
+      "emoji": "⚙️",
+      "title": "Migrate database",
+      "desc": "Dry-run against the replica first.",
+      "status": "doing",
+      "blocked": false,
+      "prio": 2,
+      "due": "2026-08-01",
+      "effort": "M",
+      "tags": ["backend", "db::postgres"],
+      "checks": [
+        { "text": "snapshot taken", "done": true },
+        { "text": "cut over", "done": false }
+      ]
+    },
+    {
+      "emoji": "🔒",
+      "title": "Provision servers",
+      "desc": "All twelve nodes reporting green.",
+      "status": "done",
+      "blocked": false,
+      "prio": 3,
+      "due": "",
+      "effort": "L",
+      "tags": ["infra"],
+      "checks": []
+    },
+    {
+      "emoji": "",
+      "title": "Draft budget",
+      "desc": "",
+      "status": "done",
+      "blocked": false,
+      "prio": 1,
+      "due": "",
+      "effort": "",
+      "tags": [],
+      "checks": []
+    }
+  ]
+}

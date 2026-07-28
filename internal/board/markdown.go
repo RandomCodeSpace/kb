@@ -24,15 +24,24 @@ var (
 	descCheckboxRe = regexp.MustCompile(`^\\*- \[[ xX]\] `)
 )
 
+// blockedToken is the title-line flag for a blocked task. It is written only
+// when Task.Blocked is true.
+const blockedToken = "%blocked"
+
 // Serialize renders a board in canonical markdown form: "# Title", one
-// "## To Do"/"## Doing"/"## Done" section per status, and per task a
-// "- [ ] emoji title !p @due ~E #tag" line followed by two-space-indented
-// description lines and checklist items. Tasks keep their slice order
-// within each section.
+// "## To Do"/"## Doing"/"## Done"/"## Cancelled" section per status, and per
+// task a "- [ ] emoji title !p @due ~E %blocked #tag" line followed by
+// two-space-indented description lines and checklist items. Tasks keep their
+// slice order within each section. The Cancelled section is a phase-3
+// addition and is written only when it has tasks, so legacy three-section
+// boards stay byte-identical on the wire.
 func Serialize(b Board) string {
 	var out strings.Builder
 	out.WriteString("# " + b.Title + "\n")
 	for _, status := range Statuses {
+		if status == StatusCancelled && !hasStatus(b, StatusCancelled) {
+			continue
+		}
 		out.WriteString("\n## " + statusLabel[status] + "\n\n")
 		for _, t := range b.Tasks {
 			if t.Status != status {
@@ -63,9 +72,20 @@ func Serialize(b Board) string {
 	return out.String()
 }
 
+// hasStatus reports whether any task on b sits in the given column.
+func hasStatus(b Board, status Status) bool {
+	for _, t := range b.Tasks {
+		if t.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
 // titleLine renders the single-line form of a task: emoji, title, then the
-// !prio (omitted when 3), @due, ~effort, and #tag tokens in that order.
-// Title words that Parse would lift into metadata are backslash-escaped.
+// !prio (omitted when 3), @due, ~effort, %blocked (omitted when false), and
+// #tag tokens in that order. Title words that Parse would lift into metadata
+// are backslash-escaped.
 func titleLine(t Task) string {
 	s := escapeTitle(t.Title)
 	if t.Emoji != "" {
@@ -80,6 +100,9 @@ func titleLine(t Task) string {
 	if t.Effort != "" {
 		s += " ~" + t.Effort
 	}
+	if t.Blocked {
+		s += " " + blockedToken
+	}
 	for _, tag := range t.Tags {
 		s += " #" + tag
 	}
@@ -87,10 +110,10 @@ func titleLine(t Task) string {
 }
 
 // escapeTitle renders a title for the wire with every metadata-shaped word
-// (!1..!4, ~S/~M/~L, @YYYY-MM-DD, #tag) — and every word already starting
-// with the escape character — prefixed by one backslash so Parse keeps it
-// as title text. Whitespace runs collapse to single spaces, matching what
-// Parse does on read.
+// (!1..!4, ~S/~M/~L, @YYYY-MM-DD, #tag, %blocked) — and every word already
+// starting with the escape character — prefixed by one backslash so Parse
+// keeps it as title text. Whitespace runs collapse to single spaces, matching
+// what Parse does on read.
 func escapeTitle(title string) string {
 	fields := strings.FieldsFunc(title, isJSSpace)
 	for i, tok := range fields {
@@ -106,6 +129,8 @@ func escapeTitle(title string) string {
 func escapeNeeded(tok string) bool {
 	switch {
 	case strings.HasPrefix(tok, `\`):
+		return true
+	case tok == blockedToken:
 		return true
 	case prioRe.MatchString(tok), effortRe.MatchString(tok):
 		return true
@@ -142,7 +167,10 @@ func Parse(input string) Board {
 			label := strings.ToLower(jsTrim(line[3:]))
 			st, ok := statusForLabel(label)
 			if !ok {
-				st = Statuses[min(2, headerIdx)]
+				// Unknown headers fall back to their position, saturating at
+				// the last column, so legacy three-section files keep their
+				// old mapping and a fourth unknown section lands in cancelled.
+				st = Statuses[min(len(Statuses)-1, headerIdx)]
 			}
 			status = st
 			haveStatus = true
@@ -211,7 +239,8 @@ func stripCheckbox(s string) (done bool, rest string, ok bool) {
 // parseTitleLine decodes a task title line: optional leading
 // extended-pictographic emoji (with optional VS16), then whitespace-split
 // tokens where !1..!4 sets priority, @YYYY-MM-DD sets due, ~S/~M/~L sets
-// effort, #x adds a tag, and everything else stays in the title.
+// effort, %blocked sets blocked, #x adds a tag, and everything else stays in
+// the title.
 // A "- [x]" checkbox forces status done regardless of section.
 func parseTitleLine(raw string, status Status, done bool, now time.Time) Task {
 	rest := jsTrim(raw)
@@ -236,6 +265,8 @@ func parseTitleLine(raw string, status Status, done bool, now time.Time) Task {
 			t.Due = tok[1:]
 		case effortRe.MatchString(tok):
 			t.Effort = tok[1:]
+		case tok == blockedToken:
+			t.Blocked = true
 		case len(tok) > 1 && tok[0] == '#':
 			t.Tags = append(t.Tags, tok[1:])
 		default:
@@ -266,6 +297,14 @@ func matchEmoji(s string) string {
 // as single tokens (tags) must not contain any.
 func ContainsSpace(s string) bool {
 	return strings.IndexFunc(s, isJSSpace) >= 0
+}
+
+// IsBlank reports whether s is empty or holds nothing but runes the wire
+// format's token splitter treats as whitespace. A blank title serializes to
+// a bare "- [ ] " line, which Parse reads back as description text rather
+// than as a task.
+func IsBlank(s string) bool {
+	return jsTrim(s) == ""
 }
 
 // IsSingleEmoji reports whether s is exactly the leading-emoji token the

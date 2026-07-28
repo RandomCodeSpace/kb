@@ -7,12 +7,18 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // backslash on the wire (stripped by parse). The leading \* keeps
 // already-escaped lines stable across repeated round trips.
 const DESC_CHECKBOX_RE = /^\\*- \[[ xX]\] /;
+// Title-line flag for a blocked task. Serialized only when blocked is true.
+const BLOCKED_TOKEN = '%blocked';
 
 export function serialize(board: Board): string {
   let out = `# ${board.title}\n`;
   for (const status of STATUSES) {
+    const tasks = board.tasks.filter((x) => x.status === status);
+    // Cancelled is a phase-3 addition: emitting its header only when it has
+    // tasks keeps legacy three-section boards byte-identical on the wire.
+    if (status === 'cancelled' && tasks.length === 0) continue;
     out += `\n## ${STATUS_LABEL[status]}\n\n`;
-    for (const t of board.tasks.filter((x) => x.status === status)) {
+    for (const t of tasks) {
       out += `- [${status === 'done' ? 'x' : ' '}] ${titleLine(t)}\n`;
       for (const line of t.desc.split('\n')) {
         const trimmed = line.trim();
@@ -38,18 +44,20 @@ export function titleLine(t: Task): string {
   if (t.prio !== 3) s += ` !${t.prio}`;
   if (t.due) s += ` @${t.due}`;
   if (t.effort) s += ` ~${t.effort}`;
+  if (t.blocked) s += ` ${BLOCKED_TOKEN}`;
   for (const tag of t.tags) s += ` #${tag}`;
   return s;
 }
 
 /**
  * Escape a title word that parse() would otherwise consume as metadata
- * (!prio, @due, ~effort, #tag) — or that starts with the escape character
- * itself — by prefixing one backslash, which parse() strips.
+ * (!prio, @due, ~effort, #tag, %blocked) — or that starts with the escape
+ * character itself — by prefixing one backslash, which parse() strips.
  */
 function escapeToken(tok: string): string {
   const needsEscape =
     tok.startsWith('\\') ||
+    tok === BLOCKED_TOKEN ||
     /^![1-4]$/.test(tok) ||
     /^~[SML]$/.test(tok) ||
     (tok.startsWith('@') && DATE_RE.test(tok.slice(1))) ||
@@ -75,9 +83,12 @@ export function parse(input: string): Board {
     if (line.startsWith('## ')) {
       headerIdx++;
       const label = line.slice(3).trim().toLowerCase();
+      // Unknown headers fall back to their position, saturating at the last
+      // column, so legacy three-section files keep their old mapping and a
+      // fourth unknown section lands in cancelled.
       status =
         STATUSES.find((s) => STATUS_LABEL[s].toLowerCase() === label) ??
-        STATUSES[Math.min(2, headerIdx)];
+        STATUSES[Math.min(STATUSES.length - 1, headerIdx)];
       current = null;
       continue;
     }
@@ -135,6 +146,7 @@ export function parseTitleLine(raw: string, status: Status, done: boolean): Task
     else if (/^![1-4]$/.test(tok)) t.prio = Number(tok.slice(1)) as Prio;
     else if (tok.startsWith('@') && DATE_RE.test(tok.slice(1))) t.due = tok.slice(1);
     else if (/^~[SML]$/.test(tok)) t.effort = tok.slice(1) as Effort;
+    else if (tok === BLOCKED_TOKEN) t.blocked = true;
     else if (tok.length > 1 && tok.startsWith('#')) t.tags.push(tok.slice(1));
     else words.push(tok);
   }

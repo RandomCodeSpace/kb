@@ -7,9 +7,14 @@ export interface BoardStore {
   save(board: Board): void;
 }
 
-const BOARD_KEY = 'webtui.board.v1';
-const STREAK_KEY = 'webtui.streak.v1';
-const DIRTY_KEY = 'webtui.dirty.v1';
+const BOARD_KEY = 'kb.board.v1';
+const STREAK_KEY = 'kb.streak.v1';
+const DIRTY_KEY = 'kb.dirty.v1';
+/** Set once the pre-rename values have been copied forward (see below). */
+const MIGRATED_KEY = 'kb.migrated.v1';
+
+const KEY_PREFIX = 'kb.';
+const LEGACY_PREFIX = 'webtui.';
 
 /**
  * Per-user key: the 'default' namespace keeps the legacy un-suffixed keys so
@@ -19,10 +24,62 @@ function nsKey(base: string, ns: string): string {
   return ns === 'default' ? base : `${base}.${ns}`;
 }
 
+/**
+ * One-time, non-destructive copy of the pre-rename `webtui.*` values to their
+ * `kb.*` keys. The old keys are deliberately left in place: a user who rolls
+ * back to an older build must not lose their board. `flagKey` makes it run
+ * exactly once per storage — re-copying later would resurrect state the new
+ * code has since removed (a cleared dirty flag, a signed-out identity).
+ */
+export function migrateLegacyKeys(
+  storage: Storage,
+  flagKey: string,
+  keys: readonly string[],
+): void {
+  try {
+    if (storage.getItem(flagKey) === '1') return;
+    for (const key of keys) {
+      if (!key.startsWith(KEY_PREFIX)) continue;
+      if (storage.getItem(key) !== null) continue;
+      const legacy = storage.getItem(LEGACY_PREFIX + key.slice(KEY_PREFIX.length));
+      if (legacy !== null) storage.setItem(key, legacy);
+    }
+    storage.setItem(flagKey, '1');
+  } catch {
+    // Storage unavailable — nothing to migrate.
+  }
+}
+
+const migrated = new Set<string>();
+
+/** Migrate this namespace's keys before the first read/write touches them. */
+function ensureMigrated(ns: string): void {
+  if (migrated.has(ns)) return;
+  migrated.add(ns);
+  try {
+    migrateLegacyKeys(localStorage, nsKey(MIGRATED_KEY, ns), [
+      nsKey(BOARD_KEY, ns),
+      nsKey(STREAK_KEY, ns),
+      nsKey(DIRTY_KEY, ns),
+    ]);
+  } catch {
+    // Storage unavailable — nothing to migrate.
+  }
+}
+
+/** Board plus whether it came from a fresh seed rather than storage. */
+export interface LoadedBoard {
+  board: Board;
+  seeded: boolean;
+}
+
 export class LocalStore implements BoardStore {
+  private readonly ns: string;
   private readonly key: string;
 
   constructor(ns: string = 'default') {
+    this.ns = ns;
+    ensureMigrated(ns);
     this.key = nsKey(BOARD_KEY, ns);
   }
 
@@ -37,6 +94,19 @@ export class LocalStore implements BoardStore {
   save(board: Board): void {
     localStorage.setItem(this.key, JSON.stringify(board));
   }
+
+  /**
+   * Load the stored board, or seed a fresh one. A seeded board is not local
+   * work: it must never be pushed over a board the server already has, so
+   * seeding clears the dirty flag instead of setting it. Callers use `seeded`
+   * to adopt the server board on first contact rather than uploading the demo.
+   */
+  loadOrSeed(): LoadedBoard {
+    const board = this.load();
+    if (board) return { board, seeded: false };
+    setDirty(this.ns, false);
+    return { board: seedBoard(), seeded: true };
+  }
 }
 
 /**
@@ -46,6 +116,7 @@ export class LocalStore implements BoardStore {
  * local changes.
  */
 export function loadDirty(ns: string = 'default'): boolean {
+  ensureMigrated(ns);
   try {
     return localStorage.getItem(nsKey(DIRTY_KEY, ns)) === '1';
   } catch {
@@ -54,6 +125,7 @@ export function loadDirty(ns: string = 'default'): boolean {
 }
 
 export function setDirty(ns: string, dirty: boolean): void {
+  ensureMigrated(ns);
   try {
     if (dirty) localStorage.setItem(nsKey(DIRTY_KEY, ns), '1');
     else localStorage.removeItem(nsKey(DIRTY_KEY, ns));
@@ -62,33 +134,71 @@ export function setDirty(ns: string, dirty: boolean): void {
   }
 }
 
-export function shippedToday(ns: string = 'default'): number {
+/** Today's shipped record: the cards shipped, not a count (see bumpShipped). */
+interface Streak {
+  date: string;
+  ids: string[];
+}
+
+/**
+ * Identity of a card for the shipped counter. A task id cannot be used: the
+ * wire format does not carry ids, so parse() mints new ones on every server
+ * refetch and the same card would be counted a second time after a reload.
+ * The title is what survives that round trip. Two cards sharing a title count
+ * once, which is the safe direction — the counter must never inflate.
+ */
+export function shipKey(task: { title: string }): string {
+  return task.title.trim();
+}
+
+/**
+ * Today's record, or an empty one. A record from an earlier day (or the
+ * pre-rename `{date, n}` counter shape) reads as empty — the streak is a
+ * cosmetic daily figure, so a rollover simply starts over.
+ */
+function loadStreak(ns: string): Streak {
+  const date = new Date().toDateString();
+  ensureMigrated(ns);
   try {
     const raw = localStorage.getItem(nsKey(STREAK_KEY, ns));
-    if (!raw) return 0;
-    const { date, n } = JSON.parse(raw) as { date: string; n: number };
-    return date === new Date().toDateString() ? n : 0;
+    if (!raw) return { date, ids: [] };
+    const v = JSON.parse(raw) as { date?: unknown; ids?: unknown };
+    if (v.date !== date || !Array.isArray(v.ids)) return { date, ids: [] };
+    return { date, ids: v.ids.filter((x): x is string => typeof x === 'string') };
   } catch {
-    return 0;
+    return { date, ids: [] };
   }
 }
 
-export function bumpShipped(ns: string = 'default'): number {
-  const n = shippedToday(ns) + 1;
-  localStorage.setItem(
-    nsKey(STREAK_KEY, ns),
-    JSON.stringify({ date: new Date().toDateString(), n }),
-  );
-  return n;
+export function shippedToday(ns: string = 'default'): number {
+  return loadStreak(ns).ids.length;
+}
+
+/**
+ * Record the card `key` (see shipKey) as shipped today and return the day's
+ * count. Storing keys rather than a counter makes this idempotent per card:
+ * dragging one card Done → Doing → Done still counts once, and so does
+ * shipping it again after a reload. Moving a card out of Done never
+ * decrements — it did ship today.
+ */
+export function bumpShipped(ns: string, key: string): number {
+  const streak = loadStreak(ns);
+  if (!streak.ids.includes(key)) streak.ids.push(key);
+  try {
+    localStorage.setItem(nsKey(STREAK_KEY, ns), JSON.stringify(streak));
+  } catch {
+    // Storage unavailable — the count lives on in memory for this session.
+  }
+  return streak.ids.length;
 }
 
 export function seedBoard(): Board {
   return {
-    title: 'webtui',
+    title: 'kb',
     tasks: [
       newTask({
         emoji: '👋', title: 'Drag me to Doing', prio: 2, status: 'todo',
-        desc: 'Cards move between columns — grab anywhere and drop.',
+        desc: 'Drag the ⠿ grip (or anywhere with a mouse) and drop.',
         tags: ['start::here'],
       }),
       newTask({

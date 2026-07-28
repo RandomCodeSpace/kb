@@ -111,7 +111,7 @@ export function SettingsModal({ identity, onClose, onSaved }: SettingsModalProps
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="modal" role="dialog" aria-modal="true" aria-label="Settings">
+      <div className="modal settings" role="dialog" aria-modal="true" aria-label="Settings">
         <h2>Settings · AI drafting</h2>
         {loadError && (
           <p className="flash err" role="alert">

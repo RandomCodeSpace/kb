@@ -11,12 +11,13 @@ server for coding agents.
 
 ## Features
 
-- **Classic status columns** — To Do / Doing / Done.
+- **Status columns** — To Do / Doing / Done / Cancelled (soft delete: cards can
+  be restored).
 - **Rich cards** — emoji, wrapping title, description snippet, inline
   expandable checklist (tick subtasks directly on the board), chunky progress
   bar, priority dot, relative due chip ("in 5d" / "overdue · 6d"), effort chip
-  (S/M/L), plain tags, and GitLab-style scoped labels (`key::value` two-tone
-  pills).
+  (S/M/L), blocked flag, plain tags, and GitLab-style scoped labels
+  (`key::value` two-tone pills).
 - **Juice that earns its place** — confetti on ship, mini-confetti on subtask
   tick, ticking the last subtask auto-ships the card, daily streak counter,
   drag with lift shadow and column highlight (pointer events, no dnd library).
@@ -26,8 +27,8 @@ server for coding agents.
   boards in one SQLite file (`modernc.org/sqlite`, pure Go, WAL mode, no
   CGO). Existing per-user `.md` boards are imported automatically on first
   start.
-- **CLI** — `kb add/list/update/move/done/rm` against the local database, or
-  against a remote kb server with `KB_SERVER` (see [CLI](#cli)).
+- **CLI** — `kb add/list/update/move/done/cancel/restore/rm` against the local
+  database, or against a remote kb server with `KB_SERVER` (see [CLI](#cli)).
 - **MCP server** — `kb mcp` exposes the board as five task tools over stdio
   for agent harnesses (see [MCP server](#mcp-server)).
 - **AI assist** — draft a card from a prompt via any OpenAI-compatible
@@ -64,10 +65,9 @@ kb list
 kb mcp                               # MCP server on stdio for agents
 ```
 
-> The `dist/` directory (the built SPA) is committed to the repository on
-> purpose: `go install` builds from the module source, and the server embeds
-> `dist/` at compile time. Without it in the tree, `go install` would produce a
-> server with no frontend.
+> To build kb from source, run `npm run build` to generate the embedded SPA
+> into `dist/`, then `CGO_ENABLED=0 go build .` for the binary. Release
+> archives include the pre-built `dist/` for reproducible builds.
 
 ## Storage
 
@@ -99,20 +99,38 @@ stored AI API keys (see [AI assist and settings](#ai-assist-and-settings)).
 
 ## API
 
-| Method | Path            | Auth | Behavior                                                          |
-| ------ | --------------- | ---- | ----------------------------------------------------------------- |
-| GET    | `/api/health`   | none | `200` JSON `{"ok":true}`                                          |
-| GET    | `/api/board`    | yes  | `200` `text/markdown` (your board), `404` if none saved yet       |
-| PUT    | `/api/board`    | yes  | Body is `text/markdown`; replaces your board; responds `204`      |
-| GET    | `/api/labels`   | yes  | `200` JSON array of your labels, most recently used first         |
-| GET    | `/api/settings` | yes  | `200` JSON `{"ai_base_url","ai_model","has_key"}` (never the key) |
-| PUT    | `/api/settings` | yes  | JSON patch `{"ai_base_url","ai_model","ai_key"}`; responds `204`  |
-| POST   | `/api/ai/test`  | yes  | 1-token ping of the configured endpoint; `{"ok":true}` or error   |
-| POST   | `/api/ai/story` | yes  | Prompt in, structured card draft out (see AI assist)              |
-| GET    | `/*`            | none | Embedded SPA static files                                         |
+| Method | Path              | Auth | Behavior                                                              |
+| ------ | ----------------- | ---- | --------------------------------------------------------------------- |
+| GET    | `/api/health`     | none | `200` JSON `{"ok":true}`                                              |
+| GET    | `/api/config`     | none | `200` JSON `{"azure_client_id","azure_tenant_id"}` (see Entra below)  |
+| GET    | `/api/board`      | yes  | `200` `text/markdown` (your board), `404` if none saved yet; both carry an `ETag` |
+| PUT    | `/api/board`      | yes  | Body is `text/markdown`; replaces your board; `204`, or `409` on a stale `If-Match` |
+| GET    | `/api/labels`     | yes  | `200` JSON array of your labels, most recently used first             |
+| GET    | `/api/settings`   | yes  | `200` JSON `{"ai_base_url","ai_model","has_key"}` (never the key)     |
+| PUT    | `/api/settings`   | yes  | JSON patch `{"ai_base_url","ai_model","ai_key"}`; responds `204`      |
+| POST   | `/api/ai/test`    | yes  | 1-token ping of the configured endpoint; `{"ok":true}` or error       |
+| POST   | `/api/ai/story`   | yes  | Prompt in, structured card draft out (see AI assist)                  |
+| POST   | `/api/ai/stories` | yes  | `{"adr","max"}` in, `{"stories":[…]}` out (see AI assist)             |
+| GET    | `/*`              | none | Embedded SPA static files                                             |
 
-Auth applies to every `/api/*` route except `/api/health`; static files are
-always open.
+Auth applies to every `/api/*` route except `/api/health` and `/api/config`
+(the SPA has to read its sign-in configuration before there is anyone to
+authenticate); static files are always open.
+
+**Content types are enforced.** A request with a body must declare it:
+`text/markdown` on `PUT /api/board`, `application/json` everywhere else.
+Anything else — including the `text/plain` and form types a cross-site request
+can send without a preflight — is rejected with `415`. This is deliberate: it
+is what stops another site's page from driving your API.
+
+**Concurrent writes.** `GET /api/board` returns an `ETag` — a token for the
+board's exact contents, so a write by any surface (SPA, CLI, MCP) changes it.
+Send it back as `If-Match` on your `PUT` and a board that changed underneath
+you answers `409` (with the current `ETag`) instead of overwriting the other
+writer; refetch, merge, and retry. The `404` from a board that does not exist
+yet carries the token too, so a first write is conditional as well. A `PUT`
+with no `If-Match` is unconditional and last-writer-wins, which will silently
+delete tasks another surface created — always send the token.
 
 ## The board format
 
@@ -130,16 +148,36 @@ The markdown wire/export format. Example:
 
 ## Doing
 
+- [ ] 🔌 Wire up SSO %blocked #auth
+
 ## Done
 
 - [x] 🧱 Init repo
+
+## Cancelled
+
+- [ ] 🧪 Spike a second renderer
 ```
 
 Tokens on the title line, parsed and stripped: `!1..!4` priority, `@YYYY-MM-DD`
-due date, `~S|~M|~L` effort, `#tag` (scoped labels are just tags containing
-`::`). A leading pictographic character is the card emoji. Indented plain lines
-form the description; indented checkboxes form the checklist. Timestamps are
-not serialized (they reset on import).
+due date, `~S|~M|~L` effort, `%blocked` (the card is flagged blocked), `#tag`
+(scoped labels are just tags containing `::`). A leading pictographic character
+is the card emoji. Indented plain lines form the description; indented
+checkboxes form the checklist. Timestamps are not serialized (they reset on
+import).
+
+A title word that would otherwise be read as a token is escaped with one
+leading backslash, which the parser strips: write `\%blocked` for a card whose
+title really says `%blocked`, and likewise `\!1`, `\~S`, `\@2026-07-21`,
+`\#hash`, or a word that starts with `\` itself.
+
+Sections are `## To Do`, `## Doing`, `## Done` and `## Cancelled`, matched by
+name (case-insensitively) and, for unrecognized headings, by position in that
+order. `## Cancelled` comes after `## Done` and is written only when it has
+cards, so a legacy three-section board round-trips byte-for-byte. Cancelled is
+the soft-delete column (`kb cancel` / `kb restore`, and the SPA's delete
+button); it is excluded from the shipped streak, progress totals and the
+default `kb list`.
 
 ## CLI
 
@@ -150,20 +188,27 @@ the CLI. Exit codes: `0` ok, `1` runtime error, `2` usage error.
 kb add "title"            add a task
 kb list                   list tasks
 kb update <id>            patch a task (only provided flags change)
-kb move <id> <status>     move a task to todo, doing, or done
+kb move <id> <status>     move a task to todo, doing, done, or cancelled
 kb done <id>              shorthand for: move <id> done
-kb rm <id>                delete a task (requires --yes)
+kb cancel <id>            soft delete: move a task to cancelled, undo with restore
+kb restore <id>           move a cancelled task back to todo
+kb rm <id>                hard delete, no undo (requires --yes)
 kb help                   show help
 ```
 
 Common flags on every command: `--user name` (board owner, default
 `default`) and `--data dir` (default `$KB_DATA` or `~/.local/share/kb`).
 
-Card flags on `add` and `update`: `--desc`, `--status todo|doing|done`,
-`--prio 1-4`, `--due YYYY-MM-DD`, `--effort S|M|L`, `--emoji`, `--tag`
-(repeatable), `--check` (repeatable), and `--title` (update only; `add` takes
-the title as its argument). `list` takes `--status` and `--json` (full tasks
-as JSON).
+Card flags on `add` and `update`: `--desc`, `--status
+todo|doing|done|cancelled`, `--prio 1-4`, `--due YYYY-MM-DD`, `--effort
+S|M|L`, `--emoji`, `--tag` (repeatable), `--check` (repeatable),
+`--blocked` / `--no-blocked`, and `--title` (update only; `add` takes the
+title as its argument). `list` takes `--status`, `--all` (cancelled tasks are
+hidden by default) and `--json` (full tasks as JSON).
+
+Finishing a task that still has open checklist items, or one flagged blocked,
+needs `--force` on `done`, `move <id> done` and `update <id> --status done`.
+Without it kb prints what is still open and exits non-zero — it never prompts.
 
 ```bash
 kb add "Migrate CI runner" --prio 1 --due 2026-08-01 --effort L \
@@ -171,13 +216,16 @@ kb add "Migrate CI runner" --prio 1 --due 2026-08-01 --effort L \
 # added 8c1f4b02 Migrate CI runner
 
 kb list
-# ID        STATUS  PRIO  TITLE              TAGS
-# 8c1f4b02  todo    1     Migrate CI runner  infra,env::prod
+# ID        STATUS  PRIO  BLOCKED  TITLE              TAGS
+# 8c1f4b02  todo    1     -        Migrate CI runner  infra,env::prod
 
 kb update 8c1f --desc "Old runner image is EOL this month." --effort M
+kb update 8c1f --blocked          # waiting on something; --no-blocked clears it
 kb move 8c1f doing
-kb done 8c1f
-kb rm 8c1f --yes    # without --yes it previews the task and refuses
+kb done 8c1f --force              # --force: ship with checklist items still open
+kb cancel 8c1f                    # soft delete; kb restore 8c1f undoes it
+kb list --all                     # cancelled tasks are hidden without this
+kb rm 8c1f --yes                  # hard delete; without --yes it previews and refuses
 ```
 
 In local mode, tasks are addressed by UUID — any unique prefix works
@@ -203,8 +251,8 @@ servers expect short-lived Entra tokens, which don't fit a static env var).
 
 The markdown wire format carries no task ids, so **remote task ids are
 ephemeral listing indexes** — `i1`, `i2`, ... in listing order (To Do, Doing,
-Done; top to bottom within a column). They are valid only against the board
-as currently listed: re-run `kb list` after the board changes before
+Done, Cancelled; top to bottom within a column). They are valid only against
+the board as currently listed: re-run `kb list` after the board changes before
 addressing tasks. A bare number (`kb done 1`) is accepted as shorthand.
 
 ## MCP server
@@ -222,10 +270,17 @@ Tools:
 | Tool          | Purpose                                                              |
 | ------------- | -------------------------------------------------------------------- |
 | `list_tasks`  | List tasks (optionally one column), ordered by column then position |
-| `add_task`    | Add a task; only `title` is required                                 |
+| `add_task`    | Add a task; only `title` is required (`blocked` optional)            |
 | `update_task` | Patch fields of a task by id (unique id prefix accepted)             |
-| `move_task`   | Move a task to `todo`, `doing`, or `done`                            |
-| `delete_task` | Delete a task by id                                                  |
+| `move_task`   | Move a task to `todo`, `doing`, `done`, or `cancelled`               |
+| `delete_task` | Delete a task by id; soft by default (see below)                     |
+
+`move_task` to `done` fails with an error naming the open checklist items, or
+reporting the blocked flag, unless `force: true` is passed.
+
+`delete_task` takes `soft: boolean`, **default `true`**: the task moves to the
+`cancelled` column and can be moved back, so an agent cannot destroy work by
+accident. Pass `soft: false` for the permanent row delete.
 
 Harness configuration, Claude-style JSON (Claude Code `.mcp.json`, Claude
 Desktop `claude_desktop_config.json`):
@@ -260,6 +315,15 @@ modal. **You always confirm before anything is saved.** The server calls the
 model, clamps every field into the card contract, and never forwards your API
 key to the browser.
 
+The **Split ADR** header button (shown only when AI is configured) turns an
+architecture decision record into a set of stories. `POST /api/ai/stories`
+takes `{"adr":"<markdown>","max":<1..20, default 8>}` and returns
+`{"stories":[…]}`, where each story has the same shape `/api/ai/story`
+returns. An ADR over 64 KiB is rejected (`413`), the ADR text is never stored
+server-side, and every returned story goes through the same field clamping.
+The SPA lists the proposals with checkboxes and a destination column; nothing
+reaches the board until you press **Add selected**.
+
 Configure it on the gear screen (or via `PUT /api/settings`): an
 OpenAI-compatible base URL, a model name, and an API key. The base URL is
 accepted with or without `/v1`; the server appends `/v1/chat/completions`.
@@ -291,6 +355,26 @@ per-user label registry with a last-used stamp. `GET /api/labels` returns
 your labels most-recently-used first and feeds the combobox in the story
 modal — existing labels are suggested, free text is always allowed. Scoped
 labels (`key::value`, e.g. `env::prod`) render as two-tone pills.
+
+## Debug overlay
+
+A hidden performance and capability readout overlay, enabled by the URL query
+`?debug=1`. The flag is persisted in localStorage (`kb.debug.v1`) so it
+survives reloads, and is dismissible from the overlay itself.
+
+When active, the overlay displays:
+- **FPS meter** — rolling average frame rate over the last ~60 frames, updated
+  ≤4 times per second so the readout is readable.
+- **Renderer capabilities** — shows whether `navigator.gpu` (WebGPU) is
+  available and whether a WebGL2 context can be created, each marked as
+  available/unavailable. Note: the board is DOM-rendered and confetti uses
+  canvas 2D; this is a capability survey only.
+- **Frame-rate cap selector** — choose 60 / 90 / 120 FPS or uncapped. The
+  selected cap throttles the app's animation frame work by skipping frames,
+  and can only *limit* the display refresh rate, never raise it.
+
+The overlay is keyboard-dismissible, does not intercept pointer events over the
+board, and carries zero performance cost when disabled.
 
 ## Identity modes
 
@@ -342,17 +426,25 @@ You need one app registration; no client secret, no Graph permissions.
 3. Under **API permissions**, the default delegated `openid`, `profile`,
    `email` scopes are all kb needs. **Do not add Microsoft Graph or any other
    permission.**
-4. Copy the **Directory (tenant) ID** and **Application (client) ID** into the
-   frontend build environment:
+4. Copy the **Directory (tenant) ID** and **Application (client) ID** onto the
+   server as `KB_AZURE_TENANT_ID` / `KB_AZURE_CLIENT_ID` and restart it. That
+   is all a released binary needs: the server validates the tokens the SPA
+   sends *and* serves the two IDs to the browser from `GET /api/config`, which
+   is what turns on the Microsoft sign-in button. Both IDs are public by
+   design — every MSAL SPA ships them in its bundle — so nothing secret is
+   exposed; the endpoint returns these two fields and nothing else.
+
+5. Only when running the Vite dev server (`npm run dev`, no kb server behind
+   it) do you need the build-time fallback:
 
    ```bash
    VITE_AZURE_TENANT_ID=<tenant id>
    VITE_AZURE_CLIENT_ID=<client id>
-   npm run build
+   npm run dev
    ```
 
-5. Set the same two IDs on the server as `KB_AZURE_TENANT_ID` /
-   `KB_AZURE_CLIENT_ID` so it validates the tokens the SPA sends.
+   `GET /api/config` wins whenever it answers, so a value baked into the
+   bundle never overrides the running server's configuration.
 
 ## Server environment reference
 
@@ -363,14 +455,15 @@ You need one app registration; no client secret, no Graph permissions.
 | `KB_AI_ALLOW_PRIVATE`  | server, runtime    | unset                | `1` lets the AI proxy reach loopback/private addresses (local Ollama)        |
 | `KB_DATA`              | all modes, runtime | `~/.local/share/kb`  | Data directory: `kb.db`, `secret`, legacy `.md` boards (`--data` overrides)  |
 | `KB_TOKEN`             | server, runtime    | unset                | Shared bearer token; enables token mode when Azure vars are unset            |
-| `KB_AZURE_TENANT_ID`   | server, runtime    | unset                | Entra tenant ID; with client ID, enables Entra mode                          |
-| `KB_AZURE_CLIENT_ID`   | server, runtime    | unset                | Entra app (client) ID; expected token audience                               |
-| `KB_SECRET`            | server/CLI/MCP     | unset                | AES-GCM secret for stored AI keys; if unset, generated at `<data>/secret`    |
+| `KB_AZURE_TENANT_ID`   | server, runtime    | unset                | Entra tenant ID; with client ID, enables Entra mode; served to the SPA by `GET /api/config` |
+| `KB_AZURE_CLIENT_ID`   | server, runtime    | unset                | Entra app (client) ID; expected token audience; served to the SPA by `GET /api/config` |
+| `KB_ALLOWED_HOSTS`     | server, runtime    | unset                | Comma-separated extra `Host` values the API accepts; loopback is always allowed |
+| `KB_SECRET`            | server/CLI/MCP     | unset                | AES-GCM secret for stored AI keys; if unset, generated at `<data>/secret`. Under 16 bytes the server refuses to start and the CLI/MCP warn |
 | `KB_SERVER`            | CLI, runtime       | unset                | Remote mode: base URL of a kb server; CLI talks HTTP instead of the local DB |
 | `KB_SERVER_TOKEN`      | CLI, runtime       | unset                | Bearer token the CLI sends in remote mode (the server's `KB_TOKEN`)          |
 | `KB_USER`              | MCP, runtime       | `default`            | Board user for `kb mcp` (`--user` flag overrides)                            |
-| `VITE_AZURE_TENANT_ID` | frontend, build    | unset                | Baked into the SPA at `npm run build`; enables the MSAL sign-in flow         |
-| `VITE_AZURE_CLIENT_ID` | frontend, build    | unset                | Baked into the SPA at `npm run build`; MSAL client ID                        |
+| `VITE_AZURE_TENANT_ID` | frontend, build    | unset                | Dev-server fallback only: baked into the bundle, used when `GET /api/config` returns no tenant ID. For a released binary set `KB_AZURE_TENANT_ID` |
+| `VITE_AZURE_CLIENT_ID` | frontend, build    | unset                | Dev-server fallback only: baked into the bundle, used when `GET /api/config` returns no client ID. For a released binary set `KB_AZURE_CLIENT_ID` |
 
 Mode precedence at startup: Azure pair set → Entra mode; else `KB_TOKEN` set →
 token mode; else open mode.

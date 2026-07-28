@@ -22,6 +22,26 @@ export function burst(x: number, y: number, n: number): void {
   }
 }
 
+let minFrameMs = 0;
+
+/**
+ * Cap the animation loop's frame rate (debug overlay). A cap can only *limit*
+ * the rate — it can never raise it above the display refresh. `null` (or a
+ * non-positive target) means uncapped.
+ */
+export function setFrameCap(fps: number | null): void {
+  minFrameMs = fps !== null && fps > 0 ? 1000 / fps : 0;
+}
+
+/**
+ * Whether a frame arriving at `now` may render given the cap and the time of
+ * the last rendered frame. The 1ms slack keeps a 60Hz display capped at 60
+ * from halving to 30 on ordinary frame jitter.
+ */
+export function frameDue(now: number, last: number): boolean {
+  return minFrameMs <= 0 || now - last >= minFrameMs - 1;
+}
+
 /** Drives the overlay canvas; called once from the Confetti component. */
 export function startLoop(canvas: HTMLCanvasElement): () => void {
   const ctx = canvas.getContext('2d')!;
@@ -39,6 +59,12 @@ export function startLoop(canvas: HTMLCanvasElement): () => void {
   window.addEventListener('resize', resize);
 
   const loop = (now: number) => {
+    // Frame skipped by the cap: `last` stays put, so the next rendered frame
+    // integrates the full elapsed time and the motion keeps its real speed.
+    if (!frameDue(now, last)) {
+      raf = requestAnimationFrame(loop);
+      return;
+    }
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);

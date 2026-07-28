@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
+// Shared Go/TS codec fixtures, inlined by Vite so no filesystem access (and no
+// @types/node) is needed. See the "shared Go/TS codec fixtures" suite below.
+import goldenMd from '../../internal/board/testdata/golden.md?raw';
+import goldenJson from '../../internal/board/testdata/golden.json?raw';
+import phase3Md from '../../internal/board/testdata/phase3.md?raw';
+import phase3Json from '../../internal/board/testdata/phase3.json?raw';
 import { parse, serialize } from './markdown';
-import type { Board } from './model';
+import type { Board, Task } from './model';
 import { newTask } from './model';
 
 const DOC = `# Ops Board
@@ -30,6 +36,7 @@ function projection(board: Board) {
       title: t.title,
       desc: t.desc,
       status: t.status,
+      blocked: t.blocked,
       prio: t.prio,
       due: t.due,
       effort: t.effort,
@@ -129,6 +136,147 @@ describe('parse', () => {
     expect(board.tasks[0].title).toBe('Something someday');
     expect(board.tasks[0].status).toBe('todo');
   });
+
+  it('maps unknown headers by position, saturating at cancelled', () => {
+    const board = parse(
+      [
+        '# B',
+        '',
+        '## Backlog',
+        '',
+        '- [ ] a',
+        '',
+        '## In Progress',
+        '',
+        '- [ ] b',
+        '',
+        '## Shipped',
+        '',
+        '- [ ] c',
+        '',
+        '## Overflow',
+        '',
+        '- [ ] d',
+        '',
+        '## Beyond',
+        '',
+        '- [ ] e',
+      ].join('\n'),
+    );
+    expect(board.tasks.map((t) => t.status)).toEqual([
+      'todo',
+      'doing',
+      'done',
+      'cancelled',
+      'cancelled',
+    ]);
+  });
+});
+
+describe('blocked', () => {
+  it('serializes %blocked only when set and parses it back', () => {
+    const board: Board = {
+      title: 'B',
+      tasks: [
+        newTask({
+          title: 'Waiting on legal',
+          status: 'doing',
+          blocked: true,
+          effort: 'M',
+          tags: ['infra'],
+        }),
+        newTask({ title: 'Free to go', status: 'doing' }),
+      ],
+    };
+    const wire = serialize(board);
+    expect(wire).toContain('- [ ] Waiting on legal ~M %blocked #infra\n');
+    expect(wire).not.toContain('Free to go %blocked');
+    const again = parse(wire);
+    expect(again.tasks[0].blocked).toBe(true);
+    expect(again.tasks[0].title).toBe('Waiting on legal');
+    expect(again.tasks[1].blocked).toBe(false);
+  });
+
+  it('keeps a literal %blocked title word out of the flag', () => {
+    const titles = ['%blocked', 'Why %blocked matters', '\\%blocked', '%blockedish'];
+    for (const title of titles) {
+      const again = parse(serialize({ title: 'B', tasks: [newTask({ title })] }));
+      expect(again.tasks).toHaveLength(1);
+      expect(again.tasks[0].title).toBe(title);
+      expect(again.tasks[0].blocked).toBe(false);
+    }
+  });
+});
+
+describe('cancelled', () => {
+  it('emits the Cancelled section after Done and parses it back', () => {
+    const board: Board = {
+      title: 'B',
+      tasks: [
+        newTask({ title: 'Landed', status: 'done' }),
+        newTask({ title: 'Dropped', status: 'cancelled' }),
+      ],
+    };
+    const wire = serialize(board);
+    expect(wire).toBe(
+      '# B\n\n## To Do\n\n\n## Doing\n\n\n## Done\n\n- [x] Landed\n\n## Cancelled\n\n- [ ] Dropped\n',
+    );
+    const again = parse(wire);
+    expect(again.tasks[1].status).toBe('cancelled');
+    expect(projection(parse(serialize(again)))).toEqual(projection(again));
+  });
+
+  it('leaves a legacy three-section board byte-identical', () => {
+    const wire = serialize(parse(DOC));
+    expect(wire).toBe(DOC);
+    expect(wire).not.toContain('Cancelled');
+  });
+});
+
+// The internal/board/testdata/<name>.md + <name>.json pairs are the shared
+// codec fixtures: internal/board/fixtures_test.go reads the very same files and
+// asserts the very same two properties. If the TypeScript and Go codecs ever
+// drift apart, one of the two suites fails on the fixture the other still
+// passes.
+//
+//   golden — a legacy three-section board (no Cancelled section, no %blocked)
+//   phase3 — the phase-3 grammar: %blocked, an escaped literal "%blocked" title
+//            word, a Cancelled section, unicode titles, and every
+//            metadata-shaped word escaped as title text
+const SHARED_FIXTURES: { name: string; md: string; json: string }[] = [
+  { name: 'golden', md: goldenMd, json: goldenJson },
+  { name: 'phase3', md: phase3Md, json: phase3Json },
+];
+
+/** projection() in the shape the shared JSON fixtures use (absent = ''). */
+function fixtureProjection(board: Board) {
+  return {
+    title: board.title,
+    tasks: board.tasks.map((t) => ({
+      emoji: t.emoji,
+      title: t.title,
+      desc: t.desc,
+      status: t.status,
+      blocked: t.blocked,
+      prio: t.prio,
+      due: t.due ?? '',
+      effort: t.effort ?? '',
+      tags: t.tags,
+      checks: t.checks,
+    })),
+  };
+}
+
+describe('shared Go/TS codec fixtures', () => {
+  for (const { name, md, json } of SHARED_FIXTURES) {
+    it(`${name}.md is canonical`, () => {
+      expect(serialize(parse(md))).toBe(md);
+    });
+
+    it(`${name}.md parses to ${name}.json`, () => {
+      expect(fixtureProjection(parse(md))).toEqual(JSON.parse(json));
+    });
+  }
 });
 
 describe('escaping', () => {
@@ -149,6 +297,48 @@ describe('escaping', () => {
     expect(t.effort).toBeUndefined();
     // The wire form is stable across repeated round trips.
     expect(serialize(again)).toBe(serialize(board));
+  });
+
+  // The codec side of the empty-title fix (store.ValidateTaskFields): as long
+  // as a title is not blank, the serialized line is one parse() reads back as
+  // a task rather than as description text grafted onto the task before it.
+  it('serializes every non-blank task to a line parse() reads back', () => {
+    const tasks: Task[] = [
+      newTask({ title: 'plain' }),
+      newTask({ title: '0', prio: 4 }),
+      newTask({ title: '\\' }),
+      newTask({ title: '%blocked', blocked: true }),
+      newTask({ title: '- [x] forged' }),
+      newTask({
+        title: '#tag !1 ~S @2026-01-01',
+        status: 'doing',
+        prio: 2,
+        blocked: true,
+      }),
+      newTask({
+        title: '日本語 café 🚀',
+        emoji: '🔥',
+        status: 'done',
+        prio: 1,
+        due: '2026-02-03',
+        effort: 'L',
+        tags: ['a', 'k::v'],
+      }),
+      newTask({
+        title: 'cancelled one',
+        status: 'cancelled',
+        checks: [{ text: 'step', done: true }],
+      }),
+    ];
+    for (const task of tasks) {
+      const board: Board = {
+        title: 'B',
+        tasks: [newTask({ title: 'anchor', status: task.status }), task],
+      };
+      const again = parse(serialize(board));
+      expect(again.tasks).toHaveLength(2);
+      expect(projection(again).tasks[1]).toEqual(projection(board).tasks[1]);
+    }
   });
 
   it('keeps checkbox-shaped description lines in the description', () => {

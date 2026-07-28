@@ -2,22 +2,54 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import type { Board, Status, Task } from './lib/model';
 import { parse, serialize } from './lib/markdown';
-import { bumpShipped, loadDirty, LocalStore, seedBoard, setDirty, shippedToday } from './lib/store';
+import {
+  bumpShipped,
+  loadDirty,
+  LocalStore,
+  setDirty,
+  shipKey,
+  shippedToday,
+} from './lib/store';
 import type { Identity } from './lib/auth';
 import { clearIdentity, loadIdentity, ReauthRequiredError, sanitizeUser, saveIdentity } from './lib/auth';
 import { RemoteStore } from './lib/remote';
 import type { AISettings, AIStoryRequest } from './lib/api';
-import { aiStory, getLabels, getSettings } from './lib/api';
+import { aiStories, aiStory, getLabels, getSettings } from './lib/api';
 import { boardLabels, unionLabels } from './lib/labels';
 import { burst } from './lib/confetti';
-import { BoardView } from './components/Board';
+import { AdrModal } from './components/AdrModal';
+import {
+  BoardView,
+  moveTask,
+  setShowCancelledFlag,
+  showCancelledFlag,
+} from './components/Board';
 import { CardModal } from './components/CardModal';
 import type { ModalState } from './components/CardModal';
+import { ShipDialog, shipWarning } from './components/ShipDialog';
+import type { ShipWarning } from './components/ShipDialog';
 import { Confetti } from './components/Confetti';
+import { DebugOverlay, debugEnabled, setDebugEnabled } from './components/DebugOverlay';
 import { IdentityGate } from './components/IdentityGate';
 import { SettingsModal } from './components/SettingsModal';
 
 type SyncState = 'off' | 'ok' | 'error' | 'expired';
+
+/** A move to Done held back by the F9/F10 confirmation. */
+interface ShipPrompt {
+  taskId: string;
+  index: number;
+  title: string;
+  warning: ShipWarning;
+}
+
+/**
+ * Shown when a board refresh (first server contact, or a 409 merge) had to
+ * close an open card or a pending Done confirmation. Silently discarding what
+ * someone was typing is the part that must not happen unannounced.
+ */
+const REFRESH_NOTICE =
+  'The board was refreshed from the server, so the card you had open was closed. Any unsaved text in it was not kept.';
 
 const SYNC_TITLE: Record<SyncState, string> = {
   off: 'sync off — local only',
@@ -51,6 +83,16 @@ export default function App() {
   );
 }
 
+/** Slot a card lands in when the caller has no opinion: end of the column. */
+function appendIndex(board: Board, to: Status): number {
+  return board.tasks.filter((t) => t.status === to).length;
+}
+
+/** Statuses the auto-ship timer may move a card out of. */
+function shippable(status: Status): boolean {
+  return status !== 'done' && status !== 'cancelled';
+}
+
 interface BoardAppProps {
   identity: Identity;
   onSignOut: () => void;
@@ -60,17 +102,31 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
   const ns = sanitizeUser(identity.id);
   const store = useMemo(() => new LocalStore(ns), [ns]);
   const remote = useMemo(() => new RemoteStore(), []);
-  const [board, setBoard] = useState<Board>(() => store.load() ?? seedBoard());
+  // Seeding clears the dirty flag (see LocalStore.loadOrSeed), so a demo board
+  // is never pushed over a board the server already has.
+  const [board, setBoard] = useState<Board>(() => store.loadOrSeed().board);
   const [modal, setModal] = useState<ModalState | null>(null);
+  const [ship, setShip] = useState<ShipPrompt | null>(null);
   const [streak, setStreak] = useState<number>(() => shippedToday(ns));
   const [sync, setSync] = useState<SyncState>('off');
   const [serverPresent, setServerPresent] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showAdr, setShowAdr] = useState(false);
+  const [showCancelled, setShowCancelled] = useState<boolean>(showCancelledFlag);
   const [serverLabels, setServerLabels] = useState<string[]>([]);
   const [aiSettings, setAiSettings] = useState<AISettings | null>(null);
+  // Hidden unless ?debug=1 (or a previously persisted flag): nothing mounts,
+  // so a disabled overlay drives no requestAnimationFrame at all.
+  const [debug, setDebug] = useState<boolean>(() => debugEnabled());
+  // Set when a server refresh had to drop something the user was in the
+  // middle of; see adopt.
+  const [notice, setNotice] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const boardRef = useRef(board);
   boardRef.current = board;
+  // Whether the user has work in progress a board refresh would discard.
+  const openWorkRef = useRef(false);
+  openWorkRef.current = modal !== null || ship !== null;
   const syncOnRef = useRef(false);
   // Last board that did NOT come from a user edit (initial load or server
   // adoption). The save effect uses identity against this to tell user edits
@@ -88,6 +144,51 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     setSync(err instanceof ReauthRequiredError ? 'expired' : 'error');
   }, []);
 
+  /**
+   * Take `next` as state that did NOT come from a user edit — the server copy
+   * on first contact, or the merged board a 409 retry actually wrote. Marking
+   * it clean stops the save effect echoing it back; failing to adopt a merged
+   * board would make the next save delete the tasks the merge carried over.
+   * parse() regenerates task ids, so any modal holding an old one is dropped:
+   * a later Save could otherwise append a duplicate of an existing task. That
+   * discards whatever the user had typed, which happens without warning at
+   * moments they cannot see coming — so say so rather than vanishing.
+   */
+  const adopt = useCallback((next: Board) => {
+    cleanBoardRef.current = next;
+    if (openWorkRef.current) setNotice(REFRESH_NOTICE);
+    setModal(null);
+    setShip(null);
+    setBoard(next);
+  }, []);
+
+  /**
+   * Fold the tasks a 409 merge carried over into the board we hold now.
+   * `sent` is the board we asked to push, `pushed` the one that reached the
+   * server. When `sent` is still current this is the clean-state adoption.
+   * When a newer edit landed while the PUT was in flight we cannot adopt
+   * (that would drop the newer edit) — but we cannot drop the merged-in tasks
+   * either: RemoteStore has already committed to the merged version, so the
+   * next PUT would carry a matching If-Match and delete them with no 409 and
+   * no error shown.
+   */
+  const carryMerged = useCallback(
+    (sent: Board, pushed: Board) => {
+      if (pushed === sent) return;
+      if (boardRef.current === sent) {
+        adopt(pushed);
+        return;
+      }
+      // The merge keeps our own tasks (ids and all) and appends the server's,
+      // which parse() gave fresh ids — so an unknown id is a carried-over task.
+      const ours = new Set(sent.tasks.map((t) => t.id));
+      const extra = pushed.tasks.filter((t) => !ours.has(t.id));
+      if (extra.length === 0) return;
+      setBoard((b) => ({ ...b, tasks: [...b.tasks, ...extra] }));
+    },
+    [adopt],
+  );
+
   useEffect(() => {
     let cancelled = false;
     // Local edits that never reached the server win over the remote copy:
@@ -95,17 +196,24 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     const pushLocal = () => {
       syncOnRef.current = true;
       const gen = editGenRef.current;
+      const sent = boardRef.current;
       remote.saveRemote(
         identity,
-        boardRef.current,
+        sent,
         (err) => {
           if (!cancelled) onSaveError(err);
         },
-        () => {
+        (pushed) => {
           // Only an ack for the newest edit may clear the dirty flag.
-          if (editGenRef.current !== gen) return;
-          setDirty(ns, false);
-          if (!cancelled) setSync('ok');
+          const fresh = editGenRef.current === gen;
+          if (fresh) setDirty(ns, false);
+          if (cancelled) return;
+          // A 409 merge wrote a different board than we sent — that is now
+          // the server's state, so it becomes ours. Unconditionally: the
+          // merged-in tasks must survive a newer edit too, or the next save
+          // deletes them.
+          carryMerged(sent, pushed);
+          if (fresh) setSync('ok');
         },
       );
     };
@@ -132,21 +240,14 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
         pushLocal();
         return;
       }
-      if (remoteBoard) {
-        // Adopted state, not a user edit — don't echo it back to the server.
-        cleanBoardRef.current = remoteBoard;
-        // parse() regenerates task ids; drop modal state holding old ones so
-        // a later Save cannot append a duplicate of an existing task.
-        setModal(null);
-        setBoard(remoteBoard);
-      }
+      if (remoteBoard) adopt(remoteBoard);
       syncOnRef.current = true;
       setSync('ok');
     })();
     return () => {
       cancelled = true;
     };
-  }, [identity, remote, ns, onSaveError]);
+  }, [identity, remote, ns, onSaveError, adopt, carryMerged]);
 
   useEffect(() => {
     store.save(board);
@@ -155,14 +256,20 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     const gen = editGenRef.current;
     setDirty(ns, true);
     if (!syncOnRef.current) return;
-    remote.saveRemoteDebounced(identity, board, onSaveError, () => {
+    remote.saveRemoteDebounced(identity, board, onSaveError, (pushed) => {
+      // After a 409 merge the board that reached the server carries tasks we
+      // have never seen; take them or the next save deletes them again. This
+      // happens even when the ack is stale, because RemoteStore has already
+      // committed to the merged version — the next PUT would carry a matching
+      // If-Match and drop those tasks with no conflict and no error.
+      carryMerged(board, pushed);
       // A stale ack (a newer edit exists) must not clear the dirty flag the
       // newer edit depends on for crash/offline safety.
       if (editGenRef.current !== gen) return;
       setDirty(ns, false);
       setSync('ok');
     });
-  }, [board, store, remote, identity, ns, onSaveError]);
+  }, [board, store, remote, identity, ns, onSaveError, carryMerged]);
 
   useEffect(() => {
     // Server-only extras: label suggestions and AI settings. Failures degrade
@@ -196,19 +303,28 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     };
   }, [remote]);
 
-  const move = useCallback(
-    (taskId: string, to: Status) => {
+  /**
+   * Commit a move. `index` is the slot within `to` (array order, which is what
+   * the codec persists). Shipping bookkeeping only fires when the card was not
+   * already in Done, so reordering inside Done neither re-counts nor re-bursts.
+   */
+  const applyMove = useCallback(
+    (taskId: string, to: Status, index?: number) => {
       const prev = boardRef.current.tasks.find((t) => t.id === taskId);
-      if (!prev || prev.status === to) return;
+      if (!prev) return;
+      const at = index ?? appendIndex(boardRef.current, to);
+      if (prev.status === to && index === undefined) return;
       const movedAt = new Date().toISOString();
-      setBoard((b) => ({
-        ...b,
-        tasks: b.tasks.map((t) =>
-          t.id === taskId ? { ...t, status: to, movedAt } : t,
-        ),
-      }));
-      if (to === 'done') {
-        setStreak(bumpShipped(ns));
+      setBoard((b) => {
+        const tasks = moveTask(b.tasks, taskId, to, at, movedAt);
+        // A drop that changes nothing (same column, same slot) must not mint a
+        // new board: that would mark the board dirty and push an identical PUT.
+        const same =
+          tasks.length === b.tasks.length && tasks.every((t, i) => t === b.tasks[i]);
+        return same ? b : { ...b, tasks };
+      });
+      if (to === 'done' && prev.status !== 'done') {
+        setStreak(bumpShipped(ns, shipKey(prev)));
         const r = document
           .querySelector(`[data-task="${taskId}"]`)
           ?.getBoundingClientRect();
@@ -219,6 +335,55 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     },
     [ns],
   );
+
+  /**
+   * Move a card, warning first when shipping it deserves a second look
+   * (unticked checklist items, or a blocked flag — F9/F10). The auto-ship
+   * timer goes through here too: with nothing open it only ever stops for a
+   * blocked card.
+   */
+  const move = useCallback(
+    (taskId: string, to: Status, index?: number) => {
+      const task = boardRef.current.tasks.find((t) => t.id === taskId);
+      if (!task) return;
+      if (to === 'done' && task.status !== 'done') {
+        const warning = shipWarning(task);
+        if (warning) {
+          setShip({
+            taskId,
+            index: index ?? appendIndex(boardRef.current, to),
+            title: task.title,
+            warning,
+          });
+          return;
+        }
+      }
+      applyMove(taskId, to, index);
+    },
+    [applyMove],
+  );
+
+  /** Ship the held-back card as it stands. */
+  const shipAnyway = useCallback(() => {
+    if (!ship) return;
+    applyMove(ship.taskId, 'done', ship.index);
+    setShip(null);
+  }, [ship, applyMove]);
+
+  /** Ship the held-back card, ticking every remaining item first. */
+  const shipTickingAll = useCallback(() => {
+    if (!ship) return;
+    setBoard((b) => ({
+      ...b,
+      tasks: b.tasks.map((t) =>
+        t.id === ship.taskId
+          ? { ...t, checks: t.checks.map((c) => ({ ...c, done: true })) }
+          : t,
+      ),
+    }));
+    applyMove(ship.taskId, 'done', ship.index);
+    setShip(null);
+  }, [ship, applyMove]);
 
   const handleTick = useCallback(
     (taskId: string, checkIdx: number, pos: { x: number; y: number }) => {
@@ -235,11 +400,13 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
       }));
       if (turningOn) {
         burst(pos.x, pos.y, 14);
-        if (checks.every((c) => c.done) && task.status !== 'done') {
+        // A cancelled card is out of play: finishing its checklist must not
+        // resurrect it into Done.
+        if (checks.every((c) => c.done) && shippable(task.status)) {
           setTimeout(() => {
             // Re-check at fire time: a tick may have been undone meanwhile.
             const cur = boardRef.current.tasks.find((t) => t.id === taskId);
-            if (cur && cur.status !== 'done' && cur.checks.every((c) => c.done)) {
+            if (cur && shippable(cur.status) && cur.checks.every((c) => c.done)) {
               move(taskId, 'done');
             }
           }, 350);
@@ -271,9 +438,37 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
     setModal(null);
   }, []);
 
-  const handleDelete = useCallback((taskId: string) => {
+  /**
+   * Soft delete (F11): the card moves to Cancelled, never a row delete. The
+   * cancelled column is where a real delete can be asked for.
+   */
+  const handleDelete = useCallback(
+    (taskId: string) => {
+      applyMove(taskId, 'cancelled');
+      setModal(null);
+    },
+    [applyMove],
+  );
+
+  const handleRestore = useCallback(
+    (taskId: string) => applyMove(taskId, 'todo'),
+    [applyMove],
+  );
+
+  /** The one path to a real row delete — so it keeps its confirmation. */
+  const handlePurge = useCallback((taskId: string) => {
+    if (!window.confirm('Delete this card permanently? This cannot be undone.')) {
+      return;
+    }
     setBoard((b) => ({ ...b, tasks: b.tasks.filter((t) => t.id !== taskId) }));
     setModal(null);
+  }, []);
+
+  const handleAddStories = useCallback((tasks: Task[]) => {
+    if (tasks.length > 0) {
+      setBoard((b) => ({ ...b, tasks: [...b.tasks, ...tasks] }));
+    }
+    setShowAdr(false);
   }, []);
 
   const handleExport = () => {
@@ -330,56 +525,92 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
 
   return (
     <>
-      <header className="app-header">
-        <h1>webtui</h1>
-        <div className="hactions">
-          {streak > 0 && <span className="streak">×{streak} shipped today</span>}
-          <span className="who" title={identity.id}>
-            {identity.id}
-          </span>
-          <span
-            className={`dot ${sync}`}
-            title={SYNC_TITLE[sync]}
-            role="status"
-            aria-label={SYNC_TITLE[sync]}
-          />
-          {serverPresent && (
+      {/* Column flex shell: the header keeps its height, the board takes the
+          rest of the viewport and scrolls inside its columns. */}
+      <div className="app-shell">
+        <header className="app-header">
+          <h1>kb</h1>
+          <div className="hactions">
+            {streak > 0 && <span className="streak">×{streak} shipped today</span>}
+            <span className="who" title={identity.id}>
+              {identity.id}
+            </span>
+            <span
+              className={`dot ${sync}`}
+              title={SYNC_TITLE[sync]}
+              role="status"
+              aria-label={SYNC_TITLE[sync]}
+            />
             <button
               type="button"
-              aria-label="Settings"
-              title="AI settings"
-              onClick={() => setShowSettings(true)}
+              aria-pressed={showCancelled}
+              title="Show the cancelled column"
+              onClick={() => {
+                setShowCancelledFlag(!showCancelled);
+                setShowCancelled(!showCancelled);
+              }}
             >
-              ⚙
+              {showCancelled ? '☑' : '☐'} Cancelled
             </button>
-          )}
-          <button type="button" onClick={handleExport}>
-            Export
-          </button>
-          <button type="button" onClick={() => fileRef.current?.click()}>
-            Import
-          </button>
-          <button type="button" onClick={onSignOut}>
-            Sign out
-          </button>
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".md,.markdown,.txt,text/markdown,text/plain"
-            hidden
-            onChange={handleImport}
-          />
-        </div>
-      </header>
-      <BoardView
-        board={board}
-        onMove={move}
-        onTick={handleTick}
-        onEdit={openEdit}
-        onAdd={openAdd}
-      />
+            {aiEnabled && (
+              <button
+                type="button"
+                title="Split an ADR into stories"
+                onClick={() => setShowAdr(true)}
+              >
+                ✨ Split ADR
+              </button>
+            )}
+            {serverPresent && (
+              <button
+                type="button"
+                aria-label="Settings"
+                title="AI settings"
+                onClick={() => setShowSettings(true)}
+              >
+                ⚙
+              </button>
+            )}
+            <button type="button" onClick={handleExport}>
+              Export
+            </button>
+            <button type="button" onClick={() => fileRef.current?.click()}>
+              Import
+            </button>
+            <button type="button" onClick={onSignOut}>
+              Sign out
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".md,.markdown,.txt,text/markdown,text/plain"
+              hidden
+              onChange={handleImport}
+            />
+          </div>
+        </header>
+        {notice && (
+          <div className="notice" role="status">
+            <span>{notice}</span>
+            <button type="button" aria-label="Dismiss" onClick={() => setNotice(null)}>
+              ✕
+            </button>
+          </div>
+        )}
+        <BoardView
+          board={board}
+          onMove={move}
+          onTick={handleTick}
+          onEdit={openEdit}
+          onAdd={openAdd}
+          showCancelled={showCancelled}
+          onRestore={handleRestore}
+          onPurge={handlePurge}
+        />
+      </div>
       <div className="foot">
-        drag cards between columns · tap ▾ to expand checklists · tap a card to edit
+        drag cards between columns (⠿ on touch) · tap ▾ to expand checklists · tap
+        a card to edit
       </div>
       {modal && (
         <CardModal
@@ -391,6 +622,22 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
           onClose={() => setModal(null)}
         />
       )}
+      {ship && (
+        <ShipDialog
+          warning={ship.warning}
+          title={ship.title}
+          onShip={shipAnyway}
+          onTickAll={shipTickingAll}
+          onCancel={() => setShip(null)}
+        />
+      )}
+      {showAdr && aiEnabled && (
+        <AdrModal
+          onSplit={(adr, max) => aiStories(identity, { adr, max })}
+          onAdd={handleAddStories}
+          onClose={() => setShowAdr(false)}
+        />
+      )}
       {showSettings && serverPresent && (
         <SettingsModal
           identity={identity}
@@ -399,6 +646,14 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
         />
       )}
       <Confetti />
+      {debug && (
+        <DebugOverlay
+          onClose={() => {
+            setDebugEnabled(false);
+            setDebug(false);
+          }}
+        />
+      )}
     </>
   );
 }

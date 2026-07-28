@@ -9,6 +9,7 @@ function task(tags: string[]): Task {
     title: 't',
     desc: '',
     status: 'todo',
+    blocked: false,
     prio: 3,
     tags,
     checks: [],

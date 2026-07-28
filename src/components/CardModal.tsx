@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Check, Effort, Prio, Status, Task } from '../lib/model';
 import { newTask, STATUS_LABEL } from '../lib/model';
 import type { AIStoryRequest, StoryDraft } from '../lib/api';
+import { EmojiField, firstEmoji } from './EmojiField';
 import { LabelsCombobox } from './LabelsCombobox';
 
 export type ModalState =
@@ -44,8 +45,9 @@ export function CardModal({
   onClose,
 }: CardModalProps) {
   const base = state.mode === 'edit' ? state.task : null;
-  const [emoji, setEmoji] = useState(base?.emoji ?? '');
+  const [emoji, setEmoji] = useState(() => firstEmoji(base?.emoji ?? ''));
   const [title, setTitle] = useState(base?.title ?? '');
+  const [blocked, setBlocked] = useState(base?.blocked ?? false);
   const [desc, setDesc] = useState(base?.desc ?? '');
   const [prio, setPrio] = useState<Prio>(base?.prio ?? 3);
   const [due, setDue] = useState(base?.due ?? '');
@@ -67,9 +69,10 @@ export function CardModal({
   const save = () => {
     if (!title.trim()) return;
     const fields = {
-      emoji: emoji.trim(),
+      emoji: firstEmoji(emoji),
       title: title.trim(),
       desc: desc.trim(),
+      blocked,
       prio,
       due: due || undefined,
       effort: effort === '' ? undefined : effort,
@@ -176,12 +179,7 @@ export function CardModal({
           <div className="mrow">
             <div className="emoji">
               <label htmlFor="f-emoji">Emoji</label>
-              <input
-                id="f-emoji"
-                value={emoji}
-                onChange={(e) => setEmoji(e.target.value)}
-                placeholder="🔧"
-              />
+              <EmojiField inputId="f-emoji" value={emoji} onChange={setEmoji} />
             </div>
             <div>
               <label htmlFor="f-title">Title</label>
@@ -237,6 +235,15 @@ export function CardModal({
               </select>
             </div>
           </div>
+          <label className="checkline" htmlFor="f-blocked">
+            <input
+              id="f-blocked"
+              type="checkbox"
+              checked={blocked}
+              onChange={(e) => setBlocked(e.target.checked)}
+            />
+            Blocked — waiting on something else
+          </label>
           <label htmlFor="f-tags">Labels (key::value for scoped)</label>
           <LabelsCombobox
             inputId="f-tags"
@@ -258,13 +265,15 @@ export function CardModal({
             <button type="button" onClick={onClose}>
               Cancel
             </button>
-            {state.mode === 'edit' && (
+            {state.mode === 'edit' && state.task.status !== 'cancelled' && (
+              // Soft delete: the card moves to Cancelled, so this needs no
+              // confirmation — the only irreversible delete lives in that
+              // column and keeps its own.
               <button
                 type="button"
                 className="del"
-                onClick={() => {
-                  if (window.confirm('Delete this task?')) onDelete(state.task.id);
-                }}
+                title="Moves the card to Cancelled — restore it any time"
+                onClick={() => onDelete(state.task.id)}
               >
                 Delete
               </button>

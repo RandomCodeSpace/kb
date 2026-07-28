@@ -17,8 +17,8 @@ import (
 // GET /api/board, an in-memory edit, and a PUT /api/board round-trip. The
 // wire format carries no task ids, so tasks are addressed by ephemeral
 // listing indexes ("i1", "i2", ...) over the canonical listing order (todo,
-// doing, done; document order within a column) — valid only against the
-// board as currently listed.
+// doing, done, cancelled; document order within a column) — valid only
+// against the board as currently listed.
 type remoteBackend struct {
 	base, token, user string
 	client            *http.Client
@@ -60,6 +60,13 @@ func (r *remoteBackend) add(t board.Task) (item, error) {
 	if t.Prio < 1 || t.Prio > 4 {
 		t.Prio = 3
 	}
+	// Remote mode builds the wire markdown itself instead of going through
+	// the store, so it must run the same field validation the store applies:
+	// without it a newline in a title or checklist item serializes as extra
+	// board lines and re-parses as forged tasks.
+	if err := store.ValidateTaskFields(t); err != nil {
+		return item{}, err
+	}
 	b.Tasks = append(b.Tasks, t)
 	renumber(b.Tasks)
 	if err := r.putBoard(b); err != nil {
@@ -68,7 +75,7 @@ func (r *remoteBackend) add(t board.Task) (item, error) {
 	return itemAt(b, len(b.Tasks)-1), nil
 }
 
-func (r *remoteBackend) update(ref string, p store.TaskPatch, moveTo *board.Status) (item, error) {
+func (r *remoteBackend) update(ref string, p store.TaskPatch, moveTo *board.Status, force bool) (item, error) {
 	b, err := r.fetchBoard()
 	if err != nil {
 		return item{}, err
@@ -77,8 +84,28 @@ func (r *remoteBackend) update(ref string, p store.TaskPatch, moveTo *board.Stat
 	if err != nil {
 		return item{}, err
 	}
-	applyPatch(&b.Tasks[ti], p)
+	// Only a real field write is validated, mirroring the local backend
+	// (store.patchTask returns early on an empty patch, so MoveTask never
+	// validates). ValidateTaskFields is deliberately stricter than board.Parse,
+	// so validating here too would make a parse-tolerant task — an odd due date
+	// or an empty title that arrived via the SPA's whole-board PUT or a legacy
+	// import — impossible to move, cancel or restore from remote mode while the
+	// local CLI handles it fine.
+	if p != (store.TaskPatch{}) {
+		applyPatch(&b.Tasks[ti], p)
+		if err := store.ValidateTaskFields(b.Tasks[ti]); err != nil {
+			return item{}, err
+		}
+	}
 	if moveTo != nil {
+		// The guard runs on the patched task and before the PUT, matching the
+		// local backend: the whole mutation is one board round-trip, so
+		// returning here leaves the server's board untouched.
+		if *moveTo == board.StatusDone && !force {
+			if err := doneGuardErr(itemAt(b, ti).ref, b.Tasks[ti]); err != nil {
+				return item{}, err
+			}
+		}
 		b.Tasks = moveTaskToEnd(b.Tasks, ti, *moveTo)
 		ti = len(b.Tasks) - 1
 	}
@@ -89,8 +116,12 @@ func (r *remoteBackend) update(ref string, p store.TaskPatch, moveTo *board.Stat
 	return itemAt(b, ti), nil
 }
 
+// move carries force: true because the done guard for move/done/cancel runs a
+// level up in app.moveTo, which has already refused (or been waved through
+// with --force) by the time it calls here. Guarding again would re-refuse the
+// moves the user explicitly forced.
 func (r *remoteBackend) move(ref string, to board.Status) (item, error) {
-	return r.update(ref, store.TaskPatch{}, &to)
+	return r.update(ref, store.TaskPatch{}, &to, true)
 }
 
 func (r *remoteBackend) remove(ref string) (item, error) {
@@ -113,7 +144,9 @@ func (r *remoteBackend) remove(ref string) (item, error) {
 
 // --- listing-order bookkeeping ---
 
-var columnRank = map[board.Status]int{board.StatusTodo: 0, board.StatusDoing: 1, board.StatusDone: 2}
+var columnRank = map[board.Status]int{
+	board.StatusTodo: 0, board.StatusDoing: 1, board.StatusDone: 2, board.StatusCancelled: 3,
+}
 
 // listingOrder returns the indexes of ts permuted into listing order:
 // status column order, then position within the column.
@@ -193,6 +226,9 @@ func applyPatch(t *board.Task, p store.TaskPatch) {
 	}
 	if p.Effort != nil {
 		t.Effort = *p.Effort
+	}
+	if p.Blocked != nil {
+		t.Blocked = *p.Blocked
 	}
 	if p.Prio != nil {
 		t.Prio = *p.Prio
