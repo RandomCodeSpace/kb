@@ -9,6 +9,7 @@ import {
   setDirty,
   shipKey,
   shippedToday,
+  unshipToday,
 } from './lib/store';
 import type { Identity } from './lib/auth';
 import {
@@ -350,6 +351,11 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
           tasks.length === b.tasks.length && tasks.every((t, i) => t === b.tasks[i]);
         return same ? b : { ...b, tasks };
       });
+      // Reopening a card takes it back off today's tally: "shipped today"
+      // means done, and a card that is open again is not done.
+      if (to !== 'done' && prev.status === 'done') {
+        setStreak(unshipToday(ns, shipKey(prev)));
+      }
       if (to === 'done' && prev.status !== 'done') {
         setStreak(bumpShipped(ns, shipKey(prev)));
         const r = document
