@@ -6,3 +6,6 @@ node_modules
 !/dist/.gitkeep
 
 /docs/
+
+# compiled binary
+/kb
