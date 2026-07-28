@@ -1,0 +1,1 @@
+import{BrowserPerformanceMeasurement as e}from"./dist-Czt_lit6.js";export{e as BrowserPerformanceMeasurement};
