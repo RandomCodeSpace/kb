@@ -134,3 +134,38 @@ Pulls the v1.1 sync service forward and pins its shape ("kb"):
   separators (no traversal).
 - **Sync**: last-write-wins on the whole file; no merge, versioning, or
   conflict detection.
+
+## Addendum 2 (2026-07-28): SQLite storage, CLI, MCP, AI assist, settings, labels
+
+User-driven phase 2. Decisions:
+
+- **Storage flips to SQLite** (`modernc.org/sqlite`, pure Go, CGO stays off).
+  Markdown becomes the wire/interchange format only: the SPA sync API
+  (`GET/PUT /api/board`, text/markdown) is unchanged, export/import unchanged.
+  A Go markdown codec (same grammar as `src/lib/markdown.ts`, shared golden
+  vectors) converts at the boundary. Existing `<data>/<user>.md` files are
+  migrated into the DB automatically on first start (originals kept).
+- **Why**: concurrent writers arrive (SPA + CLI + MCP agents); whole-file LWW
+  markdown cannot survive that. SQLite WAL + task-level ops can.
+- **Schema** (per-user scoping on every row): `tasks` (uuid id, user, emoji,
+  title, desc, status, prio, due, effort, position, tags JSON, checks JSON,
+  created_at, moved_at), `labels` (user, label, last_used), `settings`
+  (user, ai_base_url, ai_model, ai_key_enc).
+- **CLI**: `kb` bare = serve (back-compat). Subcommands `add`, `list`,
+  `update`, `move`, `done`, `rm` with flags for all card fields; task
+  addressing by UUID prefix. Local mode opens the DB directly; `KB_SERVER` +
+  `KB_SERVER_TOKEN` env switch to HTTP against a remote kb.
+- **MCP**: `kb mcp` = stdio MCP server (official
+  `github.com/modelcontextprotocol/go-sdk`), tools: `list_tasks`, `add_task`,
+  `update_task`, `move_task`, `delete_task` — for coding harnesses.
+- **AI assist**: `POST /api/ai/story` — server-side proxy to a user-configured
+  OpenAI-compatible `/v1/chat/completions` endpoint. Returns a structured
+  draft (title/desc/checklist/labels/prio/effort JSON) that prefills the story
+  modal; the user always confirms before save. API key never reaches the
+  browser after entry.
+- **Settings**: gear screen — AI base URL, model, API key (write-only, masked,
+  AES-GCM encrypted at rest with `KB_SECRET`; if unset, a key generated at
+  `<data>/secret` with 0600). Test-connection button.
+- **Labels**: registry upserted from task tags on every write;
+  `GET /api/labels` feeds a combobox (suggest existing + free-text) in the
+  story modal.
