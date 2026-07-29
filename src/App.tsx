@@ -39,6 +39,7 @@ import { ShipDialog, shipWarning } from './components/ShipDialog';
 import type { ShipWarning } from './components/ShipDialog';
 import { Confetti } from './components/Confetti';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { ReconnectModal } from './components/ReconnectModal';
 import { DebugOverlay, debugEnabled, setDebugEnabled } from './components/DebugOverlay';
 import { IdentityGate } from './components/IdentityGate';
 import { SettingsModal } from './components/SettingsModal';
@@ -65,26 +66,28 @@ const SYNC_TITLE: Record<SyncState, string> = {
   off: 'sync off — local only',
   ok: 'synced to server',
   error: 'last save to server failed',
-  expired: 'session expired — sign out and sign in again',
+  expired: 'session expired — reconnect to save to the server',
 };
 
 export default function App() {
   const [identity, setIdentity] = useState<Identity | null>(() => loadIdentity());
 
+  const adoptIdentity = (i: Identity) => {
+    saveIdentity(i);
+    setIdentity(i);
+  };
+
   if (!identity) {
-    return (
-      <IdentityGate
-        onIdentity={(i) => {
-          saveIdentity(i);
-          setIdentity(i);
-        }}
-      />
-    );
+    return <IdentityGate onIdentity={adoptIdentity} />;
   }
   return (
     <BoardApp
+      // Keyed on the id alone: restoring a session replaces the identity
+      // object but is the same person, and remounting would throw away the
+      // board state and any open card.
       key={identity.id}
       identity={identity}
+      onIdentity={adoptIdentity}
       onSignOut={() => {
         clearIdentity();
         setIdentity(null);
@@ -120,10 +123,12 @@ function taskCount(n: number): string {
 
 interface BoardAppProps {
   identity: Identity;
+  /** A credential the server accepted — see ReconnectModal. */
+  onIdentity: (identity: Identity) => void;
   onSignOut: () => void;
 }
 
-function BoardApp({ identity, onSignOut }: BoardAppProps) {
+function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
   const ns = sanitizeUser(identity.id);
   const store = useMemo(() => new LocalStore(ns), [ns]);
   const remote = useMemo(() => new RemoteStore(), []);
@@ -136,6 +141,9 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
   const [sync, setSync] = useState<SyncState>('off');
   const [serverPresent, setServerPresent] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  // Open while the person is being asked to restore an expired session; see
+  // the effect below and ReconnectModal.
+  const [showReconnect, setShowReconnect] = useState(false);
   const [showAdr, setShowAdr] = useState(false);
   const [showCancelled, setShowCancelled] = useState<boolean>(showCancelledFlag);
   const [serverLabels, setServerLabels] = useState<string[]>([]);
@@ -355,6 +363,17 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
       announce(SYNC_TITLE[sync]);
     }
   }, [sync, announce]);
+
+  // Ask to restore the session as soon as it goes bad. The dot on its own was
+  // not enough: the server token is session-scoped on purpose, so a new
+  // browser session starts looking signed in, reads the board from local
+  // storage, and 401s on every request — the only visible symptom being that
+  // server-backed panels fail to load. Dismissing leaves the header's
+  // Reconnect button; this only runs on a change into 'expired', so it asks
+  // once rather than reopening over the board.
+  useEffect(() => {
+    if (sync === 'expired') setShowReconnect(true);
+  }, [sync]);
 
   /**
    * Commit a move. `index` is the slot within `to` (array order, which is what
@@ -603,7 +622,12 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
   // Tab (and the screen reader's cursor) inside the dialog rather than walking
   // out onto board controls that aria-modal has already hidden.
   const dialogOpen =
-    modal !== null || ship !== null || showAdr || showSettings || confirm !== null;
+    modal !== null ||
+    ship !== null ||
+    showAdr ||
+    showSettings ||
+    showReconnect ||
+    confirm !== null;
 
   return (
     <>
@@ -628,6 +652,19 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
               role="img"
               aria-label={SYNC_TITLE[sync]}
             />
+            {/* The way back from an expired session. The dialog opens itself
+                once; this is what remains after it is dismissed, so the state
+                is never a dead end. */}
+            {sync === 'expired' && (
+              <button
+                type="button"
+                className="reconnect"
+                title="Restore the session so the board saves to the server again"
+                onClick={() => setShowReconnect(true)}
+              >
+                Reconnect
+              </button>
+            )}
             <button
               type="button"
               aria-pressed={showCancelled}
@@ -750,6 +787,25 @@ function BoardApp({ identity, onSignOut }: BoardAppProps) {
           }}
           onClose={() => setShowSettings(false)}
           onSaved={setAiSettings}
+        />
+      )}
+      {showReconnect && (
+        <ReconnectModal
+          identity={identity}
+          onIdentity={(next) => {
+            setShowReconnect(false);
+            // Not 'ok' — nothing has synced yet. The load effect re-runs on the
+            // new identity and reports what actually happens. Said out loud
+            // here because that transition is 'off' → 'ok', which the sync
+            // announcer stays quiet about: only a recovery from a reported
+            // failure is worth interrupting for, and this is the one case
+            // where the failure was reported but the recovery is not.
+            setSync('off');
+            announce('reconnected — the board is saving to the server again');
+            onIdentity(next);
+          }}
+          onSignOut={onSignOut}
+          onClose={() => setShowReconnect(false)}
         />
       )}
       {confirm && (

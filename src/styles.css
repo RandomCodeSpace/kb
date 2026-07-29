@@ -152,6 +152,10 @@ body {
   box-shadow: 2px 2px 0 var(--ink);
 }
 .app-header button:active { transform: translate(2px, 2px); box-shadow: none; }
+/* Only present while the session is expired, and the one control that fixes
+   it — filled so it does not read as another of the row's ordinary actions.
+   Ink on the amber, like every other filled control here. */
+.app-header button.reconnect { background: var(--amber); }
 .streak { font-weight: 800; font-size: var(--fs-md); color: var(--green-text); }
 
 /* Board-was-refreshed banner: a refresh that closes an open card must say so
@@ -994,11 +998,17 @@ body {
   padding-top: var(--sp-3);
   border-top: 2px solid var(--gray);
   align-items: center;
-  /* Pinned to the bottom of the modal's own scroll box: a tall card form on a
-     720px-high laptop overflows, and Save must not be a sliver at the edge of
-     a box with nothing to say it scrolls. The negative bottom and the matching
-     padding let it cover the modal's bottom padding, so content scrolls under
-     it rather than stopping short of it. */
+}
+/* Pinned to the bottom of the modal's own scroll box: a tall card form on a
+   720px-high laptop overflows, and Save must not be a sliver at the edge of a
+   box with nothing to say it scrolls. The negative bottom and the matching
+   padding let it cover the modal's bottom padding, so content scrolls under it
+   rather than stopping short of it.
+
+   Only when the row is last. An opaque sticky row covers whatever follows it in
+   flow: with a note after the buttons (Settings had one) the note sat under the
+   row and was unreadable. Anything trailing means the row scrolls normally. */
+.modal .actions:last-child {
   position: sticky;
   bottom: calc(-1 * var(--sp-4));
   margin-bottom: calc(-1 * var(--sp-4));
