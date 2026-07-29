@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { escapeAction, testProbe } from './SettingsModal';
+import { ReauthRequiredError } from '../lib/auth';
+import { escapeAction, loadErrorMessage, testProbe } from './SettingsModal';
+
+describe('loadErrorMessage', () => {
+  it('sends an expired session to the reconnect control, not to reopening', () => {
+    // Reopening re-issues the same unauthenticated request: the old wording
+    // asked the user to repeat what had just failed.
+    const msg = loadErrorMessage(new ReauthRequiredError());
+    expect(msg).toContain('session expired');
+    expect(msg).not.toContain('reopening');
+  });
+
+  it('keeps a plain failure distinct from an auth one', () => {
+    expect(loadErrorMessage(new Error('GET /api/settings failed: 500'))).toBe(
+      'could not load settings — the server did not answer',
+    );
+  });
+});
 
 describe('testProbe', () => {
   it('sends the values currently in the form', () => {

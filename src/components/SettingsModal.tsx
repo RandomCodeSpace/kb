@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { Identity } from '../lib/auth';
+import { ReauthRequiredError } from '../lib/auth';
 import type { AISettings, AITestProbe, SettingsPatch } from '../lib/api';
 import { aiTest, getSettings, isAbortError, putSettings } from '../lib/api';
 import { useDialogFocus } from '../lib/focus';
@@ -47,6 +48,18 @@ export function testProbe(
 }
 
 /**
+ * Why the settings could not be loaded. An expired session is the common
+ * cause and the old wording ("try reopening") was actively misleading for it:
+ * reopening re-issues the same unauthenticated request and fails the same way.
+ * The board carries the Reconnect control, so that is where this points.
+ */
+export function loadErrorMessage(err: unknown): string {
+  return err instanceof ReauthRequiredError
+    ? 'session expired — reconnect from the board to load these settings'
+    : 'could not load settings — the server did not answer';
+}
+
+/**
  * What Escape does, given what is in flight. A test is cancellable, so
  * Escape cancels it rather than closing over the values being validated. A
  * save is not: the PUT may already have been applied, and closing would drop
@@ -70,7 +83,7 @@ export function SettingsModal({
   onSaved,
 }: SettingsModalProps) {
   const [loaded, setLoaded] = useState(false);
-  const [loadError, setLoadError] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
   const [key, setKey] = useState('');
@@ -85,8 +98,9 @@ export function SettingsModal({
   // Save and test failures are about the connection these three fields
   // describe, so all three point at whichever messages are showing rather than
   // leaving a keyboard user to find them by chance.
+  // A load failure is not in this list: it replaces the form rather than
+  // annotating it, so no field is left to point at the message.
   const errorIds: string[] = [];
-  if (loadError) errorIds.push(`${errorId}-load`);
   if (save.kind === 'err') errorIds.push(`${errorId}-save`);
   if (test.kind === 'err') errorIds.push(`${errorId}-test`);
   const failed = errorIds.length > 0;
@@ -109,8 +123,8 @@ export function SettingsModal({
         setHasKey(s.has_key);
         setLoaded(true);
       })
-      .catch(() => {
-        if (!cancelled) setLoadError(true);
+      .catch((err: unknown) => {
+        if (!cancelled) setLoadError(loadErrorMessage(err));
       });
     return () => {
       cancelled = true;
@@ -254,12 +268,23 @@ export function SettingsModal({
             </div>
           </>
         )}
+        {/* The form is not shown when the load failed. Nothing came back to
+            fill it, and the same failure blocks the save and the test — it
+            would be three dead controls under an error, and a row of greyed
+            buttons is not an explanation. The message is. */}
         {loadError && (
-          <p className="flash err" id={`${errorId}-load`} role="alert">
-            could not load settings — try reopening
-          </p>
+          <>
+            <p className="flash err" id={`${errorId}-load`} role="alert">
+              {loadError}
+            </p>
+            <div className="actions">
+              <button type="button" onClick={onClose}>
+                Close
+              </button>
+            </div>
+          </>
         )}
-        {serverPresent && (
+        {serverPresent && !loadError && (
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -304,15 +329,44 @@ export function SettingsModal({
               aria-invalid={failed || undefined}
               aria-describedby={describedBy}
             />
+            {/* Above the row, not below it: what a button does is worth
+                reading before pressing it, and the row is pinned to the bottom
+                of the modal — anything after it scrolls underneath. */}
+            <p className="mnote">
+              Test connection uses the values in this form, so a key can be
+              checked before it is saved. Leave the key blank to test the saved
+              one. A key typed here is used for that one request only.
+            </p>
             {test.kind === 'busy' && (
               <p className="flash busy" role="status">
                 Testing the connection…
               </p>
             )}
+            {save.kind === 'ok' && (
+              <p className="flash ok" role="status">
+                {save.msg}
+              </p>
+            )}
+            {save.kind === 'err' && (
+              <p className="flash err" id={`${errorId}-save`} role="alert">
+                {save.msg}
+              </p>
+            )}
+            {test.kind === 'ok' && (
+              <p className="flash ok" role="status">
+                ✓ {test.msg}
+              </p>
+            )}
+            {test.kind === 'err' && (
+              <p className="flash err" id={`${errorId}-test`} role="alert">
+                {test.msg}
+              </p>
+            )}
             {/* Close and Test on the left, the primary action on the right.
                 Close is locked while a request is in flight, like the backdrop:
                 closing mid-save would discard the key being saved along with
-                any error the request is about to report. */}
+                any error the request is about to report. Last in the form so
+                the pinned row covers nothing. */}
             <div className="actions">
               <button type="button" onClick={onClose} disabled={busy}>
                 Close
@@ -334,31 +388,6 @@ export function SettingsModal({
                 {save.kind === 'busy' ? 'Saving…' : 'Save'}
               </button>
             </div>
-            {save.kind === 'ok' && (
-              <p className="flash ok" role="status">
-                {save.msg}
-              </p>
-            )}
-            {save.kind === 'err' && (
-              <p className="flash err" id={`${errorId}-save`} role="alert">
-                {save.msg}
-              </p>
-            )}
-            {test.kind === 'ok' && (
-              <p className="flash ok" role="status">
-                ✓ {test.msg}
-              </p>
-            )}
-            {test.kind === 'err' && (
-              <p className="flash err" id={`${errorId}-test`} role="alert">
-                {test.msg}
-              </p>
-            )}
-            <p className="mnote">
-              Test connection uses the values in this form, so a key can be
-              checked before it is saved. Leave the key blank to test the saved
-              one. A key typed here is used for that one request only.
-            </p>
           </form>
         )}
       </div>

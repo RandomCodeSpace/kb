@@ -105,9 +105,19 @@ describe('stylesheet guards', () => {
    * edge.
    */
   it('pins the modal action row to the bottom of the modal', () => {
-    const actions = rule('.modal .actions');
-    expect(actions).toMatch(/position:\s*sticky/);
-    expect(actions).toMatch(/bottom:/);
+    const pinned = rule('.modal .actions:last-child');
+    expect(pinned).toMatch(/position:\s*sticky/);
+    expect(pinned).toMatch(/bottom:/);
+  });
+
+  /**
+   * …but only when it is last. The pinned row is opaque, so anything after it
+   * in flow scrolls underneath and cannot be read — which is what happened to
+   * the note under Settings' buttons. Any modal that puts content after its
+   * action row gets an ordinary in-flow row instead.
+   */
+  it('does not pin an action row that has content after it', () => {
+    expect(rule('.modal .actions')).not.toMatch(/position:\s*sticky/);
   });
 
   /**

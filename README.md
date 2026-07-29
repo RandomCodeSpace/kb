@@ -618,6 +618,13 @@ The server picks its mode from environment variables at startup:
    `Authorization: Bearer <KB_TOKEN>` (compared in constant time). The user
    identity is the required, non-empty `X-KB-User` header — a manual unique id
    you choose (e.g. your email or a handle).
+   In the browser this token is held in `sessionStorage`, never
+   `localStorage`: it authorizes *every* user's board, so it must not outlive
+   the browser session. Your identity does persist, so a new session starts
+   signed in but without a token — the board still works from local storage,
+   the header shows a **Reconnect** button, and a *Session expired* dialog
+   asks for the token. Reconnecting verifies it against the server before
+   adopting it, then pushes anything edited meanwhile.
 3. **Open / localhost** — else, no auth. Identity is the `X-KB-User` header if
    present, otherwise `default`. Only use this on a trusted local machine.
    In this mode the server binds to `127.0.0.1` by default; set `KB_BIND` to
