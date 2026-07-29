@@ -773,6 +773,16 @@ func coerceDraftMap(m map[string]any) storyDraft {
 	return d
 }
 
+// logSafe makes an untrusted value safe to interpolate into a log line. The
+// CR/LF removal is spelled out as explicit replacements rather than folded into
+// stripControl's strings.Map because static analysis recognizes the former as a
+// line-break barrier and cannot see through the latter's closure.
+func logSafe(s string) string {
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	return stripControl(s)
+}
+
 // stripControl removes every control character, including the CR/LF that
 // would break a value out of its markdown line.
 func stripControl(s string) string {

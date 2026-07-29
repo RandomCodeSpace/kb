@@ -657,7 +657,7 @@ func (s *server) forgeGet(ctx context.Context, ref forgeRef, apiBase, path strin
 // paths are url.PathEscape'd), but both are stripped anyway so no future caller
 // can turn this line into a log-forging primitive.
 func forgeRequestError(ref forgeRef, path string) error {
-	log.Printf("forge: request failed source=%s path=%s", stripControl(ref.Source.Name), stripControl(path))
+	log.Printf("forge: request failed source=%s path=%s", logSafe(ref.Source.Name), logSafe(path))
 	return &aiError{code: http.StatusBadGateway, msg: "forge request failed"}
 }
 
