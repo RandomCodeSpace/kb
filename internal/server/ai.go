@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,72 @@ import (
 // error response never reaches the client.
 const AITimeout = 60 * time.Second
 
+func rejectPrivateAddress(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid dial address %q", address)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("non-IP dial address %q", address)
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return errors.New("AI endpoint resolves to a private address (set KB_AI_ALLOW_PRIVATE=1 for local model servers)")
+	}
+	return nil
+}
+
+func normalizeGuardHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	host = strings.TrimSuffix(host, ".")
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return host
+}
+
+func guardedTransport(allowHosts map[string]bool, allowAll bool) *http.Transport {
+	normalizedHosts := make(map[string]bool, len(allowHosts))
+	for host, allowed := range allowHosts {
+		if allowed {
+			normalizedHosts[normalizeGuardHost(host)] = true
+		}
+	}
+
+	return &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, fmt.Errorf("invalid dial address %q", address)
+			}
+			allowPrivate := allowAll || normalizedHosts[normalizeGuardHost(host)]
+			dialer := &net.Dialer{
+				Control: func(network, address string, rawConn syscall.RawConn) error {
+					if allowPrivate {
+						return nil
+					}
+					return rejectPrivateAddress(network, address, rawConn)
+				},
+			}
+			return dialer.DialContext(ctx, network, address)
+		},
+	}
+}
+
+func sameHostRedirect(req *http.Request, via []*http.Request) error {
+	if req.URL.Host != via[0].URL.Host {
+		return errors.New("refusing cross-host redirect")
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
+}
+
 // newAIClient builds the HTTP client used for user-configured AI endpoints.
 // Because the destination is user-controlled, the dialer rejects loopback,
 // link-local, private, and ULA addresses — checked on the resolved IP, so
@@ -36,38 +103,10 @@ const AITimeout = 60 * time.Second
 // local model servers such as Ollama. Redirects may never change host.
 func newAIClient() *http.Client {
 	allowPrivate := os.Getenv("KB_AI_ALLOW_PRIVATE") == "1"
-	dialer := &net.Dialer{
-		Control: func(_, address string, _ syscall.RawConn) error {
-			if allowPrivate {
-				return nil
-			}
-			host, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return fmt.Errorf("invalid dial address %q", address)
-			}
-			ip := net.ParseIP(host)
-			if ip == nil {
-				return fmt.Errorf("non-IP dial address %q", address)
-			}
-			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-				ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-				return errors.New("AI endpoint resolves to a private address (set KB_AI_ALLOW_PRIVATE=1 for local model servers)")
-			}
-			return nil
-		},
-	}
 	return &http.Client{
-		Timeout:   AITimeout,
-		Transport: &http.Transport{DialContext: dialer.DialContext},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if req.URL.Host != via[0].URL.Host {
-				return errors.New("refusing cross-host redirect")
-			}
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			return nil
-		},
+		Timeout:       AITimeout,
+		Transport:     guardedTransport(nil, allowPrivate),
+		CheckRedirect: sameHostRedirect,
 	}
 }
 
