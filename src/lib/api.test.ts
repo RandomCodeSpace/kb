@@ -11,9 +11,11 @@ import {
   getSettings,
   importPreview,
   isAbortError,
+  killReasonRequest,
   putIntegration,
   putSettings,
   recordImportLinks,
+  recordTombstone,
 } from './api';
 import type { ForgeSource } from './api';
 import { parse, serialize } from './markdown';
@@ -321,6 +323,53 @@ describe('import API', () => {
 
     await expect(recordImportLinks(identity, request)).resolves.toBeUndefined();
     await expect(recordImportLinks(identity, request)).resolves.toBeUndefined();
+  });
+});
+
+describe('tombstone API', () => {
+  it('builds a trimmed reason request and rejects blank reasons', () => {
+    expect(killReasonRequest('task-1', '  superseded by SSO  ')).toEqual({
+      taskId: 'task-1',
+      reason: 'superseded by SSO',
+    });
+    expect(killReasonRequest('task-1', ' \t ')).toBeNull();
+  });
+
+  it('records a reason through the authenticated tombstone endpoint', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 204 })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await recordTombstone(identity, 'task-1', 'superseded by SSO');
+
+    const call = fetchMock.mock.calls[0];
+    if (!call) throw new Error('expected tombstone fetch');
+    expect(call[0]).toBe('/api/tombstones');
+    expect(call[1]?.method).toBe('POST');
+    expect(call[1]?.headers).toMatchObject({
+      'Content-Type': 'application/json',
+      'X-KB-User': 'alice',
+    });
+    expect(JSON.parse(String(call[1]?.body))).toEqual({
+      task_id: 'task-1',
+      reason: 'superseded by SSO',
+    });
+  });
+
+  it('swallows both HTTP and fetch failures while recording a reason', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('no', { status: 500 }))
+      .mockRejectedValueOnce(new TypeError('offline'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      recordTombstone(identity, 'task-1', 'superseded'),
+    ).resolves.toBeUndefined();
+    await expect(
+      recordTombstone(identity, 'task-1', 'superseded'),
+    ).resolves.toBeUndefined();
   });
 });
 

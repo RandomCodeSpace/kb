@@ -451,19 +451,59 @@ export async function recordImportLinks(
   }
 }
 
+/**
+ * Keep reason capture testable without mounting a dialog. The endpoint uses
+ * snake_case, but the UI carries the task id in its usual client-side shape.
+ */
+export function killReasonRequest(
+  taskId: string,
+  reason: string,
+): { taskId: string; reason: string } | null {
+  const trimmed = reason.trim();
+  return trimmed === '' ? null : { taskId, reason: trimmed };
+}
+
+/**
+ * Journal why a card was killed. This is deliberately best-effort: the board
+ * move has already happened, so losing its annotation must never undo it.
+ */
+export async function recordTombstone(
+  identity: Identity,
+  taskId: string,
+  reason: string,
+): Promise<void> {
+  try {
+    const res = await authedFetch(identity, '/api/tombstones', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId, reason }),
+    });
+    if (!res.ok) return;
+  } catch {
+    // The card is already cancelled; the graveyard annotation is secondary.
+  }
+}
+
 export interface SimilarItem {
   id?: string;
   title: string;
   status?: string;
-  via: 'card' | 'import';
+  via: 'card' | 'import' | 'killed';
   link?: string;
+  reason?: string;
+  killedAt?: string;
 }
 
 function coerceSimilarItem(item: unknown): SimilarItem | null {
   if (typeof item !== 'object' || item === null) return null;
   const fields = item as Record<string, unknown>;
   const title = typeof fields.title === 'string' ? fields.title.trim() : '';
-  const via = fields.via === 'card' || fields.via === 'import' ? fields.via : null;
+  const via =
+    fields.via === 'card' ||
+    fields.via === 'import' ||
+    fields.via === 'killed'
+      ? fields.via
+      : null;
   if (title === '' || via === null) return null;
   return {
     ...(typeof fields.id === 'string' ? { id: fields.id } : {}),
@@ -471,6 +511,10 @@ function coerceSimilarItem(item: unknown): SimilarItem | null {
     ...(typeof fields.status === 'string' ? { status: fields.status } : {}),
     via,
     ...(typeof fields.link === 'string' ? { link: fields.link } : {}),
+    ...(typeof fields.reason === 'string' ? { reason: fields.reason } : {}),
+    ...(typeof fields.killed_at === 'string'
+      ? { killedAt: fields.killed_at }
+      : {}),
   };
 }
 

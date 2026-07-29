@@ -34,7 +34,9 @@ import {
   getLabels,
   getSettings,
   importPreview,
+  killReasonRequest,
   recordImportLinks,
+  recordTombstone,
 } from './lib/api';
 import { boardLabels, unionLabels } from './lib/labels';
 import { burst } from './lib/confetti';
@@ -126,8 +128,14 @@ interface ConfirmState {
   body?: string;
   confirmLabel?: string;
   destructive?: boolean;
+  inputLabel?: string;
+  inputPlaceholder?: string;
+  inputMaxLength?: number;
+  inputRequired?: boolean;
+  secondaryLabel?: string;
+  onSecondary?: () => void;
   /** Omitted for an acknowledgement: the dialog then only closes. */
-  onConfirm?: () => void;
+  onConfirm?: (inputValue: string) => void;
 }
 
 /** "3 tasks", "1 task" — the import confirmation names what it would replace. */
@@ -550,10 +558,39 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
    */
   const handleDelete = useCallback(
     (taskId: string) => {
-      applyMove(taskId, 'cancelled');
-      setModal(null);
+      const kill = () => {
+        applyMove(taskId, 'cancelled');
+        setModal(null);
+      };
+      setConfirm({
+        title: 'Why reject this card?',
+        body: 'The card moves to Cancelled. A short reason helps future similar-work checks.',
+        confirmLabel: 'Kill with reason',
+        destructive: true,
+        inputLabel: 'Reason',
+        inputPlaceholder: 'e.g. superseded by the SSO work',
+        // 500 UTF-16 code units stay below the server's 2000-byte ceiling,
+        // including the three-byte replacement for an unpaired surrogate.
+        inputMaxLength: 500,
+        inputRequired: true,
+        secondaryLabel: 'Kill without a reason',
+        onSecondary: kill,
+        onConfirm: (reason) => {
+          // Move first: the board stays responsive and starts its PUT before
+          // the deliberately best-effort graveyard annotation.
+          kill();
+          const request = killReasonRequest(taskId, reason);
+          if (request) {
+            void recordTombstone(
+              identity,
+              request.taskId,
+              request.reason,
+            );
+          }
+        },
+      });
     },
-    [applyMove],
+    [applyMove, identity],
   );
 
   const handleRestore = useCallback(
@@ -869,6 +906,12 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
           body={confirm.body}
           confirmLabel={confirm.confirmLabel}
           destructive={confirm.destructive}
+          inputLabel={confirm.inputLabel}
+          inputPlaceholder={confirm.inputPlaceholder}
+          inputMaxLength={confirm.inputMaxLength}
+          inputRequired={confirm.inputRequired}
+          secondaryLabel={confirm.secondaryLabel}
+          onSecondary={confirm.onSecondary}
           onConfirm={confirm.onConfirm}
           onClose={() => setConfirm(null)}
         />

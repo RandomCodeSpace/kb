@@ -28,6 +28,34 @@ export interface CardModalProps {
   onClose: () => void;
 }
 
+const KILLED_CHIP_LIMIT = 120;
+const KILLED_PREFIX = 'rejected ';
+const KILLED_DATE_FORMAT = new Intl.DateTimeFormat('en-US', {
+  month: 'long',
+  year: 'numeric',
+  timeZone: 'UTC',
+});
+
+/**
+ * Compact graveyard context for the advisory chip. Server validation already
+ * rejects line breaks, but collapsing all whitespace keeps malformed replies
+ * from turning one advisory row into an essay.
+ */
+export function killedChipText(item: SimilarItem, now: Date): string {
+  const killedAt = item.killedAt ? new Date(item.killedAt) : now;
+  const date = Number.isNaN(killedAt.getTime()) ? now : killedAt;
+  const reason = item.reason?.replace(/\s+/g, ' ').trim();
+  const full = `${KILLED_PREFIX}${KILLED_DATE_FORMAT.format(date)}${
+    reason ? ` \u2014 ${reason}` : ''
+  }`;
+  const characters = Array.from(full);
+  if (characters.length <= KILLED_CHIP_LIMIT) return full;
+  return `${characters
+    .slice(0, KILLED_CHIP_LIMIT - 1)
+    .join('')
+    .trimEnd()}\u2026`;
+}
+
 export function CardModal({
   state,
   identity,
@@ -134,12 +162,40 @@ export function CardModal({
                 {items.length} similar {items.length === 1 ? 'item' : 'items'} — is this a duplicate?
               </span>
               <div className="similar-list">
-                {items.map((item, index) => (
-                  <div className="similar-row" key={`${item.title}:${index}`}>
-                    <span className="similar-via">{item.via === 'card' ? 'on board' : 'imported'}</span>
-                    <span>{item.title}</span>
-                  </div>
-                ))}
+                {items.map((item, index) => {
+                  const killedText =
+                    item.via === 'killed'
+                      ? killedChipText(item, new Date())
+                      : null;
+                  return (
+                    <div
+                      className={`similar-row${killedText ? ' killed' : ''}`}
+                      key={`${item.title}:${index}`}
+                    >
+                      <span
+                        className={`similar-via${killedText ? ' killed' : ''}`}
+                      >
+                        {killedText
+                          ? 'rejected'
+                          : item.via === 'card'
+                            ? 'on board'
+                            : 'imported'}
+                      </span>
+                      <span
+                        className="similar-title"
+                        title={
+                          killedText
+                            ? `${killedText} \u00b7 ${item.title}`
+                            : undefined
+                        }
+                      >
+                        {killedText
+                          ? `${killedText.slice(KILLED_PREFIX.length)} \u00b7 ${item.title}`
+                          : item.title}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
               <button type="button" aria-label="Dismiss similar items" onClick={() => setDismissed(true)}>✕</button>
             </div>

@@ -1093,7 +1093,12 @@ body {
 .similar-list { grid-column: 1; min-width: 0; }
 .similar-head { font-size: var(--fs-sm); font-weight: 800; line-height: var(--lh-body); }
 .similar-list { display: grid; gap: var(--sp-1); }
-.similar-row { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); line-height: var(--lh-body); }
+.similar-row { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; font-size: var(--fs-sm); line-height: var(--lh-body); }
+.similar-row.killed {
+  padding: var(--sp-1);
+  background: #edf3ff;
+  border-radius: 6px;
+}
 .similar-via {
   flex: none;
   padding: var(--sp-1) var(--sp-2);
@@ -1104,6 +1109,16 @@ body {
   font-size: var(--fs-xs);
   font-weight: 800;
   line-height: var(--lh-tight);
+}
+.similar-via.killed {
+  background: #dce8ff;
+}
+.similar-title { min-width: 0; }
+.similar-row.killed .similar-title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .similar button {
   grid-column: 2;

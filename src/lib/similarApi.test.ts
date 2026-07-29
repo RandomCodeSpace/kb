@@ -22,6 +22,20 @@ describe('similar items', () => {
           },
           { id: 'bad', title: '   ', via: 'card' },
           { title: 'Imported history', via: 'import', status: 7 },
+          {
+            id: 'killed-1',
+            title: '  Rejected history  ',
+            status: 'cancelled',
+            via: 'killed',
+            reason: 'superseded by SSO',
+            killed_at: '2026-03-14T09:12:00Z',
+          },
+          {
+            title: 'Rejected without metadata',
+            via: 'killed',
+            reason: 7,
+            killed_at: null,
+          },
           { title: 'Unknown source', via: 'other' },
         ],
       }),
@@ -34,6 +48,15 @@ describe('similar items', () => {
         link: 'link::gitlab#1',
       },
       { title: 'Imported history', via: 'import' },
+      {
+        id: 'killed-1',
+        title: 'Rejected history',
+        status: 'cancelled',
+        via: 'killed',
+        reason: 'superseded by SSO',
+        killedAt: '2026-03-14T09:12:00Z',
+      },
+      { title: 'Rejected without metadata', via: 'killed' },
     ]);
   });
 
