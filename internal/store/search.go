@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,11 +11,20 @@ import (
 
 // SimilarHit is a cheap card or import-provenance match.
 type SimilarHit struct {
-	ID     string
-	Title  string
-	Status string
-	Via    string
-	Link   string
+	ID       string
+	Title    string
+	Status   string
+	Via      string
+	Link     string
+	Reason   string
+	KilledAt string
+}
+
+// Tombstone records why a task was moved to the cancelled column.
+type Tombstone struct {
+	TaskID   string
+	Reason   string
+	KilledAt string
 }
 
 // FtsQuery converts untrusted text to a bounded OR of literal FTS phrases.
@@ -38,10 +48,13 @@ func (s *Store) SearchSimilar(scope, query, excludeID string, limit int) ([]Simi
 		return nil, nil
 	}
 	rows, err := s.db.Query(`
-SELECT f.id, f.title, t.status
-FROM tasks_fts f JOIN tasks t ON t.id = f.id AND t.user = ?1
-WHERE tasks_fts MATCH ?2 AND f.scope = ?1 AND f.id <> ?3
-ORDER BY bm25(tasks_fts, 5.0, 1.0, 3.0) LIMIT ?4`,
+	SELECT f.id, f.title, t.status,
+	       COALESCE(g.reason, ''), COALESCE(g.killed_at, '')
+	FROM tasks_fts f
+	JOIN tasks t ON t.id = f.id AND t.user = ?1
+	LEFT JOIN tombstones g ON g.scope = ?1 AND g.task_id = f.id
+	WHERE tasks_fts MATCH ?2 AND f.scope = ?1 AND f.id <> ?3
+	ORDER BY bm25(tasks_fts, 5.0, 1.0, 3.0) LIMIT ?4`,
 		scope, match, excludeID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("store: search tasks: %w", err)
@@ -49,11 +62,16 @@ ORDER BY bm25(tasks_fts, 5.0, 1.0, 3.0) LIMIT ?4`,
 	var hits []SimilarHit
 	for rows.Next() {
 		var hit SimilarHit
-		if err := rows.Scan(&hit.ID, &hit.Title, &hit.Status); err != nil {
+		if err := rows.Scan(&hit.ID, &hit.Title, &hit.Status, &hit.Reason, &hit.KilledAt); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("store: scan task search: %w", err)
 		}
-		hit.Via = "card"
+		if hit.Status == "cancelled" && hit.Reason != "" {
+			hit.Via = "killed"
+		} else {
+			hit.Via = "card"
+			hit.Reason, hit.KilledAt = "", ""
+		}
 		hits = append(hits, hit)
 	}
 	if err := rows.Err(); err != nil {
@@ -94,6 +112,69 @@ ORDER BY bm25(import_links_fts, 5.0) LIMIT ?3`,
 		return nil, fmt.Errorf("store: close import search: %w", err)
 	}
 	return hits, nil
+}
+
+// RecordTombstone inserts or refreshes the reason a task was killed.
+func (s *Store) RecordTombstone(scope, taskID, reason string) error {
+	if err := validateTombstoneReason(reason); err != nil {
+		return err
+	}
+	killedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`
+	INSERT INTO tombstones (scope, task_id, reason, killed_at)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(scope, task_id) DO UPDATE SET
+		reason = excluded.reason,
+		killed_at = excluded.killed_at`,
+			scope, taskID, reason, killedAt); err != nil {
+			return fmt.Errorf("store: record tombstone: %w", err)
+		}
+		return nil
+	})
+}
+
+// Tombstone returns the scoped graveyard reason for taskID when one exists.
+func (s *Store) Tombstone(scope, taskID string) (Tombstone, bool, error) {
+	var tombstone Tombstone
+	err := s.db.QueryRow(`
+	SELECT task_id, reason, killed_at
+	FROM tombstones
+	WHERE scope = ? AND task_id = ?`,
+		scope, taskID,
+	).Scan(&tombstone.TaskID, &tombstone.Reason, &tombstone.KilledAt)
+	switch {
+	case err == nil:
+		return tombstone, true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return Tombstone{}, false, nil
+	default:
+		return Tombstone{}, false, fmt.Errorf("store: read tombstone: %w", err)
+	}
+}
+
+// DeleteTombstone removes one scoped graveyard reason when it exists.
+func (s *Store) DeleteTombstone(scope, taskID string) error {
+	if _, err := s.db.Exec(
+		`DELETE FROM tombstones WHERE scope = ? AND task_id = ?`,
+		scope, taskID,
+	); err != nil {
+		return fmt.Errorf("store: delete tombstone: %w", err)
+	}
+	return nil
+}
+
+func validateTombstoneReason(reason string) error {
+	if reason == "" {
+		return errors.New("store: tombstone reason must not be empty")
+	}
+	if len(reason) > 2000 {
+		return errors.New("store: tombstone reason exceeds 2000 bytes")
+	}
+	if strings.ContainsAny(reason, "\r\n") {
+		return errors.New("store: tombstone reason contains a line break")
+	}
+	return nil
 }
 
 // TasksByLink returns cards carrying link as one complete tag.
