@@ -130,6 +130,13 @@ func (s *Store) RecordTombstone(scope, taskID, reason string) error {
 			scope, taskID, reason, killedAt); err != nil {
 			return fmt.Errorf("store: record tombstone: %w", err)
 		}
+		if _, err := tx.Exec(`
+	DELETE FROM tombstones
+	WHERE scope = ? AND task_id NOT IN (
+		SELECT id FROM tasks WHERE user = ?
+	)`, scope, scope); err != nil {
+			return fmt.Errorf("store: sweep tombstones: %w", err)
+		}
 		return nil
 	})
 }

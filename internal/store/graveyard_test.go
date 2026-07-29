@@ -346,3 +346,165 @@ func TestCancelledCardWithoutATombstoneIsStillAnOrdinaryHit(t *testing.T) {
 		t.Fatalf("SearchSimilar = %+v, want one ordinary cancelled card", hits)
 	}
 }
+
+// TestGraveyardScopeIsolation is the structural guarantee that makes a future
+// team-scope rollout additive instead of exposing one user's decisions to another.
+func TestGraveyardScopeIsolation(t *testing.T) {
+	s := newStore(t)
+	const title = "Shared graveyard alpha beta gamma"
+	scopes := []string{"alice", "bob"}
+	tasks := make(map[string]board.Task, len(scopes))
+	reasons := map[string]string{
+		"alice": "Rejected only in alice scope",
+		"bob":   "Rejected only in bob scope",
+	}
+	for _, scope := range scopes {
+		task, err := s.AddTask(scope, board.Task{
+			Title:  title,
+			Status: board.StatusCancelled,
+		})
+		if err != nil {
+			t.Fatalf("AddTask(%q): %v", scope, err)
+		}
+		if err := s.RecordTombstone(scope, task.ID, reasons[scope]); err != nil {
+			t.Fatalf("RecordTombstone(%q): %v", scope, err)
+		}
+		tasks[scope] = task
+	}
+
+	for index, scope := range scopes {
+		other := scopes[1-index]
+		t.Run(scope, func(t *testing.T) {
+			for _, query := range []string{"shared", "graveyard", "alpha", "beta", "gamma", title} {
+				hits, err := s.SearchSimilar(scope, query, "", 10)
+				if err != nil {
+					t.Fatalf("SearchSimilar(%q): %v", query, err)
+				}
+				own := false
+				for _, hit := range hits {
+					if hit.ID == tasks[other].ID || hit.Reason == reasons[other] {
+						t.Fatalf("SearchSimilar(%q) leaked %q into %q: %+v", query, other, scope, hits)
+					}
+					if hit.ID == tasks[scope].ID && hit.Reason == reasons[scope] {
+						own = true
+					}
+				}
+				if !own {
+					t.Fatalf("SearchSimilar(%q) = %+v, want scoped task %q", query, hits, tasks[scope].ID)
+				}
+			}
+		})
+	}
+
+	if got, found, err := s.Tombstone("bob", tasks["alice"].ID); err != nil || found {
+		t.Fatalf("bob Tombstone(alice task) = %+v, %t, %v, want not found", got, found, err)
+	}
+}
+
+// TestRetitledCardOrphansItsTombstoneHarmlessly proves stale reasons cannot
+// attach to the fresh identity minted when ReplaceBoard sees a new title.
+func TestRetitledCardOrphansItsTombstoneHarmlessly(t *testing.T) {
+	s := newStore(t)
+	original := addSearchTask(t, s, board.Task{
+		Title:  "Original graveyard identity",
+		Status: board.StatusCancelled,
+	})
+	if err := s.RecordTombstone("alice", original.ID, "The old title was rejected"); err != nil {
+		t.Fatalf("RecordTombstone: %v", err)
+	}
+	if err := s.ReplaceBoard("alice", board.Board{
+		Title: "Board",
+		Tasks: []board.Task{{
+			Title:  "Retitled graveyard identity",
+			Status: board.StatusCancelled,
+		}},
+	}); err != nil {
+		t.Fatalf("ReplaceBoard: %v", err)
+	}
+	current, err := s.Board("alice")
+	if err != nil || len(current.Tasks) != 1 {
+		t.Fatalf("Board after retitle = %+v, %v", current, err)
+	}
+	if current.Tasks[0].ID == original.ID {
+		t.Fatalf("retitled task kept old ID %q", original.ID)
+	}
+	if _, found, err := s.Tombstone("alice", original.ID); err != nil || !found {
+		t.Fatalf("orphan Tombstone = found %t, err %v", found, err)
+	}
+
+	hits, err := s.SearchSimilar("alice", "retitled graveyard identity", "", 10)
+	if err != nil {
+		t.Fatalf("SearchSimilar retitled card: %v", err)
+	}
+	if len(hits) != 1 ||
+		hits[0].ID != current.Tasks[0].ID ||
+		hits[0].Via != "card" ||
+		hits[0].Reason != "" ||
+		hits[0].KilledAt != "" {
+		t.Fatalf("SearchSimilar retitled card = %+v, want an ordinary fresh hit", hits)
+	}
+}
+
+// TestPurgingACardSweepsItsTombstone prevents hard deletion from leaving a
+// graveyard row that can never become visible again.
+func TestPurgingACardSweepsItsTombstone(t *testing.T) {
+	s := newStore(t)
+	task := addSearchTask(t, s, board.Task{
+		Title:  "Purge graveyard sentinel",
+		Status: board.StatusCancelled,
+	})
+	if err := s.RecordTombstone("alice", task.ID, "This reason should be purged"); err != nil {
+		t.Fatalf("RecordTombstone: %v", err)
+	}
+
+	deleted, err := s.DeleteTask("alice", task.ID)
+	if err != nil || deleted.ID != task.ID {
+		t.Fatalf("DeleteTask = %+v, %v", deleted, err)
+	}
+	if got, found, err := s.Tombstone("alice", task.ID); err != nil || found {
+		t.Fatalf("Tombstone after purge = %+v, %t, %v, want not found", got, found, err)
+	}
+}
+
+// TestRecordTombstoneSweepsOrphansAndKeepsLiveReasons bounds stale rows without
+// deleting a reason that still belongs to a live task.
+func TestRecordTombstoneSweepsOrphansAndKeepsLiveReasons(t *testing.T) {
+	s := newStore(t)
+	orphan := addSearchTask(t, s, board.Task{
+		Title:  "Orphan sweep sentinel",
+		Status: board.StatusCancelled,
+	})
+	live := addSearchTask(t, s, board.Task{
+		Title:  "Live sweep sentinel",
+		Status: board.StatusCancelled,
+	})
+	if err := s.RecordTombstone("alice", orphan.ID, "This row will become orphaned"); err != nil {
+		t.Fatalf("RecordTombstone orphan: %v", err)
+	}
+	if err := s.RecordTombstone("alice", live.ID, "Keep this live reason"); err != nil {
+		t.Fatalf("RecordTombstone live: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`DELETE FROM tasks WHERE user = ? AND id = ?`,
+		"alice", orphan.ID,
+	); err != nil {
+		t.Fatalf("orphan task directly: %v", err)
+	}
+
+	if err := s.RecordTombstone("alice", live.ID, "Keep this refreshed live reason"); err != nil {
+		t.Fatalf("RecordTombstone sweep: %v", err)
+	}
+	if got, found, err := s.Tombstone("alice", orphan.ID); err != nil || found {
+		t.Fatalf("orphan Tombstone after sweep = %+v, %t, %v", got, found, err)
+	}
+	got, found, err := s.Tombstone("alice", live.ID)
+	if err != nil || !found || got.Reason != "Keep this refreshed live reason" {
+		t.Fatalf("live Tombstone after sweep = %+v, %t, %v", got, found, err)
+	}
+	if err := s.RecordTombstone("alice", "missing-task", "This fresh orphan must be swept"); err != nil {
+		t.Fatalf("RecordTombstone missing task: %v", err)
+	}
+	if got, found, err := s.Tombstone("alice", "missing-task"); err != nil || found {
+		t.Fatalf("fresh orphan Tombstone after sweep = %+v, %t, %v", got, found, err)
+	}
+}

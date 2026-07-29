@@ -557,6 +557,9 @@ func (s *Store) DeleteTask(user, idPrefix string) (board.Task, error) {
 		if _, err := tx.Exec(`DELETE FROM tasks WHERE user = ? AND id = ?`, user, id); err != nil {
 			return fmt.Errorf("store: delete task: %w", err)
 		}
+		if _, err := tx.Exec(`DELETE FROM tombstones WHERE scope = ? AND task_id = ?`, user, id); err != nil {
+			return fmt.Errorf("store: delete task tombstone: %w", err)
+		}
 		out = t
 		return nil
 	})
