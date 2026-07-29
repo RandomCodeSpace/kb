@@ -1451,6 +1451,85 @@ body {
 .duplicate-chip.link { background: var(--red); }
 .duplicate-chip.similar { background: var(--amber); }
 
+/* ---------- one-shot upstream review ---------- */
+.drift-review {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: var(--sp-3);
+  background: #e9edf2;
+}
+.drift-review > label {
+  margin: 0;
+}
+.drift-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.drift-controls button {
+  flex: none;
+  min-height: var(--ctl-h);
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: var(--sp-2) var(--sp-3);
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+.drift-controls button:disabled,
+.drift-accept button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.drift-controls .statusline {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+.drift-details {
+  border-left: 4px solid var(--ink);
+  padding-left: var(--sp-3);
+  overflow-wrap: anywhere;
+}
+.drift-details p,
+.drift-notice {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.drift-notice {
+  font-weight: 800;
+}
+.drift-accept {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.drift-accept p {
+  flex: 1 1 220px;
+}
+.drift-accept button {
+  min-height: var(--ctl-h);
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--green);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
 /* Primary action right, cancel/delete left, and a rule above the row so the
    form's content and its actions are visibly separate. The row wraps on a
    narrow phone; the auto margin on the primary keeps it right-aligned on

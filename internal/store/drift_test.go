@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -17,6 +18,63 @@ func recordBaselineLink(t *testing.T, s *Store, scope, externalKey string) {
 		Link: "link::" + externalKey, URL: "https://forge.example/" + externalKey, Title: "Imported item",
 	}}); err != nil {
 		t.Fatalf("RecordImportLinks: %v", err)
+	}
+}
+
+// TestImportLinksByLinkPreservesScopedDuplicateShortLinks resolves provenance
+// without collapsing two projects that share the same short forge link.
+func TestImportLinksByLinkPreservesScopedDuplicateShortLinks(t *testing.T) {
+	s := newStore(t)
+	const sharedLink = "gitlab#42"
+	aliceLinks := []ImportLink{
+		{Source: "gitlab.com", Kind: "gitlab", ExternalKey: "gitlab.com/acme/zeta#42", Link: sharedLink, URL: "https://gitlab.com/acme/zeta/-/issues/42", Title: "Zeta issue"},
+		{Source: "gitlab.com", Kind: "gitlab", ExternalKey: "gitlab.com/acme/alpha#42", Link: sharedLink, URL: "https://gitlab.com/acme/alpha/-/issues/42", Title: "Alpha issue"},
+		{Source: "gitlab.com", Kind: "gitlab", ExternalKey: "gitlab.com/acme/alpha#420", Link: "gitlab#420", URL: "https://gitlab.com/acme/alpha/-/issues/420", Title: "Near match"},
+	}
+	bobLink := ImportLink{
+		Source: "gitlab.com", Kind: "gitlab", ExternalKey: "gitlab.com/other/project#42", Link: sharedLink, URL: "https://gitlab.com/other/project/-/issues/42", Title: "Other project issue",
+	}
+	if err := s.RecordImportLinks("alice", aliceLinks); err != nil {
+		t.Fatalf("RecordImportLinks alice: %v", err)
+	}
+	if err := s.RecordImportLinks("bob", []ImportLink{bobLink}); err != nil {
+		t.Fatalf("RecordImportLinks bob: %v", err)
+	}
+
+	got, err := s.ImportLinksByLink("alice", sharedLink)
+	if err != nil {
+		t.Fatalf("ImportLinksByLink: %v", err)
+	}
+	want := []ImportLink{aliceLinks[1], aliceLinks[0]}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ImportLinksByLink = %+v, want deterministic source/external-key order %+v", got, want)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ImportLinksByLink returned %d rows, want both projects", len(got))
+	}
+
+	foreign, err := s.ImportLinksByLink("bob", sharedLink)
+	if err != nil {
+		t.Fatalf("ImportLinksByLink bob: %v", err)
+	}
+	if !reflect.DeepEqual(foreign, []ImportLink{bobLink}) {
+		t.Fatalf("ImportLinksByLink bob = %+v, want only bob row", foreign)
+	}
+
+	near, err := s.ImportLinksByLink("alice", "gitlab#420")
+	if err != nil {
+		t.Fatalf("ImportLinksByLink exact match: %v", err)
+	}
+	if !reflect.DeepEqual(near, []ImportLink{aliceLinks[2]}) {
+		t.Fatalf("ImportLinksByLink exact match = %+v, want %+v", near, []ImportLink{aliceLinks[2]})
+	}
+
+	empty, err := s.ImportLinksByLink("alice", "github#404")
+	if err != nil {
+		t.Fatalf("ImportLinksByLink empty: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("ImportLinksByLink empty = %+v, want no rows", empty)
 	}
 }
 

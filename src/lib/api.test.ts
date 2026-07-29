@@ -3,10 +3,16 @@ import type { Identity } from './auth';
 import {
   aiTest,
   aiStories,
+  acceptDrift,
+  checkDrift,
+  coerceDriftResult,
+  coerceImportProvenanceItems,
   coerceImportPreview,
   coerceStoryDraft,
   deleteIntegration,
+  DriftConflictError,
   forgeTest,
+  getImportProvenance,
   getIntegrations,
   getSettings,
   importPreview,
@@ -323,6 +329,272 @@ describe('import API', () => {
 
     await expect(recordImportLinks(identity, request)).resolves.toBeUndefined();
     await expect(recordImportLinks(identity, request)).resolves.toBeUndefined();
+  });
+
+  it('coerces every honest drift state without retaining extra fields', () => {
+    // A malformed or embellished reply must not invent a comparison claim.
+    const common = {
+      link: 'gitlab#42',
+      url: 'https://gitlab.example.com/acme/app/-/issues/42',
+      upstream_title: 'ship login',
+      baseline_title: 'draft login',
+      baseline_at: '2026-03-14T09:12:00Z',
+      checked_at: '2026-07-29T18:00:00Z',
+      summary: '',
+      internal: 'discard me',
+    };
+
+    expect(
+      coerceDriftResult({
+        ...common,
+        state: 'baseline_recorded',
+        title_changed: true,
+      }),
+    ).toEqual({
+      state: 'baseline_recorded',
+      link: common.link,
+      url: common.url,
+      upstream_title: common.upstream_title,
+      baseline_title: common.baseline_title,
+      baseline_at: common.baseline_at,
+      checked_at: common.checked_at,
+      summary: '',
+    });
+    expect(
+      coerceDriftResult({
+        ...common,
+        state: 'unchanged',
+        title_changed: false,
+      }),
+    ).toMatchObject({ state: 'unchanged', title_changed: false });
+    expect(
+      coerceDriftResult({
+        ...common,
+        state: 'drifted',
+        title_changed: true,
+        summary: 'The login flow now requires SAML.',
+        revision: 'a'.repeat(64),
+      }),
+    ).toMatchObject({
+      state: 'drifted',
+      title_changed: true,
+      summary: 'The login flow now requires SAML.',
+      revision: 'a'.repeat(64),
+    });
+  });
+
+  it('rejects malformed drift replies instead of guessing at server state', () => {
+    // Visible checks may fail, but they must never report a baseline we cannot prove.
+    expect(() => coerceDriftResult(null)).toThrow('invalid drift response');
+    expect(() =>
+      coerceDriftResult({
+        state: 'drifted',
+        link: 'gitlab#42',
+        url: 'https://gitlab.example.com/acme/app/-/issues/42',
+        upstream_title: 'ship login',
+        baseline_title: 'draft login',
+        baseline_at: 'not-a-date',
+        checked_at: '2026-07-29T18:00:00Z',
+        summary: '',
+        title_changed: true,
+        revision: 'a'.repeat(64),
+      }),
+    ).toThrow('invalid drift response');
+    expect(() =>
+      coerceDriftResult({
+        state: 'drifted',
+        link: 'gitlab#42',
+        url: 'https://gitlab.example.com/acme/app/-/issues/42',
+        upstream_title: 'ship login',
+        baseline_title: 'draft login',
+        baseline_at: '2026-03-14T09:12:00Z',
+        checked_at: '2026-07-29T18:00:00Z',
+        summary: '',
+        title_changed: true,
+      }),
+    ).toThrow('invalid drift response');
+  });
+
+  it('posts the exact drift identity and propagates the caller abort signal', async () => {
+    // The check is one user-triggered request; it must not outlive the modal.
+    const response = {
+      state: 'unchanged',
+      link: 'gitlab#42',
+      url: 'https://gitlab.example.com/acme/app/-/issues/42',
+      title_changed: false,
+      upstream_title: 'ship login',
+      baseline_title: 'ship login',
+      baseline_at: '2026-03-14T09:12:00Z',
+      checked_at: '2026-07-29T18:00:00Z',
+      summary: '',
+    };
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(jsonResponse(response)),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const ctrl = new AbortController();
+
+    await expect(
+      checkDrift(
+        identity,
+        'work',
+        'gitlab:gitlab.example.com/acme/app#42',
+        ctrl.signal,
+      ),
+    ).resolves.toEqual(response);
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('/api/import/drift');
+    expect(init?.method).toBe('POST');
+    expect(init?.signal).toBe(ctrl.signal);
+    expect(init?.headers).toMatchObject({
+      'Content-Type': 'application/json',
+      'X-KB-User': 'alice',
+    });
+    expect(JSON.parse(String(init?.body))).toEqual({
+      source: 'work',
+      external_key: 'gitlab:gitlab.example.com/acme/app#42',
+    });
+  });
+
+  it('throws the capped server text when an explicit drift check fails', async () => {
+    // This path is deliberately unlike best-effort provenance journaling.
+    const detail = `upstream unavailable ${'x'.repeat(240)}`;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(new Response(detail, { status: 502 }))),
+    );
+
+    await expect(
+      checkDrift(
+        identity,
+        'work',
+        'gitlab:gitlab.example.com/acme/app#42',
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(detail.slice(0, 200));
+  });
+
+  it('accepts only the exact server revision the user reviewed', async () => {
+    // Baseline acceptance is explicit and revision-bound, never best-effort.
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(
+        jsonResponse({ baseline_at: '2026-07-29T18:01:00Z' }),
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const ctrl = new AbortController();
+    const revision = 'b'.repeat(64);
+
+    await expect(
+      acceptDrift(
+        identity,
+        'work',
+        'gitlab:gitlab.example.com/acme/app#42',
+        revision,
+        ctrl.signal,
+      ),
+    ).resolves.toEqual({ baseline_at: '2026-07-29T18:01:00Z' });
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('/api/import/drift/accept');
+    expect(init?.method).toBe('POST');
+    expect(init?.signal).toBe(ctrl.signal);
+    expect(JSON.parse(String(init?.body))).toEqual({
+      source: 'work',
+      external_key: 'gitlab:gitlab.example.com/acme/app#42',
+      revision,
+    });
+  });
+
+  it('distinguishes a stale reviewed revision from a retryable failure', async () => {
+    // The modal must clear stale review text before asking for another check.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response('upstream changed; check again', { status: 409 }),
+        ),
+      ),
+    );
+
+    await expect(
+      acceptDrift(
+        identity,
+        'work',
+        'gitlab:gitlab.example.com/acme/app#42',
+        'c'.repeat(64),
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(DriftConflictError);
+  });
+
+  it('coerces every provenance candidate without retaining server internals', () => {
+    // One short link may name several projects, so every valid candidate survives.
+    expect(
+      coerceImportProvenanceItems({
+        items: [
+          {
+            source: 'work',
+            external_key: 'gitlab:gitlab.example.com/acme/app#42',
+            title: 'App issue',
+            url: 'https://gitlab.example.com/acme/app/-/issues/42',
+            kind: 'gitlab',
+            pat: 'must-not-survive',
+          },
+          {
+            source: 'work',
+            external_key: 'gitlab:gitlab.example.com/acme/api#42',
+            title: 'API issue',
+            url: 'https://gitlab.example.com/acme/api/-/issues/42',
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        source: 'work',
+        external_key: 'gitlab:gitlab.example.com/acme/app#42',
+        title: 'App issue',
+        url: 'https://gitlab.example.com/acme/app/-/issues/42',
+      },
+      {
+        source: 'work',
+        external_key: 'gitlab:gitlab.example.com/acme/api#42',
+        title: 'API issue',
+        url: 'https://gitlab.example.com/acme/api/-/issues/42',
+      },
+    ]);
+    expect(() => coerceImportProvenanceItems({ items: [null] })).toThrow(
+      'invalid import provenance response',
+    );
+  });
+
+  it('looks up the exact short link without deriving a forge identity', async () => {
+    // Project and source stay server-authored; the client sends only its durable tag.
+    const response = {
+      items: [
+        {
+          source: 'work',
+          external_key: 'gitlab:gitlab.example.com/acme/app#42',
+          title: 'App issue',
+          url: 'https://gitlab.example.com/acme/app/-/issues/42',
+        },
+      ],
+    };
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(jsonResponse(response)),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const ctrl = new AbortController();
+
+    await expect(
+      getImportProvenance(identity, 'gitlab#42', ctrl.signal),
+    ).resolves.toEqual(response.items);
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('/api/import/provenance');
+    expect(init?.signal).toBe(ctrl.signal);
+    expect(JSON.parse(String(init?.body))).toEqual({ link: 'gitlab#42' });
   });
 });
 

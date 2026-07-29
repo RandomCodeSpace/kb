@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,9 +85,34 @@ type importLinksRequest struct {
 	Items  []importLinksItem `json:"items"`
 }
 
+type importProvenanceRequest struct {
+	Link string `json:"link"`
+}
+
+type importProvenanceItem struct {
+	Source      string `json:"source"`
+	ExternalKey string `json:"external_key"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+}
+
+type importProvenanceResponse struct {
+	Items []importProvenanceItem `json:"items"`
+}
+
 type importDriftRequest struct {
 	Source      string `json:"source"`
 	ExternalKey string `json:"external_key"`
+}
+
+type importDriftAcceptRequest struct {
+	Source      string `json:"source"`
+	ExternalKey string `json:"external_key"`
+	Revision    string `json:"revision"`
+}
+
+type importDriftAcceptResponse struct {
+	BaselineAt string `json:"baseline_at"`
 }
 
 type importDriftResponse struct {
@@ -99,6 +125,7 @@ type importDriftResponse struct {
 	BaselineAt    string `json:"baseline_at"`
 	CheckedAt     string `json:"checked_at"`
 	Summary       string `json:"summary"`
+	Revision      string `json:"revision,omitempty"`
 }
 
 type importLinksItem struct {
@@ -367,41 +394,9 @@ func forgeRefID(raw string) (int, error) {
 // fetchIssue loads one forge issue and its bounded human discussion for the
 // import pipeline. The caller already chose the configured source in D1.
 func (s *server) fetchIssue(ctx context.Context, ref forgeRef) (forgeIssue, error) {
-	if ref.Issue <= 0 {
-		return forgeIssue{}, forgeRequestError(ref, "")
-	}
-	apiBase, err := forgeAPIBase(ref.Kind, ref.Source.BaseURL)
-	if err != nil {
-		return forgeIssue{}, forgeRequestError(ref, "")
-	}
-	issuePath, err := forgeIssuePath(ref)
-	if err != nil {
-		return forgeIssue{}, forgeRequestError(ref, "")
-	}
-	response, err := s.forgeGet(ctx, ref, apiBase, issuePath, nil)
+	issue, apiBase, issuePath, err := s.fetchIssueSnapshot(ctx, ref)
 	if err != nil {
 		return forgeIssue{}, err
-	}
-	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
-		return forgeIssue{}, forgeRequestError(ref, issuePath)
-	}
-
-	var issue forgeIssue
-	switch ref.Kind {
-	case "gitlab":
-		var raw gitLabIssue
-		if err := json.Unmarshal(response.body, &raw); err != nil {
-			return forgeIssue{}, forgeRequestError(ref, issuePath)
-		}
-		issue = forgeIssue{Ref: fmt.Sprintf("gitlab#%d", raw.IID), Title: raw.Title, Body: raw.Description, URL: raw.WebURL, Labels: raw.Labels}
-	case "github":
-		var raw gitHubIssue
-		if err := json.Unmarshal(response.body, &raw); err != nil || len(raw.PullRequest) != 0 {
-			return forgeIssue{}, forgeRequestError(ref, issuePath)
-		}
-		issue = gitHubForgeIssue(raw)
-	default:
-		return forgeIssue{}, forgeRequestError(ref, issuePath)
 	}
 	comments, err := s.fetchForgeComments(ctx, ref, apiBase, issuePath)
 	if err != nil {
@@ -409,6 +404,48 @@ func (s *server) fetchIssue(ctx context.Context, ref forgeRef) (forgeIssue, erro
 	}
 	issue.Comments = comments
 	return issue, nil
+}
+
+// fetchIssueSnapshot reads only the issue record. Acceptance needs no
+// discussion, so keeping this distinct prevents an unnecessary second egress.
+func (s *server) fetchIssueSnapshot(ctx context.Context, ref forgeRef) (forgeIssue, string, string, error) {
+	if ref.Issue <= 0 {
+		return forgeIssue{}, "", "", forgeRequestError(ref, "")
+	}
+	apiBase, err := forgeAPIBase(ref.Kind, ref.Source.BaseURL)
+	if err != nil {
+		return forgeIssue{}, "", "", forgeRequestError(ref, "")
+	}
+	issuePath, err := forgeIssuePath(ref)
+	if err != nil {
+		return forgeIssue{}, "", "", forgeRequestError(ref, "")
+	}
+	response, err := s.forgeGet(ctx, ref, apiBase, issuePath, nil)
+	if err != nil {
+		return forgeIssue{}, "", "", err
+	}
+	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
+		return forgeIssue{}, "", "", forgeRequestError(ref, issuePath)
+	}
+
+	var issue forgeIssue
+	switch ref.Kind {
+	case "gitlab":
+		var raw gitLabIssue
+		if err := json.Unmarshal(response.body, &raw); err != nil {
+			return forgeIssue{}, "", "", forgeRequestError(ref, issuePath)
+		}
+		issue = forgeIssue{Ref: fmt.Sprintf("gitlab#%d", raw.IID), Title: raw.Title, Body: raw.Description, URL: raw.WebURL, Labels: raw.Labels}
+	case "github":
+		var raw gitHubIssue
+		if err := json.Unmarshal(response.body, &raw); err != nil || len(raw.PullRequest) != 0 {
+			return forgeIssue{}, "", "", forgeRequestError(ref, issuePath)
+		}
+		issue = gitHubForgeIssue(raw)
+	default:
+		return forgeIssue{}, "", "", forgeRequestError(ref, issuePath)
+	}
+	return issue, apiBase, issuePath, nil
 }
 
 // fetchIssues loads open project, board, or milestone issues. Board filtering
@@ -970,6 +1007,43 @@ func (s *server) handleImportLinks(w http.ResponseWriter, r *http.Request, user 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleImportProvenance resolves every scoped import row for one exact short
+// link. It is a local lookup only: no forge or AI request is needed to expose
+// the provenance that the server already recorded.
+func (s *server) handleImportProvenance(w http.ResponseWriter, r *http.Request, user string) {
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var req importProvenanceRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	link := strings.TrimSpace(req.Link)
+	if link == "" || len(link) > 2048 || strings.ContainsAny(req.Link, "\r\n") {
+		http.Error(w, "invalid import link", http.StatusBadRequest)
+		return
+	}
+	links, err := s.store.ImportLinksByLink(user, link)
+	if err != nil {
+		log.Print("forge: import provenance lookup failed")
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	if len(links) == 0 {
+		http.Error(w, "import link not found", http.StatusNotFound)
+		return
+	}
+	response := importProvenanceResponse{Items: make([]importProvenanceItem, 0, len(links))}
+	for _, link := range links {
+		response.Items = append(response.Items, importProvenanceItem{
+			Source: link.Source, ExternalKey: link.ExternalKey, Title: link.Title, URL: link.URL,
+		})
+	}
+	writeJSON(w, response)
+}
+
 // handleImportDrift compares one scoped imported issue with a fresh forge
 // read. It never writes to the forge and advances the baseline only when the
 // first check has no prior server-authoritative comparison point.
@@ -984,58 +1058,10 @@ func (s *server) handleImportDrift(w http.ResponseWriter, r *http.Request, user 
 		return
 	}
 
-	imported, err := s.store.ImportedAs(user, []string{req.ExternalKey})
-	if err != nil {
-		log.Print("forge: import drift provenance lookup failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+	provenance, ref, ok := s.authorizeImportDriftTarget(w, user, req.Source, req.ExternalKey)
+	if !ok {
 		return
 	}
-	provenance, found := imported[req.ExternalKey]
-	if !found {
-		http.Error(w, "import link not found", http.StatusNotFound)
-		return
-	}
-	if !strings.EqualFold(req.Source, provenance.Source) {
-		http.Error(w, "source does not match imported item", http.StatusBadRequest)
-		return
-	}
-
-	// Keep this authorization sequence in lockstep with handleImportPreview:
-	// list, parse, select, match, decrypt, verify, then assign the PAT.
-	sources, err := s.store.ForgeSources(user)
-	if err != nil {
-		log.Print("forge: import drift source lookup failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
-		return
-	}
-	ref, err := parseForgeRef(sources, req.Source, provenance.URL)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	selected, found := forgeSourceByName(sources, req.Source)
-	if !found {
-		http.Error(w, "configured source unavailable", http.StatusBadRequest)
-		return
-	}
-	if ref.Source.Name != selected.Name {
-		http.Error(w, "reference does not match selected source", http.StatusBadRequest)
-		return
-	}
-	if provenance.Kind != selected.Kind {
-		http.Error(w, "imported item kind does not match selected source", http.StatusBadRequest)
-		return
-	}
-	if ref.Issue <= 0 {
-		http.Error(w, "issue reference required", http.StatusBadRequest)
-		return
-	}
-	kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
-	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
-		http.Error(w, "configured source unavailable", http.StatusBadRequest)
-		return
-	}
-	ref.pat = pat
 
 	ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
 	defer cancel()
@@ -1079,7 +1105,144 @@ func (s *server) handleImportDrift(w http.ResponseWriter, r *http.Request, user 
 	}
 	response.State = "drifted"
 	response.Summary = s.importDriftSummary(user, baseline, current)
+	response.Revision = importDriftRevision(current)
 	writeJSON(w, response)
+}
+
+// handleImportDriftAccept advances an existing baseline only after the caller
+// confirms the exact snapshot returned by a prior drift response.
+func (s *server) handleImportDriftAccept(w http.ResponseWriter, r *http.Request, user string) {
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var req importDriftAcceptRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if !validImportDriftRevision(req.Revision) {
+		http.Error(w, "invalid revision", http.StatusBadRequest)
+		return
+	}
+
+	_, ref, ok := s.authorizeImportDriftTarget(w, user, req.Source, req.ExternalKey)
+	if !ok {
+		return
+	}
+
+	lock := s.importDriftLocks.get(user)
+	lock.Lock()
+	defer lock.Unlock()
+
+	baseline, present, err := s.store.ImportBaseline(user, req.ExternalKey)
+	if err != nil {
+		log.Print("forge: import drift accept baseline lookup failed")
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	if !present {
+		http.Error(w, "check again", http.StatusConflict)
+		return
+	}
+	if importDriftRevision(baseline) == req.Revision {
+		writeJSON(w, importDriftAcceptResponse{BaselineAt: baseline.At})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
+	defer cancel()
+	issue, _, _, err := s.fetchIssueSnapshot(ctx, ref)
+	if err != nil {
+		writeAIError(w, user, "import drift accept", err)
+		return
+	}
+	current := store.NewImportBaseline(issue.Title, issue.Body, time.Now().UTC().Format(time.RFC3339Nano))
+	if importDriftRevision(current) != req.Revision {
+		http.Error(w, "upstream changed; check again", http.StatusConflict)
+		return
+	}
+	if err := s.store.SetImportBaseline(user, req.ExternalKey, current); err != nil {
+		log.Print("forge: import drift accept baseline update failed")
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, importDriftAcceptResponse{BaselineAt: current.At})
+}
+
+// authorizeImportDriftTarget keeps both drift endpoints on the same ordered
+// provenance/source/PAT/host/kind/issue authorization path before egress.
+func (s *server) authorizeImportDriftTarget(w http.ResponseWriter, user, source, externalKey string) (store.ImportLink, forgeRef, bool) {
+	imported, err := s.store.ImportedAs(user, []string{externalKey})
+	if err != nil {
+		log.Print("forge: import drift provenance lookup failed")
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return store.ImportLink{}, forgeRef{}, false
+	}
+	provenance, found := imported[externalKey]
+	if !found {
+		http.Error(w, "import link not found", http.StatusNotFound)
+		return store.ImportLink{}, forgeRef{}, false
+	}
+	if !strings.EqualFold(source, provenance.Source) {
+		http.Error(w, "source does not match imported item", http.StatusBadRequest)
+		return store.ImportLink{}, forgeRef{}, false
+	}
+
+	// Keep this authorization sequence in lockstep with handleImportPreview:
+	// list, parse, select, match, decrypt, verify, then assign the PAT.
+	sources, err := s.store.ForgeSources(user)
+	if err != nil {
+		log.Print("forge: import drift source lookup failed")
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return store.ImportLink{}, forgeRef{}, false
+	}
+	ref, err := parseForgeRef(sources, source, provenance.URL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return store.ImportLink{}, forgeRef{}, false
+	}
+	selected, found := forgeSourceByName(sources, source)
+	if !found {
+		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		return store.ImportLink{}, forgeRef{}, false
+	}
+	if ref.Source.Name != selected.Name {
+		http.Error(w, "reference does not match selected source", http.StatusBadRequest)
+		return store.ImportLink{}, forgeRef{}, false
+	}
+	if provenance.Kind != selected.Kind {
+		http.Error(w, "imported item kind does not match selected source", http.StatusBadRequest)
+		return store.ImportLink{}, forgeRef{}, false
+	}
+	if ref.Issue <= 0 {
+		http.Error(w, "issue reference required", http.StatusBadRequest)
+		return store.ImportLink{}, forgeRef{}, false
+	}
+	kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
+	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
+		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		return store.ImportLink{}, forgeRef{}, false
+	}
+	ref.pat = pat
+	return provenance, ref, true
+}
+
+func importDriftRevision(baseline store.ImportBaseline) string {
+	sum := sha256.Sum256([]byte(baseline.Title + "\x00" + baseline.Hash))
+	return fmt.Sprintf("%x", sum)
+}
+
+func validImportDriftRevision(revision string) bool {
+	if len(revision) != sha256.Size*2 {
+		return false
+	}
+	for i := 0; i < len(revision); i++ {
+		if (revision[i] < '0' || revision[i] > '9') && (revision[i] < 'a' || revision[i] > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *server) importDriftBaseline(user, externalKey string, current store.ImportBaseline) (store.ImportBaseline, bool, error) {

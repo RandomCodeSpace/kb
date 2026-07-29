@@ -338,6 +338,35 @@ WHERE scope = ? AND external_key IN (`+strings.Join(placeholders, ",")+`)`, args
 	return found, nil
 }
 
+// ImportLinksByLink returns every scoped provenance row carrying an exact link.
+func (s *Store) ImportLinksByLink(scope, link string) ([]ImportLink, error) {
+	rows, err := s.db.Query(`
+SELECT source, kind, external_key, link, url, title
+FROM import_links
+WHERE scope = ? AND link = ?
+ORDER BY source, external_key`, scope, link)
+	if err != nil {
+		return nil, fmt.Errorf("store: import links by link: %w", err)
+	}
+	var found []ImportLink
+	for rows.Next() {
+		var imported ImportLink
+		if err := rows.Scan(&imported.Source, &imported.Kind, &imported.ExternalKey, &imported.Link, &imported.URL, &imported.Title); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("store: scan import links by link: %w", err)
+		}
+		found = append(found, imported)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("store: import links by link: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("store: close import links by link: %w", err)
+	}
+	return found, nil
+}
+
 // RecordImportLinks atomically inserts or refreshes import provenance.
 func (s *Store) RecordImportLinks(scope string, links []ImportLink) error {
 	for _, link := range links {
