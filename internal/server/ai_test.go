@@ -59,10 +59,12 @@ type fakeOpenAI struct {
 	reqBody []byte
 	content string
 	status  int // 0 means 200
+	calls   int
 }
 
 func (f *fakeOpenAI) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		f.calls++
 		f.auth = r.Header.Get("Authorization")
 		f.path = r.URL.Path
 		f.reqBody, _ = io.ReadAll(r.Body)
@@ -77,6 +79,42 @@ func (f *fakeOpenAI) handler() http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// Import source indices are accepted only as positive integral positions; bad
+// model values remain unlinked for the server-side provenance step.
+func TestCoerceDraftsTracksOnlyValidImportSources(t *testing.T) {
+	drafts, err := coerceDrafts(`{"stories":[
+		{"title":"one","source":1},
+		{"title":"fraction","source":1.5},
+		{"title":"zero","source":0},
+		{"title":"missing"}
+	]}`, 4)
+	if err != nil || len(drafts) != 4 {
+		t.Fatalf("coerceDrafts = %+v, %v", drafts, err)
+	}
+	if drafts[0].Source != 1 || drafts[1].Source != 0 || drafts[2].Source != 0 || drafts[3].Source != 0 {
+		t.Fatalf("sources = [%d %d %d %d], want [1 0 0 0]", drafts[0].Source, drafts[1].Source, drafts[2].Source, drafts[3].Source)
+	}
+}
+
+// Import packs cap each issue body, each comment, and the total prompt while
+// retaining a source index for every issue that fits into the bounded input.
+func TestPackImportIssuesBoundsForgeText(t *testing.T) {
+	issues := make([]forgeIssue, maxImportIssues)
+	for i := range issues {
+		issues[i] = forgeIssue{
+			Ref:      fmt.Sprintf("gitlab#%d", i+1),
+			Title:    "Import issue",
+			Body:     strings.Repeat("é", maxImportIssueBodyBytes),
+			Labels:   []string{"team::auth"},
+			Comments: []string{strings.Repeat("界", maxImportCommentBytes)},
+		}
+	}
+	packed, count := packImportIssues(issues)
+	if len(packed) > maxImportPackBytes || count == 0 || count > len(issues) {
+		t.Fatalf("pack len=%d count=%d, want <=%d and 1..%d", len(packed), count, maxImportPackBytes, len(issues))
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
@@ -131,12 +132,19 @@ const storiesSystemPrompt = `You split an architecture decision record into kanb
 {"stories":[{"title":"short imperative title","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}]}]}
 prio is an integer from 1 (highest) to 4 (lowest); 3 is the default. Each story must be independently deliverable. Tags are single words with no spaces.`
 
+const importSystemPrompt = `You transform forge issues into kanban-card proposals. Respond with a single JSON object only — no prose, no code fences — of the form:
+{"stories":[{"title":"short imperative title","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}],"source":1}]}
+source must be the positive integer Source number from the supplied forge issue. Do not copy source text verbatim; propose independently actionable work.`
+
 // Bounds for POST /api/ai/stories: an ADR is prose, not a payload, and the
 // story count is clamped so one request cannot fan out unboundedly.
 const (
-	maxADRBytes       = 64 << 10 // 64 KiB
-	defaultStoryCount = 8
-	maxStoryCount     = 20
+	maxADRBytes             = 64 << 10 // 64 KiB
+	defaultStoryCount       = 8
+	maxStoryCount           = 20
+	maxImportIssueBodyBytes = 16 << 10
+	maxImportCommentBytes   = 1 << 10
+	maxImportPackBytes      = 48 << 10
 )
 
 // storyDraft is the coerced card draft returned by POST /api/ai/story.
@@ -148,6 +156,7 @@ type storyDraft struct {
 	Effort string       `json:"effort"`
 	Tags   []string     `json:"tags"`
 	Checks []draftCheck `json:"checks"`
+	Source int          `json:"-"`
 }
 
 type draftCheck struct {
@@ -549,6 +558,9 @@ func coerceDrafts(content string, max int) ([]storyDraft, error) {
 			continue
 		}
 		d := coerceDraftMap(sm)
+		if source, ok := sm["source"].(float64); ok && source >= 1 && source == float64(int(source)) {
+			d.Source = int(source)
+		}
 		if err := validateDraft(d); err != nil {
 			// Deliberately without the error: validation quotes the offending
 			// field value, and that value is card text derived from the
@@ -559,6 +571,45 @@ func coerceDrafts(content string, max int) ([]storyDraft, error) {
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// packImportIssues limits raw forge text before one model call while keeping
+// source numbers stable for server-owned provenance after coercion.
+func packImportIssues(issues []forgeIssue) (string, int) {
+	var packed strings.Builder
+	count := 0
+	for i, issue := range issues {
+		if packed.Len() >= maxImportPackBytes {
+			break
+		}
+		comments := make([]string, 0, min(len(issue.Comments), 10))
+		for _, comment := range issue.Comments {
+			if len(comments) == 10 {
+				break
+			}
+			comments = append(comments, truncateImportText(comment, maxImportCommentBytes))
+		}
+		section := fmt.Sprintf("Source %d\nTitle: %s\nRef: %s\nLabels: %s\nBody:\n%s\nComments:\n%s\n\n",
+			i+1, issue.Title, issue.Ref, strings.Join(issue.Labels, ", "),
+			truncateImportText(issue.Body, maxImportIssueBodyBytes), strings.Join(comments, "\n"))
+		if len(section) > maxImportPackBytes-packed.Len() {
+			break
+		}
+		packed.WriteString(section)
+		count++
+	}
+	return packed.String(), count
+}
+
+func truncateImportText(text string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	for len(text) > max {
+		_, size := utf8.DecodeLastRuneInString(text)
+		text = text[:len(text)-size]
+	}
+	return text
 }
 
 // validateDraft runs a coerced draft through the same field rules every

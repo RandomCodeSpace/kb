@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -1049,4 +1051,187 @@ func TestFetchIssuesReturnsGitHubRateLimitPartial(t *testing.T) {
 	if err != nil || calls != 2 || len(issues) != 2 || total != 2 || !truncated || note != "rate limited — partial results (2 of 2)" {
 		t.Fatalf("GitHub partial = issues=%d total=%d truncated=%v note=%q err=%v calls=%d", len(issues), total, truncated, note, err, calls)
 	}
+}
+
+// Import preview computes duplicate flags before one AI transformation and
+// makes provenance server-owned even when the model invents link tags.
+func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/forge/api/v4/projects/group%2Fproject/issues" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `[
+			{"iid":42,"title":"Linked issue","description":"body","web_url":"https://forge.example/issues/42","labels":["team::auth"]},
+			{"iid":43,"title":"Similar issue title","description":"body","web_url":"https://forge.example/issues/43","labels":["team::auth"]}
+		]`)
+	}))
+	defer upstream.Close()
+	fakeAI := &fakeOpenAI{content: `{"stories":[
+		{"title":"do linked","tags":["team::auth","link::evil#1"],"source":1},
+		{"title":"do similar","source":2},
+		{"title":"unlinked","tags":["link::evil#99","team::ops"],"source":99}
+	]}`}
+	aiUpstream := httptest.NewServer(fakeAI.handler())
+	defer aiUpstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, st := newTestServer(t, Config{})
+	configureAI(t, h, aiUpstream.URL, "test-model", "sk-import")
+	baseURL, pat := upstream.URL+"/forge", "glpat-import"
+	if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, &pat); err != nil {
+		t.Fatalf("seed forge source: %v", err)
+	}
+	linked, err := st.AddTask("default", board.Task{Title: "Existing linked", Tags: []string{"link::gitlab#42"}})
+	if err != nil {
+		t.Fatalf("seed linked task: %v", err)
+	}
+	similar, err := st.AddTask("default", board.Task{Title: "Similar issue title"})
+	if err != nil {
+		t.Fatalf("seed similar task: %v", err)
+	}
+
+	w := doReq(t, h, http.MethodPost, "/api/import/preview", fmt.Sprintf(`{"source":"gitlab-main","ref":%q,"max":99}`, upstream.URL+"/forge/group/project"), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST import preview: got %d body=%s", w.Code, w.Body)
+	}
+	var response struct {
+		Kind      string `json:"kind"`
+		TotalHint int    `json:"total_hint"`
+		Fetched   int    `json:"fetched"`
+		Drafts    []struct {
+			Title       string   `json:"title"`
+			Tags        []string `json:"tags"`
+			Link        string   `json:"link"`
+			ExternalKey string   `json:"external_key"`
+			URL         string   `json:"url"`
+			DuplicateOf *struct {
+				ID, Title, Via string
+			} `json:"duplicate_of"`
+		} `json:"drafts"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if fakeAI.calls != 1 || response.Kind != "project" || response.TotalHint != 2 || response.Fetched != 2 || len(response.Drafts) != 3 {
+		t.Fatalf("preview metadata = %+v AI calls=%d", response, fakeAI.calls)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw preview: %v", err)
+	}
+	for _, draft := range raw["drafts"].([]any) {
+		if _, ok := draft.(map[string]any)["source"]; ok {
+			t.Fatalf("preview draft exposes deprecated source field: %v", draft)
+		}
+	}
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	first, second, unlinked := response.Drafts[0], response.Drafts[1], response.Drafts[2]
+	if first.Link != "gitlab#42" || first.ExternalKey != "gitlab:"+host+"/group/project#42" || first.URL == "" || first.DuplicateOf == nil || first.DuplicateOf.ID != linked.ID || first.DuplicateOf.Title != linked.Title || first.DuplicateOf.Via != "link" || strings.Join(first.Tags, ",") != "team::auth,link::gitlab#42" {
+		t.Fatalf("linked draft = %+v", first)
+	}
+	if second.Link != "gitlab#43" || second.DuplicateOf == nil || second.DuplicateOf.ID != similar.ID || second.DuplicateOf.Via != "similar" || !strings.Contains(strings.Join(second.Tags, ","), "link::gitlab#43") {
+		t.Fatalf("similar draft = %+v", second)
+	}
+	if unlinked.Link != "" || unlinked.ExternalKey != "" || unlinked.URL != "" || unlinked.DuplicateOf != nil || strings.Join(unlinked.Tags, ",") != "team::ops" {
+		t.Fatalf("unlinked draft = %+v", unlinked)
+	}
+}
+
+// A model source number is authorized only when that complete numbered issue
+// was included in the bounded prompt. An omitted oversized issue must remain
+// a draft without server-owned provenance even if the model claims its index.
+func TestImportPreviewDoesNotAuthorizeOmittedPackedSource(t *testing.T) {
+	firstBody := strings.Repeat("a", maxImportIssueBodyBytes)
+	secondTitle := strings.Repeat("z", maxImportPackBytes)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/forge/api/v4/projects/group%2Fproject/issues" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `[
+			{"iid":1,"title":"first","description":%q,"web_url":"https://forge.example/issues/1"},
+			{"iid":2,"title":%q,"description":"second body","web_url":"https://forge.example/issues/2"}
+		]`, firstBody, secondTitle)
+	}))
+	defer upstream.Close()
+	fakeAI := &fakeOpenAI{content: `{"stories":[{"title":"from first","source":1},{"title":"from second","source":2}]}`}
+	aiUpstream := httptest.NewServer(fakeAI.handler())
+	defer aiUpstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, st := newTestServer(t, Config{})
+	configureAI(t, h, aiUpstream.URL, "test-model", "sk-import")
+	baseURL, pat := upstream.URL+"/forge", "glpat-import"
+	if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, &pat); err != nil {
+		t.Fatalf("seed forge source: %v", err)
+	}
+
+	w := doReq(t, h, http.MethodPost, "/api/import/preview", fmt.Sprintf(`{"source":"gitlab-main","ref":%q}`, upstream.URL+"/forge/group/project"), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST import preview: got %d body=%s", w.Code, w.Body)
+	}
+	var response struct {
+		Fetched int `json:"fetched"`
+		Drafts  []struct {
+			Title       string `json:"title"`
+			Link        string `json:"link"`
+			ExternalKey string `json:"external_key"`
+			URL         string `json:"url"`
+		} `json:"drafts"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if fakeAI.calls != 1 || response.Fetched != 2 || len(response.Drafts) != 2 {
+		t.Fatalf("preview metadata = %+v AI calls=%d", response, fakeAI.calls)
+	}
+	if first := response.Drafts[0]; first.Title != "from first" || first.Link == "" || first.ExternalKey == "" || first.URL == "" {
+		t.Fatalf("complete packed source lost provenance: %+v", first)
+	}
+	if second := response.Drafts[1]; second.Title != "from second" || second.Link != "" || second.ExternalKey != "" || second.URL != "" {
+		t.Fatalf("omitted source received provenance: %+v", second)
+	}
+	var request struct {
+		Messages []chatMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(fakeAI.reqBody, &request); err != nil {
+		t.Fatalf("decode AI request: %v", err)
+	}
+	if len(request.Messages) != 2 {
+		t.Fatalf("AI messages = %d, want system and user", len(request.Messages))
+	}
+	userMessage := request.Messages[1].Content
+	if !strings.Contains(userMessage, "Source 1\n") || strings.Contains(userMessage, "Source 2\n") {
+		t.Fatalf("AI user message contains an incomplete source record: %q", userMessage)
+	}
+}
+
+// Import references cannot select an unconfigured host, and a configured
+// private source still obeys the forge client's opaque SSRF guard.
+func TestImportPreviewRejectsUnconfiguredAndPrivateForgeHosts(t *testing.T) {
+	t.Run("unconfigured host", func(t *testing.T) {
+		h, _ := newTestServer(t, Config{})
+		w := doReq(t, h, http.MethodPost, "/api/import/preview", `{"source":"missing","ref":"https://unknown.example/group/project"}`, nil)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "no configured source for host unknown.example") {
+			t.Fatalf("unconfigured response = %d %q", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("configured but private", func(t *testing.T) {
+		upstream := httptest.NewServer(http.NotFoundHandler())
+		defer upstream.Close()
+		t.Setenv("KB_FORGE_ALLOW_PRIVATE", "")
+		h, st := newTestServer(t, Config{})
+		baseURL := upstream.URL
+		if _, err := st.SetForgeSource("default", "private", "gitlab", &baseURL, nil); err != nil {
+			t.Fatalf("seed private source: %v", err)
+		}
+		w := doReq(t, h, http.MethodPost, "/api/import/preview", fmt.Sprintf(`{"source":"private","ref":%q}`, upstream.URL+"/group/project"), nil)
+		if w.Code != http.StatusBadGateway || strings.TrimSpace(w.Body.String()) != "connection failed" {
+			t.Fatalf("private response = %d %q", w.Code, w.Body.String())
+		}
+	})
 }

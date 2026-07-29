@@ -26,6 +26,7 @@ const (
 	maxImportIssues    = 20
 	maxForgeComments   = 20
 	maxForgeCommentLen = 1 << 10
+	importFetchTimeout = 25 * time.Second
 )
 
 type forgeSourceResponse struct {
@@ -69,6 +70,35 @@ type forgeHTTPResponse struct {
 	status int
 	header http.Header
 	body   []byte
+}
+
+type importPreviewRequest struct {
+	Source string `json:"source"`
+	Ref    string `json:"ref"`
+	Max    int    `json:"max"`
+}
+
+type importDuplicate struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Via   string `json:"via"`
+}
+
+type importPreviewDraft struct {
+	storyDraft
+	Link        string           `json:"link,omitempty"`
+	ExternalKey string           `json:"external_key,omitempty"`
+	URL         string           `json:"url,omitempty"`
+	DuplicateOf *importDuplicate `json:"duplicate_of,omitempty"`
+}
+
+type importPreviewResponse struct {
+	Kind      string               `json:"kind"`
+	TotalHint int                  `json:"total_hint"`
+	Fetched   int                  `json:"fetched"`
+	Truncated bool                 `json:"truncated"`
+	Note      string               `json:"note"`
+	Drafts    []importPreviewDraft `json:"drafts"`
 }
 
 type gitLabIssue struct {
@@ -751,6 +781,147 @@ func forgeAPIBase(kind, baseURL string) (string, error) {
 		u.Path += "/api/v3"
 	}
 	return u.String(), nil
+}
+
+// handleImportPreview transforms a bounded, configured forge selection once;
+// it never writes cards or provenance, which remain an explicit later commit.
+func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, user string) {
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var req importPreviewRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	sources, err := s.store.ForgeSources(user)
+	if err != nil {
+		log.Printf("forge: list sources for %s failed", user)
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	ref, err := parseForgeRef(sources, req.Source, req.Ref)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	kind, baseURL, pat, err := s.store.ForgePAT(user, ref.Source.Name)
+	if err != nil || kind != ref.Kind || baseURL != ref.Source.BaseURL {
+		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		return
+	}
+	ref.pat = pat
+
+	ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
+	defer cancel()
+	issues, totalHint, truncated, note, err := s.fetchIssues(ctx, ref, req.Max)
+	if err != nil {
+		writeAIError(w, user, "import preview", err)
+		return
+	}
+	duplicates, err := s.importDuplicates(user, issues)
+	if err != nil {
+		log.Printf("forge: duplicate lookup for %s failed", user)
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	fetched := len(issues)
+	packed, sourceCount := packImportIssues(issues)
+	issues, duplicates = issues[:sourceCount], duplicates[:sourceCount]
+	response := importPreviewResponse{
+		Kind:      importRefKind(ref),
+		TotalHint: totalHint,
+		Fetched:   fetched,
+		Truncated: truncated,
+		Note:      note,
+		Drafts:    []importPreviewDraft{},
+	}
+	if sourceCount == 0 {
+		writeJSON(w, response)
+		return
+	}
+	content, err := s.chatCompletion(user, []chatMessage{
+		{Role: "system", Content: importSystemPrompt},
+		{Role: "user", Content: "Transform these numbered forge issues into kanban-card proposals:\n\n" + packed},
+	}, 0, true)
+	if err != nil {
+		writeAIError(w, user, "import preview", err)
+		return
+	}
+	drafts, err := coerceDrafts(content, maxImportIssues)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	for _, draft := range drafts {
+		preview := importPreviewDraft{storyDraft: draft}
+		preview.Tags = stripModelLinkTags(preview.Tags)
+		if draft.Source > 0 && draft.Source <= sourceCount {
+			issue := issues[draft.Source-1]
+			link, externalKey := importIssueProvenance(ref, issue)
+			preview.Tags = append(preview.Tags, "link::"+link)
+			preview.Link = link
+			preview.ExternalKey = externalKey
+			preview.URL = issue.URL
+			preview.DuplicateOf = duplicates[draft.Source-1]
+		}
+		response.Drafts = append(response.Drafts, preview)
+	}
+	writeJSON(w, response)
+}
+
+func (s *server) importDuplicates(scope string, issues []forgeIssue) ([]*importDuplicate, error) {
+	duplicates := make([]*importDuplicate, len(issues))
+	for i, issue := range issues {
+		links, err := s.store.TasksByLink(scope, "link::"+issue.Ref)
+		if err != nil {
+			return nil, err
+		}
+		if len(links) > 0 {
+			duplicates[i] = &importDuplicate{ID: links[0].ID, Title: links[0].Title, Via: "link"}
+			continue
+		}
+		similar, err := s.store.SearchSimilar(scope, issue.Title, "", 1)
+		if err != nil {
+			return nil, err
+		}
+		if len(similar) > 0 {
+			duplicates[i] = &importDuplicate{ID: similar[0].ID, Title: similar[0].Title, Via: "similar"}
+		}
+	}
+	return duplicates, nil
+}
+
+func importRefKind(ref forgeRef) string {
+	if ref.Issue > 0 {
+		return "issue"
+	}
+	if ref.Milestone > 0 {
+		return "milestone"
+	}
+	return "project"
+}
+
+func stripModelLinkTags(tags []string) []string {
+	filtered := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		if !strings.HasPrefix(tag, "link::") {
+			filtered = append(filtered, tag)
+		}
+	}
+	return filtered
+}
+
+func importIssueProvenance(ref forgeRef, issue forgeIssue) (link, externalKey string) {
+	link = issue.Ref
+	issueID := strings.TrimPrefix(link, ref.Kind+"#")
+	host := ""
+	if base, err := url.Parse(ref.Source.BaseURL); err == nil {
+		host = base.Host
+	}
+	externalKey = fmt.Sprintf("%s:%s/%s#%s", ref.Kind, host, ref.Project, issueID)
+	return link, externalKey
 }
 
 func (s *server) handleGetIntegrations(w http.ResponseWriter, _ *http.Request, user string) {
