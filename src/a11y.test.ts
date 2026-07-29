@@ -121,6 +121,49 @@ describe('stylesheet guards', () => {
   });
 
   /**
+   * Chromium paints a stepper arrow at each end of a scrollbar it draws
+   * itself, and they were reported as overflowing the corners of the box.
+   * `scrollbar-width: thin` does not remove them — only a non-rendering
+   * `::-webkit-scrollbar-button` does, and it is the sort of rule that reads
+   * like dead weight to whoever tidies the file next.
+   */
+  it('keeps the scrollbar stepper arrows from rendering', () => {
+    const button = rule('::-webkit-scrollbar-button');
+    expect(button).toMatch(/display:\s*none/);
+  });
+
+  /**
+   * …and the rule above only reaches Chromium while the standard properties
+   * stay out of its way. A `scrollbar-width` or `scrollbar-color` other than
+   * `auto` switches the scroller to the native theme, which ignores every
+   * ::-webkit-scrollbar rule in the file and brings the arrows straight back.
+   * Hoisting the pair out of the @supports fence — the obvious tidy-up, since
+   * the fence looks like a browser hack — is exactly that regression.
+   */
+  it('fences the standard scrollbar properties away from the -webkit- path', () => {
+    const at = CSS.indexOf('@supports not selector(::-webkit-scrollbar)');
+    expect(at).toBeGreaterThan(-1);
+    const fenced = CSS.slice(at, CSS.indexOf('\n}', at));
+    expect(fenced).toMatch(/scrollbar-width:\s*thin/);
+    expect(fenced).toMatch(/scrollbar-color:\s*var\(--dim\) transparent/);
+    // Nowhere else, or Chromium loses the -webkit- path again. Counted with
+    // the comments stripped, since the block above quotes both names.
+    const declarations = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(declarations.match(/scrollbar-color:/g)).toHaveLength(1);
+    expect(declarations.match(/scrollbar-width:/g)).toHaveLength(1);
+  });
+
+  /**
+   * The thumb is a UI component under SC 1.4.11, so it owes 3:1 against every
+   * surface it is drawn over. --gray managed 1.49-1.88:1 on kb's six (paper,
+   * white, and the four column pastels); --dim clears all six at 4.34:1 or
+   * better. Swapping it back for a lighter token would look tidier and fail.
+   */
+  it('draws the scrollbar thumb in a token that clears 3:1', () => {
+    expect(rule('::-webkit-scrollbar-thumb')).toMatch(/background-color:\s*var\(--dim\)/);
+  });
+
+  /**
    * The entrance keyframes may only touch `opacity` and `transform`: the
    * compositor drives both at the display's own rate, so the same animation
    * gets all 120 frames on a 120Hz panel and still holds together at 30fps

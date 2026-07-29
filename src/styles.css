@@ -123,14 +123,74 @@ body {
 }
 
 /* Scrollbars: every scrolling surface in kb, drawn in ink on its own paper
-   rather than the platform's grey slab. */
-.col,
-.modal,
-.storylist,
-.labeldrop,
-.gate-card {
-  scrollbar-width: thin;
-  scrollbar-color: var(--gray) transparent;
+   rather than the platform's grey slab.
+
+   Not a selector list any more. The old one named five surfaces and went stale
+   as soon as a sixth started scrolling — the board, the page itself and every
+   modal textarea were still drawing the platform bar. `*` cannot go stale, and
+   it is the lowest specificity there is, so anything that ever needs its own
+   bar can still say so.
+
+   The two families below cannot both be used, which is the whole trick here.
+   Giving `scrollbar-width` or `scrollbar-color` any value other than `auto`
+   opts a scroller into Chromium's *native* theme, and a native scrollbar
+   ignores every ::-webkit-scrollbar rule in this file — including the one that
+   removes the arrows. Measured in Chromium 151 on a plain overflowing div:
+   both standard properties left alone gives the 8px bar asked for below, while
+   `scrollbar-color` alone puts back a 10px native bar with a stepper at each
+   end, and `scrollbar-width: auto` with it a 15px one. Setting the pair is
+   what the old rule did, so on every surface it named the arrows could never
+   have been removed.
+
+   So the standard pair is fenced off behind engines that have no -webkit- path
+   to lose. Firefox is the one that matters: it has no scrollbar pseudo-elements
+   at all, and these two properties are the only way to reach its bars.
+
+   --dim rather than --gray: the thumb is a UI component, so SC 1.4.11 asks for
+   3:1 against whatever it sits on. --gray #b8bdc7 measured 1.88:1 on the white
+   modal, 1.73 on the paper, 1.55 / 1.56 / 1.61 on the todo, doing and done
+   pastels and 1.49 on cancelled — a fail on all six. --dim #63697a measures
+   5.48 / 5.03 / 4.51 / 4.53 / 4.67 / 4.34:1 on the same six, and the hover
+   state goes to full ink at 12.33:1 or better. */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--dim) transparent;
+  }
+}
+::-webkit-scrollbar {
+  /* --sp-2, so the gutter sits on the spacing ramp — a little over half the
+     15px platform bar. */
+  width: var(--sp-2);
+  height: var(--sp-2);
+}
+/* The arrows from the report. Chromium paints a stepper at each end of a bar
+   it themes itself; nothing else here removes them. */
+::-webkit-scrollbar-button {
+  display: none;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+  border: 0;
+}
+::-webkit-scrollbar-thumb {
+  background-color: var(--dim);
+  /* A pill, like every other soft shape in kb. The transparent border insets
+     the paint by 1px a side so the thumb does not graze the column's ink
+     border; `background-clip` moves where the colour lands, not where the
+     pointer can grab, so the thumb is still the full 8px to drag. */
+  border: 1px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+/* Darkening under the pointer is the only feedback a bar this slim can give. */
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--ink);
+}
+/* Where a vertical and a horizontal bar meet. Left alone it is a grey square
+   wedged into the corner of the box. */
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* ---------- app shell ---------- */
