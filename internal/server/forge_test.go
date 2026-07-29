@@ -705,6 +705,30 @@ func TestParseForgeRefResolvesConfiguredReferences(t *testing.T) {
 	}
 }
 
+func TestParseForgeRefBreaksEqualBaseTiesBySelectedSource(t *testing.T) {
+	t.Run("same base prefers selected source case-insensitively", func(t *testing.T) {
+		sources := []store.ForgeSource{
+			{Name: "alpha", Kind: "gitlab", BaseURL: "https://forge.example"},
+			{Name: "zulu", Kind: "gitlab", BaseURL: "https://forge.example"},
+		}
+		got, err := parseForgeRef(sources, "ZuLu", "https://forge.example/group/project/-/issues/8")
+		if err != nil || got.Source.Name != "zulu" || got.Project != "group/project" || got.Issue != 8 {
+			t.Fatalf("equal-base selected source = %+v, %v; want zulu issue 8", got, err)
+		}
+	})
+
+	t.Run("longer base still wins over selected source", func(t *testing.T) {
+		sources := []store.ForgeSource{
+			{Name: "alpha", Kind: "gitlab", BaseURL: "https://forge.example"},
+			{Name: "zulu", Kind: "gitlab", BaseURL: "https://forge.example/forge"},
+		}
+		got, err := parseForgeRef(sources, "alpha", "https://forge.example/forge/group/project/-/issues/8")
+		if err != nil || got.Source.Name != "zulu" || got.Project != "group/project" || got.Issue != 8 {
+			t.Fatalf("longer base source = %+v, %v; want zulu issue 8", got, err)
+		}
+	})
+}
+
 // Bare references and unconfigured hosts must never choose an arbitrary PAT.
 func TestParseForgeRefRejectsUnconfiguredReferences(t *testing.T) {
 	sources := []store.ForgeSource{
@@ -1136,6 +1160,60 @@ func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
 	}
 	if unlinked.Link != "" || unlinked.ExternalKey != "" || unlinked.URL != "" || unlinked.DuplicateOf != nil || strings.Join(unlinked.Tags, ",") != "team::ops" {
 		t.Fatalf("unlinked draft = %+v", unlinked)
+	}
+}
+
+// A selected source is an authorization boundary, not merely a hint for bare
+// GitHub references. Absolute refs must not switch to another configured
+// source before any credential lookup, forge request, or AI request.
+func TestImportPreviewRejectsSelectedSourceMismatchBeforeEgress(t *testing.T) {
+	var forgeAHits, forgeBHits atomic.Int32
+	forgeA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		forgeAHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer forgeA.Close()
+	forgeB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		forgeBHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer forgeB.Close()
+	fakeAI := &fakeOpenAI{content: `{"stories":[{"title":"unexpected"}]}`}
+	aiUpstream := httptest.NewServer(fakeAI.handler())
+	defer aiUpstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, st := newTestServer(t, Config{})
+	configureAI(t, h, aiUpstream.URL, "test-model", "sk-import")
+	baseA, baseB := forgeA.URL, forgeB.URL
+	if _, err := st.SetForgeSource("default", "source-a", "gitlab", &baseA, nil); err != nil {
+		t.Fatalf("seed source A: %v", err)
+	}
+	if _, err := st.SetForgeSource("default", "source-b", "gitlab", &baseB, nil); err != nil {
+		t.Fatalf("seed source B: %v", err)
+	}
+
+	for _, test := range []struct {
+		name, source, wantBody string
+	}{
+		{"mismatched selected source", "SOURCE-A", "reference does not match selected source"},
+		{"missing selected source", "", "configured source unavailable"},
+		{"unknown selected source", "missing", "configured source unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			w := doReq(t, h, http.MethodPost, "/api/import/preview", fmt.Sprintf(`{"source":%q,"ref":%q}`, test.source, baseB+"/group/project"), nil)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), test.wantBody) {
+				t.Fatalf("POST import preview: got %d body=%q, want 400 containing %q", w.Code, w.Body.String(), test.wantBody)
+			}
+			if forgeAHits.Load() != 0 || forgeBHits.Load() != 0 || fakeAI.calls != 0 {
+				t.Fatalf("rejected preview made egress: forge A=%d forge B=%d AI=%d", forgeAHits.Load(), forgeBHits.Load(), fakeAI.calls)
+			}
+			found, err := st.ImportedAs("default", []string{"unexpected"})
+			if err != nil || len(found) != 0 {
+				t.Fatalf("rejected preview recorded provenance: %+v, %v", found, err)
+			}
+		})
 	}
 }
 

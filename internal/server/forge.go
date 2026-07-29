@@ -166,7 +166,7 @@ func parseForgeRef(sources []store.ForgeSource, sourceName, raw string) (forgeRe
 		return forgeRef{}, errors.New("invalid forge reference")
 	}
 
-	source, path, ok := configuredForgeSource(sources, u)
+	source, path, ok := configuredForgeSource(sources, sourceName, u)
 	if !ok {
 		return forgeRef{}, fmt.Errorf("no configured source for host %s", u.Hostname())
 	}
@@ -199,7 +199,9 @@ func forgeSourceByName(sources []store.ForgeSource, name string) (store.ForgeSou
 
 // configuredForgeSource compares origins and whole path segments rather than
 // raw strings, so a source at /forge cannot authorize /forgeish by accident.
-func configuredForgeSource(sources []store.ForgeSource, request *url.URL) (store.ForgeSource, string, bool) {
+// Equal-length configured bases are disambiguated by the caller's source name;
+// a longer base always wins regardless of that selection.
+func configuredForgeSource(sources []store.ForgeSource, sourceName string, request *url.URL) (store.ForgeSource, string, bool) {
 	bestLength := -1
 	var best store.ForgeSource
 	bestPath := ""
@@ -222,7 +224,7 @@ func configuredForgeSource(sources []store.ForgeSource, request *url.URL) (store
 			continue
 		}
 		length := len(base.Scheme) + len(base.Host) + len(basePath)
-		if length > bestLength {
+		if length > bestLength || (length == bestLength && strings.EqualFold(source.Name, sourceName)) {
 			bestLength = length
 			best = source
 			bestPath = path
@@ -819,8 +821,17 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	kind, baseURL, pat, err := s.store.ForgePAT(user, ref.Source.Name)
-	if err != nil || kind != ref.Kind || baseURL != ref.Source.BaseURL {
+	selected, found := forgeSourceByName(sources, req.Source)
+	if !found {
+		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		return
+	}
+	if ref.Source.Name != selected.Name {
+		http.Error(w, "reference does not match selected source", http.StatusBadRequest)
+		return
+	}
+	kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
+	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
 		http.Error(w, "configured source unavailable", http.StatusBadRequest)
 		return
 	}
