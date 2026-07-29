@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
@@ -20,6 +22,10 @@ import (
 const (
 	forgeTimeout       = 20 * time.Second
 	maxForgeDrainBytes = 64 << 10
+	maxForgeBodyBytes  = 2 << 20
+	maxImportIssues    = 20
+	maxForgeComments   = 20
+	maxForgeCommentLen = 1 << 10
 )
 
 type forgeSourceResponse struct {
@@ -44,6 +50,53 @@ type forgeRef struct {
 	Project   string
 	Issue     int
 	Milestone int
+
+	// pat is populated only after the request owner decrypts its selected source.
+	// Keeping it private prevents the parser and response paths from exposing it.
+	pat string
+}
+
+type forgeIssue struct {
+	Ref      string
+	Title    string
+	Body     string
+	URL      string
+	Labels   []string
+	Comments []string
+}
+
+type forgeHTTPResponse struct {
+	status int
+	header http.Header
+	body   []byte
+}
+
+type gitLabIssue struct {
+	IID         int      `json:"iid"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	WebURL      string   `json:"web_url"`
+	Labels      []string `json:"labels"`
+}
+
+type gitHubIssue struct {
+	Number  int    `json:"number"`
+	Title   string `json:"title"`
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
+	Labels  []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+	PullRequest json.RawMessage `json:"pull_request"`
+}
+
+type gitLabNote struct {
+	Body   string `json:"body"`
+	System bool   `json:"system"`
+}
+
+type gitHubComment struct {
+	Body string `json:"body"`
 }
 
 // parseForgeRef accepts only configured forge URLs so later fetches can select
@@ -247,6 +300,376 @@ func forgeRefID(raw string) (int, error) {
 		return 0, errors.New("invalid forge reference")
 	}
 	return id, nil
+}
+
+// fetchIssue loads one forge issue and its bounded human discussion for the
+// import pipeline. The caller already chose the configured source in D1.
+func (s *server) fetchIssue(ctx context.Context, ref forgeRef) (forgeIssue, error) {
+	if ref.Issue <= 0 {
+		return forgeIssue{}, forgeRequestError(ref, "")
+	}
+	apiBase, err := forgeAPIBase(ref.Kind, ref.Source.BaseURL)
+	if err != nil {
+		return forgeIssue{}, forgeRequestError(ref, "")
+	}
+	issuePath, err := forgeIssuePath(ref)
+	if err != nil {
+		return forgeIssue{}, forgeRequestError(ref, "")
+	}
+	response, err := s.forgeGet(ctx, ref, apiBase, issuePath, nil)
+	if err != nil {
+		return forgeIssue{}, err
+	}
+	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
+		return forgeIssue{}, forgeRequestError(ref, issuePath)
+	}
+
+	var issue forgeIssue
+	switch ref.Kind {
+	case "gitlab":
+		var raw gitLabIssue
+		if err := json.Unmarshal(response.body, &raw); err != nil {
+			return forgeIssue{}, forgeRequestError(ref, issuePath)
+		}
+		issue = forgeIssue{Ref: fmt.Sprintf("gitlab#%d", raw.IID), Title: raw.Title, Body: raw.Description, URL: raw.WebURL, Labels: raw.Labels}
+	case "github":
+		var raw gitHubIssue
+		if err := json.Unmarshal(response.body, &raw); err != nil || len(raw.PullRequest) != 0 {
+			return forgeIssue{}, forgeRequestError(ref, issuePath)
+		}
+		issue = gitHubForgeIssue(raw)
+	default:
+		return forgeIssue{}, forgeRequestError(ref, issuePath)
+	}
+	comments, err := s.fetchForgeComments(ctx, ref, apiBase, issuePath)
+	if err != nil {
+		return forgeIssue{}, err
+	}
+	issue.Comments = comments
+	return issue, nil
+}
+
+// fetchIssues loads open project, board, or milestone issues. Board filtering
+// deliberately remains out of scope: D1 resolves boards to their project.
+func (s *server) fetchIssues(ctx context.Context, ref forgeRef, max int) (issues []forgeIssue, totalHint int, truncated bool, note string, err error) {
+	if ref.Issue > 0 {
+		issue, err := s.fetchIssue(ctx, ref)
+		if err != nil {
+			return nil, 0, false, "", err
+		}
+		return []forgeIssue{issue}, 1, false, "", nil
+	}
+	if max <= 0 || max > maxImportIssues {
+		max = maxImportIssues
+	}
+	apiBase, err := forgeAPIBase(ref.Kind, ref.Source.BaseURL)
+	if err != nil {
+		return nil, 0, false, "", forgeRequestError(ref, "")
+	}
+	listPath, query, err := s.forgeIssuesList(ctx, ref, apiBase)
+	if err != nil {
+		return nil, 0, false, "", err
+	}
+
+	page := 1
+	fallbackTotal := 0
+	hasGitLabTotal := false
+	for {
+		if page > 1 {
+			query.Set("page", strconv.Itoa(page))
+		}
+		response, err := s.forgeGet(ctx, ref, apiBase, listPath, query)
+		if err != nil {
+			return nil, 0, false, "", err
+		}
+		if ref.Kind == "gitlab" {
+			if total := forgeTotalHint(response.header); total >= 0 {
+				totalHint = total
+				hasGitLabTotal = true
+			}
+		}
+		if forgeRateLimited(ref.Kind, response) {
+			if !hasGitLabTotal {
+				totalHint = fallbackTotal
+			}
+			note = fmt.Sprintf("rate limited — partial results (%d of %d)", len(issues), totalHint)
+			return issues, totalHint, true, note, nil
+		}
+		if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
+			return nil, 0, false, "", forgeRequestError(ref, listPath)
+		}
+
+		batch, err := parseForgeIssueList(ref.Kind, response.body)
+		if err != nil {
+			return nil, 0, false, "", forgeRequestError(ref, listPath)
+		}
+		fallbackTotal += len(batch)
+		remaining := max - len(issues)
+		if len(batch) > remaining {
+			issues = append(issues, batch[:remaining]...)
+			truncated = true
+			break
+		}
+		issues = append(issues, batch...)
+		hasNext := forgeHasNextPage(ref.Kind, response.header)
+		if len(issues) >= max {
+			truncated = hasNext
+			break
+		}
+		if !hasNext {
+			break
+		}
+		page++
+	}
+	if !hasGitLabTotal {
+		totalHint = fallbackTotal
+	}
+	if totalHint > len(issues) {
+		truncated = true
+	}
+	return issues, totalHint, truncated, "", nil
+}
+
+func (s *server) forgeIssuesList(ctx context.Context, ref forgeRef, apiBase string) (string, url.Values, error) {
+	listPath, err := forgeProjectIssuesPath(ref)
+	if err != nil {
+		return "", nil, forgeRequestError(ref, "")
+	}
+	query := url.Values{"per_page": {"50"}}
+	if ref.Kind == "gitlab" {
+		query.Set("state", "opened")
+	} else if ref.Kind == "github" {
+		query.Set("state", "open")
+	} else {
+		return "", nil, forgeRequestError(ref, listPath)
+	}
+	if ref.Milestone == 0 {
+		return listPath, query, nil
+	}
+
+	milestonePath, err := forgeMilestonePath(ref)
+	if err != nil {
+		return "", nil, forgeRequestError(ref, "")
+	}
+	response, err := s.forgeGet(ctx, ref, apiBase, milestonePath, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
+		return "", nil, forgeRequestError(ref, milestonePath)
+	}
+	switch ref.Kind {
+	case "gitlab":
+		var milestone struct {
+			Title string `json:"title"`
+		}
+		if err := json.Unmarshal(response.body, &milestone); err != nil || milestone.Title == "" {
+			return "", nil, forgeRequestError(ref, milestonePath)
+		}
+		query.Set("milestone", milestone.Title)
+	case "github":
+		var milestone struct {
+			Number int `json:"number"`
+		}
+		if err := json.Unmarshal(response.body, &milestone); err != nil || milestone.Number <= 0 {
+			return "", nil, forgeRequestError(ref, milestonePath)
+		}
+		query.Set("milestone", strconv.Itoa(milestone.Number))
+	}
+	return listPath, query, nil
+}
+
+func (s *server) fetchForgeComments(ctx context.Context, ref forgeRef, apiBase, issuePath string) ([]string, error) {
+	commentsPath := issuePath + "/comments"
+	if ref.Kind == "gitlab" {
+		commentsPath = issuePath + "/notes"
+	}
+	response, err := s.forgeGet(ctx, ref, apiBase, commentsPath, url.Values{"per_page": {"50"}})
+	if err != nil {
+		return nil, err
+	}
+	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
+		return nil, forgeRequestError(ref, commentsPath)
+	}
+
+	comments := make([]string, 0, maxForgeComments)
+	switch ref.Kind {
+	case "gitlab":
+		var notes []gitLabNote
+		if err := json.Unmarshal(response.body, &notes); err != nil {
+			return nil, forgeRequestError(ref, commentsPath)
+		}
+		for _, note := range notes {
+			if !note.System {
+				comments = appendBoundedForgeComment(comments, note.Body)
+			}
+		}
+	case "github":
+		var raw []gitHubComment
+		if err := json.Unmarshal(response.body, &raw); err != nil {
+			return nil, forgeRequestError(ref, commentsPath)
+		}
+		for _, comment := range raw {
+			comments = appendBoundedForgeComment(comments, comment.Body)
+		}
+	default:
+		return nil, forgeRequestError(ref, commentsPath)
+	}
+	return comments, nil
+}
+
+func appendBoundedForgeComment(comments []string, body string) []string {
+	if len(comments) >= maxForgeComments {
+		return comments
+	}
+	for len(body) > maxForgeCommentLen {
+		_, size := utf8.DecodeLastRuneInString(body)
+		body = body[:len(body)-size]
+	}
+	return append(comments, body)
+}
+
+func forgeIssuePath(ref forgeRef) (string, error) {
+	projectPath, err := forgeProjectPath(ref)
+	if err != nil {
+		return "", err
+	}
+	return projectPath + "/issues/" + strconv.Itoa(ref.Issue), nil
+}
+
+func forgeMilestonePath(ref forgeRef) (string, error) {
+	projectPath, err := forgeProjectPath(ref)
+	if err != nil {
+		return "", err
+	}
+	return projectPath + "/milestones/" + strconv.Itoa(ref.Milestone), nil
+}
+
+func forgeProjectIssuesPath(ref forgeRef) (string, error) {
+	projectPath, err := forgeProjectPath(ref)
+	if err != nil {
+		return "", err
+	}
+	return projectPath + "/issues", nil
+}
+
+func forgeProjectPath(ref forgeRef) (string, error) {
+	if ref.Project == "" {
+		return "", errors.New("invalid forge project")
+	}
+	switch ref.Kind {
+	case "gitlab":
+		return "/projects/" + url.PathEscape(ref.Project), nil
+	case "github":
+		parts := strings.Split(ref.Project, "/")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return "", errors.New("invalid forge project")
+		}
+		return "/repos/" + url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1]), nil
+	default:
+		return "", errors.New("invalid forge kind")
+	}
+}
+
+func (s *server) forgeGet(ctx context.Context, ref forgeRef, apiBase, path string, query url.Values) (forgeHTTPResponse, error) {
+	endpoint := strings.TrimRight(apiBase, "/") + path
+	if len(query) > 0 {
+		endpoint += "?" + query.Encode()
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return forgeHTTPResponse{}, forgeRequestError(ref, path)
+	}
+	switch ref.Kind {
+	case "gitlab":
+		if ref.pat != "" {
+			request.Header.Set("PRIVATE-TOKEN", ref.pat)
+		}
+	case "github":
+		if ref.pat != "" {
+			request.Header.Set("Authorization", "Bearer "+ref.pat)
+		}
+		request.Header.Set("Accept", "application/vnd.github+json")
+	default:
+		return forgeHTTPResponse{}, forgeRequestError(ref, path)
+	}
+	if s.forgeClient == nil {
+		return forgeHTTPResponse{}, forgeRequestError(ref, path)
+	}
+	response, err := s.forgeClient.Do(request)
+	if err != nil {
+		return forgeHTTPResponse{}, forgeRequestError(ref, path)
+	}
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxForgeBodyBytes))
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil {
+		return forgeHTTPResponse{}, forgeRequestError(ref, path)
+	}
+	return forgeHTTPResponse{status: response.StatusCode, header: response.Header.Clone(), body: body}, nil
+}
+
+func forgeRequestError(ref forgeRef, path string) error {
+	log.Printf("forge: request failed source=%s path=%s", ref.Source.Name, path)
+	return &aiError{code: http.StatusBadGateway, msg: "forge request failed"}
+}
+
+func forgeTotalHint(header http.Header) int {
+	total, err := strconv.Atoi(header.Get("X-Total"))
+	if err != nil || total < 0 {
+		return -1
+	}
+	return total
+}
+
+func forgeRateLimited(kind string, response forgeHTTPResponse) bool {
+	return response.status == http.StatusTooManyRequests ||
+		(kind == "github" && response.status == http.StatusForbidden && response.header.Get("X-RateLimit-Remaining") == "0")
+}
+
+func forgeHasNextPage(kind string, header http.Header) bool {
+	if kind == "gitlab" {
+		return header.Get("X-Next-Page") != ""
+	}
+	return strings.Contains(header.Get("Link"), "rel=\"next\"")
+}
+
+func parseForgeIssueList(kind string, body []byte) ([]forgeIssue, error) {
+	switch kind {
+	case "gitlab":
+		var raw []gitLabIssue
+		if err := json.Unmarshal(body, &raw); err != nil {
+			return nil, err
+		}
+		issues := make([]forgeIssue, 0, len(raw))
+		for _, issue := range raw {
+			issues = append(issues, forgeIssue{Ref: fmt.Sprintf("gitlab#%d", issue.IID), Title: issue.Title, Body: issue.Description, URL: issue.WebURL, Labels: issue.Labels})
+		}
+		return issues, nil
+	case "github":
+		var raw []gitHubIssue
+		if err := json.Unmarshal(body, &raw); err != nil {
+			return nil, err
+		}
+		issues := make([]forgeIssue, 0, len(raw))
+		for _, issue := range raw {
+			if len(issue.PullRequest) == 0 {
+				issues = append(issues, gitHubForgeIssue(issue))
+			}
+		}
+		return issues, nil
+	default:
+		return nil, errors.New("invalid forge kind")
+	}
+}
+
+func gitHubForgeIssue(issue gitHubIssue) forgeIssue {
+	labels := make([]string, 0, len(issue.Labels))
+	for _, label := range issue.Labels {
+		if label.Name != "" {
+			labels = append(labels, label.Name)
+		}
+	}
+	return forgeIssue{Ref: fmt.Sprintf("github#%d", issue.Number), Title: issue.Title, Body: issue.Body, URL: issue.HTMLURL, Labels: labels}
 }
 
 func newForgeClient() *http.Client {

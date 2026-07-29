@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
@@ -768,5 +771,282 @@ func TestParseForgeRefTreatsAmbiguousLegacyTailsAsProjects(t *testing.T) {
 				t.Fatalf("parseForgeRef(%q) = %+v, want project-only %q", raw, got, project)
 			}
 		})
+	}
+}
+
+func testForgeRef(kind, name, baseURL, project string, issue, milestone int, pat string) forgeRef {
+	return forgeRef{
+		Source:    store.ForgeSource{Name: name, Kind: kind, BaseURL: baseURL},
+		Kind:      kind,
+		Project:   project,
+		Issue:     issue,
+		Milestone: milestone,
+		pat:       pat,
+	}
+}
+
+// Issue fetches encode forge-native paths, attach credentials only as headers,
+// and keep discussion text bounded before it reaches the AI import pipeline.
+func TestFetchIssueUsesEncodedEndpointsAndHeaderOnlyPAT(t *testing.T) {
+	tests := []struct {
+		name, kind, sourceName, project, pat, issuePath, commentsPath string
+		basePath                                                      string
+		ref                                                           forgeRef
+		wantRef                                                       string
+	}{
+		{
+			name: "GitLab enterprise", kind: "gitlab", sourceName: "gitlab", project: "group/sub/project", pat: "glpat-test",
+			basePath: "/forge", issuePath: "/forge/api/v4/projects/group%2Fsub%2Fproject/issues/42", commentsPath: "/forge/api/v4/projects/group%2Fsub%2Fproject/issues/42/notes",
+			wantRef: "gitlab#42",
+		},
+		{
+			name: "GitHub enterprise", kind: "github", sourceName: "github", project: "owner name/repo", pat: "ghp-test",
+			basePath: "/enterprise", issuePath: "/enterprise/api/v3/repos/owner%20name/repo/issues/9", commentsPath: "/enterprise/api/v3/repos/owner%20name/repo/issues/9/comments",
+			wantRef: "github#9",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requests int
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if strings.Contains(r.URL.RawQuery, test.pat) || strings.Contains(r.RequestURI, test.pat) {
+					t.Fatal("forge request put the PAT in its URL")
+				}
+				if r.Method != http.MethodGet {
+					t.Fatalf("method = %s, want GET", r.Method)
+				}
+				switch test.kind {
+				case "gitlab":
+					if r.Header.Get("PRIVATE-TOKEN") != test.pat || r.Header.Get("Authorization") != "" {
+						t.Fatal("GitLab request did not carry only PRIVATE-TOKEN")
+					}
+				case "github":
+					if r.Header.Get("Authorization") != "Bearer "+test.pat || r.Header.Get("PRIVATE-TOKEN") != "" {
+						t.Fatal("GitHub request did not carry only Bearer authorization")
+					}
+					if r.Header.Get("Accept") != "application/vnd.github+json" {
+						t.Fatalf("GitHub Accept = %q", r.Header.Get("Accept"))
+					}
+				}
+				switch r.URL.EscapedPath() {
+				case test.issuePath:
+					if r.URL.RawQuery != "" {
+						t.Fatalf("issue query = %q, want empty", r.URL.RawQuery)
+					}
+					if test.kind == "gitlab" {
+						_, _ = io.WriteString(w, `{"iid":42,"title":"Fix import","description":"body","web_url":"https://forge.example/issues/42","labels":["bug"]}`)
+					} else {
+						_, _ = io.WriteString(w, `{"number":9,"title":"Fix import","body":"body","html_url":"https://forge.example/issues/9","labels":[{"name":"bug"}]}`)
+					}
+				case test.commentsPath:
+					if r.URL.Query().Get("per_page") != "50" {
+						t.Fatalf("comments per_page = %q, want 50", r.URL.Query().Get("per_page"))
+					}
+					comments := make([]map[string]any, 0, 22)
+					for i := 0; i < 22; i++ {
+						body := "comment"
+						if i == 1 {
+							body = strings.Repeat("é", 700)
+						}
+						if test.kind == "gitlab" {
+							comments = append(comments, map[string]any{"body": body, "system": i == 0})
+						} else {
+							comments = append(comments, map[string]any{"body": body})
+						}
+					}
+					if err := json.NewEncoder(w).Encode(comments); err != nil {
+						t.Fatalf("encode comments: %v", err)
+					}
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer upstream.Close()
+
+			baseURL := upstream.URL + test.basePath
+			issue := 42
+			if test.kind == "github" {
+				issue = 9
+			}
+			ref := testForgeRef(test.kind, test.sourceName, baseURL, test.project, issue, 0, test.pat)
+			s := &server{forgeClient: upstream.Client()}
+			got, err := s.fetchIssue(context.Background(), ref)
+			if err != nil {
+				t.Fatalf("fetchIssue: %v", err)
+			}
+			if requests != 2 || got.Ref != test.wantRef || got.Title != "Fix import" || got.Body != "body" || got.URL == "" || len(got.Labels) != 1 || got.Labels[0] != "bug" {
+				t.Fatalf("fetchIssue result = %+v, requests=%d", got, requests)
+			}
+			if len(got.Comments) != 20 {
+				t.Fatalf("comments = %d, want 20 after system-note filtering and cap", len(got.Comments))
+			}
+			for _, comment := range got.Comments {
+				if len(comment) > 1<<10 || !utf8.ValidString(comment) {
+					t.Fatalf("comment has invalid bounded UTF-8 length=%d", len(comment))
+				}
+			}
+		})
+	}
+}
+
+// GitHub pull requests share issue endpoints but must never become imported tasks.
+func TestFetchIssueRejectsGitHubPullRequests(t *testing.T) {
+	for _, body := range []string{
+		`{"number":9,"title":"PR","pull_request":{}}`,
+		`{"number":9,"title":"PR","pull_request":null}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/comments") {
+					_, _ = io.WriteString(w, `[]`)
+					return
+				}
+				_, _ = io.WriteString(w, body)
+			}))
+			defer upstream.Close()
+
+			s := &server{forgeClient: upstream.Client()}
+			ref := testForgeRef("github", "github", upstream.URL+"/enterprise", "owner/repo", 9, 0, "")
+			_, err := s.fetchIssue(context.Background(), ref)
+			var ae *aiError
+			if !errors.As(err, &ae) || ae.code != http.StatusBadGateway || ae.msg != "forge request failed" {
+				t.Fatalf("pull-request error = %#v, want opaque forge aiError", err)
+			}
+		})
+	}
+}
+
+// List fetches cap imports, preserve upstream total hints, and stop immediately at rate limits.
+func TestFetchIssuesCapsAndReturnsRateLimitedPartials(t *testing.T) {
+	t.Run("GitLab pagination then 429", func(t *testing.T) {
+		var calls int
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.EscapedPath() != "/forge/api/v4/projects/group%2Fproject/issues" {
+				http.NotFound(w, r)
+				return
+			}
+			if r.URL.Query().Get("state") != "opened" || r.URL.Query().Get("per_page") != "50" {
+				t.Fatalf("list query = %q", r.URL.RawQuery)
+			}
+			calls++
+			if r.URL.Query().Get("page") == "2" {
+				w.Header().Set("X-Total", "30")
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			w.Header().Set("X-Total", "30")
+			w.Header().Set("X-Next-Page", "2")
+			_, _ = io.WriteString(w, `[{"iid":1,"title":"One","description":"body","web_url":"https://forge.example/1"},{"iid":2,"title":"Two","description":"body","web_url":"https://forge.example/2"}]`)
+		}))
+		defer upstream.Close()
+
+		s := &server{forgeClient: upstream.Client()}
+		ref := testForgeRef("gitlab", "gitlab", upstream.URL+"/forge", "group/project", 0, 0, "")
+		issues, total, truncated, note, err := s.fetchIssues(context.Background(), ref, 99)
+		if err != nil || calls != 2 || len(issues) != 2 || total != 30 || !truncated || note != "rate limited — partial results (2 of 30)" {
+			t.Fatalf("fetchIssues = issues=%d total=%d truncated=%v note=%q err=%v calls=%d", len(issues), total, truncated, note, err, calls)
+		}
+	})
+
+	t.Run("GitLab maximum import cap", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			items := make([]map[string]any, 25)
+			for i := range items {
+				items[i] = map[string]any{"iid": i + 1, "title": "Task", "description": "body", "web_url": "https://forge.example"}
+			}
+			if err := json.NewEncoder(w).Encode(items); err != nil {
+				t.Fatalf("encode issues: %v", err)
+			}
+		}))
+		defer upstream.Close()
+
+		s := &server{forgeClient: upstream.Client()}
+		ref := testForgeRef("gitlab", "gitlab", upstream.URL, "group/project", 0, 0, "")
+		issues, total, truncated, note, err := s.fetchIssues(context.Background(), ref, 100)
+		if err != nil || len(issues) != 20 || total != 25 || !truncated || note != "" {
+			t.Fatalf("cap result = issues=%d total=%d truncated=%v note=%q err=%v", len(issues), total, truncated, note, err)
+		}
+	})
+}
+
+// Milestone lists resolve their forge-specific marker before filtering issues, while GitHub rate exhaustion remains partial.
+func TestFetchIssuesResolvesMilestonesAndDropsGitHubPullRequests(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch r.URL.EscapedPath() {
+		case "/enterprise/api/v3/repos/owner/repo/milestones/3":
+			_, _ = io.WriteString(w, `{"number":3,"title":"Release"}`)
+		case "/enterprise/api/v3/repos/owner/repo/issues":
+			if r.URL.Query().Get("milestone") != "3" || r.URL.Query().Get("state") != "open" || r.URL.Query().Get("per_page") != "50" {
+				t.Fatalf("milestone list query = %q", r.URL.RawQuery)
+			}
+			_, _ = io.WriteString(w, `[{"number":1,"title":"PR","pull_request":null},{"number":2,"title":"Issue","body":"body","html_url":"https://forge.example/2"}]`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	s := &server{forgeClient: upstream.Client()}
+	ref := testForgeRef("github", "github", upstream.URL+"/enterprise", "owner/repo", 0, 3, "")
+	issues, total, truncated, note, err := s.fetchIssues(context.Background(), ref, 20)
+	if err != nil || calls != 2 || len(issues) != 1 || issues[0].Ref != "github#2" || total != 1 || truncated || note != "" {
+		t.Fatalf("milestone result = %+v total=%d truncated=%v note=%q err=%v calls=%d", issues, total, truncated, note, err, calls)
+	}
+
+	t.Run("GitLab title filter", func(t *testing.T) {
+		var milestoneCalls int
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			milestoneCalls++
+			switch r.URL.EscapedPath() {
+			case "/forge/api/v4/projects/group%2Fproject/milestones/7":
+				_, _ = io.WriteString(w, `{"title":"Release 1"}`)
+			case "/forge/api/v4/projects/group%2Fproject/issues":
+				if r.URL.Query().Get("milestone") != "Release 1" || r.URL.Query().Get("state") != "opened" {
+					t.Fatalf("GitLab milestone query = %q", r.URL.RawQuery)
+				}
+				_, _ = io.WriteString(w, `[{"iid":7,"title":"Issue","description":"body","web_url":"https://forge.example/7"}]`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer upstream.Close()
+
+		s := &server{forgeClient: upstream.Client()}
+		ref := testForgeRef("gitlab", "gitlab", upstream.URL+"/forge", "group/project", 0, 7, "")
+		issues, total, truncated, note, err := s.fetchIssues(context.Background(), ref, 20)
+		if err != nil || milestoneCalls != 2 || len(issues) != 1 || issues[0].Ref != "gitlab#7" || total != 1 || truncated || note != "" {
+			t.Fatalf("GitLab milestone result = %+v total=%d truncated=%v note=%q err=%v calls=%d", issues, total, truncated, note, err, milestoneCalls)
+		}
+	})
+}
+
+// Exhausted GitHub rate limits return already fetched work without retries or sleeps.
+func TestFetchIssuesReturnsGitHubRateLimitPartial(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/enterprise/api/v3/repos/owner/repo/issues" {
+			http.NotFound(w, r)
+			return
+		}
+		calls++
+		if r.URL.Query().Get("page") == "2" {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Link", `<https://forge.example/repos/owner/repo/issues?page=2>; rel="next"`)
+		w.Header().Set("X-Total", "999")
+		_, _ = io.WriteString(w, `[{"number":1,"title":"One","body":"body","html_url":"https://forge.example/1"},{"number":2,"title":"Two","body":"body","html_url":"https://forge.example/2"}]`)
+	}))
+	defer upstream.Close()
+
+	s := &server{forgeClient: upstream.Client()}
+	ref := testForgeRef("github", "github", upstream.URL+"/enterprise", "owner/repo", 0, 0, "")
+	issues, total, truncated, note, err := s.fetchIssues(context.Background(), ref, 20)
+	if err != nil || calls != 2 || len(issues) != 2 || total != 2 || !truncated || note != "rate limited — partial results (2 of 2)" {
+		t.Fatalf("GitHub partial = issues=%d total=%d truncated=%v note=%q err=%v calls=%d", len(issues), total, truncated, note, err, calls)
 	}
 }
