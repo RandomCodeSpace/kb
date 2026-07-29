@@ -20,11 +20,13 @@ import (
 // --- handlers ---
 
 type similarItem struct {
-	ID     string `json:"id,omitempty"`
-	Title  string `json:"title"`
-	Status string `json:"status,omitempty"`
-	Via    string `json:"via"`
-	Link   string `json:"link,omitempty"`
+	ID       string `json:"id,omitempty"`
+	Title    string `json:"title"`
+	Status   string `json:"status,omitempty"`
+	Via      string `json:"via"`
+	Link     string `json:"link,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	KilledAt string `json:"killed_at,omitempty"`
 }
 
 type similarResponse struct {
@@ -47,9 +49,43 @@ func (s *server) handleSimilar(w http.ResponseWriter, r *http.Request, user stri
 	for _, hit := range hits {
 		response.Items = append(response.Items, similarItem{
 			ID: hit.ID, Title: hit.Title, Status: hit.Status, Via: hit.Via, Link: hit.Link,
+			Reason: hit.Reason, KilledAt: hit.KilledAt,
 		})
 	}
 	writeJSON(w, response)
+}
+
+type tombstoneRequest struct {
+	TaskID string `json:"task_id"`
+	Reason string `json:"reason"`
+}
+
+func (s *server) handleTombstone(w http.ResponseWriter, r *http.Request, user string) {
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var req tombstoneRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.TaskID) == "" {
+		http.Error(w, "task_id required", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Reason) == "" ||
+		len(req.Reason) > 2000 ||
+		strings.ContainsAny(req.Reason, "\r\n") {
+		http.Error(w, "invalid tombstone reason", http.StatusBadRequest)
+		return
+	}
+	if err := s.store.RecordTombstone(user, req.TaskID, req.Reason); err != nil {
+		log.Printf("record tombstone for %s: %v", logSafe(user), err)
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // writeJSON encodes v with the JSON content type; encode errors after the

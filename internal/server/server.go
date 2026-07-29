@@ -140,6 +140,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("PUT /api/board", s.withAuth(s.handlePutBoard))
 	mux.HandleFunc("GET /api/labels", s.withAuth(s.handleLabels))
 	mux.HandleFunc("GET /api/similar", s.withAuth(s.handleSimilar))
+	mux.HandleFunc("POST /api/tombstones", s.withAuth(s.handleTombstone))
 	mux.HandleFunc("GET /api/settings", s.withAuth(s.handleGetSettings))
 	mux.HandleFunc("PUT /api/settings", s.withAuth(s.handlePutSettings))
 	mux.HandleFunc("POST /api/ai/test", s.withAuth(s.handleAITest))
