@@ -8,8 +8,10 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -95,6 +97,28 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("write json: %v", err)
 	}
+}
+
+// acceptsJSONAcknowledgement reports whether the caller explicitly accepts a
+// JSON PUT acknowledgement. Wildcards retain the legacy 204 response because
+// they do not opt in to the acknowledgement contract.
+func acceptsJSONAcknowledgement(r *http.Request) bool {
+	for _, header := range r.Header.Values("Accept") {
+		for _, value := range strings.Split(header, ",") {
+			mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(value))
+			if err != nil || mediaType != "application/json" {
+				continue
+			}
+			if q, ok := params["q"]; ok {
+				quality, err := strconv.ParseFloat(q, 64)
+				if err != nil || quality <= 0 || quality > 1 {
+					continue
+				}
+			}
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -183,7 +207,8 @@ func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user str
 			return
 		}
 	}
-	if err := s.store.ReplaceBoard(user, board.Parse(string(body))); err != nil {
+	taskIDs, err := s.store.ReplaceBoardWithTaskIDs(user, board.Parse(string(body)))
+	if err != nil {
 		log.Printf("write board for %s: %v", user, err)
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		return
@@ -195,6 +220,12 @@ func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user str
 		return
 	}
 	w.Header().Set("ETag", etag)
+	if acceptsJSONAcknowledgement(r) {
+		writeJSON(w, struct {
+			TaskIDs []string `json:"task_ids"`
+		}{TaskIDs: taskIDs})
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

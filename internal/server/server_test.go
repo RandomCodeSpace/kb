@@ -368,10 +368,11 @@ func TestTombstoneEndpoint(t *testing.T) {
 		}
 	})
 
-	t.Run("accepts an unknown task id without making a kill depend on save timing", func(t *testing.T) {
+	t.Run("accepts an unknown task id as a harmless best-effort request", func(t *testing.T) {
 		h, _ := newTestServer(t, Config{})
-		// The status move can race the debounced board PUT, so an unknown ID is
-		// accepted and the scoped orphan sweep cleans it up instead of failing.
+		// A stale client may still post an unknown ID. Accept it so annotation
+		// failure cannot block the kill; the scoped orphan sweep drops it. The
+		// SPA waits for the board PUT's canonical-ID acknowledgement instead.
 		w := doReq(t, h, "POST", "/api/tombstones", tombstoneBody(t, "not-saved-yet", "A race-safe reason"), nil)
 		if w.Code != http.StatusNoContent {
 			t.Fatalf("POST unknown tombstone = %d %q, want 204", w.Code, w.Body)

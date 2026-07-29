@@ -5,7 +5,7 @@ import goldenMd from '../../internal/board/testdata/golden.md?raw';
 import goldenJson from '../../internal/board/testdata/golden.json?raw';
 import phase3Md from '../../internal/board/testdata/phase3.md?raw';
 import phase3Json from '../../internal/board/testdata/phase3.json?raw';
-import { parse, serialize } from './markdown';
+import { parse, serialize, wireTasks } from './markdown';
 import type { Board, Task } from './model';
 import { newTask } from './model';
 
@@ -170,6 +170,65 @@ describe('parse', () => {
       'cancelled',
       'cancelled',
     ]);
+  });
+});
+
+describe('wireTasks', () => {
+  it('matches canonical markdown order for interleaved statuses and duplicate titles', () => {
+    const tasks = [
+      newTask({
+        id: 'done-1',
+        title: 'Duplicate',
+        desc: 'done first',
+        status: 'done',
+      }),
+      newTask({
+        id: 'todo-1',
+        title: 'Duplicate',
+        desc: 'todo first',
+        status: 'todo',
+      }),
+      newTask({
+        id: 'cancelled-1',
+        title: 'Cancelled',
+        desc: 'cancelled',
+        status: 'cancelled',
+      }),
+      newTask({
+        id: 'doing-1',
+        title: 'Doing',
+        desc: 'doing',
+        status: 'doing',
+      }),
+      newTask({
+        id: 'todo-2',
+        title: 'Duplicate',
+        desc: 'todo second',
+        status: 'todo',
+      }),
+      newTask({
+        id: 'done-2',
+        title: 'Duplicate',
+        desc: 'done second',
+        status: 'done',
+      }),
+    ];
+    const board: Board = { title: 'B', tasks };
+
+    const ordered = wireTasks(board);
+    expect(ordered.map((t) => t.id)).toEqual([
+      'todo-1',
+      'todo-2',
+      'doing-1',
+      'done-1',
+      'done-2',
+      'cancelled-1',
+    ]);
+    // parse() is a line-for-line port of the Go parser. Its task slice proves
+    // the helper follows the exact order the server receives from serialize().
+    expect(
+      parse(serialize(board)).tasks.map((t) => [t.status, t.title, t.desc]),
+    ).toEqual(ordered.map((t) => [t.status, t.title, t.desc]));
   });
 });
 

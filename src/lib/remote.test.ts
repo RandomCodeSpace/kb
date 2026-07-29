@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Board } from './model';
 import { newTask } from './model';
-import { parse, serialize } from './markdown';
+import { parse, serialize, wireTasks } from './markdown';
 import type { Identity } from './auth';
 import { mergeBoards, RemoteStore } from './remote';
 
@@ -41,6 +41,19 @@ function stubFetch(script: Response[]): Call[] {
 function save(store: RemoteStore, b: Board): Promise<Board> {
   return new Promise<Board>((resolve, reject) => {
     store.saveRemote(identity, b, reject, resolve);
+  });
+}
+
+type SaveResult = {
+  pushed: Board;
+  taskIDs: ReadonlyMap<string, string>;
+};
+
+function saveWithTaskIDs(store: RemoteStore, b: Board): Promise<SaveResult> {
+  return new Promise<SaveResult>((resolve, reject) => {
+    store.saveRemote(identity, b, reject, (pushed, taskIDs) => {
+      resolve({ pushed, taskIDs });
+    });
   });
 }
 
@@ -111,6 +124,7 @@ describe('RemoteStore concurrency', () => {
     await store.loadRemote(identity);
     await save(store, board('A', 'C'));
     expect(calls[1]!.method).toBe('PUT');
+    expect(calls[1]!.headers.Accept).toBe('application/json');
     expect(calls[1]!.headers['If-Match']).toBe('v1');
   });
 
@@ -197,5 +211,114 @@ describe('RemoteStore concurrency', () => {
     await save(store, board('A'));
     await save(store, board('A', 'B'));
     expect(calls[1]!.headers['If-Match']).toBe('v9');
+  });
+
+  it('maps duplicate-title client ids to canonical ids by wire position', async () => {
+    const store = new RemoteStore();
+    const pushed: Board = {
+      title: 'kb',
+      tasks: [
+        newTask({ id: 'done-client', title: 'Duplicate', status: 'done' }),
+        newTask({ id: 'todo-client-1', title: 'Duplicate', status: 'todo' }),
+        newTask({ id: 'doing-client', title: 'Other', status: 'doing' }),
+        newTask({ id: 'todo-client-2', title: 'Duplicate', status: 'todo' }),
+      ],
+    };
+    const canonical = [
+      'todo-server-1',
+      'todo-server-2',
+      'doing-server',
+      'done-server',
+    ];
+    stubFetch([
+      new Response(JSON.stringify({ task_ids: canonical }), {
+        status: 200,
+        headers: { ETag: 'v1' },
+      }),
+    ]);
+
+    const saved = await saveWithTaskIDs(store, pushed);
+
+    expect(saved.pushed).toBe(pushed);
+    expect(saved.pushed.tasks.map((t) => t.id)).toEqual([
+      'done-client',
+      'todo-client-1',
+      'doing-client',
+      'todo-client-2',
+    ]);
+    expect([...saved.taskIDs]).toEqual(
+      wireTasks(pushed).map((task, i) => [task.id, canonical[i]!]),
+    );
+  });
+
+  it('accepts a legacy 204 response with an empty task-id map', async () => {
+    const store = new RemoteStore();
+    stubFetch([new Response(null, { status: 204 })]);
+
+    const saved = await saveWithTaskIDs(store, board('A'));
+
+    expect([...saved.taskIDs]).toEqual([]);
+  });
+
+  it.each([
+    ['invalid JSON', '{'],
+    ['a null body', 'null'],
+    ['an array body', '[]'],
+    ['a missing task_ids field', '{}'],
+    ['a non-array task_ids field', '{"task_ids":"server-a"}'],
+    ['too few task ids', '{"task_ids":["server-a"]}'],
+    [
+      'too many task ids',
+      '{"task_ids":["server-a","server-b","server-c"]}',
+    ],
+    ['a non-string task id', '{"task_ids":["server-a",42]}'],
+    ['an empty task id', '{"task_ids":["server-a",""]}'],
+    ['a whitespace task id', '{"task_ids":["server-a","   "]}'],
+    [
+      'duplicate task ids',
+      '{"task_ids":["server-a","server-a"]}',
+    ],
+  ])('rejects negotiated 200 JSON with %s', async (_case, bodyText) => {
+    const store = new RemoteStore();
+    stubFetch([new Response(bodyText, { status: 200 })]);
+
+    await expect(saveWithTaskIDs(store, board('A', 'B'))).rejects.toThrow(
+      'PUT /api/board returned invalid task ids',
+    );
+  });
+
+  it('rejects an unexpected successful PUT status', async () => {
+    const store = new RemoteStore();
+    stubFetch([new Response(null, { status: 202 })]);
+
+    await expect(saveWithTaskIDs(store, board('A'))).rejects.toThrow(
+      'PUT /api/board failed: 202',
+    );
+  });
+
+  it('maps a 409 retry against the merged board that was actually pushed', async () => {
+    const store = new RemoteStore();
+    stubFetch([
+      new Response(serialize(board('A')), { headers: { ETag: 'v1' } }),
+      new Response('conflict', { status: 409 }),
+      new Response(serialize(board('A', 'B')), { headers: { ETag: 'v2' } }),
+      new Response(
+        JSON.stringify({
+          task_ids: ['server-a', 'server-c', 'server-b'],
+        }),
+        { status: 200, headers: { ETag: 'v3' } },
+      ),
+    ]);
+    await store.loadRemote(identity);
+
+    const saved = await saveWithTaskIDs(store, board('A', 'C'));
+
+    expect(titles(saved.pushed)).toEqual(['A', 'C', 'B']);
+    expect([...saved.taskIDs]).toEqual(
+      wireTasks(saved.pushed).map((task, i) => [
+        task.id,
+        ['server-a', 'server-c', 'server-b'][i]!,
+      ]),
+    );
   });
 });

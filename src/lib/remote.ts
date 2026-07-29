@@ -1,5 +1,5 @@
 import type { Board, Task } from './model';
-import { parse, serialize, titleLine } from './markdown';
+import { parse, serialize, titleLine, wireTasks } from './markdown';
 import type { Identity } from './auth';
 import { authedFetch } from './api';
 
@@ -10,7 +10,10 @@ type PendingSave = {
   identity: Identity;
   board: Board;
   onError?: (err: unknown) => void;
-  onSuccess?: (pushed: Board) => void;
+  onSuccess?: (
+    pushed: Board,
+    taskIDs: ReadonlyMap<string, string>,
+  ) => void;
 };
 
 /**
@@ -44,6 +47,56 @@ function pushKey(into: Map<string, Task[]>, key: string, t: Task): void {
   const bucket = into.get(key);
   if (bucket) bucket.push(t);
   else into.set(key, [t]);
+}
+
+function invalidTaskIDs(): Error {
+  return new Error('PUT /api/board returned invalid task ids');
+}
+
+/**
+ * Convert the negotiated acknowledgement into client-id -> canonical-id
+ * entries. The server returns ids in parsed markdown order, not Board.tasks
+ * order, so the positions must be paired through wireTasks().
+ */
+async function taskIDMap(
+  res: Response,
+  pushed: Board,
+): Promise<ReadonlyMap<string, string>> {
+  if (res.status === 204) return new Map();
+  if (res.status !== 200) {
+    throw new Error(`PUT /api/board failed: ${res.status}`);
+  }
+
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    throw invalidTaskIDs();
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    throw invalidTaskIDs();
+  }
+  const ids = (body as Record<string, unknown>).task_ids;
+  const tasks = wireTasks(pushed);
+  if (!Array.isArray(ids) || ids.length !== tasks.length) {
+    throw invalidTaskIDs();
+  }
+
+  const mapped = new Map<string, string>();
+  const seenCanonical = new Set<string>();
+  for (let i = 0; i < tasks.length; i++) {
+    const canonicalID = ids[i];
+    if (
+      typeof canonicalID !== 'string' ||
+      canonicalID.trim() === '' ||
+      seenCanonical.has(canonicalID)
+    ) {
+      throw invalidTaskIDs();
+    }
+    seenCanonical.add(canonicalID);
+    mapped.set(tasks[i]!.id, canonicalID);
+  }
+  return mapped;
 }
 
 /**
@@ -143,7 +196,10 @@ export class RemoteStore {
     board: Board,
     keepalive: boolean,
   ): Promise<Response> {
-    const headers: Record<string, string> = { 'Content-Type': 'text/markdown' };
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      'Content-Type': 'text/markdown',
+    };
     // Optimistic concurrency: without a known version we cannot claim one, so
     // the server decides whether to accept an unconditional write.
     if (this.etag) headers['If-Match'] = this.etag;
@@ -161,13 +217,18 @@ export class RemoteStore {
    * task is dropped, and pushed once more. `onSuccess` receives the board that
    * actually reached the server — after a merge it differs from `board`, and
    * the caller must adopt it as clean state or the next save would delete the
-   * merged-in tasks.
+   * merged-in tasks. Its second argument maps the client ids in that board to
+   * the canonical server ids acknowledged for the same wire positions; the
+   * board itself is not rewritten.
    */
   saveRemote(
     identity: Identity,
     board: Board,
     onError?: (err: unknown) => void,
-    onSuccess?: (pushed: Board) => void,
+    onSuccess?: (
+      pushed: Board,
+      taskIDs: ReadonlyMap<string, string>,
+    ) => void,
     opts?: { keepalive?: boolean },
   ): void {
     const keepalive = opts?.keepalive ?? false;
@@ -182,13 +243,13 @@ export class RemoteStore {
         if (server) pushed = mergeBoards(board, server, base);
         res = await this.putBoard(identity, pushed, keepalive);
       }
-      if (!res.ok) throw new Error(`PUT /api/board failed: ${res.status}`);
+      const taskIDs = await taskIDMap(res, pushed);
       this.base = pushed;
       // A server that echoes the new version lets the next save stay
       // conditional; without it the stale tag simply forces one more merge.
       const tag = res.headers.get('ETag');
       if (tag) this.etag = tag;
-      onSuccess?.(pushed);
+      onSuccess?.(pushed, taskIDs);
     })().catch((err: unknown) => onError?.(err));
   }
 
@@ -197,7 +258,10 @@ export class RemoteStore {
     identity: Identity,
     board: Board,
     onError?: (err: unknown) => void,
-    onSuccess?: (pushed: Board) => void,
+    onSuccess?: (
+      pushed: Board,
+      taskIDs: ReadonlyMap<string, string>,
+    ) => void,
   ): void {
     if (this.saveTimer !== null) clearTimeout(this.saveTimer);
     this.pending = { identity, board, onError, onSuccess };

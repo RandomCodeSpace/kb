@@ -10,10 +10,21 @@ const DESC_CHECKBOX_RE = /^\\*- \[[ xX]\] /;
 // Title-line flag for a blocked task. Serialized only when blocked is true.
 const BLOCKED_TOKEN = '%blocked';
 
+/**
+ * Tasks in the order serialize() writes them and the Go parser receives them:
+ * canonical column order, preserving board order within each column.
+ */
+export function wireTasks(board: Board): Task[] {
+  return STATUSES.flatMap((status) =>
+    board.tasks.filter((task) => task.status === status),
+  );
+}
+
 export function serialize(board: Board): string {
   let out = `# ${board.title}\n`;
+  const ordered = wireTasks(board);
   for (const status of STATUSES) {
-    const tasks = board.tasks.filter((x) => x.status === status);
+    const tasks = ordered.filter((task) => task.status === status);
     // Cancelled is a phase-3 addition: emitting its header only when it has
     // tasks keeps legacy three-section boards byte-identical on the wire.
     if (status === 'cancelled' && tasks.length === 0) continue;

@@ -25,6 +25,109 @@ func TestPutBodyLimit(t *testing.T) {
 	}
 }
 
+func TestPutBoardTaskIDAcknowledgement(t *testing.T) {
+	const wire = "# B\n\n## To Do\n\n- [ ] Duplicate\n  first\n- [ ] Duplicate\n  second\n"
+
+	t.Run("application JSON returns IDs in parsed task order", func(t *testing.T) {
+		h, st := newTestServer(t, Config{})
+		w := doReq(t, h, "PUT", "/api/board", wire, map[string]string{
+			"Accept": "application/json",
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("PUT = %d %q, want 200", w.Code, w.Body)
+		}
+		if w.Header().Get("ETag") == "" {
+			t.Fatal("PUT returned no ETag")
+		}
+		if got := w.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+			t.Fatalf("Content-Type = %q, want application/json", got)
+		}
+		var response struct {
+			TaskIDs []string `json:"task_ids"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode PUT response: %v (body=%s)", err, w.Body)
+		}
+		parsed := board.Parse(wire)
+		stored, err := st.Board("default")
+		if err != nil {
+			t.Fatalf("store.Board: %v", err)
+		}
+		if len(response.TaskIDs) != len(parsed.Tasks) || len(stored.Tasks) != len(parsed.Tasks) {
+			t.Fatalf("task IDs/stored/parsed lengths = %d/%d/%d",
+				len(response.TaskIDs), len(stored.Tasks), len(parsed.Tasks))
+		}
+		for i := range parsed.Tasks {
+			if response.TaskIDs[i] != stored.Tasks[i].ID ||
+				stored.Tasks[i].Desc != parsed.Tasks[i].Desc {
+				t.Errorf("task[%d] acknowledgement/stored = (%q, %q), want (%q, %q)",
+					i, response.TaskIDs[i], stored.Tasks[i].Desc, stored.Tasks[i].ID, parsed.Tasks[i].Desc)
+			}
+		}
+
+		// Moving the first of two equal-title cards makes ReplaceBoard reuse
+		// identities by wire position. The acknowledgement must report that
+		// actual assignment rather than guessing from the duplicate title.
+		const movedWire = "# B\n\n## To Do\n\n- [ ] Duplicate\n  second\n\n## Cancelled\n\n- [ ] Duplicate\n  first\n"
+		w = doReq(t, h, "PUT", "/api/board", movedWire, map[string]string{
+			"Accept": "application/json",
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("moved PUT = %d %q, want 200", w.Code, w.Body)
+		}
+		var movedResponse struct {
+			TaskIDs []string `json:"task_ids"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &movedResponse); err != nil {
+			t.Fatalf("decode moved PUT response: %v", err)
+		}
+		if len(movedResponse.TaskIDs) != 2 ||
+			movedResponse.TaskIDs[0] != response.TaskIDs[0] ||
+			movedResponse.TaskIDs[1] != response.TaskIDs[1] {
+			t.Fatalf("moved task IDs = %v, want positional identities %v",
+				movedResponse.TaskIDs, response.TaskIDs)
+		}
+
+		const reason = "Rejected after save"
+		w = doReq(t, h, "POST", "/api/tombstones",
+			tombstoneBody(t, movedResponse.TaskIDs[1], reason), nil)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("POST tombstone = %d %q, want 204", w.Code, w.Body)
+		}
+		got, found, err := st.Tombstone("default", movedResponse.TaskIDs[1])
+		if err != nil || !found || got.Reason != reason {
+			t.Fatalf("Tombstone = %+v, %t, %v; want returned ID and reason", got, found, err)
+		}
+		hits, err := st.SearchSimilar("default", "Duplicate", "", 10)
+		if err != nil {
+			t.Fatalf("SearchSimilar: %v", err)
+		}
+		var live, killed bool
+		for _, hit := range hits {
+			switch hit.ID {
+			case movedResponse.TaskIDs[0]:
+				live = hit.Via == "card" && hit.Reason == ""
+			case movedResponse.TaskIDs[1]:
+				killed = hit.Via == "killed" && hit.Reason == reason
+			}
+		}
+		if !live || !killed {
+			t.Fatalf("duplicate-title hits = %+v, want live first and killed second", hits)
+		}
+	})
+
+	t.Run("caller without JSON Accept keeps legacy no-content response", func(t *testing.T) {
+		h, _ := newTestServer(t, Config{})
+		w := doReq(t, h, "PUT", "/api/board", wire, nil)
+		if w.Code != http.StatusNoContent || w.Body.Len() != 0 {
+			t.Fatalf("PUT = %d %q, want 204 with no body", w.Code, w.Body)
+		}
+		if w.Header().Get("ETag") == "" {
+			t.Fatal("PUT returned no ETag")
+		}
+	})
+}
+
 func TestHealthAndStatic(t *testing.T) {
 	h, _ := newTestServer(t, Config{})
 

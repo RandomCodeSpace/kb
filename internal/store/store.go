@@ -256,15 +256,24 @@ func (s *Store) HasBoard(user string) (bool, error) {
 	}
 }
 
-// ReplaceBoard replaces the user's whole board (the SPA PUT path). Incoming
-// tasks are matched against existing ones first by (Status, Title), then by
-// Title alone; matches keep their ID and CreatedAt, and a status change
-// stamps MovedAt. Unmatched incoming tasks get fresh UUIDs; existing tasks
-// absent from b are deleted. Positions are recomputed from slice order per
-// status and labels are upserted from all task tags.
+// ReplaceBoard replaces the user's whole board and discards the committed
+// task IDs. See ReplaceBoardWithTaskIDs for replacement semantics.
 func (s *Store) ReplaceBoard(user string, b board.Board) error {
+	_, err := s.ReplaceBoardWithTaskIDs(user, b)
+	return err
+}
+
+// ReplaceBoardWithTaskIDs replaces the user's whole board (the SPA PUT path)
+// and returns each committed task ID in b.Tasks order. Incoming tasks are
+// matched against existing ones first by (Status, Title), then by Title alone;
+// matches keep their ID and CreatedAt, and a status change stamps MovedAt.
+// Unmatched incoming tasks get fresh UUIDs; existing tasks absent from b are
+// deleted. Positions are recomputed from slice order per status and labels are
+// upserted from all task tags.
+func (s *Store) ReplaceBoardWithTaskIDs(user string, b board.Board) ([]string, error) {
 	now := time.Now().UTC()
-	return s.withTx(func(tx *sql.Tx) error {
+	taskIDs := make([]string, len(b.Tasks))
+	err := s.withTx(func(tx *sql.Tx) error {
 		byStatusTitle, byTitle, err := loadExisting(tx, user)
 		if err != nil {
 			return err
@@ -318,12 +327,17 @@ func (s *Store) ReplaceBoard(user string, b board.Board) error {
 			if err := insertTask(tx, user, t); err != nil {
 				return err
 			}
+			taskIDs[i] = t.ID
 			if err := s.upsertLabels(tx, user, t.Tags); err != nil {
 				return err
 			}
 		}
 		return setMeta(tx, titleKey(user), b.Title)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return taskIDs, nil
 }
 
 // exTask is the identity slice of an existing row used by ReplaceBoard
@@ -339,7 +353,10 @@ type exTask struct {
 // loadExisting reads the identity columns of the user's tasks and indexes
 // them by (status, title) and by title.
 func loadExisting(tx *sql.Tx, user string) (byStatusTitle, byTitle map[string][]*exTask, err error) {
-	rows, err := tx.Query(`SELECT id, title, status, created_at, moved_at FROM tasks WHERE user = ?`, user)
+	rows, err := tx.Query(
+		`SELECT id, title, status, created_at, moved_at FROM tasks WHERE user = ? ORDER BY `+statusRank+`, position`,
+		user,
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("store: load existing tasks: %w", err)
 	}

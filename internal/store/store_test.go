@@ -156,6 +156,43 @@ func TestReplaceBoardPreservesIdentity(t *testing.T) {
 	}
 }
 
+func TestReplaceBoardWithTaskIDsReturnsCommittedRequestOrder(t *testing.T) {
+	s := newStore(t)
+	in := board.Board{Title: "B", Tasks: []board.Task{
+		{Title: "Duplicate", Desc: "first", Status: board.StatusTodo, Prio: 3},
+		{Title: "Duplicate", Desc: "second", Status: board.StatusTodo, Prio: 3},
+	}}
+
+	ids, err := s.ReplaceBoardWithTaskIDs("u", in)
+	if err != nil {
+		t.Fatalf("ReplaceBoardWithTaskIDs: %v", err)
+	}
+	if len(ids) != len(in.Tasks) {
+		t.Fatalf("task IDs = %v, want one per input task", ids)
+	}
+	if ids[0] == "" || ids[1] == "" || ids[0] == ids[1] {
+		t.Fatalf("task IDs = %v, want distinct non-empty IDs", ids)
+	}
+	stored, err := s.Board("u")
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	for i := range in.Tasks {
+		if stored.Tasks[i].Desc != in.Tasks[i].Desc || stored.Tasks[i].ID != ids[i] {
+			t.Errorf("stored task[%d] = (%q, %q), want (%q, %q)",
+				i, stored.Tasks[i].Desc, stored.Tasks[i].ID, in.Tasks[i].Desc, ids[i])
+		}
+	}
+
+	preserved, err := s.ReplaceBoardWithTaskIDs("u", in)
+	if err != nil {
+		t.Fatalf("second ReplaceBoardWithTaskIDs: %v", err)
+	}
+	if !reflect.DeepEqual(preserved, ids) {
+		t.Errorf("preserved task IDs = %v, want %v", preserved, ids)
+	}
+}
+
 func TestTaskCRUD(t *testing.T) {
 	s := newStore(t)
 	t1, err := s.AddTask("u", board.Task{Title: "First"})
