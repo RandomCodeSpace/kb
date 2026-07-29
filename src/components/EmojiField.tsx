@@ -89,16 +89,21 @@ export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
   // store, and picking one used to close the popover and write nothing).
   const [reason, setReason] = useState('');
   const wrapRef = useRef<HTMLDivElement>(null);
-  const btnRef = useRef<HTMLButtonElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  // Set while an outside pointerdown is closing the popover. Clicking the
+  // field's <label> is "outside" (it sits beside this component), so the
+  // close it causes is followed by the label's synthesized click on the
+  // input — which would reopen the picker it just closed.
+  const closingRef = useRef(false);
 
   /**
-   * Close the popover and put focus back on the button that opened it —
+   * Close the popover and put focus back on the field that opened it —
    * otherwise Escape (or picking an emoji) drops focus onto <body>, inside a
    * dialog the user is still filling in.
    */
   const close = () => {
     setOpen(false);
-    btnRef.current?.focus();
+    inputRef.current?.focus();
   };
 
   /** Take `raw` if the codec can store it, otherwise explain why not. */
@@ -139,7 +144,11 @@ export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
       if (wrapRef.current?.contains(e.target as Node)) return;
       e.stopPropagation();
       // A press elsewhere is already choosing where focus goes; don't steal it
-      // back to the button.
+      // back to the field.
+      closingRef.current = true;
+      setTimeout(() => {
+        closingRef.current = false;
+      }, 0);
       setOpen(false);
     };
     window.addEventListener('keydown', onKey, true);
@@ -152,25 +161,37 @@ export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
 
   return (
     <div className="emojifield" ref={wrapRef}>
+      {/* The emoji itself is the trigger: clicking the field opens the picker
+          (no separate picker button), and typing an emoji by hand still
+          works — which is also the fallback when the picker fails to load.
+          For the keyboard, ArrowDown opens it — the combobox convention —
+          because a click handler alone is invisible to a keyboard user. */}
       <input
+        ref={inputRef}
         id={inputId}
         value={value}
+        role="combobox"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        title="Click to pick an emoji, or type one"
         onChange={(e) => apply(e.target.value)}
+        onClick={() => {
+          if (closingRef.current) return; // see closingRef
+          setOpen((o) => !o);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowDown' && !open) {
+            e.preventDefault();
+            setOpen(true);
+          }
+        }}
         placeholder="🔧"
         aria-describedby={reason ? `${inputId}-note` : undefined}
       />
-      <button
-        ref={btnRef}
-        type="button"
-        className="emojibtn"
-        aria-label="Pick an emoji"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-      >
-        ☺
-      </button>
       {open && (
-        <div className="emojipop">
+        // The role and name deliver what the trigger's aria-haspopup="dialog"
+        // promised; without them the popup announced as nothing at all.
+        <div className="emojipop" role="dialog" aria-label="Emoji picker">
           {picker ? (
             <picker.Picker
               // Passing `data` is what keeps the picker offline: without it

@@ -1,6 +1,54 @@
 import { describe, expect, it } from 'vitest';
 import { ReauthRequiredError } from '../lib/auth';
-import { escapeAction, loadErrorMessage, testProbe } from './SettingsModal';
+import {
+  escapeAction,
+  formStatus,
+  loadErrorMessage,
+  testProbe,
+} from './SettingsModal';
+
+describe('formStatus', () => {
+  const idle = { kind: 'idle' } as const;
+
+  it('is idle when nothing has happened — the reserved line stays empty', () => {
+    expect(formStatus(idle, idle)).toEqual({ kind: 'idle' });
+  });
+
+  it('a running test outranks everything', () => {
+    expect(
+      formStatus({ kind: 'err', msg: 'save failed' }, { kind: 'busy' }).kind,
+    ).toBe('busy');
+  });
+
+  it('a failed save stays visible over a later successful test', () => {
+    // The test passing does not save anything — the save is still unsaved,
+    // and hiding that behind "connection ok" would read as success.
+    const s = formStatus(
+      { kind: 'err', msg: 'save failed' },
+      { kind: 'ok', msg: 'connection ok' },
+    );
+    expect(s).toEqual({ kind: 'err', msg: 'save failed', source: 'save' });
+  });
+
+  it('a test failure outranks a stale save success', () => {
+    const s = formStatus(
+      { kind: 'ok', msg: 'saved' },
+      { kind: 'err', msg: 'connection failed' },
+    );
+    expect(s).toEqual({ kind: 'err', msg: 'connection failed', source: 'test' });
+  });
+
+  it('shows a success when that is the whole story', () => {
+    expect(formStatus({ kind: 'ok', msg: 'saved' }, idle)).toEqual({
+      kind: 'ok',
+      msg: 'saved',
+    });
+    expect(formStatus(idle, { kind: 'ok', msg: 'connection ok' })).toEqual({
+      kind: 'ok',
+      msg: '✓ connection ok',
+    });
+  });
+});
 
 describe('loadErrorMessage', () => {
   it('sends an expired session to the reconnect control, not to reopening', () => {

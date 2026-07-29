@@ -142,8 +142,18 @@ export function LabelsCombobox({
           onKeyDown={onKeyDown}
         />
       </div>
-      {showDrop && (
-        <ul className="labeldrop" id={listId} role="listbox" aria-label="Label suggestions">
+      {/* Mounted for the whole focus, hidden (not unmounted) when nothing
+          matches: remounting on the empty↔non-empty boundary replayed the
+          entrance animation on ordinary keystrokes. visibility keeps the
+          animation's one run intact; display or a remount would restart it. */}
+      {open && (
+        <ul
+          className="labeldrop"
+          id={listId}
+          role="listbox"
+          aria-label="Label suggestions"
+          style={filtered.length === 0 ? { visibility: 'hidden' } : undefined}
+        >
           {filtered.map((l, i) => (
             <li
               key={l}
