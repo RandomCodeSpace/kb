@@ -464,20 +464,63 @@ func writeAIError(w http.ResponseWriter, user, op string, err error) {
 func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user string) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req struct {
-		ADR string `json:"adr"`
-		Max int    `json:"max"`
+		ADR    string `json:"adr"`
+		URL    string `json:"url"`
+		Source string `json:"source"`
+		Max    int    `json:"max"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	if len(req.ADR) > maxADRBytes {
+	hasADR := strings.TrimSpace(req.ADR) != ""
+	hasURL := strings.TrimSpace(req.URL) != ""
+	if hasADR == hasURL {
+		http.Error(w, "provide adr or url", http.StatusBadRequest)
+		return
+	}
+	if hasADR && len(req.ADR) > maxADRBytes {
 		http.Error(w, "adr too large (max 64 KiB)", http.StatusRequestEntityTooLarge)
 		return
 	}
-	if strings.TrimSpace(req.ADR) == "" {
-		http.Error(w, "adr required", http.StatusBadRequest)
-		return
+	adr, link, issueURL := req.ADR, "", ""
+	if hasURL {
+		sources, err := s.store.ForgeSources(user)
+		if err != nil {
+			log.Printf("forge: list sources for stories for %s failed", user)
+			http.Error(w, "storage error", http.StatusInternalServerError)
+			return
+		}
+		ref, err := parseForgeRef(sources, req.Source, req.URL)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		selected, found := forgeSourceByName(sources, req.Source)
+		if !found {
+			http.Error(w, "configured source unavailable", http.StatusBadRequest)
+			return
+		}
+		if ref.Source.Name != selected.Name {
+			http.Error(w, "reference does not match selected source", http.StatusBadRequest)
+			return
+		}
+		kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
+		if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
+			http.Error(w, "configured source unavailable", http.StatusBadRequest)
+			return
+		}
+		ref.pat = pat
+		ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
+		defer cancel()
+		issue, err := s.fetchIssue(ctx, ref)
+		if err != nil {
+			writeAIError(w, user, "stories", err)
+			return
+		}
+		adr = forgeIssueADR(issue)
+		link, _ = importIssueProvenance(ref, issue)
+		issueURL = issue.URL
 	}
 	max := req.Max
 	if max == 0 {
@@ -491,7 +534,7 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 	}
 	msgs := []chatMessage{
 		{Role: "system", Content: storiesSystemPrompt},
-		{Role: "user", Content: fmt.Sprintf("Split this ADR into at most %d stories:\n\n%s", max, req.ADR)},
+		{Role: "user", Content: fmt.Sprintf("Split this ADR into at most %d stories:\n\n%s", max, adr)},
 	}
 	content, err := s.chatCompletion(user, msgs, 0, true)
 	if err != nil {
@@ -503,7 +546,38 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, map[string][]storyDraft{"stories": stories})
+	if link != "" {
+		for i := range stories {
+			stories[i].Tags = append(stripModelLinkTags(stories[i].Tags), "link::"+link)
+		}
+	}
+	writeJSON(w, struct {
+		Stories []storyDraft `json:"stories"`
+		Link    string       `json:"link,omitempty"`
+		URL     string       `json:"url,omitempty"`
+	}{Stories: stories, Link: link, URL: issueURL})
+}
+
+// forgeIssueADR turns one fetched issue and its bounded human discussion into
+// the ADR text sent to the existing splitter. Discussion yields first when the
+// input reaches maxADRBytes; if title and body alone exceed it, truncation is
+// still rune-safe and leaves the prompt within the same existing limit.
+func forgeIssueADR(issue forgeIssue) string {
+	adr := fmt.Sprintf("# %s\n\n%s", issue.Title, issue.Body)
+	discussion := "\n\n## Discussion"
+	if len(adr)+len(discussion) > maxADRBytes {
+		return truncateImportText(adr, maxADRBytes)
+	}
+	adr += discussion
+	for _, comment := range issue.Comments {
+		item := "\n- " + comment
+		remaining := maxADRBytes - len(adr)
+		if len(item) > remaining {
+			return adr + truncateImportText(item, remaining)
+		}
+		adr += item
+	}
+	return adr
 }
 
 var draftDueRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)

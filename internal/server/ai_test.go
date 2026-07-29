@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestAIEndpoint(t *testing.T) {
@@ -374,6 +375,16 @@ func TestAIStories(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
 			t.Fatalf("stories JSON: %v (body=%s)", err, w.Body)
 		}
+		var raw map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("raw stories JSON: %v", err)
+		}
+		if _, ok := raw["link"]; ok {
+			t.Fatalf("ADR response unexpectedly has link: %v", raw)
+		}
+		if _, ok := raw["url"]; ok {
+			t.Fatalf("ADR response unexpectedly has url: %v", raw)
+		}
 		// The blank-title story and the non-object are dropped; everything
 		// returned passes the shared validation.
 		if len(res.Stories) != 3 {
@@ -470,8 +481,11 @@ func TestAIStories(t *testing.T) {
 		if w := doReq(t, h, "POST", "/api/ai/stories", string(big), nil); w.Code != http.StatusRequestEntityTooLarge {
 			t.Errorf("oversized ADR: got %d, want 413", w.Code)
 		}
-		if w := doReq(t, h, "POST", "/api/ai/stories", `{"adr":"   "}`, nil); w.Code != http.StatusBadRequest {
-			t.Errorf("blank ADR: got %d, want 400", w.Code)
+		for _, body := range []string{`{}`, `{"adr":"   "}`, `{"adr":"x","url":"https://forge.example/issues/1","source":"primary"}`} {
+			w := doReq(t, h, "POST", "/api/ai/stories", body, nil)
+			if w.Code != http.StatusBadRequest || strings.TrimSpace(w.Body.String()) != "provide adr or url" {
+				t.Errorf("ADR/url XOR for %s: got %d %q, want exact 400", body, w.Code, w.Body.String())
+			}
 		}
 		if w := doReq(t, h, "POST", "/api/ai/stories", `not json`, nil); w.Code != http.StatusBadRequest {
 			t.Errorf("bad JSON: got %d, want 400", w.Code)
@@ -484,6 +498,171 @@ func TestAIStories(t *testing.T) {
 		}
 		if w := doReq(t, h, "POST", "/api/ai/stories", string(ok), nil); w.Code != http.StatusBadRequest {
 			t.Errorf("ADR at the 64 KiB bound: got %d, want 400 (unconfigured)", w.Code)
+		}
+	})
+}
+
+func TestAIStoriesFromForgeIssue(t *testing.T) {
+	t.Run("caps discussion and adds server-owned provenance", func(t *testing.T) {
+		body := strings.Repeat("a", maxADRBytes-80)
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.EscapedPath() {
+			case "/forge/api/v4/projects/group%2Fproject/issues/42":
+				_, _ = fmt.Fprintf(w, `{"iid":42,"title":"Issue title","description":%q,"web_url":"https://forge.example/group/project/-/issues/42"}`, body)
+			case "/forge/api/v4/projects/group%2Fproject/issues/42/notes":
+				_, _ = fmt.Fprintf(w, `[{"body":%q,"system":false}]`, strings.Repeat("界", maxForgeCommentLen))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer upstream.Close()
+		fake := &fakeOpenAI{content: `{"stories":[{"title":"first","tags":["model","link::evil#1"]},{"title":"second","tags":["link::evil#2"]}]}`}
+		aiUpstream := httptest.NewServer(fake.handler())
+		defer aiUpstream.Close()
+
+		t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+		t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+		h, st := newTestServer(t, Config{})
+		configureAI(t, h, aiUpstream.URL, "m", "sk-t")
+		baseURL, pat := upstream.URL+"/forge", "glpat-test"
+		if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, &pat); err != nil {
+			t.Fatalf("seed forge source: %v", err)
+		}
+
+		w := doReq(t, h, "POST", "/api/ai/stories", fmt.Sprintf(`{"url":%q,"source":"GITLAB-MAIN"}`, upstream.URL+"/forge/group/project/-/issues/42"), nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("POST forge stories: got %d body=%s", w.Code, w.Body)
+		}
+		var res struct {
+			Stories []storyDraft `json:"stories"`
+			Link    string       `json:"link"`
+			URL     string       `json:"url"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+			t.Fatalf("forge stories JSON: %v", err)
+		}
+		if res.Link != "gitlab#42" || res.URL != "https://forge.example/group/project/-/issues/42" || len(res.Stories) != 2 {
+			t.Fatalf("forge stories = %+v", res)
+		}
+		for i, story := range res.Stories {
+			if strings.Contains(strings.Join(story.Tags, ","), "link::evil") || !strings.HasSuffix(strings.Join(story.Tags, ","), "link::gitlab#42") {
+				t.Fatalf("story lacks server-owned link tag: %+v", story)
+			}
+			if i == 0 && strings.Join(story.Tags, ",") != "model,link::gitlab#42" {
+				t.Fatalf("story tags = %q, want model plus only the server link", strings.Join(story.Tags, ","))
+			}
+		}
+		var sent struct {
+			Messages []chatMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(fake.reqBody, &sent); err != nil {
+			t.Fatalf("decode AI request: %v", err)
+		}
+		prompt := sent.Messages[len(sent.Messages)-1].Content
+		adr := strings.TrimPrefix(prompt, "Split this ADR into at most 8 stories:\n\n")
+		if len(adr) > maxADRBytes || !utf8.ValidString(adr) || !strings.Contains(adr, "# Issue title\n\n") || !strings.Contains(adr, "## Discussion\n-") {
+			t.Fatalf("bounded forge ADR = %d bytes %q", len(adr), adr)
+		}
+	})
+
+	t.Run("multibyte title and body alone stay inside the ADR cap", func(t *testing.T) {
+		body := strings.Repeat("界", maxADRBytes)
+		var requests int
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			switch r.URL.EscapedPath() {
+			case "/api/v4/projects/group%2Fproject/issues/42":
+				_, _ = fmt.Fprintf(w, `{"iid":42,"title":"界 title","description":%q,"web_url":"https://forge.example/issues/42"}`, body)
+			case "/api/v4/projects/group%2Fproject/issues/42/notes":
+				_, _ = io.WriteString(w, `[{"body":"comment","system":false}]`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer upstream.Close()
+		fake := &fakeOpenAI{content: `{"stories":[{"title":"split"}]}`}
+		aiUpstream := httptest.NewServer(fake.handler())
+		defer aiUpstream.Close()
+
+		t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+		t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+		h, st := newTestServer(t, Config{})
+		configureAI(t, h, aiUpstream.URL, "m", "sk-t")
+		baseURL := upstream.URL
+		if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, nil); err != nil {
+			t.Fatalf("seed forge source: %v", err)
+		}
+
+		w := doReq(t, h, "POST", "/api/ai/stories", fmt.Sprintf(`{"url":%q,"source":"gitlab-main"}`, upstream.URL+"/group/project/-/issues/42"), nil)
+		if w.Code != http.StatusOK || requests != 2 {
+			t.Fatalf("multibyte forge stories: got %d requests=%d body=%s", w.Code, requests, w.Body)
+		}
+		var sent struct {
+			Messages []chatMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(fake.reqBody, &sent); err != nil {
+			t.Fatalf("decode AI request: %v", err)
+		}
+		adr := strings.TrimPrefix(sent.Messages[len(sent.Messages)-1].Content, "Split this ADR into at most 8 stories:\n\n")
+		if len(adr) > maxADRBytes || !utf8.ValidString(adr) || strings.Contains(adr, "## Discussion") {
+			t.Fatalf("body-only capped ADR = %d bytes %q", len(adr), adr)
+		}
+	})
+
+	t.Run("selected source mismatch makes no egress", func(t *testing.T) {
+		forgeAHits, forgeBHits := 0, 0
+		forgeA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			forgeAHits++
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer forgeA.Close()
+		forgeB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			forgeBHits++
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer forgeB.Close()
+		fake := &fakeOpenAI{content: `{"stories":[{"title":"unexpected"}]}`}
+		aiUpstream := httptest.NewServer(fake.handler())
+		defer aiUpstream.Close()
+
+		t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+		t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+		h, st := newTestServer(t, Config{})
+		configureAI(t, h, aiUpstream.URL, "m", "sk-t")
+		baseA, baseB := forgeA.URL, forgeB.URL
+		if _, err := st.SetForgeSource("default", "source-a", "gitlab", &baseA, nil); err != nil {
+			t.Fatalf("seed source A: %v", err)
+		}
+		if _, err := st.SetForgeSource("default", "source-b", "gitlab", &baseB, nil); err != nil {
+			t.Fatalf("seed source B: %v", err)
+		}
+		w := doReq(t, h, "POST", "/api/ai/stories", fmt.Sprintf(`{"url":%q,"source":"SOURCE-A"}`, baseB+"/group/project/-/issues/42"), nil)
+		if w.Code != http.StatusBadRequest || strings.TrimSpace(w.Body.String()) != "reference does not match selected source" || forgeAHits != 0 || forgeBHits != 0 || fake.calls != 0 {
+			t.Fatalf("mismatch response = %d %q forge A=%d forge B=%d AI=%d", w.Code, w.Body.String(), forgeAHits, forgeBHits, fake.calls)
+		}
+	})
+
+	t.Run("forge failures use the shared opaque AI error", func(t *testing.T) {
+		forge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer forge.Close()
+		fake := &fakeOpenAI{content: `{"stories":[{"title":"unexpected"}]}`}
+		aiUpstream := httptest.NewServer(fake.handler())
+		defer aiUpstream.Close()
+
+		t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+		t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+		h, st := newTestServer(t, Config{})
+		configureAI(t, h, aiUpstream.URL, "m", "sk-t")
+		baseURL := forge.URL
+		if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, nil); err != nil {
+			t.Fatalf("seed forge source: %v", err)
+		}
+
+		w := doReq(t, h, "POST", "/api/ai/stories", fmt.Sprintf(`{"url":%q,"source":"gitlab-main"}`, forge.URL+"/group/project/-/issues/42"), nil)
+		if w.Code != http.StatusBadGateway || strings.TrimSpace(w.Body.String()) != "connection failed" || fake.calls != 0 {
+			t.Fatalf("forge failure response = %d %q AI calls=%d", w.Code, w.Body.String(), fake.calls)
 		}
 	})
 }
