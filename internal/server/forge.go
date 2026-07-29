@@ -27,6 +27,7 @@ const (
 	maxForgeComments   = 20
 	maxForgeCommentLen = 1 << 10
 	importFetchTimeout = 25 * time.Second
+	maxImportLinks     = 100
 )
 
 type forgeSourceResponse struct {
@@ -76,6 +77,18 @@ type importPreviewRequest struct {
 	Source string `json:"source"`
 	Ref    string `json:"ref"`
 	Max    int    `json:"max"`
+}
+
+type importLinksRequest struct {
+	Source string            `json:"source"`
+	Items  []importLinksItem `json:"items"`
+}
+
+type importLinksItem struct {
+	ExternalKey string `json:"external_key"`
+	Link        string `json:"link"`
+	URL         string `json:"url"`
+	Title       string `json:"title"`
 }
 
 type importDuplicate struct {
@@ -869,6 +882,64 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 		response.Drafts = append(response.Drafts, preview)
 	}
 	writeJSON(w, response)
+}
+
+// handleImportLinks records client-selected import provenance without loading
+// credentials or contacting a forge. The named source provides the canonical
+// source and kind; the client supplies only the item identity and display data.
+func (s *server) handleImportLinks(w http.ResponseWriter, r *http.Request, user string) {
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var req importLinksRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if len(req.Items) > maxImportLinks {
+		http.Error(w, "too many import links (max 100)", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Source) == "" {
+		http.Error(w, "source required", http.StatusBadRequest)
+		return
+	}
+	for _, item := range req.Items {
+		if strings.TrimSpace(item.ExternalKey) == "" || strings.TrimSpace(item.Link) == "" ||
+			strings.TrimSpace(item.URL) == "" || strings.TrimSpace(item.Title) == "" {
+			http.Error(w, "import link fields required", http.StatusBadRequest)
+			return
+		}
+	}
+	sources, err := s.store.ForgeSources(user)
+	if err != nil {
+		log.Printf("forge: list import sources for %s failed: %v", user, err)
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	source, found := forgeSourceByName(sources, req.Source)
+	if !found {
+		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		return
+	}
+	links := make([]store.ImportLink, len(req.Items))
+	for i, item := range req.Items {
+		links[i] = store.ImportLink{
+			Source: source.Name, Kind: source.Kind, ExternalKey: item.ExternalKey,
+			Link: item.Link, URL: item.URL, Title: item.Title,
+		}
+	}
+	if err := s.store.RecordImportLinks(user, links); err != nil {
+		if strings.HasPrefix(err.Error(), "store: import ") {
+			http.Error(w, "invalid import link", http.StatusBadRequest)
+			return
+		}
+		log.Printf("forge: record import links for %s failed: %v", user, err)
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) importDuplicates(scope string, issues []forgeIssue) ([]*importDuplicate, error) {

@@ -1209,6 +1209,178 @@ func TestImportPreviewDoesNotAuthorizeOmittedPackedSource(t *testing.T) {
 	}
 }
 
+func TestImportLinksRecordsCanonicalProvenanceAndUpserts(t *testing.T) {
+	h, st := newIntegrationsHandler(t)
+	baseURL := "https://forge.example"
+	if _, err := st.SetForgeSource("default", "GitLab.Main", "gitlab", &baseURL, nil); err != nil {
+		t.Fatalf("seed forge source: %v", err)
+	}
+
+	post := func(body string) {
+		t.Helper()
+		w := doReq(t, h, http.MethodPost, "/api/import/links", body, nil)
+		if w.Code != http.StatusNoContent || w.Body.Len() != 0 {
+			t.Fatalf("POST import links: got %d body=%q, want empty 204", w.Code, w.Body.String())
+		}
+	}
+	post(`{"source":"GITLAB.MAIN","items":[{"external_key":"gitlab:forge.example/group/project#42","link":"gitlab#42","url":"https://forge.example/group/project/-/issues/42","title":"First import title"}]}`)
+
+	key := "gitlab:forge.example/group/project#42"
+	got, err := st.ImportedAs("default", []string{key})
+	if err != nil {
+		t.Fatalf("ImportedAs first import: %v", err)
+	}
+	want := store.ImportLink{
+		Source: "gitlab.main", Kind: "gitlab", ExternalKey: key, Link: "gitlab#42",
+		URL: "https://forge.example/group/project/-/issues/42", Title: "First import title",
+	}
+	if len(got) != 1 || got[key] != want {
+		t.Fatalf("first import = %+v, want %+v", got, want)
+	}
+
+	post(`{"source":"gitlab.main","items":[{"external_key":"gitlab:forge.example/group/project#42","link":"gitlab#42-refreshed","url":"https://forge.example/group/project/-/issues/42?refresh=1","title":"Refreshed import title"}]}`)
+	want.Link = "gitlab#42-refreshed"
+	want.URL = "https://forge.example/group/project/-/issues/42?refresh=1"
+	want.Title = "Refreshed import title"
+	got, err = st.ImportedAs("default", []string{key})
+	if err != nil || len(got) != 1 || got[key] != want {
+		t.Fatalf("upsert import = %+v, %v; want %+v", got, err, want)
+	}
+}
+
+func TestImportLinksRejectsBadBatchesWithoutPartialWrites(t *testing.T) {
+	h, st := newIntegrationsHandler(t)
+	baseURL := "https://forge.example"
+	if _, err := st.SetForgeSource("default", "primary", "gitlab", &baseURL, nil); err != nil {
+		t.Fatalf("seed forge source: %v", err)
+	}
+	valid := map[string]string{
+		"external_key": "valid", "link": "gitlab#1", "url": "https://forge.example/1", "title": "valid title",
+	}
+	tooMany := make([]map[string]string, 101)
+	for i := range tooMany {
+		tooMany[i] = valid
+	}
+	tooManyBody, err := json.Marshal(map[string]any{"source": "primary", "items": tooMany})
+	if err != nil {
+		t.Fatalf("marshal oversized batch: %v", err)
+	}
+	cases := []struct {
+		name, body string
+		wantCode   int
+	}{
+		{"more than 100", string(tooManyBody), http.StatusBadRequest},
+		{"malformed JSON", `{"source":`, http.StatusBadRequest},
+		{"missing source", `{"items":[{"external_key":"valid","link":"gitlab#1","url":"https://forge.example/1","title":"valid title"}]}`, http.StatusBadRequest},
+		{"missing item field", `{"source":"primary","items":[{"external_key":"valid","link":"gitlab#1","url":"https://forge.example/1","title":"valid title"},{"external_key":"missing-title","link":"gitlab#2","url":"https://forge.example/2"}]}`, http.StatusBadRequest},
+		{"oversized field", fmt.Sprintf(`{"source":"primary","items":[{"external_key":"valid","link":"gitlab#1","url":"https://forge.example/1","title":"valid title"},{"external_key":%q,"link":"gitlab#2","url":"https://forge.example/2","title":"bad"}]}`, strings.Repeat("k", 2049)), http.StatusBadRequest},
+		{"CRLF field", `{"source":"primary","items":[{"external_key":"valid","link":"gitlab#1","url":"https://forge.example/1","title":"valid title"},{"external_key":"bad\nkey","link":"gitlab#2","url":"https://forge.example/2","title":"bad"}]}`, http.StatusBadRequest},
+		{"unknown source", `{"source":"missing","items":[{"external_key":"valid","link":"gitlab#1","url":"https://forge.example/1","title":"valid title"}]}`, http.StatusBadRequest},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			w := doReq(t, h, http.MethodPost, "/api/import/links", tt.body, nil)
+			if w.Code != tt.wantCode {
+				t.Fatalf("POST import links: got %d body=%q, want %d", w.Code, w.Body.String(), tt.wantCode)
+			}
+			got, err := st.ImportedAs("default", []string{"valid"})
+			if err != nil || len(got) != 0 {
+				t.Fatalf("rejected batch wrote rows: %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestImportLinksAcceptsExactly100Items(t *testing.T) {
+	h, st := newIntegrationsHandler(t)
+	baseURL := "https://forge.example"
+	if _, err := st.SetForgeSource("default", "primary", "gitlab", &baseURL, nil); err != nil {
+		t.Fatalf("seed forge source: %v", err)
+	}
+	items := make([]map[string]string, 100)
+	keys := make([]string, len(items))
+	for i := range items {
+		keys[i] = fmt.Sprintf("key-%d", i)
+		items[i] = map[string]string{
+			"external_key": keys[i], "link": fmt.Sprintf("gitlab#%d", i),
+			"url": fmt.Sprintf("https://forge.example/%d", i), "title": fmt.Sprintf("title %d", i),
+		}
+	}
+	body, err := json.Marshal(map[string]any{"source": "primary", "items": items})
+	if err != nil {
+		t.Fatalf("marshal 100-item batch: %v", err)
+	}
+	w := doReq(t, h, http.MethodPost, "/api/import/links", string(body), nil)
+	if w.Code != http.StatusNoContent || w.Body.Len() != 0 {
+		t.Fatalf("100-item import: got %d body=%q, want empty 204", w.Code, w.Body.String())
+	}
+	got, err := st.ImportedAs("default", keys)
+	if err != nil || len(got) != len(items) {
+		t.Fatalf("ImportedAs 100-item batch = %d rows, %v; want %d", len(got), err, len(items))
+	}
+}
+
+func TestImportLinksStorageFailuresStayGeneric(t *testing.T) {
+	h, st := newIntegrationsHandler(t)
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	w := doReq(t, h, http.MethodPost, "/api/import/links", `{"source":"primary","items":[]}`, nil)
+	if w.Code != http.StatusInternalServerError || strings.TrimSpace(w.Body.String()) != "storage error" {
+		t.Fatalf("closed-store import: got %d body=%q, want generic 500", w.Code, w.Body.String())
+	}
+}
+
+func TestImportLinksAreScopedByAuthenticatedUser(t *testing.T) {
+	h, st := newIntegrationsHandler(t)
+	baseURL := "https://forge.example"
+	for _, source := range []struct {
+		scope, kind string
+	}{
+		{"alice", "gitlab"},
+		{"bob", "github"},
+	} {
+		if _, err := st.SetForgeSource(source.scope, "shared", source.kind, &baseURL, nil); err != nil {
+			t.Fatalf("seed %s source: %v", source.scope, err)
+		}
+	}
+	if _, err := st.SetForgeSource("bob", "bob-only", "github", &baseURL, nil); err != nil {
+		t.Fatalf("seed Bob-only source: %v", err)
+	}
+	key := "same-external-key"
+	for _, user := range []struct {
+		name, kind, title string
+	}{
+		{"Alice", "gitlab", "Alice import"},
+		{"Bob", "github", "Bob import"},
+	} {
+		body := fmt.Sprintf(`{"source":"SHARED","items":[{"external_key":%q,"link":"%s#1","url":"https://forge.example/1","title":%q}]}`, key, user.kind, user.title)
+		w := doReq(t, h, http.MethodPost, "/api/import/links", body, map[string]string{"X-KB-User": user.name})
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("%s import: got %d body=%q", user.name, w.Code, w.Body.String())
+		}
+	}
+	for _, want := range []struct {
+		scope, kind, title string
+	}{
+		{"alice", "gitlab", "Alice import"},
+		{"bob", "github", "Bob import"},
+	} {
+		got, err := st.ImportedAs(want.scope, []string{key})
+		expected := store.ImportLink{Source: "shared", Kind: want.kind, ExternalKey: key, Link: want.kind + "#1", URL: "https://forge.example/1", Title: want.title}
+		if err != nil || len(got) != 1 || got[key] != expected {
+			t.Fatalf("ImportedAs(%q) = %+v, %v; want %+v", want.scope, got, err, expected)
+		}
+	}
+	w := doReq(t, h, http.MethodPost, "/api/import/links", `{"source":"bob-only","items":[{"external_key":"blocked","link":"github#2","url":"https://forge.example/2","title":"blocked"}]}`, map[string]string{"X-KB-User": "Alice"})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Alice using Bob-only source: got %d body=%q, want 400", w.Code, w.Body.String())
+	}
+	if found, err := st.ImportedAs("alice", []string{"blocked"}); err != nil || len(found) != 0 {
+		t.Fatalf("Bob-only source wrote Alice provenance: %+v, %v", found, err)
+	}
+}
+
 // Import references cannot select an unconfigured host, and a configured
 // private source still obeys the forge client's opaque SSRF guard.
 func TestImportPreviewRejectsUnconfiguredAndPrivateForgeHosts(t *testing.T) {

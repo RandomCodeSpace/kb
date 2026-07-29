@@ -146,6 +146,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /api/ai/story", s.withAuth(s.handleAIStory))
 	mux.HandleFunc("POST /api/ai/stories", s.withAuth(s.handleAIStories))
 	mux.HandleFunc("POST /api/import/preview", s.withAuth(s.handleImportPreview))
+	mux.HandleFunc("POST /api/import/links", s.withAuth(s.handleImportLinks))
 	mux.HandleFunc("GET /api/integrations", s.withAuth(s.handleGetIntegrations))
 	mux.HandleFunc("PUT /api/integrations/{name}", s.withAuth(s.handlePutIntegration))
 	mux.HandleFunc("DELETE /api/integrations/{name}", s.withAuth(s.handleDeleteIntegration))
