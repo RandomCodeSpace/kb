@@ -1120,6 +1120,89 @@ body {
   line-height: var(--lh-flat);
   cursor: pointer;
 }
+
+/* ---------- forge integrations ----------
+   Integration rows deliberately stay out of .actions: Settings' AI form owns
+   the modal's one sticky action row, while each source remains ordinary
+   scrollable content. */
+.modal .irow {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 0.8fr)
+    minmax(0, 1fr)
+    minmax(0, 1.4fr);
+  grid-template-areas:
+    'kind-label name-label base-label'
+    'kind name base'
+    'pat-label pat-label pat-label'
+    'pat pat pat'
+    'test save remove'
+    'status status status';
+  gap: var(--sp-2);
+  align-items: end;
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 2px solid var(--gray);
+  border-radius: 12px;
+  background: var(--bg);
+}
+.modal .irow > label { margin: 0; }
+.modal .irow > label:nth-of-type(1) { grid-area: kind-label; }
+.modal .irow > label:nth-of-type(2) { grid-area: name-label; }
+.modal .irow > label:nth-of-type(3) { grid-area: base-label; }
+.modal .irow > label:nth-of-type(4) { grid-area: pat-label; }
+.modal .irow > select { grid-area: kind; }
+.modal .irow > input:nth-of-type(1) { grid-area: name; }
+.modal .irow > input:nth-of-type(2) { grid-area: base; }
+.modal .irow > input:nth-of-type(3) { grid-area: pat; }
+.modal .irow > button:nth-of-type(1) { grid-area: test; }
+.modal .irow > button:nth-of-type(2) { grid-area: save; }
+.modal .irow > button:nth-of-type(3) { grid-area: remove; }
+.modal .irow > .statusline {
+  grid-area: status;
+  min-width: 0;
+  min-height: calc(var(--fs-sm) * var(--lh-body));
+}
+.modal .irow > .statusline .flash {
+  display: block;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.modal .irow button {
+  box-sizing: border-box;
+  min-height: var(--ctl-h);
+  padding: var(--sp-2) var(--sp-3);
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 2px 2px 0 var(--ink);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 800;
+  line-height: var(--lh-tight);
+  cursor: pointer;
+}
+.modal .irow button.save { background: var(--green); }
+.modal .irow button:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+.modal .irow button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+/* The last row is the Add source control, not an integration card. */
+.modal .irow:last-of-type {
+  display: flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
 /* Narrow phones: let the three-up rows wrap instead of squeezing the fields. */
 @media (max-width: 480px) {
   .mrow { flex-wrap: wrap; }
@@ -1127,6 +1210,22 @@ body {
   .mrow > .emoji { flex: 0 0 84px; }
   .similar-row { flex-direction: column; align-items: stretch; }
   .similar-via { align-self: flex-start; }
+  .modal .irow {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      'kind-label kind-label'
+      'kind kind'
+      'name-label name-label'
+      'name name'
+      'base-label base-label'
+      'base base'
+      'pat-label pat-label'
+      'pat pat'
+      'test save'
+      'remove remove'
+      'status status';
+  }
+  .modal .irow button:nth-of-type(3) { width: 100%; }
 }
 /* A checkbox is not a full-width field — undo the generic input sizing. The
    whole row is the label, and therefore the target: 24px tall. */
