@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -385,5 +386,35 @@ func TestContentSecurityPolicyOmitsUnimplementedDirectives(t *testing.T) {
 		if strings.Contains(got, "webrtc") {
 			t.Errorf("CSP = %q, must not send the unimplemented webrtc directive", got)
 		}
+	}
+}
+
+// A percent-encoded newline in the request target survives net/http's decoding
+// into r.URL.Path, so logging it verbatim let any unauthenticated caller append
+// a second, fully attacker-controlled line to the log — including a forged
+// timestamp. Confirmed against the pre-fix binary: one request to
+// /api/%0A2026%2F07%2F29%2018%3A00%3A00%20FORGED produced two log lines.
+func TestAccessLogCannotBeForgedThroughTheRequestPath(t *testing.T) {
+	var captured strings.Builder
+	previous := log.Writer()
+	log.SetOutput(&captured)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(previous)
+		log.SetFlags(log.LstdFlags)
+	})
+
+	handler := withLogging(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	request := httptest.NewRequest("GET", "/api/%0A2026%2F07%2F29%2018%3A00%3A00%20FORGED%20LOG%20LINE", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	logged := strings.TrimSuffix(captured.String(), "\n")
+	if strings.ContainsAny(logged, "\r\n") {
+		t.Fatalf("access log entry = %q, must stay on one line", logged)
+	}
+	if !strings.Contains(logged, "FORGED") {
+		t.Fatalf("access log entry = %q, should still record the requested path", logged)
 	}
 }

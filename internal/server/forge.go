@@ -653,8 +653,11 @@ func (s *server) forgeGet(ctx context.Context, ref forgeRef, apiBase, path strin
 	return forgeHTTPResponse{status: response.StatusCode, header: response.Header.Clone(), body: body}, nil
 }
 
+// The name and path are already constrained (names match ^[a-z0-9._-]{1,64}$ and
+// paths are url.PathEscape'd), but both are stripped anyway so no future caller
+// can turn this line into a log-forging primitive.
 func forgeRequestError(ref forgeRef, path string) error {
-	log.Printf("forge: request failed source=%s path=%s", ref.Source.Name, path)
+	log.Printf("forge: request failed source=%s path=%s", stripControl(ref.Source.Name), stripControl(path))
 	return &aiError{code: http.StatusBadGateway, msg: "forge request failed"}
 }
 

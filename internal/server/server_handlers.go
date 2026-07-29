@@ -303,11 +303,13 @@ func (w *statusWriter) WriteHeader(code int) {
 }
 
 // withLogging logs method, path, status, and duration. Never headers/tokens.
+// The path is percent-decoded by net/http, so a request for %0A would otherwise
+// carry a raw newline into the log and let a caller forge whole entries.
 func withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
-		log.Printf("%s %s %d %s", r.Method, r.URL.Path, sw.status, time.Since(start).Round(time.Microsecond))
+		log.Printf("%s %s %d %s", r.Method, stripControl(r.URL.Path), sw.status, time.Since(start).Round(time.Microsecond))
 	})
 }
