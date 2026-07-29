@@ -76,6 +76,35 @@ export interface AIStoriesRequest {
   max?: number;
 }
 
+export type ForgeKind = 'gitlab' | 'github';
+
+export interface ForgeSource {
+  name: string;
+  kind: ForgeKind;
+  base_url: string;
+  has_token: boolean;
+}
+
+export interface IntegrationPatch {
+  kind: ForgeKind;
+  base_url?: string;
+  pat?: string;
+}
+
+export interface PutIntegrationResult {
+  tokenCleared: boolean;
+}
+
+export interface ForgeTestProbe {
+  base_url?: string;
+  pat?: string;
+}
+
+export interface ForgeTestResult {
+  ok: boolean;
+  error?: string;
+}
+
 /** Short error text from a failed response body, never echoing secrets. */
 async function errText(res: Response, fallback: string): Promise<string> {
   try {
@@ -85,6 +114,144 @@ async function errText(res: Response, fallback: string): Promise<string> {
     // Body unreadable — use the fallback.
   }
   return fallback;
+}
+
+function coerceForgeSource(value: unknown): ForgeSource | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const fields = value as Record<string, unknown>;
+  const name = typeof fields.name === 'string' ? fields.name.trim() : '';
+  const baseURL =
+    typeof fields.base_url === 'string' ? fields.base_url.trim() : '';
+  const kind =
+    fields.kind === 'gitlab' || fields.kind === 'github' ? fields.kind : null;
+  if (name === '' || baseURL === '' || kind === null) return null;
+  return {
+    name,
+    kind,
+    base_url: baseURL,
+    has_token: fields.has_token === true,
+  };
+}
+
+export function coerceForgeSources(body: unknown): ForgeSource[] {
+  if (typeof body !== 'object' || body === null) return [];
+  const sources = (body as Record<string, unknown>).sources;
+  if (!Array.isArray(sources)) return [];
+  return sources.flatMap((source) => {
+    const coerced = coerceForgeSource(source);
+    return coerced === null ? [] : [coerced];
+  });
+}
+
+function integrationPath(name: string, suffix = ''): string {
+  if (name === '' || name === '.' || name === '..') {
+    throw new Error('invalid integration name');
+  }
+  return `/api/integrations/${encodeURIComponent(name)}${suffix}`;
+}
+
+export async function getIntegrations(
+  identity: Identity,
+): Promise<ForgeSource[]> {
+  const res = await authedFetch(identity, '/api/integrations');
+  if (!res.ok) {
+    throw new Error(
+      await errText(res, `load integrations failed: ${res.status}`),
+    );
+  }
+  return coerceForgeSources(await res.json());
+}
+
+export async function putIntegration(
+  identity: Identity,
+  name: string,
+  patch: IntegrationPatch,
+): Promise<PutIntegrationResult> {
+  const body = {
+    kind: patch.kind,
+    ...(typeof patch.base_url === 'string' ? { base_url: patch.base_url } : {}),
+    ...(typeof patch.pat === 'string' ? { pat: patch.pat } : {}),
+  };
+  const res = await authedFetch(
+    identity,
+    integrationPath(name),
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(
+      await errText(res, `save integration failed: ${res.status}`),
+    );
+  }
+  if (res.status === 204) return { tokenCleared: false };
+  try {
+    const result = (await res.json()) as { token_cleared?: unknown };
+    return { tokenCleared: result.token_cleared === true };
+  } catch {
+    return { tokenCleared: false };
+  }
+}
+
+export async function deleteIntegration(
+  identity: Identity,
+  name: string,
+): Promise<void> {
+  const res = await authedFetch(identity, integrationPath(name), {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    throw new Error(
+      await errText(res, `remove integration failed: ${res.status}`),
+    );
+  }
+}
+
+export async function forgeTest(
+  identity: Identity,
+  name: string,
+  probe?: ForgeTestProbe,
+): Promise<ForgeTestResult> {
+  try {
+    const init: RequestInit = { method: 'POST' };
+    if (probe !== undefined) {
+      init.headers = { 'Content-Type': 'application/json' };
+      init.body = JSON.stringify({
+        ...(typeof probe.base_url === 'string'
+          ? { base_url: probe.base_url }
+          : {}),
+        ...(typeof probe.pat === 'string' ? { pat: probe.pat } : {}),
+      });
+    }
+    const res = await authedFetch(
+      identity,
+      integrationPath(name, '/test'),
+      init,
+    );
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: await errText(res, `test failed: ${res.status}`),
+      };
+    }
+    const result: unknown = await res.json();
+    if (typeof result !== 'object' || result === null) {
+      return { ok: false, error: 'connection failed' };
+    }
+    const fields = result as Record<string, unknown>;
+    if (fields.ok === true) return { ok: true };
+    return {
+      ok: false,
+      error:
+        typeof fields.error === 'string' && fields.error.trim() !== ''
+          ? fields.error
+          : 'connection failed',
+    };
+  } catch {
+    return { ok: false, error: 'connection failed' };
+  }
 }
 
 export async function getLabels(identity: Identity): Promise<string[]> {

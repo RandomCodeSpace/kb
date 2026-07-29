@@ -6,6 +6,7 @@ import { isAbortError } from '../lib/api';
 import type { AISettings, AITestProbe, SettingsPatch } from '../lib/settings';
 import { aiTest, getSettings, putSettings } from '../lib/settings';
 import { useDialogFocus } from '../lib/focus';
+import { IntegrationsSection } from './IntegrationsSection';
 
 export interface SettingsModalProps {
   identity: Identity;
@@ -276,6 +277,7 @@ export function SettingsModal({
           cap. Remembered on this device; <code>?debug=1</code> in the URL still
           forces it on.
         </p>
+        <IntegrationsSection identity={identity} serverPresent={serverPresent} />
         <h3>AI drafting</h3>
         {/* Without a server there is nothing to configure and nowhere to load
             from — the modal is open for the toggle above. */}
