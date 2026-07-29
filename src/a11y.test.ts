@@ -121,10 +121,11 @@ describe('stylesheet guards', () => {
   });
 
   /**
-   * The entrance keyframes may only touch `opacity` and `transform`: both run
-   * on the compositor, so the 30fps frame cap (or a busy main thread) cannot
-   * make them stutter. A property like height, top or box-shadow here would
-   * animate on the main thread and janks exactly when it matters.
+   * The entrance keyframes may only touch `opacity` and `transform`: the
+   * compositor drives both at the display's own rate, so the same animation
+   * gets all 120 frames on a 120Hz panel and still holds together at 30fps
+   * or under a busy main thread. A property like height, top or box-shadow
+   * here would animate on the main thread and jank exactly when it matters.
    */
   it.each(['kb-fade', 'kb-pop', 'kb-drop', 'kb-rise'])(
     'keyframes %s animate compositor properties only',

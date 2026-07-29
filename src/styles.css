@@ -50,15 +50,23 @@
   --measure: 70ch;
 
   /* ---------- motion ----------
-     One vocabulary for everything that moves. Every duration is a whole
-     number of frames at 30fps (33ms each), so an animation never ends
-     mid-frame on a capped display: 132ms = 4 frames, 198ms = 6, 264ms = 8.
-     The entrance keyframes animate only `opacity` and `transform` — both run
-     on the compositor, so a 30fps cap (or a busy main thread) cannot make
-     them stutter; a11y.test.ts holds that line. Button hover/press
-     transitions also move box-shadow or background, which repaint — a
-     deliberate exception, confined to control-sized areas where a repaint is
-     cheaper than a frame. Nothing animates layout. */
+     One vocabulary for everything that moves.
+
+     Durations are wall-clock, not frame counts: CSS interpolates against
+     time, so the same 198ms renders ~6 frames at 30fps and ~24 at 120Hz —
+     the higher the refresh rate, the smoother the identical animation. The
+     values are whole 30fps frames (132 = 4, 198 = 6, 264 = 8) only so that
+     the floor case lands cleanly; nothing here is capped to that rate, and
+     no duration should ever be chosen to suit it.
+
+     What actually decides smoothness is the property: the entrance keyframes
+     animate only `opacity` and `transform`, which the compositor drives at
+     the display's own rate, independent of the main thread. That is what
+     lets a 120Hz panel spend all 120 frames on the animation while React is
+     busy elsewhere — and what keeps 30fps from stuttering. a11y.test.ts
+     holds that line. Button hover/press transitions also move box-shadow or
+     background, which repaint — a deliberate exception, confined to
+     control-sized areas. Nothing animates layout. */
   --dur-0: 66ms;
   --dur-1: 132ms;
   --dur-2: 198ms;
