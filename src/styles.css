@@ -1014,13 +1014,13 @@ body {
 .modal #f-checks { min-height: 110px; }
 .mrow { display: flex; gap: var(--sp-3); }
 .mrow > * { flex: 1; min-width: 0; }
-/* Wide enough for the emoji input plus its picker button. */
-.mrow > .emoji { flex: 0 0 118px; }
+/* Just the emoji chip — the rest of the row goes to the title. */
+.mrow > .emoji { flex: 0 0 84px; }
 /* Narrow phones: let the three-up rows wrap instead of squeezing the fields. */
 @media (max-width: 480px) {
   .mrow { flex-wrap: wrap; }
   .mrow > * { flex: 1 1 40%; }
-  .mrow > .emoji { flex: 0 0 118px; }
+  .mrow > .emoji { flex: 0 0 84px; }
 }
 /* A checkbox is not a full-width field — undo the generic input sizing. The
    whole row is the label, and therefore the target: 24px tall. */
@@ -1077,14 +1077,50 @@ body {
   font-weight: 700;
   color: var(--red-text);
 }
-/* The field is the trigger (see EmojiField): it reads as a chip you press,
-   not a line you type into, though typing still works. */
-.emojifield input {
+/* The trigger is the emoji itself (see EmojiField) — a button, not a field:
+   there is nothing to type here. Sized and bordered like the inputs beside
+   it so the row still reads as one set of controls. */
+.emojibtn {
   flex: 1;
   min-width: 0;
+  box-sizing: border-box;
+  min-height: var(--ctl-h);
+  font: inherit;
+  font-size: var(--fs-2xl);
+  line-height: var(--lh-flat);
   text-align: center;
+  color: var(--ink);
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: var(--sp-1) var(--sp-2);
   cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out);
 }
+.emojibtn:hover { background: var(--bg); }
+/* No emoji yet: the "+" is a prompt, so it takes the hint colour and the
+   body size rather than sitting there at emoji scale. */
+.emojibtn.empty { font-size: var(--fs-xl); color: var(--dim); }
+.emojifoot {
+  display: flex;
+  padding: var(--sp-2);
+  border-top: 2px solid var(--gray);
+}
+.emojifoot button {
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 800;
+  line-height: var(--lh-flat);
+  color: var(--ink);
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  min-height: 28px;
+  padding: 0 var(--sp-2);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out);
+}
+.emojifoot button:hover { background: var(--bg); }
 .emojipop {
   position: absolute;
   top: calc(100% + var(--sp-1));
@@ -1124,7 +1160,10 @@ body {
   --border-radius: 12px;
   /* The kb frame around it carries the shadow; a second one would smear. */
   --shadow: none;
-  height: 380px;
+  /* Capped against the viewport: the modal clips its overflow, and a fixed
+     380px pushed the Remove-emoji row past the modal's bottom edge on a
+     720px-high laptop. */
+  height: min(380px, 44vh);
 }
 .emojipop .mnote { margin: 0; padding: var(--sp-2) var(--sp-3); }
 
@@ -1765,7 +1804,9 @@ body {
   .datebtn,
   .datepop .dhead button,
   .datepop .dfoot button,
-  .datepop .dday { transition: none; }
+  .datepop .dday,
+  .emojibtn,
+  .emojifoot button { transition: none; }
   .busy::before { animation: none; }
   .modal-backdrop,
   .modal,

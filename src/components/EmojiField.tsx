@@ -79,31 +79,35 @@ export interface EmojiFieldProps {
   onChange: (emoji: string) => void;
 }
 
-/** Emoji input with a lazily loaded emoji-mart popover. */
+/**
+ * Emoji chooser: the current emoji, as a button that opens a lazily loaded
+ * emoji-mart popover. Deliberately not a text field — an input invites
+ * typing, and everything typeable here is either already in the picker or is
+ * something the wire format refuses.
+ */
 export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
   const [open, setOpen] = useState(false);
   const [picker, setPicker] = useState<PickerModule | null>(null);
   const [failed, setFailed] = useState(false);
-  // Why the last entry was not taken, or '' — an unsupported emoji has to say
-  // so, not disappear (the picker offers flags and ZWJ sequences it cannot
-  // store, and picking one used to close the popover and write nothing).
+  // Why the last pick was not taken, or '' — the picker offers flags, keycaps
+  // and ZWJ sequences the codec cannot store, and choosing one used to close
+  // the popover and write nothing.
   const [reason, setReason] = useState('');
   const wrapRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  // Set while an outside pointerdown is closing the popover. Clicking the
-  // field's <label> is "outside" (it sits beside this component), so the
-  // close it causes is followed by the label's synthesized click on the
-  // input — which would reopen the picker it just closed.
+  const btnRef = useRef<HTMLButtonElement>(null);
+  // Set while an outside pointerdown is closing the popover. The field's
+  // <label> is "outside" (it sits beside this component) and a label forwards
+  // its click to the button, so the close would be followed by a reopen.
   const closingRef = useRef(false);
 
   /**
-   * Close the popover and put focus back on the field that opened it —
+   * Close the popover and put focus back on the button that opened it —
    * otherwise Escape (or picking an emoji) drops focus onto <body>, inside a
    * dialog the user is still filling in.
    */
   const close = () => {
     setOpen(false);
-    inputRef.current?.focus();
+    btnRef.current?.focus();
   };
 
   /** Take `raw` if the codec can store it, otherwise explain why not. */
@@ -121,7 +125,8 @@ export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
         if (!cancelled) setPicker(m);
       },
       () => {
-        // The field still accepts a hand-typed emoji without the picker.
+        // Nothing to fall back to now that the field is selector-only; the
+        // emoji is optional, and the card saves fine without one.
         if (!cancelled) setFailed(true);
       },
     );
@@ -161,33 +166,28 @@ export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
 
   return (
     <div className="emojifield" ref={wrapRef}>
-      {/* The emoji itself is the trigger: clicking the field opens the picker
-          (no separate picker button), and typing an emoji by hand still
-          works — which is also the fallback when the picker fails to load.
-          For the keyboard, ArrowDown opens it — the combobox convention —
-          because a click handler alone is invisible to a keyboard user. */}
-      <input
-        ref={inputRef}
+      {/* The current emoji IS the control: pressing it opens the picker. A
+          button rather than an input, so it is operable by pointer and
+          keyboard alike with no text-entry affordance to mislead. Empty
+          reads as a prompt, not as a value. */}
+      <button
+        ref={btnRef}
         id={inputId}
-        value={value}
-        role="combobox"
-        aria-expanded={open}
+        type="button"
+        className={value ? 'emojibtn' : 'emojibtn empty'}
         aria-haspopup="dialog"
-        title="Click to pick an emoji, or type one"
-        onChange={(e) => apply(e.target.value)}
+        aria-expanded={open}
+        // The glyph alone is the whole label, and "none" has no glyph at all.
+        aria-label={value ? `Emoji: ${value}. Choose another` : 'Choose an emoji'}
+        title="Choose an emoji"
         onClick={() => {
           if (closingRef.current) return; // see closingRef
           setOpen((o) => !o);
         }}
-        onKeyDown={(e) => {
-          if (e.key === 'ArrowDown' && !open) {
-            e.preventDefault();
-            setOpen(true);
-          }
-        }}
-        placeholder="🔧"
         aria-describedby={reason ? `${inputId}-note` : undefined}
-      />
+      >
+        {value || '+'}
+      </button>
       {open && (
         // The role and name deliver what the trigger's aria-haspopup="dialog"
         // promised; without them the popup announced as nothing at all.
@@ -216,8 +216,26 @@ export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
             />
           ) : (
             <p className="mnote">
-              {failed ? 'picker unavailable — type an emoji' : 'loading…'}
+              {failed
+                ? 'picker unavailable — the emoji is optional, save without one'
+                : 'loading…'}
             </p>
+          )}
+          {/* The picker can set an emoji but never unset one, and a card that
+              has one would otherwise be stuck with it. */}
+          {value && picker && (
+            <div className="emojifoot">
+              <button
+                type="button"
+                onClick={() => {
+                  setReason('');
+                  onChange('');
+                  close();
+                }}
+              >
+                Remove emoji
+              </button>
+            </div>
           )}
         </div>
       )}
