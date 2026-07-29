@@ -1,12 +1,15 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // SimilarHit is a cheap card or import-provenance match.
@@ -224,6 +227,77 @@ type ImportLink struct {
 	Link        string
 	URL         string
 	Title       string
+}
+
+// ImportBaseline records what an imported item looked like when last checked.
+type ImportBaseline struct{ Title, Hash, Excerpt, At string }
+
+const maxImportBaselineExcerptBytes = 8 << 10
+
+// NewImportBaseline hashes the complete body before keeping a bounded,
+// rune-safe excerpt, so exact comparison does not depend on lossy storage.
+func NewImportBaseline(title, body, at string) ImportBaseline {
+	sum := sha256.Sum256([]byte(body))
+	excerpt := body
+	for len(excerpt) > maxImportBaselineExcerptBytes {
+		_, size := utf8.DecodeLastRuneInString(excerpt)
+		excerpt = excerpt[:len(excerpt)-size]
+	}
+	return ImportBaseline{
+		Title:   title,
+		Hash:    hex.EncodeToString(sum[:]),
+		Excerpt: excerpt,
+		At:      at,
+	}
+}
+
+// ImportBaseline returns the scoped baseline for externalKey when one exists.
+func (s *Store) ImportBaseline(scope, externalKey string) (ImportBaseline, bool, error) {
+	var baseline ImportBaseline
+	err := s.db.QueryRow(`
+SELECT baseline_title, baseline_hash, baseline_excerpt, baseline_at
+FROM import_links
+WHERE scope = ? AND external_key = ?`, scope, externalKey).Scan(
+		&baseline.Title, &baseline.Hash, &baseline.Excerpt, &baseline.At,
+	)
+	switch {
+	case err == nil:
+		return baseline, baseline != (ImportBaseline{}), nil
+	case errors.Is(err, sql.ErrNoRows):
+		return ImportBaseline{}, false, nil
+	default:
+		return ImportBaseline{}, false, fmt.Errorf("store: read import baseline: %w", err)
+	}
+}
+
+// SetImportBaseline updates one existing scoped import baseline.
+func (s *Store) SetImportBaseline(scope, externalKey string, baseline ImportBaseline) error {
+	if err := validateImportBaseline(baseline); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+UPDATE import_links
+SET baseline_title = ?, baseline_hash = ?, baseline_excerpt = ?, baseline_at = ?
+WHERE scope = ? AND external_key = ?`,
+		baseline.Title, baseline.Hash, baseline.Excerpt, baseline.At, scope, externalKey); err != nil {
+		return fmt.Errorf("store: set import baseline: %w", err)
+	}
+	return nil
+}
+
+func validateImportBaseline(baseline ImportBaseline) error {
+	if len(baseline.Excerpt) > maxImportBaselineExcerptBytes {
+		return errors.New("store: import baseline excerpt exceeds 8192 bytes")
+	}
+	for name, value := range map[string]string{
+		"title": baseline.Title,
+		"hash":  baseline.Hash,
+	} {
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("store: import baseline %s contains a line break", name)
+		}
+	}
+	return nil
 }
 
 // ImportedAs returns provenance rows keyed by external key.
