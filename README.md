@@ -188,6 +188,18 @@ the soft-delete column (`kb cancel` / `kb restore`, and the SPA's delete
 button); it is excluded from the shipped streak, progress totals and the
 default `kb list`.
 
+## Decision graveyard
+
+Killing a card still means moving it to the existing Cancelled soft-delete
+column; it is not a new kind of deletion. A tombstone is an optional reason
+attached to that killed card. When similar work is proposed later, kb can show
+the prior decision as an advisory warning. The warning is dismissible and never
+blocks creating or editing a card.
+
+Tombstone reasons are stored as plaintext in the local database. Anyone who can
+read that database file can read the reasons, so do not put secrets or other
+sensitive information in them.
+
 ## CLI
 
 The same `kb` binary is the task CLI. A bare `kb` serves; a subcommand runs
@@ -353,6 +365,20 @@ selected**.
 **Imports are one-shot AI transformations, not clones or mirrors; there is no
 background sync.** Later changes on the forge do not update cards, and card
 changes do not update forge issues. Import again when you want a new snapshot.
+
+### Checking imported issues
+
+Use **Check upstream** on an imported card when you want to compare it with the
+current forge issue.
+*a drift check is a one-time comparison you ask for; kb never syncs, never polls, and never writes to your forge.*
+
+The first check only records the issue's current state as the baseline. Any
+drift between import and that first check is not detected; later checks compare
+against the recorded baseline.
+
+Drift baselines keep the issue title and a bounded body excerpt as plaintext in
+the local database. Anyone who can read that database file can read the
+excerpt, including text captured from a private issue.
 
 ## AI assist and settings
 
