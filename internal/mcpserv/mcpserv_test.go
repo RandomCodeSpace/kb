@@ -292,6 +292,71 @@ func TestDuplicateCheckKeepsExactLinksFirstAndScopesCandidates(t *testing.T) {
 	}
 }
 
+func TestDuplicateCheckCapsMixedCandidatesAfterExactLinks(t *testing.T) {
+	cs, st := connectWithStore(t)
+	var exactIDs []string
+	for i := 0; i < 8; i++ {
+		exact, err := st.AddTask("tester", board.Task{
+			Title: fmt.Sprintf("exact-only candidate %02d", i),
+			Tags:  []string{"link::gitlab#mixed-limit"},
+		})
+		if err != nil {
+			t.Fatalf("seed exact-link card %d: %v", i, err)
+		}
+		exactIDs = append(exactIDs, exact.ID)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := st.AddTask("tester", board.Task{Title: fmt.Sprintf("mixed-limit similar %02d", i)}); err != nil {
+			t.Fatalf("seed similar card %d: %v", i, err)
+		}
+	}
+
+	var got struct {
+		Candidates []struct {
+			ID   string `json:"id"`
+			Via  string `json:"via"`
+			Link string `json:"link"`
+		} `json:"candidates"`
+	}
+	callOK(t, cs, "duplicate_check", map[string]any{
+		"title": "mixed-limit",
+		"link":  "link::gitlab#mixed-limit",
+	}, &got)
+	if len(got.Candidates) != 10 {
+		t.Fatalf("duplicate_check returned %d candidates, want 10: %+v", len(got.Candidates), got.Candidates)
+	}
+	for i, wantID := range exactIDs {
+		candidate := got.Candidates[i]
+		if candidate.ID != wantID || candidate.Via != "card" || candidate.Link != "link::gitlab#mixed-limit" {
+			t.Errorf("candidate %d = %+v, want exact-link card %q", i, candidate, wantID)
+		}
+	}
+	for _, candidate := range got.Candidates[8:] {
+		if candidate.ID == "" || candidate.Via != "card" || candidate.Link != "" {
+			t.Errorf("similar candidate = %+v, want card without exact-link field", candidate)
+		}
+	}
+}
+
+func TestDuplicateCheckKeepsThreeSimilarCandidateBudgetWithoutExactLink(t *testing.T) {
+	cs, st := connectWithStore(t)
+	for i := 0; i < 5; i++ {
+		if _, err := st.AddTask("tester", board.Task{Title: fmt.Sprintf("similar-only budget %02d", i)}); err != nil {
+			t.Fatalf("seed similar card %d: %v", i, err)
+		}
+	}
+
+	var got struct {
+		Candidates []json.RawMessage `json:"candidates"`
+	}
+	callOK(t, cs, "duplicate_check", map[string]any{
+		"title": "similar-only budget",
+	}, &got)
+	if len(got.Candidates) != 3 {
+		t.Fatalf("duplicate_check returned %d similar candidates, want 3", len(got.Candidates))
+	}
+}
+
 func assertJSONKeys(t *testing.T, raw json.RawMessage, want ...string) {
 	t.Helper()
 	if len(raw) == 0 {

@@ -378,6 +378,29 @@ func TestIntegrationsCRUDAndPATRedaction(t *testing.T) {
 	}
 }
 
+func TestIntegrationsRejectBaseURLQueryAndFragment(t *testing.T) {
+	h, st := newIntegrationsHandler(t)
+	for _, baseURL := range []string{
+		"https://gitlab.example.com?x=y",
+		"https://gitlab.example.com#fragment",
+	} {
+		body, err := json.Marshal(map[string]string{"kind": "gitlab", "base_url": baseURL})
+		if err != nil {
+			t.Fatal("marshal integration request")
+		}
+		w := doReq(t, h, http.MethodPut, "/api/integrations/primary", string(body), nil)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("PUT integration with URL component: got %d, want 400", w.Code)
+		}
+		if strings.Contains(w.Body.String(), baseURL) {
+			t.Fatal("integration validation response echoed the URL")
+		}
+	}
+	if sources, err := st.ForgeSources("default"); err != nil || len(sources) != 0 {
+		t.Fatalf("rejected integrations persisted sources=%d err=%v", len(sources), err)
+	}
+}
+
 func TestIntegrationsAreScopedByAuthenticatedUser(t *testing.T) {
 	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "")
 	h, _ := newIntegrationsHandler(t)
@@ -446,6 +469,43 @@ func TestIntegrationsConnectionTestProtectsStoredPAT(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), pat) {
 		t.Fatal("test response exposed stored PAT")
+	}
+}
+
+func TestIntegrationProbeRejectsCredentialURLWithoutEgress(t *testing.T) {
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	h, st := newIntegrationsHandler(t)
+	baseURL := upstream.URL
+	if _, err := st.SetForgeSource("default", "legacy", "gitlab", &baseURL, nil); err != nil {
+		t.Fatal("seed legacy integration")
+	}
+	legacyBaseURL := upstream.URL + "?x=y"
+	body, err := json.Marshal(map[string]string{"base_url": legacyBaseURL})
+	if err != nil {
+		t.Fatal("marshal legacy URL probe")
+	}
+
+	w := doReq(t, h, http.MethodPost, "/api/integrations/legacy/test", string(body), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("legacy URL probe: got %d, want 200", w.Code)
+	}
+	var result integrationTestResponse
+	decodeForgeJSON(t, w, &result)
+	if result.OK || result.Error != "forge base URL must not contain query or fragment" {
+		t.Fatal("legacy URL probe returned the wrong validation result")
+	}
+	if strings.Contains(w.Body.String(), legacyBaseURL) {
+		t.Fatal("legacy URL probe echoed the URL")
+	}
+	if hits.Load() != 0 {
+		t.Fatal("legacy URL probe reached the upstream")
 	}
 }
 

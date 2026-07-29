@@ -24,6 +24,13 @@ type AISettings struct {
 	HasKey  bool
 }
 
+func validateAIBaseURLForStorage(raw string) error {
+	if strings.ContainsAny(strings.TrimSpace(raw), "?#") {
+		return errors.New("store: AI base URL must not contain query or fragment")
+	}
+	return nil
+}
+
 // AISettings returns the user's AI settings; a user with no stored row gets
 // the zero value.
 func (s *Store) AISettings(user string) (AISettings, error) {
@@ -49,6 +56,11 @@ func (s *Store) AISettings(user string) (AISettings, error) {
 // or whoever can write settings could route the decrypted key to a host
 // they control.
 func (s *Store) SetAISettings(user string, baseURL, model *string, apiKey *string) (keyCleared bool, err error) {
+	if baseURL != nil {
+		if err := validateAIBaseURLForStorage(*baseURL); err != nil {
+			return false, err
+		}
+	}
 	err = s.withTx(func(tx *sql.Tx) error {
 		var base, mdl string
 		var enc []byte

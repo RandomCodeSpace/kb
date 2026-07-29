@@ -33,25 +33,39 @@ ORDER BY name`, scope)
 	if err != nil {
 		return nil, fmt.Errorf("store: forge sources: %w", err)
 	}
-	defer rows.Close()
-
 	sources := make([]ForgeSource, 0)
 	for rows.Next() {
 		var source ForgeSource
 		var enc []byte
 		var createdAt string
 		if err := rows.Scan(&source.Name, &source.Kind, &source.BaseURL, &enc, &createdAt); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("store: scan forge source: %w", err)
 		}
 		source.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
 		if err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("store: parse forge source creation time: %w", err)
 		}
 		source.HasToken = len(enc) > 0
 		sources = append(sources, source)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, fmt.Errorf("store: forge sources: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("store: close forge sources: %w", err)
+	}
+	for i := range sources {
+		clean := stripURLSuffix(sources[i].BaseURL)
+		if clean == sources[i].BaseURL {
+			continue
+		}
+		if _, err := s.db.Exec(`UPDATE forge_sources SET base_url = ? WHERE scope = ? AND name = ?`, clean, scope, sources[i].Name); err != nil {
+			return nil, fmt.Errorf("store: repair forge source URL: %w", err)
+		}
+		sources[i].BaseURL = clean
 	}
 	return sources, nil
 }
@@ -93,6 +107,15 @@ WHERE scope = ? AND name = ?`, scope, name).Scan(&base, &enc, &createdAt); {
 			exists = false
 		case err != nil:
 			return fmt.Errorf("store: read forge source: %w", err)
+		}
+		if exists {
+			clean := stripURLSuffix(base)
+			if clean != base {
+				if _, err := tx.Exec(`UPDATE forge_sources SET base_url = ? WHERE scope = ? AND name = ?`, clean, scope, name); err != nil {
+					return fmt.Errorf("store: repair forge source URL: %w", err)
+				}
+				base = clean
+			}
 		}
 
 		if !exists {
@@ -170,6 +193,13 @@ WHERE scope = ? AND name = ?`, scope, name).Scan(&kind, &baseURL, &enc); {
 	case err != nil:
 		return "", "", "", fmt.Errorf("store: forge PAT: %w", err)
 	}
+	clean := stripURLSuffix(baseURL)
+	if clean != baseURL {
+		if _, err := s.db.Exec(`UPDATE forge_sources SET base_url = ? WHERE scope = ? AND name = ?`, clean, scope, name); err != nil {
+			return "", "", "", fmt.Errorf("store: repair forge source URL: %w", err)
+		}
+		baseURL = clean
+	}
 	if len(enc) == 0 {
 		return kind, baseURL, "", nil
 	}
@@ -178,6 +208,13 @@ WHERE scope = ? AND name = ?`, scope, name).Scan(&kind, &baseURL, &enc); {
 		return "", "", "", err
 	}
 	return kind, baseURL, string(plain), nil
+}
+
+func stripURLSuffix(raw string) string {
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
+		return raw[:i]
+	}
+	return raw
 }
 
 func normalizeForgeSourceName(name string) (string, error) {
@@ -205,6 +242,9 @@ func normalizeForgeBaseURL(raw string) (string, error) {
 	}
 	if u.User != nil {
 		return "", errors.New("store: forge base URL must not contain userinfo")
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", errors.New("store: forge base URL must not contain query or fragment")
 	}
 	return u.String(), nil
 }

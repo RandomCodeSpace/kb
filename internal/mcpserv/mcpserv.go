@@ -254,6 +254,8 @@ type duplicateCheckOutput struct {
 	Candidates []similarStub `json:"candidates"`
 }
 
+const duplicateCheckMaxCandidates = 10
+
 // --- handlers ---
 
 func (k *kb) listTasks(_ context.Context, _ *mcp.CallToolRequest, in listTasksInput) (*mcp.CallToolResult, listTasksOutput, error) {
@@ -300,6 +302,9 @@ func (k *kb) duplicateCheck(_ context.Context, _ *mcp.CallToolRequest, in duplic
 	seenIDs := make(map[string]struct{})
 	appendHits := func(hits []store.SimilarHit) {
 		for _, hit := range hits {
+			if len(out.Candidates) >= duplicateCheckMaxCandidates {
+				return
+			}
 			if hit.ID != "" {
 				if _, seen := seenIDs[hit.ID]; seen {
 					continue
@@ -319,12 +324,18 @@ func (k *kb) duplicateCheck(_ context.Context, _ *mcp.CallToolRequest, in duplic
 		}
 		appendHits(hits)
 	}
-	query := strings.TrimSpace(in.Title + " " + in.Body)
-	hits, err := k.st.SearchSimilar(k.user, query, "", 3)
-	if err != nil {
-		return nil, duplicateCheckOutput{}, err
+	if remaining := duplicateCheckMaxCandidates - len(out.Candidates); remaining > 0 {
+		similarLimit := remaining
+		if similarLimit > 3 {
+			similarLimit = 3
+		}
+		query := strings.TrimSpace(in.Title + " " + in.Body)
+		hits, err := k.st.SearchSimilar(k.user, query, "", similarLimit)
+		if err != nil {
+			return nil, duplicateCheckOutput{}, err
+		}
+		appendHits(hits)
 	}
-	appendHits(hits)
 	return nil, out, nil
 }
 

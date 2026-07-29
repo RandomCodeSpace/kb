@@ -191,6 +191,9 @@ func aiEndpoint(base string) (string, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", errors.New("AI base URL scheme must be http or https")
 	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", errors.New("AI base URL must not contain query or fragment")
+	}
 	// The base URL is stored unencrypted and echoed back by GET /api/settings,
 	// so a credential in the userinfo would be a key leaked to the browser —
 	// the one thing the server-side AI proxy exists to prevent. Keys go in the

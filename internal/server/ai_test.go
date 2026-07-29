@@ -29,6 +29,8 @@ func TestAIEndpoint(t *testing.T) {
 		// to the browser by GET /api/settings.
 		{"https://user:pass@api.example.com/v1", "", true},
 		{"https://token@api.example.com/v1", "", true},
+		{"https://api.example.com/v1?x=y", "", true},
+		{"https://api.example.com/v1#fragment", "", true},
 		{"ftp://api.example.com", "", true},
 		{"file:///etc/passwd", "", true},
 		{"not a url", "", true},

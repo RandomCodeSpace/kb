@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // SimilarHit is a cheap card or import-provenance match.
@@ -18,7 +19,9 @@ type SimilarHit struct {
 
 // FtsQuery converts untrusted text to a bounded OR of literal FTS phrases.
 func FtsQuery(raw string) string {
-	tokens := strings.Fields(raw)
+	tokens := strings.FieldsFunc(raw, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	})
 	if len(tokens) > 12 {
 		tokens = tokens[:12]
 	}
@@ -101,7 +104,7 @@ FROM tasks
 WHERE user = ? AND EXISTS (
 	SELECT 1 FROM json_each(tasks.tags) WHERE json_each.value = ?
 )
-ORDER BY `+statusRank+`, position`, scope, link)
+ORDER BY `+statusRank+`, position, id LIMIT 10`, scope, link)
 	if err != nil {
 		return nil, fmt.Errorf("store: tasks by link: %w", err)
 	}

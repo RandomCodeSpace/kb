@@ -556,6 +556,88 @@ func TestAISettings(t *testing.T) {
 	}
 }
 
+func TestSetAISettingsRejectsBaseURLQueryAndFragment(t *testing.T) {
+	s := newStore(t)
+	for _, baseURL := range []string{
+		"https://api.example/v1?x=y",
+		"https://api.example/v1#fragment",
+	} {
+		if _, err := s.SetAISettings("u", sptr(baseURL), nil, nil); err == nil {
+			t.Fatal("SetAISettings accepted URL suffix")
+		} else if err.Error() != "store: AI base URL must not contain query or fragment" {
+			t.Fatal("SetAISettings returned an unsafe validation error")
+		}
+		if got, err := s.AISettings("u"); err != nil || got != (AISettings{}) {
+			t.Fatalf("rejected URL suffix persisted settings err=%v", err)
+		}
+	}
+}
+
+func TestOpenRepairsLegacyCredentialURLSuffixes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kb.db")
+	s, err := Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal("open initial store")
+	}
+	if _, err := s.db.Exec(`INSERT INTO settings (user, ai_base_url, ai_model) VALUES (?, ?, ?)`, "u", "https://api.example/v1?x=y", "model"); err != nil {
+		t.Fatal("seed legacy settings URL")
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, fixture := range []struct{ scope, name, baseURL string }{
+		{"u", "listed", "https://forge.example/root#fragment"},
+		{"bob", "loaded", "https://forge.example/root?x=y"},
+		{"u", "written", "https://forge.example/root?x=y"},
+	} {
+		if _, err := s.db.Exec(`INSERT INTO forge_sources (scope, name, kind, base_url, created_at) VALUES (?, ?, ?, ?, ?)`, fixture.scope, fixture.name, "gitlab", fixture.baseURL, stamp); err != nil {
+			t.Fatal("seed legacy forge URL")
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal("close initial store")
+	}
+
+	s, err = Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal("reopen legacy store")
+	}
+	defer s.Close()
+	if got, err := s.AISettings("u"); err != nil || got.BaseURL != "https://api.example/v1" || strings.ContainsAny(got.BaseURL, "?#") {
+		t.Fatalf("repaired settings are wrong err=%v", err)
+	}
+	var settingsBase, forgeBase, version string
+	if err := s.db.QueryRow(`SELECT ai_base_url FROM settings WHERE user = ?`, "u").Scan(&settingsBase); err != nil || strings.ContainsAny(settingsBase, "?#") {
+		t.Fatalf("persisted settings suffix remains err=%v", err)
+	}
+	if err := s.db.QueryRow(`SELECT base_url FROM forge_sources WHERE scope = ? AND name = ?`, "u", "listed").Scan(&forgeBase); err != nil || !strings.ContainsAny(forgeBase, "?#") {
+		t.Fatalf("startup repair touched a forge scope err=%v", err)
+	}
+	if err := s.db.QueryRow(`SELECT base_url FROM forge_sources WHERE scope = ? AND name = ?`, "u", "written").Scan(&forgeBase); err != nil || !strings.ContainsAny(forgeBase, "?#") {
+		t.Fatalf("startup repair touched a write-path forge row err=%v", err)
+	}
+	if _, err := s.SetForgeSource("u", "written", "gitlab", nil, nil); err != nil {
+		t.Fatal("scoped forge write repair failed")
+	}
+	if err := s.db.QueryRow(`SELECT base_url FROM forge_sources WHERE scope = ? AND name = ?`, "u", "written").Scan(&forgeBase); err != nil || strings.ContainsAny(forgeBase, "?#") {
+		t.Fatalf("write-path forge repair did not persist err=%v", err)
+	}
+	sources, err := s.ForgeSources("u")
+	if err != nil || len(sources) != 2 || strings.ContainsAny(sources[0].BaseURL, "?#") || strings.ContainsAny(sources[1].BaseURL, "?#") {
+		t.Fatalf("scoped forge listing did not repair cleanly err=%v", err)
+	}
+	if err := s.db.QueryRow(`SELECT base_url FROM forge_sources WHERE scope = ? AND name = ?`, "u", "listed").Scan(&forgeBase); err != nil || strings.ContainsAny(forgeBase, "?#") {
+		t.Fatalf("listed forge repair did not persist err=%v", err)
+	}
+	if err := s.db.QueryRow(`SELECT base_url FROM forge_sources WHERE scope = ? AND name = ?`, "bob", "loaded").Scan(&forgeBase); err != nil || !strings.ContainsAny(forgeBase, "?#") {
+		t.Fatalf("scoped forge listing crossed scope err=%v", err)
+	}
+	if _, baseURL, _ := mustForgePAT(t, s, "bob", "loaded"); strings.ContainsAny(baseURL, "?#") {
+		t.Fatal("scoped forge load returned a suffix")
+	}
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil || version != "3" {
+		t.Fatalf("schema version changed during repair err=%v", err)
+	}
+}
+
 func TestBaseURLChangeClearsKey(t *testing.T) {
 	s := newStore(t)
 	if _, err := s.SetAISettings("u", sptr("https://api.example.com/v1"), sptr("m"), sptr("sk-1")); err != nil {

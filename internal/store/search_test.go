@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -76,6 +77,27 @@ func TestFtsQueryCapsInputAndEmptySearchDoesNoWork(t *testing.T) {
 	}
 }
 
+func TestFtsQueryTreatsControlCharactersAsTokenBoundaries(t *testing.T) {
+	if got, want := FtsQuery("abc\x00def"), `"abc" OR "def"`; got != want {
+		t.Fatalf("FtsQuery embedded NUL = %q, want %q", got, want)
+	}
+	for _, raw := range []string{"\x00", "\x00\x01\x1f\x7f"} {
+		if got := FtsQuery(raw); got != "" {
+			t.Fatalf("FtsQuery control-only %q = %q, want empty", raw, got)
+		}
+	}
+}
+
+func TestSearchSimilarWithEmbeddedNULHasNoSQLSyntaxError(t *testing.T) {
+	hits, err := newStore(t).SearchSimilar("alice", "abc\x00def", "", 10)
+	if err != nil {
+		t.Fatalf("SearchSimilar embedded NUL: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("SearchSimilar embedded NUL = %+v, want no hits", hits)
+	}
+}
+
 func TestFTSWriteThroughTracksEveryTaskWritePath(t *testing.T) {
 	s := newStore(t)
 	added := addSearchTask(t, s, board.Task{Title: "addunique marker"})
@@ -130,6 +152,59 @@ func TestTasksByLinkMatchesACompleteTagOnly(t *testing.T) {
 	want := []SimilarHit{{ID: exact.ID, Title: exact.Title, Status: string(exact.Status), Via: "card", Link: "link::gitlab#12"}}
 	if !reflect.DeepEqual(hits, want) {
 		t.Fatalf("TasksByLink = %+v, want %+v", hits, want)
+	}
+}
+
+func TestTasksByLinkCapsResultsAtTen(t *testing.T) {
+	s := newStore(t)
+	wantIDs := make([]string, 0, 12)
+	for i := 0; i < 12; i++ {
+		added := addSearchTask(t, s, board.Task{
+			Title: fmt.Sprintf("exact-link-%02d", i), Tags: []string{"link::gitlab#limit"},
+		})
+		wantIDs = append(wantIDs, added.ID)
+	}
+
+	hits, err := s.TasksByLink("alice", "link::gitlab#limit")
+	if err != nil {
+		t.Fatalf("TasksByLink: %v", err)
+	}
+	if len(hits) != 10 {
+		t.Fatalf("TasksByLink returned %d hits, want 10", len(hits))
+	}
+	for i, hit := range hits {
+		if hit.ID != wantIDs[i] {
+			t.Errorf("TasksByLink hit %d = %q, want %q", i, hit.ID, wantIDs[i])
+		}
+	}
+}
+
+func TestTasksByLinkUsesStableIDTieBreakForCap(t *testing.T) {
+	s := newStore(t)
+	wantIDs := make([]string, 0, 12)
+	for i := 0; i < 12; i++ {
+		added := addSearchTask(t, s, board.Task{
+			Title: fmt.Sprintf("tie-link-%02d", i), Tags: []string{"link::gitlab#tie"},
+		})
+		id := fmt.Sprintf("tie-%02d", 11-i)
+		if _, err := s.db.Exec(`UPDATE tasks SET id = ?, position = 0 WHERE id = ?`, id, added.ID); err != nil {
+			t.Fatalf("tie task %d: %v", i, err)
+		}
+		wantIDs = append(wantIDs, id)
+	}
+	sort.Strings(wantIDs)
+
+	hits, err := s.TasksByLink("alice", "link::gitlab#tie")
+	if err != nil {
+		t.Fatalf("TasksByLink: %v", err)
+	}
+	if len(hits) != 10 {
+		t.Fatalf("TasksByLink returned %d hits, want 10", len(hits))
+	}
+	for i, hit := range hits {
+		if hit.ID != wantIDs[i] {
+			t.Errorf("TasksByLink tie hit %d = %q, want %q", i, hit.ID, wantIDs[i])
+		}
 	}
 }
 

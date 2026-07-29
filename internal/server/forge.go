@@ -765,12 +765,9 @@ func normalizeForgeProbeBase(raw string) (*url.URL, error) {
 	if u.User != nil {
 		return nil, errors.New("forge base URL must not contain userinfo")
 	}
-	// A configured endpoint identifies an origin and optional path prefix, not
-	// a caller-controlled query. Removing both also keeps every probe URL free
-	// of credential-shaped or endpoint-specific query data.
-	u.RawQuery = ""
-	u.ForceQuery = false
-	u.Fragment = ""
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return nil, errors.New("forge base URL must not contain query or fragment")
+	}
 	return u, nil
 }
 
@@ -1058,8 +1055,12 @@ func (s *server) handlePutIntegration(w http.ResponseWriter, r *http.Request, us
 
 	tokenCleared, err := s.store.SetForgeSource(user, name, req.Kind, req.BaseURL, req.PAT)
 	if err != nil {
-		if err.Error() == "store: forge base URL is required" {
+		switch err.Error() {
+		case "store: forge base URL is required":
 			http.Error(w, "forge base URL is required", http.StatusBadRequest)
+			return
+		case "store: forge base URL must not contain query or fragment":
+			http.Error(w, "forge base URL must not contain query or fragment", http.StatusBadRequest)
 			return
 		}
 		log.Printf("forge: save integration for %s failed: %v", user, err)

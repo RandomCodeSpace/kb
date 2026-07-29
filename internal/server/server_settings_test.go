@@ -92,6 +92,34 @@ func TestSettingsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSettingsRejectBaseURLQueryAndFragment(t *testing.T) {
+	h, _ := newTestServer(t, Config{})
+	for _, baseURL := range []string{
+		"https://api.example.com/v1?x=y",
+		"https://api.example.com/v1#fragment",
+	} {
+		body, err := json.Marshal(map[string]string{"ai_base_url": baseURL})
+		if err != nil {
+			t.Fatal("marshal settings request")
+		}
+		w := doReq(t, h, http.MethodPut, "/api/settings", string(body), nil)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("PUT settings with URL component: got %d, want 400", w.Code)
+		}
+		if strings.Contains(w.Body.String(), baseURL) {
+			t.Fatal("settings validation response echoed the URL")
+		}
+	}
+	w := doReq(t, h, http.MethodGet, "/api/settings", "", nil)
+	var got settingsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET settings JSON: %v", err)
+	}
+	if got != (settingsResponse{}) {
+		t.Fatalf("rejected settings persisted %+v", got)
+	}
+}
+
 func TestPutSettingsBaseURLChangeClearsKey(t *testing.T) {
 	h, _ := newTestServer(t, Config{})
 

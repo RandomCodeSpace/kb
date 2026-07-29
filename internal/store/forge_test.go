@@ -181,6 +181,8 @@ func TestForgeSourceValidationAndNormalization(t *testing.T) {
 		{"missing host", "prod", "gitlab", "https:///api", "", false},
 		{"non-http base", "prod", "gitlab", "ftp://forge.example", "", false},
 		{"userinfo", "prod", "gitlab", "https://user:" + userinfoSecret + "@forge.example", userinfoSecret, false},
+		{"query", "prod", "gitlab", "https://forge.example?x=y", "", false},
+		{"fragment", "prod", "gitlab", "https://forge.example#fragment", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
