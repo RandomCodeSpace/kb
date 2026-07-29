@@ -123,14 +123,74 @@ body {
 }
 
 /* Scrollbars: every scrolling surface in kb, drawn in ink on its own paper
-   rather than the platform's grey slab. */
-.col,
-.modal,
-.storylist,
-.labeldrop,
-.gate-card {
-  scrollbar-width: thin;
-  scrollbar-color: var(--gray) transparent;
+   rather than the platform's grey slab.
+
+   Not a selector list any more. The old one named five surfaces and went stale
+   as soon as a sixth started scrolling — the board, the page itself and every
+   modal textarea were still drawing the platform bar. `*` cannot go stale, and
+   it is the lowest specificity there is, so anything that ever needs its own
+   bar can still say so.
+
+   The two families below cannot both be used, which is the whole trick here.
+   Giving `scrollbar-width` or `scrollbar-color` any value other than `auto`
+   opts a scroller into Chromium's *native* theme, and a native scrollbar
+   ignores every ::-webkit-scrollbar rule in this file — including the one that
+   removes the arrows. Measured in Chromium 151 on a plain overflowing div:
+   both standard properties left alone gives the 8px bar asked for below, while
+   `scrollbar-color` alone puts back a 10px native bar with a stepper at each
+   end, and `scrollbar-width: auto` with it a 15px one. Setting the pair is
+   what the old rule did, so on every surface it named the arrows could never
+   have been removed.
+
+   So the standard pair is fenced off behind engines that have no -webkit- path
+   to lose. Firefox is the one that matters: it has no scrollbar pseudo-elements
+   at all, and these two properties are the only way to reach its bars.
+
+   --dim rather than --gray: the thumb is a UI component, so SC 1.4.11 asks for
+   3:1 against whatever it sits on. --gray #b8bdc7 measured 1.88:1 on the white
+   modal, 1.73 on the paper, 1.55 / 1.56 / 1.61 on the todo, doing and done
+   pastels and 1.49 on cancelled — a fail on all six. --dim #63697a measures
+   5.48 / 5.03 / 4.51 / 4.53 / 4.67 / 4.34:1 on the same six, and the hover
+   state goes to full ink at 12.33:1 or better. */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--dim) transparent;
+  }
+}
+::-webkit-scrollbar {
+  /* --sp-2, so the gutter sits on the spacing ramp — a little over half the
+     15px platform bar. */
+  width: var(--sp-2);
+  height: var(--sp-2);
+}
+/* The arrows from the report. Chromium paints a stepper at each end of a bar
+   it themes itself; nothing else here removes them. */
+::-webkit-scrollbar-button {
+  display: none;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+  border: 0;
+}
+::-webkit-scrollbar-thumb {
+  background-color: var(--dim);
+  /* A pill, like every other soft shape in kb. The transparent border insets
+     the paint by 1px a side so the thumb does not graze the column's ink
+     border; `background-clip` moves where the colour lands, not where the
+     pointer can grab, so the thumb is still the full 8px to drag. */
+  border: 1px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+/* Darkening under the pointer is the only feedback a bar this slim can give. */
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--ink);
+}
+/* Where a vertical and a horizontal bar meet. Left alone it is a grey square
+   wedged into the corner of the box. */
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* ---------- app shell ---------- */
@@ -788,6 +848,7 @@ body {
 .modal.ship { width: min(520px, 92vw); }
 .modal.confirm { width: min(460px, 92vw); }
 .modal.adr { width: min(760px, 92vw); }
+.modal.import { width: min(820px, 92vw); }
 .modal h2 {
   margin: 0 0 var(--sp-1);
   font-size: var(--fs-xl);
@@ -1016,11 +1077,156 @@ body {
 .mrow > * { flex: 1; min-width: 0; }
 /* Just the emoji chip — the rest of the row goes to the title. */
 .mrow > .emoji { flex: 0 0 84px; }
+
+.similar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--tap);
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding: var(--sp-2);
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  animation: kb-rise var(--dur-2) var(--ease-out);
+}
+.similar-head,
+.similar-list { grid-column: 1; min-width: 0; }
+.similar-head { font-size: var(--fs-sm); font-weight: 800; line-height: var(--lh-body); }
+.similar-list { display: grid; gap: var(--sp-1); }
+.similar-row { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); line-height: var(--lh-body); }
+.similar-via {
+  flex: none;
+  padding: var(--sp-1) var(--sp-2);
+  color: var(--ink);
+  background: var(--bg);
+  border: 1.5px solid var(--ink);
+  border-radius: 999px;
+  font-size: var(--fs-xs);
+  font-weight: 800;
+  line-height: var(--lh-tight);
+}
+.similar button {
+  grid-column: 2;
+  grid-row: 1;
+  box-sizing: border-box;
+  width: var(--tap);
+  min-height: var(--tap);
+  padding: 0;
+  color: var(--ink);
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 6px;
+  font: inherit;
+  font-weight: 800;
+  line-height: var(--lh-flat);
+  cursor: pointer;
+}
+
+/* ---------- forge integrations ----------
+   Integration rows deliberately stay out of .actions: Settings' AI form owns
+   the modal's one sticky action row, while each source remains ordinary
+   scrollable content. */
+.modal .irow {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 0.8fr)
+    minmax(0, 1fr)
+    minmax(0, 1.4fr);
+  grid-template-areas:
+    'kind-label name-label base-label'
+    'kind name base'
+    'pat-label pat-label pat-label'
+    'pat pat pat'
+    'test save remove'
+    'status status status';
+  gap: var(--sp-2);
+  align-items: end;
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 2px solid var(--gray);
+  border-radius: 12px;
+  background: var(--bg);
+}
+.modal .irow > label { margin: 0; }
+.modal .irow > label:nth-of-type(1) { grid-area: kind-label; }
+.modal .irow > label:nth-of-type(2) { grid-area: name-label; }
+.modal .irow > label:nth-of-type(3) { grid-area: base-label; }
+.modal .irow > label:nth-of-type(4) { grid-area: pat-label; }
+.modal .irow > select { grid-area: kind; }
+.modal .irow > input:nth-of-type(1) { grid-area: name; }
+.modal .irow > input:nth-of-type(2) { grid-area: base; }
+.modal .irow > input:nth-of-type(3) { grid-area: pat; }
+.modal .irow > button:nth-of-type(1) { grid-area: test; }
+.modal .irow > button:nth-of-type(2) { grid-area: save; }
+.modal .irow > button:nth-of-type(3) { grid-area: remove; }
+.modal .irow > .statusline {
+  grid-area: status;
+  min-width: 0;
+  min-height: calc(var(--fs-sm) * var(--lh-body));
+}
+.modal .irow > .statusline .flash {
+  display: block;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.modal .irow button {
+  box-sizing: border-box;
+  min-height: var(--ctl-h);
+  padding: var(--sp-2) var(--sp-3);
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 2px 2px 0 var(--ink);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 800;
+  line-height: var(--lh-tight);
+  cursor: pointer;
+}
+.modal .irow button.save { background: var(--green); }
+.modal .irow button:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+.modal .irow button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+/* The last row is the Add source control, not an integration card. */
+.modal .irow:last-of-type {
+  display: flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
 /* Narrow phones: let the three-up rows wrap instead of squeezing the fields. */
 @media (max-width: 480px) {
   .mrow { flex-wrap: wrap; }
   .mrow > * { flex: 1 1 40%; }
   .mrow > .emoji { flex: 0 0 84px; }
+  .similar-row { flex-direction: column; align-items: stretch; }
+  .similar-via { align-self: flex-start; }
+  .modal .irow {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      'kind-label kind-label'
+      'kind kind'
+      'name-label name-label'
+      'name name'
+      'base-label base-label'
+      'base base'
+      'pat-label pat-label'
+      'pat pat'
+      'test save'
+      'remove remove'
+      'status status';
+  }
+  .modal .irow button:nth-of-type(3) { width: 100%; }
 }
 /* A checkbox is not a full-width field — undo the generic input sizing. The
    whole row is the label, and therefore the target: 24px tall. */
@@ -1190,6 +1396,46 @@ body {
 .storyrow > input { flex: 1; min-width: 0; }
 .storyrow > select { flex: 0 0 72px; }
 .modal #f-adr { min-height: 200px; }
+
+/* ---------- issue import review ---------- */
+.import-notice,
+.import-banner {
+  margin: var(--sp-2) 0 0;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+  font-weight: 800;
+}
+.import-notice { background: var(--amber); }
+.import-banner { background: #e9edf2; }
+.importrow {
+  flex-wrap: wrap;
+  border: 2px solid var(--gray);
+  border-radius: 10px;
+  padding: var(--sp-2);
+}
+.importrow > input:not([type='checkbox']) {
+  flex: 1 1 260px;
+}
+.import-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  max-width: 100%;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-tight);
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+.link-chip { background: #e9edf2; }
+.duplicate-chip.link { background: var(--red); }
+.duplicate-chip.similar { background: var(--amber); }
+
 /* Primary action right, cancel/delete left, and a rule above the row so the
    form's content and its actions are visibly separate. The row wraps on a
    narrow phone; the auto margin on the primary keeps it right-aligned on
@@ -1817,6 +2063,7 @@ body {
   .statusline .flash,
   .ai-note.flash,
   .notice,
+  .similar,
   .app-header button.reconnect { animation: none; }
   .card.dragclone { transform: none; }
   html { scroll-behavior: auto; }

@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import type { Effort, Prio, Status, Task } from '../lib/model';
 import { newTask, STATUS_LABEL, STATUSES } from '../lib/model';
-import type { StoryDraft } from '../lib/api';
+import type { AIStoriesRequest, ForgeSource, StoryDraft } from '../lib/api';
 import { isAbortError } from '../lib/api';
 import { useDialogFocus } from '../lib/focus';
 
@@ -23,6 +23,23 @@ export function adrBytes(adr: string): number {
 export function clampMax(n: number): number {
   if (!Number.isFinite(n)) return MAX_DEFAULT;
   return Math.max(MAX_MIN, Math.min(MAX_MAX, Math.round(n)));
+}
+
+/** Build exactly one supported split mode: pasted ADR or forge issue URL. */
+export function splitRequest(
+  adr: string,
+  url: string,
+  source: string,
+): AIStoriesRequest | { error: string } {
+  const hasAdr = adr.trim() !== '';
+  const trimmedURL = url.trim();
+  const hasURL = trimmedURL !== '';
+  if (hasAdr === hasURL) return { error: 'provide adr or url' };
+  if (!hasURL) return { adr };
+
+  const trimmedSource = source.trim();
+  if (trimmedSource === '') return { error: 'select a forge source' };
+  return { url: trimmedURL, source: trimmedSource };
 }
 
 /** One proposed story plus the user's review edits. */
@@ -68,15 +85,15 @@ export function rowsToTasks(rows: readonly StoryRow[], status: Status): Task[] {
 }
 
 export interface AdrModalProps {
+  sources: readonly ForgeSource[];
   /**
    * Splitter from the API layer; already validates every returned draft. The
    * signal is how Cancel aborts a split in flight rather than only hiding
    * the busy state.
    */
   onSplit: (
-    adr: string,
-    max: number,
-    signal?: AbortSignal,
+    req: AIStoriesRequest,
+    signal: AbortSignal,
   ) => Promise<StoryDraft[]>;
   onAdd: (tasks: Task[]) => void;
   onClose: () => void;
@@ -87,8 +104,10 @@ export interface AdrModalProps {
  * Nothing reaches the board until "Add selected" — the review step is the
  * whole point of the feature.
  */
-export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
+export function AdrModal({ sources, onSplit, onAdd, onClose }: AdrModalProps) {
   const [adr, setAdr] = useState('');
+  const [url, setURL] = useState('');
+  const [source, setSource] = useState(sources[0]?.name ?? '');
   const [max, setMax] = useState(MAX_DEFAULT);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -118,7 +137,14 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
   // Closed mid-split: don't leave the request running with nowhere to land.
   useEffect(() => () => splitAbort.current?.abort(), []);
 
+  useEffect(() => {
+    if (source === '' && sources[0]) setSource(sources[0].name);
+  }, [source, sources]);
+
+  const hasAdr = adr.trim() !== '';
+  const hasURL = url.trim() !== '';
   const tooBig = adrBytes(adr) > ADR_MAX_BYTES;
+  const urlError = hasURL && error !== null;
 
   const readFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const input = e.target;
@@ -134,13 +160,18 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
   };
 
   const run = async () => {
-    if (busy || adr.trim() === '' || tooBig) return;
+    if (busy || tooBig) return;
+    const req = splitRequest(adr, url, source);
+    if ('error' in req) {
+      setError(req.error);
+      return;
+    }
     setBusy(true);
     setError(null);
     const ctrl = new AbortController();
     splitAbort.current = ctrl;
     try {
-      const drafts = await onSplit(adr, clampMax(max), ctrl.signal);
+      const drafts = await onSplit({ ...req, max: clampMax(max) }, ctrl.signal);
       if (drafts.length === 0) {
         setError('the model returned no usable stories');
         return;
@@ -192,17 +223,57 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
             <textarea
               id="f-adr"
               value={adr}
-              onChange={(e) => setAdr(e.target.value)}
+              onChange={(e) => {
+                setAdr(e.target.value);
+                setError(null);
+              }}
               placeholder="# ADR 0007: adopt …"
-              disabled={busy}
-              // Both failures are about this text, so they are attached to it.
-              aria-invalid={tooBig || error !== null || undefined}
+              disabled={busy || hasURL}
+              // ADR validation and request failures are attached to this input.
+              aria-invalid={tooBig || (!hasURL && error !== null) || undefined}
               aria-describedby={
-                [tooBig ? sizeErrorId : '', error ? errorId : '']
+                [tooBig ? sizeErrorId : '', !hasURL && error ? errorId : '']
                   .filter(Boolean)
                   .join(' ') || undefined
               }
             />
+            <p className="mnote">…or split from a forge issue</p>
+            <div className="mrow" inert={busy}>
+              <div>
+                <label htmlFor="f-adr-source">Source</label>
+                <select
+                  id="f-adr-source"
+                  value={source}
+                  onChange={(e) => {
+                    setSource(e.target.value);
+                    setError(null);
+                  }}
+                  disabled={busy || hasAdr}
+                >
+                  {sources.map((item) => (
+                    <option key={item.name} value={item.name}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="f-adr-url">Forge issue URL</label>
+                <input
+                  id="f-adr-url"
+                  type="text"
+                  value={url}
+                  onChange={(e) => {
+                    setURL(e.target.value);
+                    setError(null);
+                  }}
+                  placeholder="gitlab.example.com/group/project/-/issues/42"
+                  disabled={busy || hasAdr}
+                  aria-invalid={urlError || undefined}
+                  aria-describedby={urlError ? errorId : undefined}
+                />
+              </div>
+            </div>
             {/* Inert while a split runs, so nothing here can change under the
                 request; the textarea above is disabled for the same reason. */}
             <div className="mrow" inert={busy}>
@@ -213,6 +284,7 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
                   type="file"
                   accept=".md,.markdown,.txt,text/markdown,text/plain"
                   onChange={(e) => void readFile(e)}
+                  disabled={busy || hasURL}
                 />
               </div>
               <div>
@@ -225,6 +297,7 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
                   value={max}
                   onChange={(e) => setMax(Number(e.target.value))}
                   onBlur={() => setMax(clampMax(max))}
+                  disabled={busy}
                 />
               </div>
             </div>
@@ -268,7 +341,12 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
                 type="button"
                 className="save propose"
                 onClick={() => void run()}
-                disabled={busy || adr.trim() === '' || tooBig}
+                disabled={
+                  busy ||
+                  (!hasAdr && !hasURL) ||
+                  (hasAdr && hasURL) ||
+                  tooBig
+                }
               >
                 {busy ? 'Splitting…' : 'Propose stories'}
               </button>

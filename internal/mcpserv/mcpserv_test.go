@@ -3,18 +3,28 @@ package mcpserv
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
 // connect spins up the MCP server over an in-memory transport against a temp
 // DB and returns a connected client session.
 func connect(t *testing.T) *mcp.ClientSession {
+	t.Helper()
+	cs, _ := connectWithStore(t)
+	return cs
+}
+
+// connectWithStore also returns the real SQLite store so MCP tests can seed
+// fixtures through the same write paths used by the other application surfaces.
+func connectWithStore(t *testing.T) (*mcp.ClientSession, *store.Store) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "kb.db"), []byte("test-secret"))
 	if err != nil {
@@ -36,11 +46,11 @@ func connect(t *testing.T) *mcp.ClientSession {
 		t.Fatalf("client connect: %v", err)
 	}
 	t.Cleanup(func() { cs.Close() })
-	return cs
+	return cs, st
 }
 
-// callOK invokes a tool, requires success, and decodes the text content into out.
-func callOK(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any, out any) {
+// callTextOK invokes a tool, requires success, and returns its raw text content.
+func callTextOK(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any) string {
 	t.Helper()
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
@@ -53,28 +63,316 @@ func callOK(t *testing.T, cs *mcp.ClientSession, name string, args map[string]an
 	if !ok {
 		t.Fatalf("%s: content[0] is %T, want TextContent", name, res.Content[0])
 	}
-	if err := json.Unmarshal([]byte(tc.Text), out); err != nil {
-		t.Fatalf("%s: decode %q: %v", name, tc.Text, err)
+	return tc.Text
+}
+
+// callOK invokes a tool, requires success, and decodes the text content into out.
+func callOK(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any, out any) {
+	t.Helper()
+	text := callTextOK(t, cs, name, args)
+	if err := json.Unmarshal([]byte(text), out); err != nil {
+		t.Fatalf("%s: decode %q: %v", name, text, err)
 	}
 }
 
-func TestListToolsExposesAllFive(t *testing.T) {
+// TestListToolsExposesExactlySeven keeps both advisory tools discoverable and
+// preserves the rationale that tells an agent when to prefer their cheap stubs.
+func TestListToolsExposesExactlySeven(t *testing.T) {
 	cs := connect(t)
 	res, err := cs.ListTools(context.Background(), &mcp.ListToolsParams{})
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
-	got := map[string]bool{}
-	for _, tool := range res.Tools {
-		got[tool.Name] = true
+	want := map[string]bool{
+		"list_tasks":      true,
+		"add_task":        true,
+		"update_task":     true,
+		"move_task":       true,
+		"delete_task":     true,
+		"search_similar":  true,
+		"duplicate_check": true,
 	}
-	for _, want := range []string{"list_tasks", "add_task", "update_task", "move_task", "delete_task"} {
-		if !got[want] {
-			t.Errorf("tool %q missing; got %v", want, res.Tools)
+	got := map[string]string{}
+	for _, tool := range res.Tools {
+		got[tool.Name] = tool.Description
+		if !want[tool.Name] {
+			t.Errorf("unexpected tool %q", tool.Name)
 		}
 	}
-	if len(res.Tools) != 5 {
-		t.Errorf("got %d tools, want 5", len(res.Tools))
+	for name := range want {
+		if _, ok := got[name]; !ok {
+			t.Errorf("tool %q missing; got %v", name, res.Tools)
+		}
+	}
+	if len(res.Tools) != 7 {
+		t.Errorf("got %d tools, want 7", len(res.Tools))
+	}
+	const why = "check before creating a card to avoid duplicating existing work; returns cheap stubs, fetch details only if needed"
+	for _, name := range []string{"search_similar", "duplicate_check"} {
+		if description, ok := got[name]; ok && !strings.Contains(description, why) {
+			t.Errorf("tool %q description %q does not contain exact rationale %q", name, description, why)
+		}
+	}
+}
+
+// TestSearchSimilarClampsDefaultAndMaximumBudgets prevents an omitted-style
+// zero from returning nothing and an oversized request from escaping the cap.
+func TestSearchSimilarClampsDefaultAndMaximumBudgets(t *testing.T) {
+	cs, st := connectWithStore(t)
+	for i := 0; i < 12; i++ {
+		if _, err := st.AddTask("tester", board.Task{
+			Title: fmt.Sprintf("budget sentinel card %02d", i),
+		}); err != nil {
+			t.Fatalf("seed budget card %d: %v", i, err)
+		}
+	}
+
+	for _, tt := range []struct {
+		name  string
+		limit int
+		want  int
+	}{
+		{name: "zero uses the default", limit: 0, want: 3},
+		{name: "oversized uses the maximum", limit: 99, want: 10},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var got struct {
+				Items []json.RawMessage `json:"items"`
+			}
+			callOK(t, cs, "search_similar", map[string]any{
+				"query": "budget sentinel",
+				"limit": tt.limit,
+			}, &got)
+			if len(got.Items) != tt.want {
+				t.Errorf("search_similar limit %d returned %d items, want %d", tt.limit, len(got.Items), tt.want)
+			}
+		})
+	}
+}
+
+// TestSearchSimilarEmitsLowercaseOmitEmptyStubKeys guards the cheap wire shape
+// so card-only and import-only fields do not leak as empty or capitalized keys.
+func TestSearchSimilarEmitsLowercaseOmitEmptyStubKeys(t *testing.T) {
+	cs, st := connectWithStore(t)
+	if _, err := st.AddTask("tester", board.Task{Title: "shape sentinel card"}); err != nil {
+		t.Fatalf("seed shape card: %v", err)
+	}
+	if err := st.RecordImportLinks("tester", []store.ImportLink{{
+		Source:      "gitlab.example",
+		Kind:        "gitlab",
+		ExternalKey: "shape-import",
+		Link:        "link::gitlab#2",
+		URL:         "https://gitlab.example/issues/2",
+		Title:       "shape sentinel import",
+	}}); err != nil {
+		t.Fatalf("seed shape import: %v", err)
+	}
+
+	text := callTextOK(t, cs, "search_similar", map[string]any{
+		"query": "shape sentinel",
+		"limit": 10,
+	})
+	var got struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("decode search_similar output %q: %v", text, err)
+	}
+	if len(got.Items) != 2 {
+		t.Fatalf("search_similar returned %d shape fixtures, want 2: %s", len(got.Items), text)
+	}
+
+	byVia := make(map[string]json.RawMessage, len(got.Items))
+	for _, raw := range got.Items {
+		var stub struct {
+			Via string `json:"via"`
+		}
+		if err := json.Unmarshal(raw, &stub); err != nil {
+			t.Fatalf("decode stub %s: %v", raw, err)
+		}
+		byVia[stub.Via] = raw
+	}
+	assertJSONKeys(t, byVia["card"], "id", "title", "status", "via")
+	assertJSONKeys(t, byVia["import"], "title", "via", "link")
+}
+
+// TestDuplicateCheckKeepsExactLinksFirstAndScopesCandidates proves the exact
+// provenance hit wins without duplication while foreign tenant data stays out.
+func TestDuplicateCheckKeepsExactLinksFirstAndScopesCandidates(t *testing.T) {
+	cs, st := connectWithStore(t)
+	exact, err := st.AddTask("tester", board.Task{
+		Title: "dupesentinel exact link candidate",
+		Tags:  []string{"link::gitlab#1"},
+	})
+	if err != nil {
+		t.Fatalf("seed exact-link card: %v", err)
+	}
+	similar, err := st.AddTask("tester", board.Task{
+		Title: "dupesentinel nearby card",
+	})
+	if err != nil {
+		t.Fatalf("seed similar card: %v", err)
+	}
+	const importedTitle = "dupesentinel imported issue"
+	if err := st.RecordImportLinks("tester", []store.ImportLink{{
+		Source:      "gitlab.example",
+		Kind:        "gitlab",
+		ExternalKey: "tester-import",
+		Link:        "link::gitlab#2",
+		URL:         "https://gitlab.example/issues/2",
+		Title:       importedTitle,
+	}}); err != nil {
+		t.Fatalf("seed similar import: %v", err)
+	}
+
+	foreign, err := st.AddTask("second-user", board.Task{
+		Title: "dupesentinel foreign card",
+		Tags:  []string{"link::gitlab#1"},
+	})
+	if err != nil {
+		t.Fatalf("seed foreign card: %v", err)
+	}
+	const foreignImportTitle = "dupesentinel foreign import"
+	if err := st.RecordImportLinks("second-user", []store.ImportLink{{
+		Source:      "gitlab.example",
+		Kind:        "gitlab",
+		ExternalKey: "foreign-import",
+		Link:        "link::gitlab#1",
+		URL:         "https://gitlab.example/issues/1",
+		Title:       foreignImportTitle,
+	}}); err != nil {
+		t.Fatalf("seed foreign import: %v", err)
+	}
+
+	var got struct {
+		Candidates []struct {
+			ID     string `json:"id"`
+			Title  string `json:"title"`
+			Status string `json:"status"`
+			Via    string `json:"via"`
+			Link   string `json:"link"`
+		} `json:"candidates"`
+	}
+	callOK(t, cs, "duplicate_check", map[string]any{
+		"title": "dupesentinel",
+		"link":  "link::gitlab#1",
+	}, &got)
+	if len(got.Candidates) == 0 {
+		t.Fatal("duplicate_check returned no candidates")
+	}
+	if first := got.Candidates[0]; first.ID != exact.ID || first.Link != "link::gitlab#1" || first.Via != "card" {
+		t.Errorf("first candidate = %+v, want exact-link card %q", first, exact.ID)
+	}
+
+	exactCount := 0
+	similarFound := false
+	importFound := false
+	for _, candidate := range got.Candidates {
+		if candidate.ID == exact.ID {
+			exactCount++
+		}
+		if candidate.ID == similar.ID && candidate.Via == "card" {
+			similarFound = true
+		}
+		if candidate.Title == importedTitle && candidate.Via == "import" {
+			importFound = true
+		}
+		if candidate.ID == foreign.ID || candidate.Title == foreignImportTitle {
+			t.Errorf("foreign candidate leaked into tester scope: %+v", candidate)
+		}
+	}
+	if exactCount != 1 {
+		t.Errorf("exact-link candidate appeared %d times, want once", exactCount)
+	}
+	if !similarFound {
+		t.Errorf("same-scope similar card %q missing: %+v", similar.ID, got.Candidates)
+	}
+	if !importFound {
+		t.Errorf("same-scope import candidate %q missing: %+v", importedTitle, got.Candidates)
+	}
+}
+
+func TestDuplicateCheckCapsMixedCandidatesAfterExactLinks(t *testing.T) {
+	cs, st := connectWithStore(t)
+	var exactIDs []string
+	for i := 0; i < 8; i++ {
+		exact, err := st.AddTask("tester", board.Task{
+			Title: fmt.Sprintf("exact-only candidate %02d", i),
+			Tags:  []string{"link::gitlab#mixed-limit"},
+		})
+		if err != nil {
+			t.Fatalf("seed exact-link card %d: %v", i, err)
+		}
+		exactIDs = append(exactIDs, exact.ID)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := st.AddTask("tester", board.Task{Title: fmt.Sprintf("mixed-limit similar %02d", i)}); err != nil {
+			t.Fatalf("seed similar card %d: %v", i, err)
+		}
+	}
+
+	var got struct {
+		Candidates []struct {
+			ID   string `json:"id"`
+			Via  string `json:"via"`
+			Link string `json:"link"`
+		} `json:"candidates"`
+	}
+	callOK(t, cs, "duplicate_check", map[string]any{
+		"title": "mixed-limit",
+		"link":  "link::gitlab#mixed-limit",
+	}, &got)
+	if len(got.Candidates) != 10 {
+		t.Fatalf("duplicate_check returned %d candidates, want 10: %+v", len(got.Candidates), got.Candidates)
+	}
+	for i, wantID := range exactIDs {
+		candidate := got.Candidates[i]
+		if candidate.ID != wantID || candidate.Via != "card" || candidate.Link != "link::gitlab#mixed-limit" {
+			t.Errorf("candidate %d = %+v, want exact-link card %q", i, candidate, wantID)
+		}
+	}
+	for _, candidate := range got.Candidates[8:] {
+		if candidate.ID == "" || candidate.Via != "card" || candidate.Link != "" {
+			t.Errorf("similar candidate = %+v, want card without exact-link field", candidate)
+		}
+	}
+}
+
+func TestDuplicateCheckKeepsThreeSimilarCandidateBudgetWithoutExactLink(t *testing.T) {
+	cs, st := connectWithStore(t)
+	for i := 0; i < 5; i++ {
+		if _, err := st.AddTask("tester", board.Task{Title: fmt.Sprintf("similar-only budget %02d", i)}); err != nil {
+			t.Fatalf("seed similar card %d: %v", i, err)
+		}
+	}
+
+	var got struct {
+		Candidates []json.RawMessage `json:"candidates"`
+	}
+	callOK(t, cs, "duplicate_check", map[string]any{
+		"title": "similar-only budget",
+	}, &got)
+	if len(got.Candidates) != 3 {
+		t.Fatalf("duplicate_check returned %d similar candidates, want 3", len(got.Candidates))
+	}
+}
+
+func assertJSONKeys(t *testing.T, raw json.RawMessage, want ...string) {
+	t.Helper()
+	if len(raw) == 0 {
+		t.Fatalf("missing stub for keys %v", want)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode stub keys from %s: %v", raw, err)
+	}
+	if len(got) != len(want) {
+		t.Errorf("stub keys = %v, want exactly %v", got, want)
+	}
+	for _, key := range want {
+		if _, ok := got[key]; !ok {
+			t.Errorf("stub keys = %v, missing %q", got, key)
+		}
 	}
 }
 

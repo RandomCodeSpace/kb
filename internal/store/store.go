@@ -150,6 +150,10 @@ func Open(path string, secret []byte) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := repairAIBaseURLSuffixes(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	s := &Store{db: db, aead: aead}
 	var maxSeq sql.NullInt64
 	if err := db.QueryRow(`SELECT MAX(last_used) FROM labels`).Scan(&maxSeq); err != nil {
@@ -158,6 +162,29 @@ func Open(path string, secret []byte) (*Store, error) {
 	}
 	s.labelSeq.Store(maxSeq.Int64)
 	return s, nil
+}
+
+// repairAIBaseURLSuffixes removes pre-validation URL query and fragment
+// suffixes from settings left by older releases. It runs after every migration
+// in one transaction, so it also repairs databases already at the current
+// schema without creating another schema version.
+func repairAIBaseURLSuffixes(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: begin URL suffix repair: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE settings SET ai_base_url = CASE
+		WHEN instr(ai_base_url, '?') > 0 AND (instr(ai_base_url, '#') = 0 OR instr(ai_base_url, '?') < instr(ai_base_url, '#')) THEN substr(ai_base_url, 1, instr(ai_base_url, '?') - 1)
+		WHEN instr(ai_base_url, '#') > 0 THEN substr(ai_base_url, 1, instr(ai_base_url, '#') - 1)
+		ELSE ai_base_url END
+		WHERE instr(ai_base_url, '?') > 0 OR instr(ai_base_url, '#') > 0`); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("store: repair AI URL suffixes: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit URL suffix repair: %w", err)
+	}
+	return nil
 }
 
 // Close closes the underlying database.

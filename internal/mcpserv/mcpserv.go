@@ -83,7 +83,7 @@ type kb struct {
 	user string
 }
 
-// newServer builds the MCP server with all five task tools registered.
+// newServer builds the MCP server with all seven board tools registered.
 func newServer(st *store.Store, user string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "kb", Title: "kb kanban board", Version: "1.0.0"}, nil)
 	k := &kb{st: st, user: user}
@@ -107,6 +107,14 @@ func newServer(st *store.Store, user string) *mcp.Server {
 		Name:        "delete_task",
 		Description: "Delete a task identified by its id (a unique id prefix is accepted). By default this is a soft delete: the task moves to the cancelled column and can be moved back. Pass soft: false to remove the row permanently, which cannot be undone. Returns the deleted task.",
 	}, k.deleteTask)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "search_similar",
+		Description: "Search existing cards and import history; check before creating a card to avoid duplicating existing work; returns cheap stubs, fetch details only if needed.",
+	}, k.searchSimilar)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "duplicate_check",
+		Description: "Check a proposed title, body, and exact provenance link; check before creating a card to avoid duplicating existing work; returns cheap stubs, fetch details only if needed.",
+	}, k.duplicateCheck)
 	return srv
 }
 
@@ -160,6 +168,16 @@ func toBoardChecks(cs []check) []board.Check {
 	return out
 }
 
+func toSimilarStub(hit store.SimilarHit) similarStub {
+	return similarStub{
+		ID:     hit.ID,
+		Title:  hit.Title,
+		Status: hit.Status,
+		Via:    hit.Via,
+		Link:   hit.Link,
+	}
+}
+
 // --- tool inputs/outputs ---
 
 type listTasksInput struct {
@@ -209,6 +227,35 @@ type deleteTaskInput struct {
 	Soft *bool  `json:"soft,omitempty" jsonschema:"true (the default) moves the task to the cancelled column; false deletes the row permanently and cannot be undone"`
 }
 
+type searchSimilarInput struct {
+	Query string `json:"query" jsonschema:"free text matched against card titles, descriptions, tags and import history"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max stubs to return; default 3, max 10"`
+}
+
+type similarStub struct {
+	ID     string `json:"id,omitempty"`
+	Title  string `json:"title,omitempty"`
+	Status string `json:"status,omitempty"`
+	Via    string `json:"via,omitempty"`
+	Link   string `json:"link,omitempty"`
+}
+
+type searchSimilarOutput struct {
+	Items []similarStub `json:"items"`
+}
+
+type duplicateCheckInput struct {
+	Title string `json:"title" jsonschema:"proposed card title"`
+	Body  string `json:"body,omitempty"`
+	Link  string `json:"link,omitempty" jsonschema:"provenance tag e.g. link::gitlab#123, checked exactly first"`
+}
+
+type duplicateCheckOutput struct {
+	Candidates []similarStub `json:"candidates"`
+}
+
+const duplicateCheckMaxCandidates = 10
+
 // --- handlers ---
 
 func (k *kb) listTasks(_ context.Context, _ *mcp.CallToolRequest, in listTasksInput) (*mcp.CallToolResult, listTasksOutput, error) {
@@ -227,6 +274,67 @@ func (k *kb) listTasks(_ context.Context, _ *mcp.CallToolRequest, in listTasksIn
 	out := listTasksOutput{Tasks: make([]taskJSON, 0, len(tasks))}
 	for _, t := range tasks {
 		out.Tasks = append(out.Tasks, toTaskJSON(t))
+	}
+	return nil, out, nil
+}
+
+func (k *kb) searchSimilar(_ context.Context, _ *mcp.CallToolRequest, in searchSimilarInput) (*mcp.CallToolResult, searchSimilarOutput, error) {
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 3
+	}
+	if limit > 10 {
+		limit = 10
+	}
+	hits, err := k.st.SearchSimilar(k.user, in.Query, "", limit)
+	if err != nil {
+		return nil, searchSimilarOutput{}, err
+	}
+	out := searchSimilarOutput{Items: make([]similarStub, 0, len(hits))}
+	for _, hit := range hits {
+		out.Items = append(out.Items, toSimilarStub(hit))
+	}
+	return nil, out, nil
+}
+
+func (k *kb) duplicateCheck(_ context.Context, _ *mcp.CallToolRequest, in duplicateCheckInput) (*mcp.CallToolResult, duplicateCheckOutput, error) {
+	out := duplicateCheckOutput{Candidates: make([]similarStub, 0)}
+	seenIDs := make(map[string]struct{})
+	appendHits := func(hits []store.SimilarHit) {
+		for _, hit := range hits {
+			if len(out.Candidates) >= duplicateCheckMaxCandidates {
+				return
+			}
+			if hit.ID != "" {
+				if _, seen := seenIDs[hit.ID]; seen {
+					continue
+				}
+				seenIDs[hit.ID] = struct{}{}
+			}
+			out.Candidates = append(out.Candidates, toSimilarStub(hit))
+		}
+	}
+
+	// Exact provenance is stronger evidence, so its cards stay ahead of text
+	// matches and win when the same task appears through both paths.
+	if in.Link != "" {
+		hits, err := k.st.TasksByLink(k.user, in.Link)
+		if err != nil {
+			return nil, duplicateCheckOutput{}, err
+		}
+		appendHits(hits)
+	}
+	if remaining := duplicateCheckMaxCandidates - len(out.Candidates); remaining > 0 {
+		similarLimit := remaining
+		if similarLimit > 3 {
+			similarLimit = 3
+		}
+		query := strings.TrimSpace(in.Title + " " + in.Body)
+		hits, err := k.st.SearchSimilar(k.user, query, "", similarLimit)
+		if err != nil {
+			return nil, duplicateCheckOutput{}, err
+		}
+		appendHits(hits)
 	}
 	return nil, out, nil
 }

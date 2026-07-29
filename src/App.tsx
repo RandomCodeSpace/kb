@@ -21,8 +21,21 @@ import {
   saveIdentity,
 } from './lib/auth';
 import { RemoteStore } from './lib/remote';
-import type { AISettings, AIStoryRequest } from './lib/api';
-import { aiStories, aiStory, getLabels, getSettings } from './lib/api';
+import type {
+  AISettings,
+  AIStoryRequest,
+  ForgeSource,
+  RecordImportLinksRequest,
+} from './lib/api';
+import {
+  aiStories,
+  aiStory,
+  getIntegrations,
+  getLabels,
+  getSettings,
+  importPreview,
+  recordImportLinks,
+} from './lib/api';
 import { boardLabels, unionLabels } from './lib/labels';
 import { burst } from './lib/confetti';
 import { AdrModal } from './components/AdrModal';
@@ -43,6 +56,7 @@ import { ReconnectModal } from './components/ReconnectModal';
 import { DebugOverlay, debugEnabled, setDebugEnabled } from './components/DebugOverlay';
 import { IdentityGate } from './components/IdentityGate';
 import { SettingsModal } from './components/SettingsModal';
+import { ImportModal } from './components/ImportModal';
 
 type SyncState = 'off' | 'ok' | 'error' | 'expired';
 
@@ -145,9 +159,11 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
   // the effect below and ReconnectModal.
   const [showReconnect, setShowReconnect] = useState(false);
   const [showAdr, setShowAdr] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [showCancelled, setShowCancelled] = useState<boolean>(showCancelledFlag);
   const [serverLabels, setServerLabels] = useState<string[]>([]);
   const [aiSettings, setAiSettings] = useState<AISettings | null>(null);
+  const [sources, setSources] = useState<ForgeSource[]>([]);
   // Off unless the settings toggle turned it on (persisted) or ?debug=1
   // overrides: nothing mounts, so a disabled overlay drives no
   // requestAnimationFrame at all.
@@ -320,9 +336,10 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
 
   useEffect(() => {
     // Server-only extras: label suggestions and AI settings. Failures degrade
-    // silently — labels fall back to board tags, the AI section stays hidden.
-    if (!serverPresent) return;
+    // silently — labels fall back to board tags, AI/import actions stay hidden.
     let cancelled = false;
+    setSources([]);
+    if (!serverPresent) return;
     getLabels(identity)
       .then((ls) => {
         if (!cancelled) setServerLabels(ls);
@@ -333,10 +350,15 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
         if (!cancelled) setAiSettings(s);
       })
       .catch(() => {});
+    getIntegrations(identity)
+      .then((nextSources) => {
+        if (!cancelled) setSources(nextSources);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [serverPresent, identity]);
+  }, [serverPresent, identity, showSettings]);
 
   useEffect(() => {
     // Flush the pending debounced save when the page goes away so edits made
@@ -558,7 +580,15 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
       setBoard((b) => ({ ...b, tasks: [...b.tasks, ...tasks] }));
     }
     setShowAdr(false);
+    setShowImport(false);
   }, []);
+
+  const handleCommitLinks = useCallback(
+    (req: RecordImportLinksRequest) => {
+      void recordImportLinks(identity, req);
+    },
+    [identity],
+  );
 
   const handleExport = () => {
     const blob = new Blob([serialize(boardRef.current)], {
@@ -607,6 +637,9 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
     serverPresent &&
     aiSettings !== null &&
     (aiSettings.has_key || aiSettings.ai_base_url.trim() !== '');
+  useEffect(() => {
+    if (!aiEnabled || sources.length === 0) setShowImport(false);
+  }, [aiEnabled, sources.length]);
   // The signal comes from the modal: an AI call takes seconds, so the user
   // must be able to abort it rather than only hide the spinner.
   const aiDraft = useMemo(
@@ -625,6 +658,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
     modal !== null ||
     ship !== null ||
     showAdr ||
+    showImport ||
     showSettings ||
     showReconnect ||
     confirm !== null;
@@ -683,6 +717,15 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
                 onClick={() => setShowAdr(true)}
               >
                 ✨ Split ADR
+              </button>
+            )}
+            {aiEnabled && sources.length > 0 && (
+              <button
+                type="button"
+                title="Import issues as reviewed AI-transformed cards"
+                onClick={() => setShowImport(true)}
+              >
+                ⇪ Import issues
               </button>
             )}
             {/* Always present: the modal also carries the debug-overlay
@@ -752,6 +795,8 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
       </div>
       {modal && (
         <CardModal
+          // allow: SIZE_OK - A5 needs authenticated advisory lookup; decomposing BoardApp is out of scope.
+          identity={identity}
           state={modal}
           labels={allLabels}
           aiDraft={aiDraft}
@@ -771,9 +816,19 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
       )}
       {showAdr && aiEnabled && (
         <AdrModal
-          onSplit={(adr, max, signal) => aiStories(identity, { adr, max }, signal)}
+          sources={sources}
+          onSplit={(req, signal) => aiStories(identity, req, signal)}
           onAdd={handleAddStories}
           onClose={() => setShowAdr(false)}
+        />
+      )}
+      {showImport && aiEnabled && sources.length > 0 && (
+        <ImportModal
+          sources={sources}
+          onPreview={(req, signal) => importPreview(identity, req, signal)}
+          onAdd={handleAddStories}
+          onCommitLinks={handleCommitLinks}
+          onClose={() => setShowImport(false)}
         />
       )}
       {showSettings && (

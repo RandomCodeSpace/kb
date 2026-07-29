@@ -1,12 +1,12 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import type { Check, Effort, Prio, Status, Task } from '../lib/model';
-import { newTask, STATUS_LABEL } from '../lib/model';
-import type { AIStoryRequest, StoryDraft } from '../lib/api';
-import { isAbortError } from '../lib/api';
+import type { Identity } from '../lib/auth';
+import type { Status, Task } from '../lib/model';
+import { STATUS_LABEL } from '../lib/model';
+import type { AIStoryRequest, SimilarItem, StoryDraft } from '../lib/api';
+import { getSimilar } from '../lib/api';
 import { useDialogFocus } from '../lib/focus';
-import { DateField } from './DateField';
-import { EmojiField, firstEmoji } from './EmojiField';
-import { LabelsCombobox } from './LabelsCombobox';
+import { shouldQuery } from '../lib/similar';
+import { CardEditor } from './CardEditor';
 
 export type ModalState =
   | { mode: 'add'; status: Status }
@@ -14,6 +14,7 @@ export type ModalState =
 
 export interface CardModalProps {
   state: ModalState;
+  identity: Identity;
   /** Suggestions for the labels combobox (server labels ∪ board tags). */
   labels: string[];
   /**
@@ -27,131 +28,71 @@ export interface CardModalProps {
   onClose: () => void;
 }
 
-function checksToText(checks: Check[]): string {
-  return checks.map((c) => (c.done ? `x ${c.text}` : c.text)).join('\n');
-}
-
-function textToChecks(src: string): Check[] {
-  return src
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .map((l) =>
-      l.startsWith('x ')
-        ? { text: l.slice(2).trim(), done: true }
-        : { text: l, done: false },
-    );
-}
-
 export function CardModal({
   state,
+  identity,
   labels,
   aiDraft,
   onSave,
   onDelete,
   onClose,
 }: CardModalProps) {
-  const base = state.mode === 'edit' ? state.task : null;
-  const [emoji, setEmoji] = useState(() => firstEmoji(base?.emoji ?? ''));
-  const [title, setTitle] = useState(base?.title ?? '');
-  const [blocked, setBlocked] = useState(base?.blocked ?? false);
-  const [desc, setDesc] = useState(base?.desc ?? '');
-  const [prio, setPrio] = useState<Prio>(base?.prio ?? 3);
-  const [due, setDue] = useState(base?.due ?? '');
-  const [effort, setEffort] = useState<Effort | ''>(base?.effort ?? '');
-  const [tags, setTags] = useState<string[]>(base ? base.tags : []);
-  const [checks, setChecks] = useState(base ? checksToText(base.checks) : '');
-  const [aiPrompt, setAiPrompt] = useState('');
+  const excludeId = state.mode === 'edit' ? state.task.id : undefined;
+  const [title, setTitle] = useState(state.mode === 'edit' ? state.task.title : '');
   const [aiBusy, setAiBusy] = useState(false);
-  const [aiError, setAiError] = useState<string | null>(null);
-  const draftAbort = useRef<AbortController | null>(null);
+  const [items, setItems] = useState<SimilarItem[]>([]);
+  const [dismissed, setDismissed] = useState(false);
+  const [lastQ, setLastQ] = useState('');
+  const draftCancel = useRef<(() => void) | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  const aiErrorId = useId();
   // The emoji picker is a custom element with its own keyboard grid; the trap
   // stays out of it, or Tab inside the picker would jump back to the form.
   const onDialogKeyDown = useDialogFocus(boxRef, { skipWithin: '.emojipop' });
-
-  const cancelDraft = () => draftAbort.current?.abort();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       // Mid-draft, Escape cancels the request instead of closing the card:
       // closing would throw away the form the user is waiting to have filled.
-      if (draftAbort.current) draftAbort.current.abort();
+      if (aiBusy) draftCancel.current?.();
       else onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [aiBusy, onClose]);
 
   // A card closed mid-draft (a server refresh can do it) must not leave the
   // request running with nowhere to land.
-  useEffect(() => () => draftAbort.current?.abort(), []);
+  useEffect(() => () => draftCancel.current?.(), []);
 
-  const save = () => {
-    if (!title.trim()) return;
-    const fields = {
-      emoji: firstEmoji(emoji),
-      title: title.trim(),
-      desc: desc.trim(),
-      blocked,
-      prio,
-      due: due || undefined,
-      effort: effort === '' ? undefined : effort,
-      tags,
-      checks: textToChecks(checks),
-    };
-    if (state.mode === 'add') {
-      onSave(newTask({ ...fields, status: state.status }));
-    } else {
-      onSave({ ...state.task, ...fields });
-    }
-  };
-
-  const runDraft = async () => {
-    if (!aiDraft || aiBusy || !aiPrompt.trim()) return;
-    setAiBusy(true);
-    setAiError(null);
-    const req: AIStoryRequest = {
-      mode: state.mode === 'add' ? 'create' : 'update',
-      prompt: aiPrompt.trim(),
-    };
-    if (state.mode === 'edit') {
-      req.task = {
-        title: title.trim(),
-        desc: desc.trim(),
-        prio,
-        due,
-        effort,
-        tags,
-        checks: textToChecks(checks),
-      };
+  useEffect(() => {
+    if (!shouldQuery(title, lastQ)) {
+      if (Array.from(title.trim()).length < 3) {
+        setItems([]);
+        setLastQ('');
+      }
+      return;
     }
     const ctrl = new AbortController();
-    draftAbort.current = ctrl;
-    try {
-      const d = await aiDraft(req, ctrl.signal);
-      // Prefill the form only — the user still reviews and presses Save.
-      if (d.title !== '') setTitle(d.title);
-      setDesc(d.desc);
-      setPrio(d.prio);
-      setDue(d.due);
-      setEffort(d.effort);
-      setTags(d.tags);
-      setChecks(checksToText(d.checks));
-    } catch (err) {
-      // A cancel is not a failure, and nothing was written: the form is
-      // exactly as it was, so say nothing.
-      if (!isAbortError(err)) {
-        setAiError(err instanceof Error ? err.message : 'draft failed');
-      }
-    } finally {
-      draftAbort.current = null;
-      setAiBusy(false);
-    }
-  };
+    const timer = setTimeout(() => {
+      void getSimilar(
+        identity,
+        title,
+        excludeId,
+        ctrl.signal,
+      ).then((next) => {
+        if (ctrl.signal.aborted) return;
+        setItems(next);
+        setLastQ(title.trim());
+        setDismissed(false);
+      });
+    }, 400);
+    return () => {
+      clearTimeout(timer);
+      ctrl.abort();
+    };
+  }, [excludeId, identity, lastQ, title]);
 
   return (
     <div
@@ -179,171 +120,34 @@ export function CardModal({
             ? `New task · ${STATUS_LABEL[state.status]}`
             : 'Edit task'}
         </h2>
-        {aiDraft && (
-          <div className="ai-box">
-            <label htmlFor="f-ai">✨ Draft with AI</label>
-            <textarea
-              id="f-ai"
-              rows={2}
-              value={aiPrompt}
-              onChange={(e) => setAiPrompt(e.target.value)}
-              placeholder={
-                state.mode === 'add'
-                  ? 'Describe the task to draft…'
-                  : 'How should this card change?'
-              }
-              disabled={aiBusy}
-              // The failure is about this request, so it is attached to the
-              // field the request came from rather than left floating.
-              aria-invalid={aiError !== null}
-              aria-describedby={aiError ? aiErrorId : undefined}
-            />
-            {/* One button that becomes the cancel while the request runs, and
-                one note slot that carries hint, progress or failure: a second
-                button mounting beside the first, or an error paragraph
-                mounting below the row, both moved the form mid-action. */}
-            <div className="ai-row">
-              <button
-                type="button"
-                className="ai-go"
-                onClick={aiBusy ? cancelDraft : () => void runDraft()}
-                disabled={!aiBusy && !aiPrompt.trim()}
-              >
-                {aiBusy ? 'Cancel' : 'Draft'}
-              </button>
-              {aiBusy ? (
-                <span className="ai-note busy" role="status">
-                  Drafting the card…
-                </span>
-              ) : aiError ? (
-                <span
-                  key={aiError}
-                  className="ai-note flash err"
-                  id={aiErrorId}
-                  role="alert"
-                  title={aiError}
-                >
-                  {aiError}
-                </span>
-              ) : (
-                <span className="ai-note">
-                  fills the form below — review, then Save
-                </span>
-              )}
+        <CardEditor
+          state={state}
+          labels={labels}
+          aiDraft={aiDraft}
+          title={title}
+          onTitleChange={setTitle}
+          onBusyChange={setAiBusy}
+          cancelRef={draftCancel}
+          titleExtras={!dismissed && items.length > 0 && (
+            <div className="similar">
+              <span className="similar-head" role="status">
+                {items.length} similar {items.length === 1 ? 'item' : 'items'} — is this a duplicate?
+              </span>
+              <div className="similar-list">
+                {items.map((item, index) => (
+                  <div className="similar-row" key={`${item.title}:${index}`}>
+                    <span className="similar-via">{item.via === 'card' ? 'on board' : 'imported'}</span>
+                    <span>{item.title}</span>
+                  </div>
+                ))}
+              </div>
+              <button type="button" aria-label="Dismiss similar items" onClick={() => setDismissed(true)}>✕</button>
             </div>
-          </div>
-        )}
-        {/* Inert while a draft is running: these fields are about to be
-            overwritten, and Save/Delete would act on values the reply is
-            about to replace. It blocks this form only — the page still
-            scrolls, and the draft's own Cancel above stays live. */}
-        <form
-          inert={aiBusy}
-          onSubmit={(e) => {
-            e.preventDefault();
-            save();
-          }}
-        >
-          <div className="mrow">
-            <div className="emoji">
-              <label htmlFor="f-emoji">Emoji</label>
-              <EmojiField inputId="f-emoji" value={emoji} onChange={setEmoji} />
-            </div>
-            <div>
-              <label htmlFor="f-title">Title</label>
-              <input
-                id="f-title"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="What needs doing?"
-                autoFocus
-              />
-            </div>
-          </div>
-          <label htmlFor="f-desc">Description</label>
-          <textarea
-            id="f-desc"
-            value={desc}
-            onChange={(e) => setDesc(e.target.value)}
-          />
-          <div className="mrow">
-            <div>
-              <label htmlFor="f-prio">Priority</label>
-              <select
-                id="f-prio"
-                value={prio}
-                onChange={(e) => setPrio(Number(e.target.value) as Prio)}
-              >
-                <option value={1}>1 · urgent</option>
-                <option value={2}>2 · high</option>
-                <option value={3}>3 · normal</option>
-                <option value={4}>4 · low</option>
-              </select>
-            </div>
-            <div>
-              <label htmlFor="f-due">Due</label>
-              <DateField inputId="f-due" value={due} onChange={setDue} />
-            </div>
-            <div>
-              <label htmlFor="f-effort">Effort</label>
-              <select
-                id="f-effort"
-                value={effort}
-                onChange={(e) => setEffort(e.target.value as Effort | '')}
-              >
-                <option value="">none</option>
-                <option value="S">S</option>
-                <option value="M">M</option>
-                <option value="L">L</option>
-              </select>
-            </div>
-          </div>
-          <label className="checkline" htmlFor="f-blocked">
-            <input
-              id="f-blocked"
-              type="checkbox"
-              checked={blocked}
-              onChange={(e) => setBlocked(e.target.checked)}
-            />
-            Blocked — waiting on something else
-          </label>
-          <label htmlFor="f-tags">Labels (key::value for scoped)</label>
-          <LabelsCombobox
-            inputId="f-tags"
-            value={tags}
-            suggestions={labels}
-            onChange={setTags}
-          />
-          <label htmlFor="f-checks">Checklist (one per line, prefix "x " when done)</label>
-          <textarea
-            id="f-checks"
-            value={checks}
-            onChange={(e) => setChecks(e.target.value)}
-            placeholder={'write failing test\nx reproduce locally'}
-          />
-          {/* Delete and Cancel on the left, the primary action on the right. */}
-          <div className="actions">
-            {state.mode === 'edit' && state.task.status !== 'cancelled' && (
-              // Soft delete: the card moves to Cancelled, so this needs no
-              // confirmation — the only irreversible delete lives in that
-              // column and keeps its own.
-              <button
-                type="button"
-                className="del"
-                title="Moves the card to Cancelled — restore it any time"
-                onClick={() => onDelete(state.task.id)}
-              >
-                Delete
-              </button>
-            )}
-            <button type="button" onClick={onClose}>
-              Cancel
-            </button>
-            <button type="submit" className="save" disabled={!title.trim()}>
-              Save
-            </button>
-          </div>
-        </form>
+          )}
+          onSave={onSave}
+          onDelete={onDelete}
+          onClose={onClose}
+        />
       </div>
     </div>
   );

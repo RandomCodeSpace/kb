@@ -5,6 +5,7 @@ import {
   adrBytes,
   clampMax,
   rowsToTasks,
+  splitRequest,
   toRows,
 } from './AdrModal';
 
@@ -47,6 +48,38 @@ describe('clampMax', () => {
 
   it('falls back to the default for junk', () => {
     expect(clampMax(Number.NaN)).toBe(8);
+  });
+});
+
+describe('splitRequest', () => {
+  it('builds an ADR-only request without leaking the selected source', () => {
+    expect(splitRequest('  # ADR\n', '', 'work')).toEqual({
+      adr: '  # ADR\n',
+    });
+  });
+
+  it('builds a URL request with its selected forge source', () => {
+    expect(
+      splitRequest('', '  gitlab.example.com/group/project/-/issues/42  ', 'work'),
+    ).toEqual({
+      url: 'gitlab.example.com/group/project/-/issues/42',
+      source: 'work',
+    });
+  });
+
+  it('rejects both inputs and neither input', () => {
+    expect(splitRequest('ADR', 'github.com/org/repo/issues/1', 'github')).toEqual({
+      error: 'provide adr or url',
+    });
+    expect(splitRequest('  ', '  ', 'github')).toEqual({
+      error: 'provide adr or url',
+    });
+  });
+
+  it('requires a selected source for a forge issue URL', () => {
+    expect(splitRequest('', 'github.com/org/repo/issues/1', '  ')).toEqual({
+      error: 'select a forge source',
+    });
   });
 });
 

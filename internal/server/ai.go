@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
@@ -29,6 +31,72 @@ import (
 // error response never reaches the client.
 const AITimeout = 60 * time.Second
 
+func rejectPrivateAddress(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid dial address %q", address)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("non-IP dial address %q", address)
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return errors.New("AI endpoint resolves to a private address (set KB_AI_ALLOW_PRIVATE=1 for local model servers)")
+	}
+	return nil
+}
+
+func normalizeGuardHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	host = strings.TrimSuffix(host, ".")
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return host
+}
+
+func guardedTransport(allowHosts map[string]bool, allowAll bool) *http.Transport {
+	normalizedHosts := make(map[string]bool, len(allowHosts))
+	for host, allowed := range allowHosts {
+		if allowed {
+			normalizedHosts[normalizeGuardHost(host)] = true
+		}
+	}
+
+	return &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, fmt.Errorf("invalid dial address %q", address)
+			}
+			allowPrivate := allowAll || normalizedHosts[normalizeGuardHost(host)]
+			dialer := &net.Dialer{
+				Control: func(network, address string, rawConn syscall.RawConn) error {
+					if allowPrivate {
+						return nil
+					}
+					return rejectPrivateAddress(network, address, rawConn)
+				},
+			}
+			return dialer.DialContext(ctx, network, address)
+		},
+	}
+}
+
+func sameHostRedirect(req *http.Request, via []*http.Request) error {
+	if req.URL.Host != via[0].URL.Host {
+		return errors.New("refusing cross-host redirect")
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
+}
+
 // newAIClient builds the HTTP client used for user-configured AI endpoints.
 // Because the destination is user-controlled, the dialer rejects loopback,
 // link-local, private, and ULA addresses — checked on the resolved IP, so
@@ -36,38 +104,10 @@ const AITimeout = 60 * time.Second
 // local model servers such as Ollama. Redirects may never change host.
 func newAIClient() *http.Client {
 	allowPrivate := os.Getenv("KB_AI_ALLOW_PRIVATE") == "1"
-	dialer := &net.Dialer{
-		Control: func(_, address string, _ syscall.RawConn) error {
-			if allowPrivate {
-				return nil
-			}
-			host, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return fmt.Errorf("invalid dial address %q", address)
-			}
-			ip := net.ParseIP(host)
-			if ip == nil {
-				return fmt.Errorf("non-IP dial address %q", address)
-			}
-			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-				ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-				return errors.New("AI endpoint resolves to a private address (set KB_AI_ALLOW_PRIVATE=1 for local model servers)")
-			}
-			return nil
-		},
-	}
 	return &http.Client{
-		Timeout:   AITimeout,
-		Transport: &http.Transport{DialContext: dialer.DialContext},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if req.URL.Host != via[0].URL.Host {
-				return errors.New("refusing cross-host redirect")
-			}
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			return nil
-		},
+		Timeout:       AITimeout,
+		Transport:     guardedTransport(nil, allowPrivate),
+		CheckRedirect: sameHostRedirect,
 	}
 }
 
@@ -92,12 +132,19 @@ const storiesSystemPrompt = `You split an architecture decision record into kanb
 {"stories":[{"title":"short imperative title","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}]}]}
 prio is an integer from 1 (highest) to 4 (lowest); 3 is the default. Each story must be independently deliverable. Tags are single words with no spaces.`
 
+const importSystemPrompt = `You transform forge issues into kanban-card proposals. Respond with a single JSON object only — no prose, no code fences — of the form:
+{"stories":[{"title":"short imperative title","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}],"source":1}]}
+source must be the positive integer Source number from the supplied forge issue. Do not copy source text verbatim; propose independently actionable work.`
+
 // Bounds for POST /api/ai/stories: an ADR is prose, not a payload, and the
 // story count is clamped so one request cannot fan out unboundedly.
 const (
-	maxADRBytes       = 64 << 10 // 64 KiB
-	defaultStoryCount = 8
-	maxStoryCount     = 20
+	maxADRBytes             = 64 << 10 // 64 KiB
+	defaultStoryCount       = 8
+	maxStoryCount           = 20
+	maxImportIssueBodyBytes = 16 << 10
+	maxImportCommentBytes   = 1 << 10
+	maxImportPackBytes      = 48 << 10
 )
 
 // storyDraft is the coerced card draft returned by POST /api/ai/story.
@@ -109,6 +156,7 @@ type storyDraft struct {
 	Effort string       `json:"effort"`
 	Tags   []string     `json:"tags"`
 	Checks []draftCheck `json:"checks"`
+	Source int          `json:"-"`
 }
 
 type draftCheck struct {
@@ -142,6 +190,9 @@ func aiEndpoint(base string) (string, error) {
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", errors.New("AI base URL scheme must be http or https")
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", errors.New("AI base URL must not contain query or fragment")
 	}
 	// The base URL is stored unencrypted and echoed back by GET /api/settings,
 	// so a credential in the userinfo would be a key leaked to the browser —
@@ -416,20 +467,63 @@ func writeAIError(w http.ResponseWriter, user, op string, err error) {
 func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user string) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req struct {
-		ADR string `json:"adr"`
-		Max int    `json:"max"`
+		ADR    string `json:"adr"`
+		URL    string `json:"url"`
+		Source string `json:"source"`
+		Max    int    `json:"max"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	if len(req.ADR) > maxADRBytes {
+	hasADR := strings.TrimSpace(req.ADR) != ""
+	hasURL := strings.TrimSpace(req.URL) != ""
+	if hasADR == hasURL {
+		http.Error(w, "provide adr or url", http.StatusBadRequest)
+		return
+	}
+	if hasADR && len(req.ADR) > maxADRBytes {
 		http.Error(w, "adr too large (max 64 KiB)", http.StatusRequestEntityTooLarge)
 		return
 	}
-	if strings.TrimSpace(req.ADR) == "" {
-		http.Error(w, "adr required", http.StatusBadRequest)
-		return
+	adr, link, issueURL := req.ADR, "", ""
+	if hasURL {
+		sources, err := s.store.ForgeSources(user)
+		if err != nil {
+			log.Printf("forge: list sources for stories for %s failed", user)
+			http.Error(w, "storage error", http.StatusInternalServerError)
+			return
+		}
+		ref, err := parseForgeRef(sources, req.Source, req.URL)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		selected, found := forgeSourceByName(sources, req.Source)
+		if !found {
+			http.Error(w, "configured source unavailable", http.StatusBadRequest)
+			return
+		}
+		if ref.Source.Name != selected.Name {
+			http.Error(w, "reference does not match selected source", http.StatusBadRequest)
+			return
+		}
+		kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
+		if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
+			http.Error(w, "configured source unavailable", http.StatusBadRequest)
+			return
+		}
+		ref.pat = pat
+		ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
+		defer cancel()
+		issue, err := s.fetchIssue(ctx, ref)
+		if err != nil {
+			writeAIError(w, user, "stories", err)
+			return
+		}
+		adr = forgeIssueADR(issue)
+		link, _ = importIssueProvenance(ref, issue)
+		issueURL = issue.URL
 	}
 	max := req.Max
 	if max == 0 {
@@ -443,7 +537,7 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 	}
 	msgs := []chatMessage{
 		{Role: "system", Content: storiesSystemPrompt},
-		{Role: "user", Content: fmt.Sprintf("Split this ADR into at most %d stories:\n\n%s", max, req.ADR)},
+		{Role: "user", Content: fmt.Sprintf("Split this ADR into at most %d stories:\n\n%s", max, adr)},
 	}
 	content, err := s.chatCompletion(user, msgs, 0, true)
 	if err != nil {
@@ -455,7 +549,38 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, map[string][]storyDraft{"stories": stories})
+	if link != "" {
+		for i := range stories {
+			stories[i].Tags = append(stripModelLinkTags(stories[i].Tags), "link::"+link)
+		}
+	}
+	writeJSON(w, struct {
+		Stories []storyDraft `json:"stories"`
+		Link    string       `json:"link,omitempty"`
+		URL     string       `json:"url,omitempty"`
+	}{Stories: stories, Link: link, URL: issueURL})
+}
+
+// forgeIssueADR turns one fetched issue and its bounded human discussion into
+// the ADR text sent to the existing splitter. Discussion yields first when the
+// input reaches maxADRBytes; if title and body alone exceed it, truncation is
+// still rune-safe and leaves the prompt within the same existing limit.
+func forgeIssueADR(issue forgeIssue) string {
+	adr := fmt.Sprintf("# %s\n\n%s", issue.Title, issue.Body)
+	discussion := "\n\n## Discussion"
+	if len(adr)+len(discussion) > maxADRBytes {
+		return truncateImportText(adr, maxADRBytes)
+	}
+	adr += discussion
+	for _, comment := range issue.Comments {
+		item := "\n- " + comment
+		remaining := maxADRBytes - len(adr)
+		if len(item) > remaining {
+			return adr + truncateImportText(item, remaining)
+		}
+		adr += item
+	}
+	return adr
 }
 
 var draftDueRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
@@ -510,6 +635,9 @@ func coerceDrafts(content string, max int) ([]storyDraft, error) {
 			continue
 		}
 		d := coerceDraftMap(sm)
+		if source, ok := sm["source"].(float64); ok && source >= 1 && source == float64(int(source)) {
+			d.Source = int(source)
+		}
 		if err := validateDraft(d); err != nil {
 			// Deliberately without the error: validation quotes the offending
 			// field value, and that value is card text derived from the
@@ -520,6 +648,45 @@ func coerceDrafts(content string, max int) ([]storyDraft, error) {
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// packImportIssues limits raw forge text before one model call while keeping
+// source numbers stable for server-owned provenance after coercion.
+func packImportIssues(issues []forgeIssue) (string, int) {
+	var packed strings.Builder
+	count := 0
+	for i, issue := range issues {
+		if packed.Len() >= maxImportPackBytes {
+			break
+		}
+		comments := make([]string, 0, min(len(issue.Comments), 10))
+		for _, comment := range issue.Comments {
+			if len(comments) == 10 {
+				break
+			}
+			comments = append(comments, truncateImportText(comment, maxImportCommentBytes))
+		}
+		section := fmt.Sprintf("Source %d\nTitle: %s\nRef: %s\nLabels: %s\nBody:\n%s\nComments:\n%s\n\n",
+			i+1, issue.Title, issue.Ref, strings.Join(issue.Labels, ", "),
+			truncateImportText(issue.Body, maxImportIssueBodyBytes), strings.Join(comments, "\n"))
+		if len(section) > maxImportPackBytes-packed.Len() {
+			break
+		}
+		packed.WriteString(section)
+		count++
+	}
+	return packed.String(), count
+}
+
+func truncateImportText(text string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	for len(text) > max {
+		_, size := utf8.DecodeLastRuneInString(text)
+		text = text[:len(text)-size]
+	}
+	return text
 }
 
 // validateDraft runs a coerced draft through the same field rules every
@@ -604,6 +771,16 @@ func coerceDraftMap(m map[string]any) storyDraft {
 		}
 	}
 	return d
+}
+
+// logSafe makes an untrusted value safe to interpolate into a log line. The
+// CR/LF removal is spelled out as explicit replacements rather than folded into
+// stripControl's strings.Map because static analysis recognizes the former as a
+// line-break barrier and cannot see through the latter's closure.
+func logSafe(s string) string {
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	return stripControl(s)
 }
 
 // stripControl removes every control character, including the CR/LF that

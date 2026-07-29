@@ -29,8 +29,10 @@ server for coding agents.
   start.
 - **CLI** — `kb add/list/update/move/done/cancel/restore/rm` against the local
   database, or against a remote kb server with `KB_SERVER` (see [CLI](#cli)).
-- **MCP server** — `kb mcp` exposes the board as five task tools over stdio
-  for agent harnesses (see [MCP server](#mcp-server)).
+- **MCP server** — `kb mcp` exposes five task tools and two context tools over
+  stdio for agent harnesses (see [MCP server](#mcp-server)).
+- **Forge integrations** — import AI-transformed issues from GitLab or GitHub,
+  public or enterprise (see [Integrations](#integrations)).
 - **AI assist** — draft a card from a prompt via any OpenAI-compatible
   endpoint you configure; the server proxies, your API key never reaches the
   browser (see [AI assist and settings](#ai-assist-and-settings)).
@@ -95,7 +97,8 @@ Whole-file last-write-wins markdown cannot survive that; WAL plus task-level
 operations can.
 
 The data directory also holds `secret` — an auto-generated encryption key for
-stored AI API keys (see [AI assist and settings](#ai-assist-and-settings)).
+stored AI API keys and forge PATs (see [Integrations](#integrations) and
+[AI assist and settings](#ai-assist-and-settings)).
 
 ## API
 
@@ -106,11 +109,17 @@ stored AI API keys (see [AI assist and settings](#ai-assist-and-settings)).
 | GET    | `/api/board`      | yes  | `200` `text/markdown` (your board), `404` if none saved yet; both carry an `ETag` |
 | PUT    | `/api/board`      | yes  | Body is `text/markdown`; replaces your board; `204`, or `409` on a stale `If-Match` |
 | GET    | `/api/labels`     | yes  | `200` JSON array of your labels, most recently used first             |
+| GET    | `/api/similar`    | yes  | Similar-card advisory for query text; cheap stubs only                |
 | GET    | `/api/settings`   | yes  | `200` JSON `{"ai_base_url","ai_model","has_key"}` (never the key)     |
 | PUT    | `/api/settings`   | yes  | JSON patch `{"ai_base_url","ai_model","ai_key"}`; responds `204`      |
+| GET    | `/api/integrations` | yes | List configured forge sources; returns `has_token`, never the PAT   |
+| PUT, DELETE | `/api/integrations/{name}` | yes | Create/update or remove one scoped forge source             |
+| POST   | `/api/integrations/{name}/test` | yes | Test source access; returns an opaque result               |
+| POST   | `/api/import/preview` | yes | Fetch and transform configured forge issues for review             |
+| POST   | `/api/import/links` | yes | Record selected cards' canonical import provenance                  |
 | POST   | `/api/ai/test`    | yes  | 1-token ping of the configured endpoint; `{"ok":true}` or error       |
 | POST   | `/api/ai/story`   | yes  | Prompt in, structured card draft out (see AI assist)                  |
-| POST   | `/api/ai/stories` | yes  | `{"adr","max"}` in, `{"stories":[…]}` out (see AI assist)             |
+| POST   | `/api/ai/stories` | yes  | ADR or configured forge issue in, `{"stories":[…]}` out (see AI assist) |
 | GET    | `/*`              | none | Embedded SPA static files                                             |
 
 Auth applies to every `/api/*` route except `/api/health` and `/api/config`
@@ -267,13 +276,15 @@ kb mcp [--data DIR] [--user NAME]   # defaults: $KB_DATA or ~/.local/share/kb; $
 
 Tools:
 
-| Tool          | Purpose                                                              |
-| ------------- | -------------------------------------------------------------------- |
-| `list_tasks`  | List tasks (optionally one column), ordered by column then position |
-| `add_task`    | Add a task; only `title` is required (`blocked` optional)            |
-| `update_task` | Patch fields of a task by id (unique id prefix accepted)             |
-| `move_task`   | Move a task to `todo`, `doing`, `done`, or `cancelled`               |
-| `delete_task` | Delete a task by id; soft by default (see below)                     |
+| Tool              | Purpose                                                                          |
+| ----------------- | -------------------------------------------------------------------------------- |
+| `list_tasks`      | List tasks (optionally one column), ordered by column then position               |
+| `add_task`        | Add a task; only `title` is required (`blocked` optional)                        |
+| `update_task`     | Patch fields of a task by id (unique id prefix accepted)                         |
+| `move_task`       | Move a task to `todo`, `doing`, `done`, or `cancelled`                           |
+| `delete_task`     | Delete a task by id; soft by default (see below)                                 |
+| `search_similar`  | Use before creating a card to search card text, tags, and import history         |
+| `duplicate_check` | Use before creating a proposed card to check its text and exact provenance link  |
 
 `move_task` to `done` fails with an error naming the open checklist items, or
 reporting the blocked flag, unless `force: true` is passed.
@@ -305,6 +316,44 @@ command = "kb"
 args = ["mcp", "--user", "ak"]
 ```
 
+## Integrations
+
+Open **Settings → Integrations** to add named GitLab or GitHub sources. Both
+public hosts (`gitlab.com`, `github.com`) and self-managed GitLab or GitHub
+Enterprise hosts are supported; set each source's base URL to the host and any
+installation path prefix. Public repositories can be used without a personal
+access token (PAT); private content requires a token with access to the source.
+
+Forge PATs are write-only. The server seals them with AES-256-GCM at rest,
+returns only `has_token` to the browser, and sends them to the forge only in
+the provider's authentication header (`PRIVATE-TOKEN` for GitLab,
+`Authorization: Bearer` for GitHub) — never in a URL, query string, or AI
+request. Changing a source to another origin without entering a replacement
+PAT clears the saved token.
+
+Forge requests reject loopback, link-local, private, and unspecified addresses
+by default. For a source on an enterprise LAN, set
+`KB_FORGE_ALLOW_PRIVATE=gitlab.example.com`; use a comma-separated hostname
+allowlist for more than one source. `1` or `*` allows every configured forge
+host to resolve privately and should be reserved for controlled environments.
+This setting belongs only to forge traffic. `KB_AI_ALLOW_PRIVATE` remains the
+separate, unchanged opt-in for the configured AI endpoint.
+
+### Importing issues
+
+Issue import also requires [AI assist](#ai-assist-and-settings). Choose
+**Import issues**, select a configured source, and enter an issue, project or
+repository, board, or milestone URL. A GitLab board URL resolves to that
+project's open issues; a named GitHub source also accepts `owner/repo`. kb
+fetches at most 20 open issues per preview, asks the configured model to turn
+them into card proposals, and shows exact-link and similar-card hints. Review
+and edit the proposals, choose a destination column, then press **Add
+selected**.
+
+**Imports are one-shot AI transformations, not clones or mirrors; there is no
+background sync.** Later changes on the forge do not update cards, and card
+changes do not update forge issues. Import again when you want a new snapshot.
+
 ## AI assist and settings
 
 The story modal can draft a card from a prompt. `POST /api/ai/story` takes
@@ -315,14 +364,20 @@ modal. **You always confirm before anything is saved.** The server calls the
 model, clamps every field into the card contract, and never forwards your API
 key to the browser.
 
-The **Split ADR** header button (shown only when AI is configured) turns an
-architecture decision record into a set of stories. `POST /api/ai/stories`
-takes `{"adr":"<markdown>","max":<1..20, default 8>}` and returns
-`{"stories":[…]}`, where each story has the same shape `/api/ai/story`
-returns. An ADR over 64 KiB is rejected (`413`), the ADR text is never stored
-server-side, and every returned story goes through the same field clamping.
-The SPA lists the proposals with checkboxes and a destination column; nothing
-reaches the board until you press **Add selected**.
+The **Split ADR** header button (shown only when AI is configured) turns either
+an architecture decision record or one configured forge issue into a set of
+stories. `POST /api/ai/stories` accepts exactly one input mode:
+`{"adr":"<markdown>","max":<optional>}` or
+`{"url":"<issue URL>","source":"<configured name>","max":<optional>}`. In
+either mode `max` defaults to 8 and is clamped to 1..20. In URL mode the
+server fetches the issue and its bounded discussion, assembles at most 64 KiB
+of context, and adds the canonical `link::` provenance tag to every returned
+story. The response is `{"stories":[…]}` plus top-level `link`/`url` in URL
+mode; each story has the same shape `/api/ai/story` returns. A pasted ADR over
+64 KiB is rejected (`413`), source text is never stored as an ADR, and every
+returned story goes through the same field clamping. The SPA lists the
+proposals with checkboxes and a destination column; nothing reaches the board
+until you press **Add selected**.
 
 Configure it on the gear screen (or via `PUT /api/settings`): an
 OpenAI-compatible base URL, a model name, and an API key. The base URL is
@@ -707,12 +762,13 @@ You need one app registration; no client secret, no Graph permissions.
 | `KB_PORT`              | server, runtime    | `8080`               | Listen port (`--port` flag overrides)                                        |
 | `KB_BIND`              | server, runtime    | unset                | Bind address; open mode defaults to `127.0.0.1`, other modes to all ifaces   |
 | `KB_AI_ALLOW_PRIVATE`  | server, runtime    | unset                | `1` lets the AI proxy reach loopback/private addresses (local Ollama)        |
+| `KB_FORGE_ALLOW_PRIVATE` | server, runtime  | unset                | Comma-separated forge hostnames allowed to resolve privately; `1` or `*` allows all |
 | `KB_DATA`              | all modes, runtime | `~/.local/share/kb`  | Data directory: `kb.db`, `secret`, legacy `.md` boards (`--data` overrides)  |
 | `KB_TOKEN`             | server, runtime    | unset                | Shared bearer token; enables token mode when Azure vars are unset            |
 | `KB_AZURE_TENANT_ID`   | server, runtime    | unset                | Entra tenant ID; with client ID, enables Entra mode; served to the SPA by `GET /api/config` |
 | `KB_AZURE_CLIENT_ID`   | server, runtime    | unset                | Entra app (client) ID; expected token audience; served to the SPA by `GET /api/config` |
 | `KB_ALLOWED_HOSTS`     | server, runtime    | unset                | Comma-separated extra `Host` values the API accepts; loopback is always allowed |
-| `KB_SECRET`            | server/CLI/MCP     | unset                | AES-GCM secret for stored AI keys; if unset, generated at `<data>/secret`. Under 16 bytes the server refuses to start and the CLI/MCP warn |
+| `KB_SECRET`            | server/CLI/MCP     | unset                | AES-GCM secret for stored AI keys and forge PATs; if unset, generated at `<data>/secret`. Under 16 bytes the server refuses to start and the CLI/MCP warn |
 | `KB_SERVER`            | CLI, runtime       | unset                | Remote mode: base URL of a kb server; CLI talks HTTP instead of the local DB |
 | `KB_SERVER_TOKEN`      | CLI, runtime       | unset                | Bearer token the CLI sends in remote mode (the server's `KB_TOKEN`)          |
 | `KB_USER`              | MCP, runtime       | `default`            | Board user for `kb mcp` (`--user` flag overrides)                            |
@@ -768,11 +824,13 @@ entirely ours to control.
 **1. Same-origin requests to kb's own API.** The only traffic a signed-in
 board generates. Loading the app fetches `/assets/*.js`, `/assets/*.css` and
 `/favicon.ico`; the app then calls `/api/config`, `/api/health`, `/api/board`,
-`/api/labels` and `/api/settings`, plus `/api/ai/story`, `/api/ai/stories` and
-`/api/ai/test` when you use AI assist. Nothing else. The emoji table is
-compiled into the bundle (`@emoji-mart/data`), so the picker fetches neither
-its data nor a spritesheet — it renders system emoji glyphs. All fonts are
-system stacks; there is no `@font-face` pointing off-origin.
+`/api/labels` and `/api/settings`; `/api/similar` while editing a card;
+`/api/integrations/*` in Settings; `/api/import/*` when importing issues; and
+`/api/ai/story`, `/api/ai/stories` and `/api/ai/test` when you use AI assist.
+Nothing else. The emoji table is compiled into the bundle
+(`@emoji-mart/data`), so the picker fetches neither its data nor a spritesheet
+— it renders system emoji glyphs. All fonts are system stacks; there is no
+`@font-face` pointing off-origin.
 
 This is enforced, not merely observed. The SPA response carries a
 Content-Security-Policy that blocks cross-origin requests:
@@ -831,29 +889,44 @@ Two things about MSAL are worth stating plainly rather than omitting:
 Without Azure configured, MSAL is never loaded at all (it is a lazy chunk) and
 the policy has no cross-origin entry.
 
-**3. Your own configured LLM endpoint — server-side only.** If you set an AI
-base URL in Settings, the *server* posts chat completions to it; the browser
-only ever talks to `/api/ai/*`, so the API key never reaches the browser and is
-stored AES-256-GCM encrypted at rest. The request contains the prompt you
-typed and, for an ADR split, the document you pasted — nothing else about your
-board. The endpoint is SSRF-guarded: the resolved IP may not be loopback,
-private, link-local or unspecified (unless `KB_AI_ALLOW_PRIVATE=1` opts in for
-a local model server such as Ollama), redirects may not change host, the round
-trip is capped at 60s, and a base URL containing a username or password is
-rejected outright so a credential cannot be stored in the clear. This client
-ignores `HTTP_PROXY`/`HTTPS_PROXY`; it dials the endpoint directly.
+**3. Your configured GitLab/GitHub sources — server-side only.** Forge calls
+go only to API hosts derived from sources you configure: `github.com` uses
+`api.github.com`; GitLab and enterprise sources use their configured base
+host. Testing a source, previewing an import, or splitting from a forge issue
+URL makes the server request GitLab or GitHub API data from the selected
+source. A configured PAT travels only in the provider's authentication
+header. The forge client rejects private-address resolution by default; a
+hostname must be explicitly allowlisted with `KB_FORGE_ALLOW_PRIVATE` to
+reach an enterprise LAN. Redirects may not change host, and the client
+ignores `HTTP_PROXY`/`HTTPS_PROXY`.
 
-**4. CLI remote mode.** `kb` with `KB_SERVER` set talks to that server and only
+**4. Your own configured LLM endpoint — server-side only.** If you set an AI
+base URL in Settings, the *server* posts chat completions to it; the browser
+never calls the model endpoint directly, so the API key never reaches the
+browser and is stored AES-256-GCM encrypted at rest. The request contains the
+prompt you typed; for a story split, either the document you pasted or the
+bounded forge issue title, body, and comments; or, for issue import, the
+bounded source titles, references, labels, bodies, and comments needed for the
+transformation — nothing else about your board. The endpoint is SSRF-guarded:
+the resolved IP may not be loopback, private, link-local or unspecified
+(unless `KB_AI_ALLOW_PRIVATE=1` opts in for a local model server such as
+Ollama), redirects may not change host, the round trip is capped at 60s, and a
+base URL containing a username or password is rejected outright so a
+credential cannot be stored in the clear. This client ignores
+`HTTP_PROXY`/`HTTPS_PROXY`; it dials the endpoint directly.
+
+**5. CLI remote mode.** `kb` with `KB_SERVER` set talks to that server and only
 that server — every request carries your token and replays the whole board, so
 redirects to another host are refused. Without `KB_SERVER` the CLI is purely
 local, and `kb mcp` never opens a socket at all: it speaks stdio.
 
-Unlike the AI client, the JWKS and CLI remote clients use Go's default
-transport and therefore honour `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`. If those
-are set in kb's environment, that proxy sees those requests.
+Unlike the AI and forge clients, the JWKS and CLI remote clients use Go's
+default transport and therefore honour `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`.
+If those are set in kb's environment, that proxy sees those requests.
 
-Everything else is on-device: boards, labels and settings live in the SQLite
-database under the data directory and nowhere else.
+Everything else is on-device: boards, labels, settings, integration
+configuration, and import history live in the SQLite database under the data
+directory and nowhere else.
 
 ## Security notes
 
@@ -869,14 +942,17 @@ database under the data directory and nowhere else.
   database row is scoped to the authenticated identity — no path traversal,
   no cross-user reads.
 
-**AI key handling**
+**Stored credential handling**
 
-- Stored AI API keys are AES-256-GCM encrypted at rest (secret: `KB_SECRET`
-  or the generated `<data>/secret`, mode 0600). The API returns only
-  `has_key`, never the key; AI error messages never contain it; the browser
-  only ever sends it once, on save.
+- Stored AI API keys and forge PATs are AES-256-GCM encrypted at rest (secret:
+  `KB_SECRET` or the generated `<data>/secret`, mode 0600). The API returns
+  only `has_key` or `has_token`, never plaintext credentials; upstream error
+  messages never contain them.
 - The AI proxy only calls the base URL you configured (http/https); request
   bodies are size-capped and responses clamped into the draft contract.
+- The forge client only calls configured sources. PATs are sent in
+  authentication headers, never in URLs, and are never sent to the AI
+  endpoint.
 
 **What it does not do**
 

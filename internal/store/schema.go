@@ -47,6 +47,70 @@ CREATE TABLE IF NOT EXISTS settings (
 	`
 ALTER TABLE tasks ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0;
 `,
+	// v3: forge configuration and durable import provenance. The FTS tables are
+	// plain tables rather than external-content tables because tasks has a TEXT
+	// primary key and implicit rowids are not stable across VACUUM.
+	//
+	// FTS calls its searchable description column body because desc is reserved
+	// inside fts5(). Triggers maintain both indexes in the writer's transaction,
+	// so every process stays current without background work. import_links has no
+	// task_id because ReplaceBoard regenerates IDs; the link:: tag is durable.
+	`
+CREATE TABLE forge_sources (
+  scope      TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  base_url   TEXT NOT NULL,
+  pat_enc    BLOB,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (scope, name)
+);
+CREATE TABLE import_links (
+  scope        TEXT NOT NULL,
+  source       TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  external_key TEXT NOT NULL,
+  link         TEXT NOT NULL,
+  url          TEXT NOT NULL,
+  title        TEXT NOT NULL,
+  imported_at  TEXT NOT NULL,
+  PRIMARY KEY (scope, external_key)
+);
+CREATE VIRTUAL TABLE tasks_fts USING fts5(
+  title, body, tags, id UNINDEXED, scope UNINDEXED,
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+CREATE VIRTUAL TABLE import_links_fts USING fts5(
+  title, external_key UNINDEXED, scope UNINDEXED,
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER tasks_fts_ai AFTER INSERT ON tasks BEGIN
+  INSERT INTO tasks_fts(id, scope, title, body, tags)
+  VALUES (new.id, new.user, new.title, new."desc", new.tags);
+END;
+CREATE TRIGGER tasks_fts_ad AFTER DELETE ON tasks BEGIN
+  DELETE FROM tasks_fts WHERE id = old.id;
+END;
+CREATE TRIGGER tasks_fts_au AFTER UPDATE OF title, "desc", tags ON tasks BEGIN
+  DELETE FROM tasks_fts WHERE id = old.id;
+  INSERT INTO tasks_fts(id, scope, title, body, tags)
+  VALUES (new.id, new.user, new.title, new."desc", new.tags);
+END;
+CREATE TRIGGER import_links_fts_ai AFTER INSERT ON import_links BEGIN
+  INSERT INTO import_links_fts(title, external_key, scope)
+  VALUES (new.title, new.external_key, new.scope);
+END;
+CREATE TRIGGER import_links_fts_au AFTER UPDATE ON import_links BEGIN
+  DELETE FROM import_links_fts WHERE external_key = old.external_key AND scope = old.scope;
+  INSERT INTO import_links_fts(title, external_key, scope)
+  VALUES (new.title, new.external_key, new.scope);
+END;
+CREATE TRIGGER import_links_fts_ad AFTER DELETE ON import_links BEGIN
+  DELETE FROM import_links_fts WHERE external_key = old.external_key AND scope = old.scope;
+END;
+INSERT INTO tasks_fts(id, scope, title, body, tags)
+  SELECT id, user, title, "desc", tags FROM tasks;
+`,
 }
 
 // migrate creates the meta table and applies any pending schema versions.
