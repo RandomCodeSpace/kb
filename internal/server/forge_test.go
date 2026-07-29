@@ -584,3 +584,189 @@ func TestIntegrationsConnectionTestCollapsesUpstreamFailures(t *testing.T) {
 		})
 	}
 }
+
+// Configured references select the most specific forge endpoint and preserve the
+// project identity required by the later fetch phase.
+func TestParseForgeRefResolvesConfiguredReferences(t *testing.T) {
+	sources := []store.ForgeSource{
+		{Name: "gitlab", Kind: "gitlab", BaseURL: "https://gitlab.example.com"},
+		{Name: "gitlab-enterprise", Kind: "gitlab", BaseURL: "https://gitlab.example.com/forge"},
+		{Name: "gitlab-nested", Kind: "gitlab", BaseURL: "https://gitlab.example.com/forge/team"},
+		{Name: "github", Kind: "github", BaseURL: "https://github.com"},
+		{Name: "github-enterprise", Kind: "github", BaseURL: "https://github.example.com/enterprise"},
+	}
+
+	tests := []struct {
+		name, sourceName, raw, wantSource, wantKind, wantProject string
+		wantIssue, wantMilestone                                 int
+	}{
+		{
+			name:       "GitLab issue",
+			raw:        "https://gitlab.example.com/group/subgroup/project/-/issues/42",
+			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/subgroup/project", wantIssue: 42,
+		},
+		{
+			name:       "GitLab legacy issue",
+			raw:        "https://gitlab.example.com/group/project/issues/43",
+			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/project", wantIssue: 43,
+		},
+		{
+			name:       "GitLab milestone",
+			raw:        "https://gitlab.example.com/group/project/-/milestones/7",
+			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/project", wantMilestone: 7,
+		},
+		{
+			name:       "GitLab project",
+			raw:        "https://gitlab.example.com/group/project",
+			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/project",
+		},
+		{
+			name:       "GitLab project may use a route-word namespace",
+			raw:        "https://gitlab.example.com/issues/project",
+			wantSource: "gitlab", wantKind: "gitlab", wantProject: "issues/project",
+		},
+		{
+			name:       "GitLab nested project may use a route-word namespace",
+			raw:        "https://gitlab.example.com/group/subgroup/issues/project",
+			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/subgroup/issues/project",
+		},
+		{
+			name:       "GitLab board resolves to its project",
+			raw:        "https://gitlab.example.com/group/project/-/boards/123",
+			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/project",
+		},
+		{
+			name:       "longest GitLab enterprise path prefix",
+			raw:        "https://gitlab.example.com/forge/group/project/-/issues/8",
+			wantSource: "gitlab-enterprise", wantKind: "gitlab", wantProject: "group/project", wantIssue: 8,
+		},
+		{
+			name:       "nested GitLab enterprise path prefix",
+			raw:        "https://gitlab.example.com/forge/team/group/project/-/issues/8",
+			wantSource: "gitlab-nested", wantKind: "gitlab", wantProject: "group/project", wantIssue: 8,
+		},
+		{
+			name:       "path prefix remains a whole segment",
+			raw:        "https://gitlab.example.com/forgeish/group/project/-/issues/8",
+			wantSource: "gitlab", wantKind: "gitlab", wantProject: "forgeish/group/project", wantIssue: 8,
+		},
+		{
+			name:       "GitHub issue",
+			raw:        "https://github.com/owner/repo/issues/9",
+			wantSource: "github", wantKind: "github", wantProject: "owner/repo", wantIssue: 9,
+		},
+		{
+			name:       "GitHub milestone",
+			raw:        "https://github.com/owner/repo/milestone/3",
+			wantSource: "github", wantKind: "github", wantProject: "owner/repo", wantMilestone: 3,
+		},
+		{
+			name:       "GitHub project",
+			raw:        "https://github.com/owner/repo",
+			wantSource: "github", wantKind: "github", wantProject: "owner/repo",
+		},
+		{
+			name:       "GitHub Enterprise path prefix",
+			raw:        "https://github.example.com/enterprise/owner/repo/issues/10",
+			wantSource: "github-enterprise", wantKind: "github", wantProject: "owner/repo", wantIssue: 10,
+		},
+		{
+			name:       "query fragment and trailing slash do not change identity",
+			raw:        "https://github.com/owner/repo/issues/9/?page=2#notes",
+			wantSource: "github", wantKind: "github", wantProject: "owner/repo", wantIssue: 9,
+		},
+		{
+			name:       "bare project uses named source",
+			sourceName: "github", raw: "owner/repo",
+			wantSource: "github", wantKind: "github", wantProject: "owner/repo",
+		},
+		{
+			name:       "absolute host ignores selected source name",
+			sourceName: "github", raw: "https://gitlab.example.com/group/project/-/issues/11",
+			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/project", wantIssue: 11,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseForgeRef(sources, test.sourceName, test.raw)
+			if err != nil {
+				t.Fatalf("parseForgeRef(%q, %q): %v", test.sourceName, test.raw, err)
+			}
+			if got.Source.Name != test.wantSource || got.Kind != test.wantKind || got.Project != test.wantProject ||
+				got.Issue != test.wantIssue || got.Milestone != test.wantMilestone {
+				t.Fatalf("parseForgeRef(%q) = %+v, want source=%q kind=%q project=%q issue=%d milestone=%d", test.raw, got, test.wantSource, test.wantKind, test.wantProject, test.wantIssue, test.wantMilestone)
+			}
+		})
+	}
+}
+
+// Bare references and unconfigured hosts must never choose an arbitrary PAT.
+func TestParseForgeRefRejectsUnconfiguredReferences(t *testing.T) {
+	sources := []store.ForgeSource{
+		{Name: "github", Kind: "github", BaseURL: "https://github.com"},
+		{Name: "gitlab", Kind: "gitlab", BaseURL: "https://gitlab.example.com"},
+	}
+	tests := []struct {
+		name, sourceName, raw, want string
+	}{
+		{"unknown host", "", "https://unknown.example/owner/repo/issues/1", "no configured source for host unknown.example"},
+		{"bare without source", "", "owner/repo", "no configured source named"},
+		{"bare with unknown source", "missing", "owner/repo", "no configured source named missing"},
+		{"bare with GitLab source", "gitlab", "owner/repo", "bare reference requires GitHub source"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseForgeRef(sources, test.sourceName, test.raw)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("parseForgeRef(%q, %q) error = %v, want %q", test.sourceName, test.raw, err, test.want)
+			}
+		})
+	}
+}
+
+// Unambiguous modern and GitHub route errors must not degrade to project imports.
+func TestParseForgeRefRejectsMalformedRoutes(t *testing.T) {
+	sources := []store.ForgeSource{
+		{Name: "gitlab", Kind: "gitlab", BaseURL: "https://gitlab.example.com"},
+		{Name: "github", Kind: "github", BaseURL: "https://github.com"},
+	}
+	for _, raw := range []string{
+		"https://gitlab.example.com/group/project/-/issues/0",
+		"https://gitlab.example.com/group/project/-/issues/not-a-number",
+		"https://gitlab.example.com/group/project/-/issues/42/notes",
+		"https://github.com/owner/repo/issues/-1",
+		"https://github.com/owner/repo/milestone/999999999999999999999999999999999999",
+		"https://github.com/owner/repo/issues/9/comments",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := parseForgeRef(sources, "", raw); err == nil {
+				t.Fatalf("parseForgeRef(%q) succeeded, want malformed route error", raw)
+			}
+		})
+	}
+}
+
+// Legacy GitLab markers are routes only with a final positive decimal ID, so
+// every other marker-shaped path remains an otherwise valid nested project.
+func TestParseForgeRefTreatsAmbiguousLegacyTailsAsProjects(t *testing.T) {
+	sources := []store.ForgeSource{{Name: "gitlab", Kind: "gitlab", BaseURL: "https://gitlab.example.com"}}
+	for _, raw := range []string{
+		"https://gitlab.example.com/group/project/issues/42/notes",
+		"https://gitlab.example.com/group/project/issues/not-a-number/notes",
+		"https://gitlab.example.com/group/project/milestones/not-a-number/notes",
+		"https://gitlab.example.com/group/project/issues/0",
+		"https://gitlab.example.com/group/project/issues/not-a-number",
+		"https://gitlab.example.com/group/project/milestones/0",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			got, err := parseForgeRef(sources, "", raw)
+			if err != nil {
+				t.Fatalf("parseForgeRef(%q): %v", raw, err)
+			}
+			project := strings.TrimPrefix(raw, "https://gitlab.example.com/")
+			if got.Project != project || got.Issue != 0 || got.Milestone != 0 {
+				t.Fatalf("parseForgeRef(%q) = %+v, want project-only %q", raw, got, project)
+			}
+		})
+	}
+}

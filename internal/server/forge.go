@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +36,217 @@ type forgeSourcesResponse struct {
 type forgeTestResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+type forgeRef struct {
+	Source    store.ForgeSource
+	Kind      string
+	Project   string
+	Issue     int
+	Milestone int
+}
+
+// parseForgeRef accepts only configured forge URLs so later fetches can select
+// the corresponding stored credential without ever following arbitrary hosts.
+func parseForgeRef(sources []store.ForgeSource, sourceName, raw string) (forgeRef, error) {
+	raw = strings.TrimSpace(raw)
+	if isBareForgeProject(raw) {
+		source, ok := forgeSourceByName(sources, sourceName)
+		if !ok {
+			if sourceName == "" {
+				return forgeRef{}, errors.New("no configured source named")
+			}
+			return forgeRef{}, fmt.Errorf("no configured source named %s", sourceName)
+		}
+		if source.Kind != "github" {
+			return forgeRef{}, errors.New("bare reference requires GitHub source")
+		}
+		return forgeRef{Source: source, Kind: source.Kind, Project: raw}, nil
+	}
+
+	u, err := url.ParseRequestURI(raw)
+	if err != nil || u.Scheme == "" || u.Hostname() == "" || u.User != nil ||
+		(u.Scheme != "http" && u.Scheme != "https") {
+		return forgeRef{}, errors.New("invalid forge reference")
+	}
+
+	source, path, ok := configuredForgeSource(sources, u)
+	if !ok {
+		return forgeRef{}, fmt.Errorf("no configured source for host %s", u.Hostname())
+	}
+	switch source.Kind {
+	case "gitlab":
+		return parseGitLabRef(source, path)
+	case "github":
+		return parseGitHubRef(source, path)
+	default:
+		return forgeRef{}, errors.New("invalid forge kind")
+	}
+}
+
+func isBareForgeProject(raw string) bool {
+	if raw == "" || strings.ContainsAny(raw, ":?#") {
+		return false
+	}
+	parts := strings.Split(raw, "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+}
+
+func forgeSourceByName(sources []store.ForgeSource, name string) (store.ForgeSource, bool) {
+	for _, source := range sources {
+		if strings.EqualFold(source.Name, name) {
+			return source, true
+		}
+	}
+	return store.ForgeSource{}, false
+}
+
+// configuredForgeSource compares origins and whole path segments rather than
+// raw strings, so a source at /forge cannot authorize /forgeish by accident.
+func configuredForgeSource(sources []store.ForgeSource, request *url.URL) (store.ForgeSource, string, bool) {
+	bestLength := -1
+	var best store.ForgeSource
+	bestPath := ""
+	requestPath := strings.TrimRight(request.Path, "/")
+	for _, source := range sources {
+		base, err := normalizeForgeProbeBase(source.BaseURL)
+		if err != nil || !sameForgeOrigin(base, request) {
+			continue
+		}
+		basePath := strings.TrimRight(base.Path, "/")
+		var path string
+		switch {
+		case basePath == "":
+			path = strings.TrimPrefix(requestPath, "/")
+		case requestPath == basePath:
+			path = ""
+		case strings.HasPrefix(requestPath, basePath+"/"):
+			path = strings.TrimPrefix(requestPath, basePath+"/")
+		default:
+			continue
+		}
+		length := len(base.Scheme) + len(base.Host) + len(basePath)
+		if length > bestLength {
+			bestLength = length
+			best = source
+			bestPath = path
+		}
+	}
+	return best, bestPath, bestLength >= 0
+}
+
+func sameForgeOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		forgeURLPort(a) == forgeURLPort(b)
+}
+
+func forgeURLPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if u.Scheme == "https" {
+		return "443"
+	}
+	return "80"
+}
+
+func parseGitLabRef(source store.ForgeSource, path string) (forgeRef, error) {
+	parts, err := forgePathParts(path)
+	if err != nil {
+		return forgeRef{}, err
+	}
+	n := len(parts)
+	if n >= 3 && parts[n-3] == "-" {
+		project := strings.Join(parts[:n-3], "/")
+		if project == "" {
+			return forgeRef{}, errors.New("invalid forge reference")
+		}
+		id, err := forgeRefID(parts[n-1])
+		if err != nil {
+			return forgeRef{}, err
+		}
+		ref := forgeRef{Source: source, Kind: source.Kind, Project: project}
+		switch parts[n-2] {
+		case "issues":
+			ref.Issue = id
+		case "milestones":
+			ref.Milestone = id
+		case "boards":
+			// Phase 1 resolves a board to its project; list and label filters are out of scope.
+		default:
+			return forgeRef{}, errors.New("invalid forge reference")
+		}
+		return ref, nil
+	}
+	if n >= 3 && (parts[n-2] == "issues" || parts[n-2] == "milestones") {
+		project := strings.Join(parts[:n-2], "/")
+		if project == "" {
+			return forgeRef{}, errors.New("invalid forge reference")
+		}
+		id, err := forgeRefID(parts[n-1])
+		if err == nil {
+			ref := forgeRef{Source: source, Kind: source.Kind, Project: project}
+			if parts[n-2] == "issues" {
+				ref.Issue = id
+			} else {
+				ref.Milestone = id
+			}
+			return ref, nil
+		}
+	}
+	for _, part := range parts {
+		if part == "-" {
+			return forgeRef{}, errors.New("invalid forge reference")
+		}
+	}
+	return forgeRef{Source: source, Kind: source.Kind, Project: strings.Join(parts, "/")}, nil
+}
+
+func parseGitHubRef(source store.ForgeSource, path string) (forgeRef, error) {
+	parts, err := forgePathParts(path)
+	if err != nil {
+		return forgeRef{}, err
+	}
+	if len(parts) == 2 {
+		return forgeRef{Source: source, Kind: source.Kind, Project: strings.Join(parts, "/")}, nil
+	}
+	if len(parts) != 4 || (parts[2] != "issues" && parts[2] != "milestone") {
+		return forgeRef{}, errors.New("invalid forge reference")
+	}
+	id, err := forgeRefID(parts[3])
+	if err != nil {
+		return forgeRef{}, err
+	}
+	ref := forgeRef{Source: source, Kind: source.Kind, Project: strings.Join(parts[:2], "/")}
+	if parts[2] == "issues" {
+		ref.Issue = id
+	} else {
+		ref.Milestone = id
+	}
+	return ref, nil
+}
+
+func forgePathParts(path string) ([]string, error) {
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return nil, errors.New("invalid forge reference")
+	}
+	parts := strings.Split(path, "/")
+	for _, part := range parts {
+		if part == "" {
+			return nil, errors.New("invalid forge reference")
+		}
+	}
+	return parts, nil
+}
+
+func forgeRefID(raw string) (int, error) {
+	id, err := strconv.Atoi(raw)
+	if err != nil || id <= 0 {
+		return 0, errors.New("invalid forge reference")
+	}
+	return id, nil
 }
 
 func newForgeClient() *http.Client {
