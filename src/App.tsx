@@ -816,7 +816,8 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
       )}
       {showAdr && aiEnabled && (
         <AdrModal
-          onSplit={(adr, max, signal) => aiStories(identity, { adr, max }, signal)}
+          sources={sources}
+          onSplit={(req, signal) => aiStories(identity, req, signal)}
           onAdd={handleAddStories}
           onClose={() => setShowAdr(false)}
         />

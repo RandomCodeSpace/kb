@@ -70,9 +70,11 @@ export interface AIStoryRequest {
   task?: Record<string, unknown>;
 }
 
-/** ADR to split into stories; `max` is clamped to 1..20 by the server. */
+/** ADR or forge issue to split; `max` is clamped to 1..20 by the server. */
 export interface AIStoriesRequest {
-  adr: string;
+  adr?: string;
+  url?: string;
+  source?: string;
   max?: number;
 }
 
