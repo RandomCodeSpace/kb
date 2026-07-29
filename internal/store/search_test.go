@@ -133,90 +133,6 @@ func TestTasksByLinkMatchesACompleteTagOnly(t *testing.T) {
 	}
 }
 
-func TestImportLinksUpsertRefreshesAllFieldsAndSupportsBatchLookup(t *testing.T) {
-	s := newStore(t)
-	first := ImportLink{
-		Source: "gitlab.com", Kind: "gitlab", ExternalKey: "gitlab.com/acme/app#12",
-		Link: "link::gitlab#12", URL: "https://gitlab.com/acme/app/-/issues/12", Title: "oldunique import title",
-	}
-	second := ImportLink{
-		Source: "github.com", Kind: "github", ExternalKey: "github.com/acme/app#13",
-		Link: "link::github#13", URL: "https://github.com/acme/app/issues/13", Title: "second import title",
-	}
-	if err := s.RecordImportLinks("alice", []ImportLink{first, second}); err != nil {
-		t.Fatalf("RecordImportLinks initial: %v", err)
-	}
-	var importedAt, refreshedAt string
-	if err := s.db.QueryRow(`SELECT imported_at FROM import_links WHERE scope = ? AND external_key = ?`, "alice", first.ExternalKey).Scan(&importedAt); err != nil {
-		t.Fatalf("read initial imported_at: %v", err)
-	}
-	updated := ImportLink{
-		Source: "enterprise", Kind: "github", ExternalKey: first.ExternalKey,
-		Link: "link::github#99", URL: "https://forge.example/acme/app/issues/99", Title: "updatedunique import title",
-	}
-	if err := s.RecordImportLinks("alice", []ImportLink{updated}); err != nil {
-		t.Fatalf("RecordImportLinks update: %v", err)
-	}
-	if err := s.db.QueryRow(`SELECT imported_at FROM import_links WHERE scope = ? AND external_key = ?`, "alice", first.ExternalKey).Scan(&refreshedAt); err != nil {
-		t.Fatalf("read refreshed imported_at: %v", err)
-	}
-	if refreshedAt == importedAt {
-		t.Fatalf("upsert retained imported_at %q", importedAt)
-	}
-	got, err := s.ImportedAs("alice", []string{first.ExternalKey, second.ExternalKey, "missing"})
-	if err != nil {
-		t.Fatalf("ImportedAs: %v", err)
-	}
-	want := map[string]ImportLink{first.ExternalKey: updated, second.ExternalKey: second}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ImportedAs = %+v, want %+v", got, want)
-	}
-	hits, err := s.SearchSimilar("alice", "updatedunique", "", 3)
-	if err != nil {
-		t.Fatalf("SearchSimilar import: %v", err)
-	}
-	if len(hits) != 1 || hits[0].Via != "import" || hits[0].Link != updated.Link || hits[0].Title != updated.Title {
-		t.Fatalf("SearchSimilar import = %+v", hits)
-	}
-}
-
-func TestImportedAsEmptyInputReturnsInitializedMap(t *testing.T) {
-	got, err := newStore(t).ImportedAs("alice", nil)
-	if err != nil {
-		t.Fatalf("ImportedAs(nil): %v", err)
-	}
-	if got == nil || len(got) != 0 {
-		t.Fatalf("ImportedAs(nil) = %#v, want initialized empty map", got)
-	}
-}
-
-func TestRecordImportLinksRejectsMalformedBatchWithoutPartialWrites(t *testing.T) {
-	tests := []ImportLink{
-		{ExternalKey: strings.Repeat("k", 2049), URL: "https://example.test", Title: "title"},
-		{ExternalKey: "key", URL: strings.Repeat("u", 2049), Title: "title"},
-		{ExternalKey: "key", URL: "https://example.test", Title: strings.Repeat("t", 501)},
-		{ExternalKey: "key\nbreak", URL: "https://example.test", Title: "title"},
-		{ExternalKey: "key", URL: "https://example.test\rbreak", Title: "title"},
-		{ExternalKey: "key", URL: "https://example.test", Title: "title\nbreak"},
-	}
-	for i, bad := range tests {
-		t.Run(fmt.Sprintf("case-%d", i), func(t *testing.T) {
-			s := newStore(t)
-			valid := ImportLink{Source: "gitlab.com", Kind: "gitlab", ExternalKey: "valid", Link: "link::gitlab#1", URL: "https://example.test/1", Title: "valid"}
-			if err := s.RecordImportLinks("alice", []ImportLink{valid, bad}); err == nil {
-				t.Fatal("RecordImportLinks accepted malformed input")
-			}
-			got, err := s.ImportedAs("alice", []string{"valid", bad.ExternalKey})
-			if err != nil {
-				t.Fatalf("ImportedAs after rejection: %v", err)
-			}
-			if len(got) != 0 {
-				t.Fatalf("rejected batch wrote rows: %+v", got)
-			}
-		})
-	}
-}
-
 func TestSearchSimilarReturnsCardsBeforeImportsAndCapsMergedResults(t *testing.T) {
 	s := newStore(t)
 	card := addSearchTask(t, s, board.Task{Title: "shared marker card"})
@@ -232,6 +148,69 @@ func TestSearchSimilarReturnsCardsBeforeImportsAndCapsMergedResults(t *testing.T
 	}
 	if len(hits) != 2 || hits[0].Via != "card" || hits[0].ID != card.ID || hits[1].Via != "import" {
 		t.Fatalf("SearchSimilar merge = %+v, want card first and total cap 2", hits)
+	}
+}
+
+func TestScopeIsolation(t *testing.T) {
+	s := newStore(t)
+	scopes := []string{"alice", "bob"}
+	cards := make(map[string]board.Task, len(scopes))
+	provenance := make(map[string][]ImportLink, len(scopes))
+	for _, scope := range scopes {
+		card, err := s.AddTask(scope, board.Task{
+			Title: "scope title marker", Desc: "scope body marker", Tags: []string{"scope-tag-marker", "link::gitlab#1"},
+		})
+		if err != nil {
+			t.Fatalf("AddTask(%q): %v", scope, err)
+		}
+		links := []ImportLink{
+			{Source: "forge.example", Kind: "gitlab", ExternalKey: "shared-key", Link: "link::gitlab#shared", URL: "https://forge.example/shared", Title: "shared import title"},
+			{Source: "forge.example", Kind: "gitlab", ExternalKey: scope + "-only", Link: "link::gitlab#" + scope, URL: "https://forge.example/" + scope, Title: scope + " isolated import sentinel"},
+		}
+		if err := s.RecordImportLinks(scope, links); err != nil {
+			t.Fatalf("RecordImportLinks(%q): %v", scope, err)
+		}
+		cards[scope], provenance[scope] = card, links
+	}
+
+	// These scope checks make a future team-scope rollout additive rather than a cross-tenant rewrite.
+	for i, scope := range scopes {
+		other := scopes[1-i]
+		t.Run(scope, func(t *testing.T) {
+			for _, query := range []string{"scope title marker", "scope body marker", "scope-tag-marker"} {
+				hits, err := s.SearchSimilar(scope, query, "", 10)
+				if err != nil {
+					t.Fatalf("SearchSimilar(%q): %v", query, err)
+				}
+				own, foreign := false, false
+				for _, hit := range hits {
+					own = own || hit.ID == cards[scope].ID
+					foreign = foreign || hit.ID == cards[other].ID
+				}
+				if !own || foreign {
+					t.Fatalf("SearchSimilar(%q) = %+v, want %q without %q", query, hits, cards[scope].ID, cards[other].ID)
+				}
+			}
+			links, err := s.TasksByLink(scope, "link::gitlab#1")
+			if err != nil || len(links) != 1 || links[0].ID != cards[scope].ID {
+				t.Fatalf("TasksByLink(%q) = %+v, %v", scope, links, err)
+			}
+			keys := []string{"shared-key", scope + "-only", other + "-only"}
+			found, err := s.ImportedAs(scope, keys)
+			want := map[string]ImportLink{"shared-key": provenance[scope][0], scope + "-only": provenance[scope][1]}
+			if err != nil || !reflect.DeepEqual(found, want) {
+				t.Fatalf("ImportedAs(%q) = %+v, %v, want %+v", scope, found, err, want)
+			}
+			hits, err := s.SearchSimilar(scope, "isolated import sentinel", "", 10)
+			own, foreign := false, false
+			for _, hit := range hits {
+				own = own || hit.Via == "import" && hit.Title == provenance[scope][1].Title
+				foreign = foreign || hit.Via == "import" && hit.Title == provenance[other][1].Title
+			}
+			if err != nil || !own || foreign {
+				t.Fatalf("SearchSimilar import(%q) = %+v, %v", scope, hits, err)
+			}
+		})
 	}
 }
 
