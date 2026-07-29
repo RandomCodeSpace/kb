@@ -1076,11 +1076,57 @@ body {
 .mrow > * { flex: 1; min-width: 0; }
 /* Just the emoji chip — the rest of the row goes to the title. */
 .mrow > .emoji { flex: 0 0 84px; }
+
+.similar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--tap);
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding: var(--sp-2);
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  animation: kb-rise var(--dur-2) var(--ease-out);
+}
+.similar-head,
+.similar-list { grid-column: 1; min-width: 0; }
+.similar-head { font-size: var(--fs-sm); font-weight: 800; line-height: var(--lh-body); }
+.similar-list { display: grid; gap: var(--sp-1); }
+.similar-row { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); line-height: var(--lh-body); }
+.similar-via {
+  flex: none;
+  padding: var(--sp-1) var(--sp-2);
+  color: var(--ink);
+  background: var(--bg);
+  border: 1.5px solid var(--ink);
+  border-radius: 999px;
+  font-size: var(--fs-xs);
+  font-weight: 800;
+  line-height: var(--lh-tight);
+}
+.similar button {
+  grid-column: 2;
+  grid-row: 1;
+  box-sizing: border-box;
+  width: var(--tap);
+  min-height: var(--tap);
+  padding: 0;
+  color: var(--ink);
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 6px;
+  font: inherit;
+  font-weight: 800;
+  line-height: var(--lh-flat);
+  cursor: pointer;
+}
 /* Narrow phones: let the three-up rows wrap instead of squeezing the fields. */
 @media (max-width: 480px) {
   .mrow { flex-wrap: wrap; }
   .mrow > * { flex: 1 1 40%; }
   .mrow > .emoji { flex: 0 0 84px; }
+  .similar-row { flex-direction: column; align-items: stretch; }
+  .similar-via { align-self: flex-start; }
 }
 /* A checkbox is not a full-width field — undo the generic input sizing. The
    whole row is the label, and therefore the target: 24px tall. */
@@ -1877,6 +1923,7 @@ body {
   .statusline .flash,
   .ai-note.flash,
   .notice,
+  .similar,
   .app-header button.reconnect { animation: none; }
   .card.dragclone { transform: none; }
   html { scroll-behavior: auto; }

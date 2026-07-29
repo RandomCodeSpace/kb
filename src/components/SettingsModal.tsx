@@ -1,8 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { Identity } from '../lib/auth';
 import { ReauthRequiredError } from '../lib/auth';
-import type { AISettings, AITestProbe, SettingsPatch } from '../lib/api';
-import { aiTest, getSettings, isAbortError, putSettings } from '../lib/api';
+import { isAbortError } from '../lib/api';
+// allow: SIZE_OK - import-only settings API integration; modal decomposition is outside A5.
+import type { AISettings, AITestProbe, SettingsPatch } from '../lib/settings';
+import { aiTest, getSettings, putSettings } from '../lib/settings';
 import { useDialogFocus } from '../lib/focus';
 
 export interface SettingsModalProps {

@@ -1,6 +1,7 @@
 import type { Identity } from './auth';
 import { getApiToken, ReauthRequiredError } from './auth';
-import type { Effort, Prio } from './model';
+import { coerceStoryDraft } from './storyDraft';
+import type { StoryDraft } from './storyDraft';
 
 async function authHeaders(
   identity: Identity,
@@ -40,36 +41,16 @@ export async function authedFetch(
   return res;
 }
 
-/** Client view of the per-user AI settings; the key itself never leaves the server. */
-export interface AISettings {
-  ai_base_url: string;
-  ai_model: string;
-  has_key: boolean;
-}
-
-/** Any subset of fields to change; omit ai_key to keep the stored key. */
-export interface SettingsPatch {
-  ai_base_url?: string;
-  ai_model?: string;
-  ai_key?: string;
-}
-
-export interface AITestResult {
-  ok: boolean;
-  error?: string;
-}
-
-/**
- * Values to test instead of the stored ones, so a connection can be checked
- * before an unvalidated key is saved. `ai_key` is omitted to test the key the
- * server already holds; a key sent here is used for that one request and is
- * never persisted.
- */
-export interface AITestProbe {
-  ai_base_url: string;
-  ai_model: string;
-  ai_key?: string;
-}
+export { aiTest, getSettings, putSettings } from './settings';
+export type {
+  AISettings,
+  AITestProbe,
+  AITestResult,
+  PutSettingsResult,
+  SettingsPatch,
+} from './settings';
+export { coerceStoryDraft } from './storyDraft';
+export type { StoryDraft } from './storyDraft';
 
 /**
  * True for the rejection `fetch` produces when its signal is aborted — a
@@ -95,17 +76,6 @@ export interface AIStoriesRequest {
   max?: number;
 }
 
-/** Card draft returned by POST /api/ai/story, clamped into form-safe values. */
-export interface StoryDraft {
-  title: string;
-  desc: string;
-  prio: Prio;
-  due: string; // YYYY-MM-DD or ''
-  effort: Effort | '';
-  tags: string[];
-  checks: { text: string; done: boolean }[];
-}
-
 /** Short error text from a failed response body, never echoing secrets. */
 async function errText(res: Response, fallback: string): Promise<string> {
   try {
@@ -123,76 +93,6 @@ export async function getLabels(identity: Identity): Promise<string[]> {
   const body: unknown = await res.json();
   if (!Array.isArray(body)) return [];
   return body.filter((x): x is string => typeof x === 'string');
-}
-
-export async function getSettings(identity: Identity): Promise<AISettings> {
-  const res = await authedFetch(identity, '/api/settings');
-  if (!res.ok) throw new Error(`GET /api/settings failed: ${res.status}`);
-  const b = (await res.json()) as Record<string, unknown>;
-  return {
-    ai_base_url: typeof b.ai_base_url === 'string' ? b.ai_base_url : '',
-    ai_model: typeof b.ai_model === 'string' ? b.ai_model : '',
-    has_key: b.has_key === true,
-  };
-}
-
-export interface PutSettingsResult {
-  /**
-   * True when the server dropped the stored key because the base URL moved
-   * to a different scheme/host — the key must be re-entered.
-   */
-  keyCleared: boolean;
-}
-
-export async function putSettings(
-  identity: Identity,
-  patch: SettingsPatch,
-): Promise<PutSettingsResult> {
-  const res = await authedFetch(identity, '/api/settings', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(patch),
-  });
-  if (!res.ok) {
-    throw new Error(await errText(res, `save settings failed: ${res.status}`));
-  }
-  if (res.status === 204) return { keyCleared: false };
-  try {
-    const b = (await res.json()) as { key_cleared?: unknown };
-    return { keyCleared: b.key_cleared === true };
-  } catch {
-    return { keyCleared: false };
-  }
-}
-
-/**
- * 1-token chat completion; never throws for upstream failures. With no probe
- * it tests the saved settings, which is what the endpoint has always meant;
- * with one it tests those values instead without touching what is stored.
- */
-export async function aiTest(
-  identity: Identity,
-  probe?: AITestProbe,
-  signal?: AbortSignal,
-): Promise<AITestResult> {
-  const init: RequestInit = { method: 'POST', signal };
-  if (probe) {
-    init.headers = { 'Content-Type': 'application/json' };
-    init.body = JSON.stringify(probe);
-  }
-  const res = await authedFetch(identity, '/api/ai/test', init);
-  if (!res.ok) {
-    return { ok: false, error: await errText(res, `test failed: ${res.status}`) };
-  }
-  const b = (await res.json()) as { ok?: unknown; error?: unknown };
-  if (b.ok === true) return { ok: true };
-  return {
-    ok: false,
-    error:
-      typeof b.error === 'string' && b.error !== ''
-        ? b.error
-        : 'connection failed',
-  };
 }
 
 export async function aiStory(
@@ -236,77 +136,53 @@ export async function aiStories(
   return stories.map(coerceStoryDraft).filter((d) => d.title !== '');
 }
 
-const DUE_RE = /^\d{4}-\d{2}-\d{2}$/;
-// C0/C1 control characters, including the CR/LF that would let an upstream
-// reply open a new markdown line, plus the separators the wire treats as
-// whitespace.
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
-
-/**
- * Wire safety: fields that occupy one line on the wire (title, tag, check
- * text) get their control characters folded to spaces and whitespace runs
- * collapsed, matching what the codec does on read.
- */
-function oneLine(s: string): string {
-  return s.replace(CONTROL_RE, ' ').replace(/\s+/g, ' ').trim();
+export interface SimilarItem {
+  id?: string;
+  title: string;
+  status?: string;
+  via: 'card' | 'import';
+  link?: string;
 }
 
-/**
- * Descriptions are multi-line on the wire (each line is indented, and the
- * codec escapes lines that would re-parse as checklist items), so newlines
- * survive — every other control character does not.
- */
-function multiLine(s: string): string {
-  return s
-    .split(/\r\n|\r|\n/)
-    .map((line) => line.replace(CONTROL_RE, ' ').replace(/[^\S\n]+/g, ' ').trim())
-    .join('\n')
-    .trim();
+function coerceSimilarItem(item: unknown): SimilarItem | null {
+  if (typeof item !== 'object' || item === null) return null;
+  const fields = item as Record<string, unknown>;
+  const title = typeof fields.title === 'string' ? fields.title.trim() : '';
+  const via = fields.via === 'card' || fields.via === 'import' ? fields.via : null;
+  if (title === '' || via === null) return null;
+  return {
+    ...(typeof fields.id === 'string' ? { id: fields.id } : {}),
+    title,
+    ...(typeof fields.status === 'string' ? { status: fields.status } : {}),
+    via,
+    ...(typeof fields.link === 'string' ? { link: fields.link } : {}),
+  };
 }
 
-/**
- * Clamp an untrusted draft body into form-safe values. The server already
- * coerces, but the form types (Prio union, Effort union) must never trust
- * the wire: prio 1-4 (default 3), effort S/M/L or '', due YYYY-MM-DD or ''.
- * Every string field additionally passes wire-safety validation so a hostile
- * upstream reply cannot inject markdown lines into the board.
- */
-export function coerceStoryDraft(body: unknown): StoryDraft {
-  const b = (typeof body === 'object' && body !== null ? body : {}) as Record<
-    string,
-    unknown
-  >;
-  const prioNum = typeof b.prio === 'number' ? Math.round(b.prio) : 3;
-  const prio = (prioNum >= 1 && prioNum <= 4 ? prioNum : 3) as Prio;
-  const effort =
-    b.effort === 'S' || b.effort === 'M' || b.effort === 'L' ? b.effort : '';
-  const due = typeof b.due === 'string' && DUE_RE.test(b.due) ? b.due : '';
-  // A tag is one whitespace-delimited '#'-prefixed token on the wire, so a
-  // tag with inner whitespace would split into title words: drop it rather
-  // than silently rewriting what the model asked for.
-  const tags = Array.isArray(b.tags)
-    ? b.tags
-        .filter((t): t is string => typeof t === 'string')
-        .map((t) => oneLine(t).replace(/^#+/, ''))
-        .filter((t) => t !== '' && !/\s/.test(t))
-    : [];
-  const checks = Array.isArray(b.checks)
-    ? b.checks.flatMap((c): { text: string; done: boolean }[] => {
-        if (typeof c !== 'object' || c === null) return [];
-        const o = c as Record<string, unknown>;
-        if (typeof o.text !== 'string') return [];
-        const text = oneLine(o.text);
-        if (text === '') return [];
-        return [{ text, done: o.done === true }];
+export function coerceSimilarItems(body: unknown): SimilarItem[] {
+  if (typeof body !== 'object' || body === null) return [];
+  const items = (body as Record<string, unknown>).items;
+  return Array.isArray(items)
+    ? items.flatMap((item) => {
+        const coerced = coerceSimilarItem(item);
+        return coerced === null ? [] : [coerced];
       })
     : [];
-  return {
-    title: typeof b.title === 'string' ? oneLine(b.title) : '',
-    desc: typeof b.desc === 'string' ? multiLine(b.desc) : '',
-    prio,
-    due,
-    effort,
-    tags,
-    checks,
-  };
+}
+
+export async function getSimilar(
+  identity: Identity,
+  q: string,
+  excludeId?: string,
+  signal?: AbortSignal,
+): Promise<SimilarItem[]> {
+  try {
+    const params = new URLSearchParams({ q });
+    if (excludeId) params.set('exclude', excludeId);
+    const res = await authedFetch(identity, `/api/similar?${params}`, { signal });
+    if (!res.ok) return [];
+    return coerceSimilarItems(await res.json());
+  } catch {
+    return [];
+  }
 }

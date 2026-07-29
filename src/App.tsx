@@ -752,6 +752,8 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
       </div>
       {modal && (
         <CardModal
+          // allow: SIZE_OK - A5 needs authenticated advisory lookup; decomposing BoardApp is out of scope.
+          identity={identity}
           state={modal}
           labels={allLabels}
           aiDraft={aiDraft}
