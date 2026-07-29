@@ -848,6 +848,7 @@ body {
 .modal.ship { width: min(520px, 92vw); }
 .modal.confirm { width: min(460px, 92vw); }
 .modal.adr { width: min(760px, 92vw); }
+.modal.import { width: min(820px, 92vw); }
 .modal h2 {
   margin: 0 0 var(--sp-1);
   font-size: var(--fs-xl);
@@ -1395,6 +1396,46 @@ body {
 .storyrow > input { flex: 1; min-width: 0; }
 .storyrow > select { flex: 0 0 72px; }
 .modal #f-adr { min-height: 200px; }
+
+/* ---------- issue import review ---------- */
+.import-notice,
+.import-banner {
+  margin: var(--sp-2) 0 0;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+  font-weight: 800;
+}
+.import-notice { background: var(--amber); }
+.import-banner { background: #e9edf2; }
+.importrow {
+  flex-wrap: wrap;
+  border: 2px solid var(--gray);
+  border-radius: 10px;
+  padding: var(--sp-2);
+}
+.importrow > input:not([type='checkbox']) {
+  flex: 1 1 260px;
+}
+.import-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  max-width: 100%;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-tight);
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+.link-chip { background: #e9edf2; }
+.duplicate-chip.link { background: var(--red); }
+.duplicate-chip.similar { background: var(--amber); }
+
 /* Primary action right, cancel/delete left, and a rule above the row so the
    form's content and its actions are visibly separate. The row wraps on a
    narrow phone; the auto margin on the primary keeps it right-aligned on

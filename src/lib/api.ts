@@ -105,6 +105,46 @@ export interface ForgeTestResult {
   error?: string;
 }
 
+export interface ImportDuplicate {
+  id?: string;
+  title: string;
+  via: 'link' | 'similar';
+}
+
+export interface ImportDraft extends StoryDraft {
+  link?: string;
+  external_key?: string;
+  url?: string;
+  duplicate_of?: ImportDuplicate;
+}
+
+export interface ImportPreview {
+  kind: 'issue' | 'project' | 'milestone';
+  total_hint: number;
+  fetched: number;
+  truncated: boolean;
+  note: string;
+  drafts: ImportDraft[];
+}
+
+export interface ImportPreviewRequest {
+  source: string;
+  ref: string;
+  max: number;
+}
+
+export interface ImportLinkItem {
+  external_key: string;
+  link: string;
+  url: string;
+  title: string;
+}
+
+export interface RecordImportLinksRequest {
+  source: string;
+  items: ImportLinkItem[];
+}
+
 /** Short error text from a failed response body, never echoing secrets. */
 async function errText(res: Response, fallback: string): Promise<string> {
   try {
@@ -301,6 +341,112 @@ export async function aiStories(
       : undefined;
   if (!Array.isArray(stories)) return [];
   return stories.map(coerceStoryDraft).filter((d) => d.title !== '');
+}
+
+function importCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.round(value))
+    : 0;
+}
+
+function importText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  return text === '' ? undefined : text;
+}
+
+function coerceImportDuplicate(value: unknown): ImportDuplicate | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const fields = value as Record<string, unknown>;
+  const title = importText(fields.title);
+  const via =
+    fields.via === 'link' || fields.via === 'similar' ? fields.via : undefined;
+  if (title === undefined || via === undefined) return undefined;
+  const id = importText(fields.id);
+  return { ...(id === undefined ? {} : { id }), title, via };
+}
+
+function coerceImportDraft(value: unknown): ImportDraft | null {
+  const draft = coerceStoryDraft(value);
+  if (draft.title === '') return null;
+  const fields = value as Record<string, unknown>;
+  const link = importText(fields.link);
+  const externalKey = importText(fields.external_key);
+  const url = importText(fields.url);
+  const duplicate = coerceImportDuplicate(fields.duplicate_of);
+  return {
+    ...draft,
+    ...(link === undefined ? {} : { link }),
+    ...(externalKey === undefined ? {} : { external_key: externalKey }),
+    ...(url === undefined ? {} : { url }),
+    ...(duplicate === undefined ? {} : { duplicate_of: duplicate }),
+  };
+}
+
+/** Coerce the D3 response without discarding server-authored provenance. */
+export function coerceImportPreview(body: unknown): ImportPreview {
+  const fields = (
+    typeof body === 'object' && body !== null ? body : {}
+  ) as Record<string, unknown>;
+  const kind =
+    fields.kind === 'issue' ||
+    fields.kind === 'project' ||
+    fields.kind === 'milestone'
+      ? fields.kind
+      : 'project';
+  const drafts = Array.isArray(fields.drafts)
+    ? fields.drafts.flatMap((value) => {
+        const draft = coerceImportDraft(value);
+        return draft === null ? [] : [draft];
+      })
+    : [];
+  return {
+    kind,
+    total_hint: importCount(fields.total_hint),
+    fetched: importCount(fields.fetched),
+    truncated: fields.truncated === true,
+    note: typeof fields.note === 'string' ? fields.note : '',
+    drafts,
+  };
+}
+
+export async function importPreview(
+  identity: Identity,
+  req: ImportPreviewRequest,
+  signal: AbortSignal,
+): Promise<ImportPreview> {
+  const res = await authedFetch(identity, '/api/import/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(
+      await errText(res, `import preview failed: ${res.status}`),
+    );
+  }
+  return coerceImportPreview(await res.json());
+}
+
+/**
+ * Journal selected source links after cards are added. This is deliberately
+ * best-effort: losing provenance must not roll back work already on the board.
+ */
+export async function recordImportLinks(
+  identity: Identity,
+  req: RecordImportLinksRequest,
+): Promise<void> {
+  try {
+    const res = await authedFetch(identity, '/api/import/links', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    if (!res.ok) return;
+  } catch {
+    // The cards are already committed; the provenance journal is secondary.
+  }
 }
 
 export interface SimilarItem {
