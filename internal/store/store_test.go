@@ -297,13 +297,14 @@ func TestMigrateV3FromV2(t *testing.T) {
 	}
 	defer s.Close()
 
-	// Then: v3 records its version and makes each required index object.
+	// Then: the current schema records its version and retains every v3 index
+	// object needed to search the legacy task immediately.
 	var version string
 	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != "3" {
-		t.Fatalf("schema version = %q, want 3", version)
+	if version != "4" {
+		t.Fatalf("schema version = %q, want 4", version)
 	}
 	for _, table := range []string{"tasks_fts", "import_links_fts"} {
 		var definition string
@@ -633,7 +634,7 @@ func TestOpenRepairsLegacyCredentialURLSuffixes(t *testing.T) {
 	if _, baseURL, _ := mustForgePAT(t, s, "bob", "loaded"); strings.ContainsAny(baseURL, "?#") {
 		t.Fatal("scoped forge load returned a suffix")
 	}
-	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil || version != "3" {
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil || version != "4" {
 		t.Fatalf("schema version changed during repair err=%v", err)
 	}
 }
