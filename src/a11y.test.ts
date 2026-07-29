@@ -121,6 +121,66 @@ describe('stylesheet guards', () => {
   });
 
   /**
+   * The entrance keyframes may only touch `opacity` and `transform`: the
+   * compositor drives both at the display's own rate, so the same animation
+   * gets all 120 frames on a 120Hz panel and still holds together at 30fps
+   * or under a busy main thread. A property like height, top or box-shadow
+   * here would animate on the main thread and jank exactly when it matters.
+   */
+  it.each(['kb-fade', 'kb-pop', 'kb-drop', 'kb-rise'])(
+    'keyframes %s animate compositor properties only',
+    (name) => {
+      const at = CSS.indexOf(`@keyframes ${name}`);
+      expect(at).toBeGreaterThan(-1);
+      const body = CSS.slice(at, CSS.indexOf('}\n}', at));
+      const props = [...body.matchAll(/([a-z-]+)\s*:/g)].map((m) => m[1]);
+      for (const p of props) {
+        expect(['opacity', 'transform', 'from', 'to']).toContain(p);
+      }
+    },
+  );
+
+  /**
+   * Every entrance animation must be switched off under reduced motion —
+   * surfaces and messages then appear in place. A new `animation:` added to
+   * the sheet without joining the reduce block is exactly the silent
+   * regression this guard exists for.
+   */
+  it('turns every entrance animation off under prefers-reduced-motion', () => {
+    const at = CSS.indexOf('@media (prefers-reduced-motion: reduce)');
+    expect(at).toBeGreaterThan(-1);
+    const block = CSS.slice(at);
+    for (const sel of [
+      '.modal-backdrop',
+      '.modal',
+      '.emojipop',
+      '.labeldrop',
+      '.datepop',
+      '.flash',
+      '.notice',
+    ]) {
+      expect(block).toContain(sel);
+    }
+    expect(block).toMatch(/animation:\s*none/);
+  });
+
+  /**
+   * The reduce block must be the sheet's last word. A media query adds no
+   * specificity, so any later rule at equal specificity re-enables the
+   * animation the block switches off — the .flash entrance shipped exactly
+   * that way once, animating under reduced motion while the block claimed
+   * otherwise.
+   */
+  it('keeps prefers-reduced-motion after every animation/transition rule', () => {
+    const at = CSS.indexOf('@media (prefers-reduced-motion: reduce)');
+    const after = CSS.slice(at);
+    // Inside the block every animation/transition is a switch-off; anything
+    // else after it would be a re-enable candidate.
+    const offenders = [...after.matchAll(/(animation|transition):\s*(?!none)[a-z]/g)];
+    expect(offenders).toEqual([]);
+  });
+
+  /**
    * An absolutely positioned ::after resolves `inset` against its containing
    * block's *padding* box, so on a bordered button a negative inset silently
    * lost 2px per side — a 36x36 target where 40x40 was intended. Sizing the

@@ -24,12 +24,18 @@ export const DIALOG_FOCUSABLE =
  * The dialog's own focusable controls, in document order. Anything under an
  * `inert` subtree is left out: the modals freeze their form that way while a
  * request is in flight, and Tab must not land on a control the browser has
- * already taken out of play.
+ * already taken out of play. `tabIndex < 0` is left out too — a roving-
+ * tabindex widget (the calendar grid) parks all but one of its cells at -1,
+ * and the trap walking Tab through 41 parked days would defeat the point of
+ * roving focus.
  */
 export function dialogFocusables(root: HTMLElement | null): HTMLElement[] {
   if (!root) return [];
   return Array.from(root.querySelectorAll<HTMLElement>(DIALOG_FOCUSABLE)).filter(
-    (el) => el.closest('[inert]') === null && !el.hasAttribute('hidden'),
+    (el) =>
+      el.closest('[inert]') === null &&
+      !el.hasAttribute('hidden') &&
+      el.tabIndex >= 0,
   );
 }
 

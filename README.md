@@ -400,16 +400,14 @@ display preference, and needing it is likeliest exactly then.
 
 Everything in the board is styled to one visual system, with one deliberate
 exception: parts of a few native controls belong to the browser or the OS and
-cannot be reached from CSS. kb styles the *closed* control and stops there —
-hand-rolling replacements (a calendar widget, a listbox) would be far more
-surface than the consistency is worth. What remains browser-drawn:
+cannot be reached from CSS. kb styles the *closed* control and stops there.
+The calendar is the one replacement kb does draw: the native panel sat in the
+middle of the card form looking like a different product, so the ▦ button
+beside the due field opens kb's own popover (month grid, weeks starting
+Monday; arrows move a day or a week, PageUp/PageDown a month, Enter picks,
+Escape closes). The segmented date *input* stays the browser's — typing and
+arrow-key editing keep the native grammar. What remains browser-drawn:
 
-- **The date field's calendar panel.** The field itself, its segments and the
-  picker trigger are styled; the panel that opens from the trigger is browser
-  chrome. Those hooks (`::-webkit-datetime-edit`,
-  `::-webkit-calendar-picker-indicator`) are Chromium-only, so on Firefox and
-  Safari the whole date field renders as that browser's own control. This is
-  expected, not a regression.
 - **The `<select>` option list.** The closed select carries kb's border, paper
   and drop arrow; the list that drops out of it is drawn by the browser.
   `color-scheme: light` is what keeps it legible under a dark OS theme.

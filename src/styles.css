@@ -49,6 +49,33 @@
      70 characters, which is where a line stops being comfortable to read. */
   --measure: 70ch;
 
+  /* ---------- motion ----------
+     One vocabulary for everything that moves.
+
+     Durations are wall-clock, not frame counts: CSS interpolates against
+     time, so the same 198ms renders ~6 frames at 30fps and ~24 at 120Hz —
+     the higher the refresh rate, the smoother the identical animation. The
+     values are whole 30fps frames (132 = 4, 198 = 6, 264 = 8) only so that
+     the floor case lands cleanly; nothing here is capped to that rate, and
+     no duration should ever be chosen to suit it.
+
+     What actually decides smoothness is the property: the entrance keyframes
+     animate only `opacity` and `transform`, which the compositor drives at
+     the display's own rate, independent of the main thread. That is what
+     lets a 120Hz panel spend all 120 frames on the animation while React is
+     busy elsewhere — and what keeps 30fps from stuttering. a11y.test.ts
+     holds that line. Button hover/press transitions also move box-shadow or
+     background, which repaint — a deliberate exception, confined to
+     control-sized areas. Nothing animates layout. */
+  --dur-0: 66ms;
+  --dur-1: 132ms;
+  --dur-2: 198ms;
+  --dur-3: 264ms;
+  /* Snappy settle for things that appear; a touch of overshoot for the
+     playground personality without being bouncy. */
+  --ease-out: cubic-bezier(0.22, 0.8, 0.3, 1);
+  --ease-pop: cubic-bezier(0.25, 0.9, 0.3, 1.12);
+
   /* One height for every text control, so buttons, inputs and selects in a
      form sit on a single baseline: 8px padding + a 13px/1.2 line box + the
      2px ink border. */
@@ -151,11 +178,33 @@ body {
   cursor: pointer;
   box-shadow: 2px 2px 0 var(--ink);
 }
+/* The press/hover feel every raised button shares: hover lifts it a pixel off
+   the page (the shadow grows to match, so the light stays put), pressing sits
+   it down onto its shadow. Hover glides; the press itself bites in two frames
+   or the button feels like it answers late. */
+.app-header button,
+.modal .actions button,
+.gate-btn {
+  transition:
+    transform var(--dur-1) var(--ease-out),
+    box-shadow var(--dur-1) var(--ease-out),
+    opacity var(--dur-1) var(--ease-out) var(--dur-1);
+}
+.app-header button:active,
+.modal .actions button:active,
+.gate-btn:active { transition-duration: var(--dur-0); }
+.app-header button:hover:not(:disabled, :active) {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--ink);
+}
 .app-header button:active { transform: translate(2px, 2px); box-shadow: none; }
 /* Only present while the session is expired, and the one control that fixes
    it — filled so it does not read as another of the row's ordinary actions.
    Ink on the amber, like every other filled control here. */
-.app-header button.reconnect { background: var(--amber); }
+.app-header button.reconnect {
+  background: var(--amber);
+  animation: kb-rise var(--dur-2) var(--ease-out);
+}
 .streak { font-weight: 800; font-size: var(--fs-md); color: var(--green-text); }
 
 /* Board-was-refreshed banner: a refresh that closes an open card must say so
@@ -164,6 +213,7 @@ body {
 .notice {
   flex: none;
   display: flex;
+  animation: kb-rise var(--dur-2) var(--ease-out);
   align-items: flex-start;
   gap: var(--sp-2);
   margin: 0 var(--sp-4) var(--sp-1);
@@ -690,12 +740,32 @@ body {
 }
 .fx { position: fixed; inset: 0; pointer-events: none; z-index: 30; }
 
+/* ---------- entrances ----------
+   Everything that appears, appears the same way: surfaces pop, messages rise,
+   veils fade. Mount-only (CSS cannot animate an unmount without JS holding
+   the node alive, and a dismissal should be instant anyway — the user asked
+   for it to go). All three are opacity/transform only; see the motion tokens
+   for why. */
+@keyframes kb-fade {
+  from { opacity: 0; }
+}
+@keyframes kb-pop {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+}
+@keyframes kb-drop {
+  from { opacity: 0; transform: translateY(-6px) scale(0.98); }
+}
+@keyframes kb-rise {
+  from { opacity: 0; transform: translateY(4px); }
+}
+
 /* ---------- modal ---------- */
 .modal-backdrop {
   position: fixed;
   inset: 0;
   z-index: 40;
   background: rgba(32, 36, 44, 0.45);
+  animation: kb-fade var(--dur-2) var(--ease-out);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -706,6 +776,7 @@ body {
   border: 2px solid var(--ink);
   border-radius: 16px;
   box-shadow: 6px 6px 0 var(--ink);
+  animation: kb-pop var(--dur-3) var(--ease-pop);
   box-sizing: border-box;
   width: min(920px, 92vw);
   max-height: 92vh;
@@ -799,15 +870,13 @@ body {
   cursor: pointer;
 }
 
-/* The date field. Everything up to the trigger is ours; the calendar panel
-   that opens from it is browser chrome and stays that way. These hooks are
-   Chromium-only, so on Firefox and Safari the field is the browser's own —
-   see "Native controls kb does not draw" in the README. */
+/* The date field. The segmented input stays the browser's (typing, arrow
+   keys and the screen-reader grammar are all native), but the calendar it
+   opens is kb's own popover (see DateField) — the native panel is browser
+   chrome that cannot be themed, so the indicator that opened it is hidden
+   and the .datebtn chip beside the field opens ours instead. */
 .modal input[type='date'] {
   font-variant-numeric: tabular-nums;
-  /* The 24px trigger below is taller than a 13px line box, so this field takes
-     the narrower block padding to keep the shared 36px control height. */
-  padding-block: var(--sp-1);
 }
 .modal input[type='date']::-webkit-datetime-edit { color: var(--ink); }
 .modal input[type='date']::-webkit-datetime-edit-fields-wrapper { padding: 0; }
@@ -818,39 +887,140 @@ body {
 .modal input[type='date']::-webkit-datetime-edit-year-field:not([aria-valuenow]) {
   color: var(--dim);
 }
-/* The trigger, as a small kb chip. It is an author-sized control, so the
-   2.5.8 user-agent exception does not cover it: the box is 24px tall and
-   26px wide, which the 36px field has room for. */
-.modal input[type='date']::-webkit-calendar-picker-indicator {
+.modal input[type='date']::-webkit-calendar-picker-indicator { display: none; }
+
+/* ---------- kb's calendar popover ---------- */
+.datefield { position: relative; display: flex; gap: var(--sp-1); }
+.datefield input { flex: 1; min-width: 0; }
+.datebtn {
+  flex: none;
   box-sizing: border-box;
-  width: 26px;
-  height: var(--tap);
-  margin: 0 calc(-1 * var(--sp-1)) 0 var(--sp-2);
-  padding: 0 var(--sp-1);
+  width: var(--ctl-h);
+  min-height: var(--ctl-h);
+  font: inherit;
+  font-size: var(--fs-lg);
+  line-height: var(--lh-flat);
+  color: var(--ink);
+  background: #fff;
   border: 2px solid var(--ink);
-  border-radius: 6px;
-  background-color: #fff;
-  opacity: 1;
+  border-radius: 10px;
   cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out);
 }
-.modal input[type='date']::-webkit-calendar-picker-indicator:hover {
-  background-color: #ffe4d3;
+.datebtn:hover { background: #ffe4d3; }
+.datebtn:active { background: var(--accent); }
+.datepop {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  /* Anchored to the field's RIGHT edge: the Due field sits in the right half
+     of its row, so a left-anchored popover ran past the modal's edge below
+     ~500px and popped a horizontal scrollbar. Rightward of the field there
+     is never that much room; leftward there is the whole row. */
+  right: 0;
+  z-index: 7;
+  transform-origin: top right;
+  animation: kb-drop var(--dur-2) var(--ease-pop);
+  padding: var(--sp-2);
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 14px;
+  box-shadow: 4px 4px 0 var(--ink);
+  /* Wider than its column; on a narrow phone the viewport cap is what bites
+     and the 7-column grid's minmax track is what gives. */
+  width: max-content;
+  max-width: min(300px, 84vw);
 }
-.modal input[type='date']::-webkit-calendar-picker-indicator:active {
-  background-color: var(--accent);
+.datepop .dhead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-1);
+}
+.datepop .dhead strong {
+  flex: 1;
+  text-align: center;
+  font-size: var(--fs-md);
+  line-height: var(--lh-tight);
+  font-weight: 800;
+}
+.datepop .dhead button,
+.datepop .dfoot button {
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 800;
+  line-height: var(--lh-flat);
+  color: var(--ink);
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  min-width: var(--ctl-h);
+  min-height: 28px;
+  padding: 0 var(--sp-2);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out);
+}
+.datepop .dhead button:hover,
+.datepop .dfoot button:hover { background: var(--bg); }
+.datepop .dgrid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(28px, 36px));
+  gap: 2px;
+}
+.datepop .dwd {
+  text-align: center;
+  font-size: var(--fs-xs);
+  line-height: var(--lh-tight);
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--dim);
+  padding: var(--sp-1) 0;
+}
+.datepop .dday {
+  box-sizing: border-box;
+  min-height: 32px;
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: var(--lh-flat);
+  color: var(--ink);
+  background: #fff;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out);
+}
+.datepop .dday:hover { background: var(--bg); }
+/* Neighbouring months' spill days: pickable, but visibly not this month. */
+.datepop .dday.out { color: var(--dim); font-weight: 600; }
+.datepop .dday.today { border-color: var(--ink); }
+/* Explicit ink, and after .out so a selected spill day takes it too: --dim
+   on the accent fill measures 2.14:1, ink measures 6.09:1. */
+.datepop .dday.sel {
+  background: var(--accent);
+  border-color: var(--ink);
+  color: var(--ink);
+}
+.datepop .dfoot {
+  display: flex;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-2);
+  border-top: 2px solid var(--gray);
 }
 /* Description gets room to write in: ~8 rows at the 13px form font. */
 .modal #f-desc { min-height: 168px; }
 .modal #f-checks { min-height: 110px; }
 .mrow { display: flex; gap: var(--sp-3); }
 .mrow > * { flex: 1; min-width: 0; }
-/* Wide enough for the emoji input plus its picker button. */
-.mrow > .emoji { flex: 0 0 118px; }
+/* Just the emoji chip — the rest of the row goes to the title. */
+.mrow > .emoji { flex: 0 0 84px; }
 /* Narrow phones: let the three-up rows wrap instead of squeezing the fields. */
 @media (max-width: 480px) {
   .mrow { flex-wrap: wrap; }
   .mrow > * { flex: 1 1 40%; }
-  .mrow > .emoji { flex: 0 0 118px; }
+  .mrow > .emoji { flex: 0 0 84px; }
 }
 /* A checkbox is not a full-width field — undo the generic input sizing. The
    whole row is the label, and therefore the target: 24px tall. */
@@ -907,26 +1077,57 @@ body {
   font-weight: 700;
   color: var(--red-text);
 }
-.emojifield input { flex: 1; min-width: 0; text-align: center; }
+/* The trigger is the emoji itself (see EmojiField) — a button, not a field:
+   there is nothing to type here. Sized and bordered like the inputs beside
+   it so the row still reads as one set of controls. */
 .emojibtn {
-  flex: none;
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: var(--ctl-h);
   font: inherit;
-  font-size: var(--fs-lg);
+  font-size: var(--fs-2xl);
   line-height: var(--lh-flat);
+  text-align: center;
   color: var(--ink);
   background: #fff;
   border: 2px solid var(--ink);
   border-radius: 10px;
-  padding: 0 var(--sp-2);
-  min-height: var(--ctl-h);
+  padding: var(--sp-1) var(--sp-2);
   cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out);
 }
-.emojibtn:active { transform: translate(1px, 1px); }
+.emojibtn:hover { background: var(--bg); }
+/* No emoji yet: the "+" is a prompt, so it takes the hint colour and the
+   body size rather than sitting there at emoji scale. */
+.emojibtn.empty { font-size: var(--fs-xl); color: var(--dim); }
+.emojifoot {
+  display: flex;
+  padding: var(--sp-2);
+  border-top: 2px solid var(--gray);
+}
+.emojifoot button {
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 800;
+  line-height: var(--lh-flat);
+  color: var(--ink);
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  min-height: 28px;
+  padding: 0 var(--sp-2);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out);
+}
+.emojifoot button:hover { background: var(--bg); }
 .emojipop {
   position: absolute;
   top: calc(100% + var(--sp-1));
   left: 0;
   z-index: 7;
+  transform-origin: top left;
+  animation: kb-drop var(--dur-2) var(--ease-pop);
   /* The picker is wider than the emoji field; keep it inside the modal. */
   max-width: min(352px, 84vw);
   /* The frame is ours: emoji-mart's own root is a plain rounded rectangle, so
@@ -959,7 +1160,10 @@ body {
   --border-radius: 12px;
   /* The kb frame around it carries the shadow; a second one would smear. */
   --shadow: none;
-  height: 380px;
+  /* Capped against the viewport: the modal clips its overflow, and a fixed
+     380px pushed the Remove-emoji row past the modal's bottom edge on a
+     720px-high laptop. */
+  height: min(380px, 44vh);
 }
 .emojipop .mnote { margin: 0; padding: var(--sp-2) var(--sp-3); }
 
@@ -1029,12 +1233,25 @@ body {
   cursor: pointer;
   box-shadow: 3px 3px 0 var(--ink);
 }
+.modal .actions button:hover:not(:disabled, :active) {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--ink);
+}
 .modal .actions button:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
 /* Filled actions keep their colour and take ink text: white on the green
    measured 3.40:1 and on the red 3.08:1, ink measures 4.57:1 and 5.04:1. */
 .modal .actions .save { margin-left: auto; background: var(--green); }
+/* Labels that swap mid-flight ("Save"/"Saving…", "Test connection"/"Cancel
+   test") hold a floor width, so the swap never nudges the buttons beside
+   them. Sized to the longer label of each pair. */
+.modal .actions .save { min-width: 104px; }
+.modal .actions .test { min-width: 148px; }
+.modal .actions .cancel-split { min-width: 118px; }
+.modal .actions .save.propose { min-width: 152px; }
 /* Any locked action, primary or not: Close and Test are disabled while a
-   request is in flight, and must not still read as pressable. */
+   request is in flight, and must not still read as pressable. The dim takes
+   the same four-frame delay as the fields (see the shared transition rule by
+   the header buttons): a fast request must not blink the whole row. */
 .modal .actions button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -1112,6 +1329,8 @@ body {
   right: 0;
   top: calc(100% + var(--sp-1));
   z-index: 5;
+  transform-origin: top center;
+  animation: kb-drop var(--dur-2) var(--ease-pop);
   margin: 0;
   padding: var(--sp-1);
   list-style: none;
@@ -1166,23 +1385,11 @@ body {
   transform: none;
   box-shadow: 2px 2px 0 var(--ink);
 }
-/* Aborts the AI request in flight — plain, so it never competes with Draft. */
-.ai-stop {
-  font: inherit;
-  font-size: var(--fs-sm);
-  font-weight: 800;
-  line-height: var(--lh-tight);
-  border: 2px solid var(--ink);
-  border-radius: 10px;
-  padding: var(--sp-2) var(--sp-3);
-  min-height: var(--ctl-h);
-  background: #fff;
-  color: var(--ink);
-  cursor: pointer;
-  box-shadow: 2px 2px 0 var(--ink);
-}
-.ai-stop:active { transform: translate(2px, 2px); box-shadow: none; }
+/* The Draft/Cancel swap holds a floor so the morph never moves the note. */
+.ai-go { min-width: 72px; }
 .ai-note { font-size: var(--fs-xs); line-height: var(--lh-body); font-weight: 700; color: var(--dim); }
+/* An error in the note slot keeps the note's size, not .flash's. */
+.ai-note.flash { margin: 0; font-size: var(--fs-xs); animation: kb-rise var(--dur-2) var(--ease-out); }
 
 /* In-place busy state: names the running operation next to the control that
    started it, so nobody has to guess whether the click registered. */
@@ -1206,30 +1413,51 @@ body {
   50% { opacity: 0.35; transform: scale(0.7); }
 }
 /* Fields and buttons held while a request is in flight, and the pulse that
-   some people cannot look at. */
+   some people cannot look at. The dim is *delayed* by four frames: a save
+   against a local server settles in less time than that, and dimming the
+   whole form for two frames and snapping it back read as the screen
+   flickering. A request slow enough to matter still shows it. */
 .modal [inert] { opacity: 0.55; }
+/* The inert wrappers (CardModal's form, AdrModal's mrow) get the same delay:
+   without it a fast or cancelled request snapped the whole section to 0.55
+   and back — the exact blink the delay exists to kill. */
+.modal form,
+.modal .mrow,
+.modal input,
+.modal select,
+.modal textarea {
+  transition: opacity var(--dur-1) var(--ease-out) var(--dur-1);
+}
 .modal input:disabled,
 .modal select:disabled,
 .modal textarea:disabled { opacity: 0.55; cursor: not-allowed; }
-/* Reduced motion: keep every state change, drop the movement that carries it.
-   Confetti is skipped in JS (see lib/confetti.ts) rather than here, because a
-   canvas animation has no transition to switch off. Everything else that moves
-   in kb is listed here: the column tint, the progress bar, the checklist
-   accordion, the chevron, the checkbox fill, the busy pulse, and the drag
-   clone's tilt. Dialogs and overlays (.modal-backdrop, .modal, .emojipop,
-   .labeldrop, .debug, .fx) appear and disappear without a transition, so there
-   is nothing there to reduce. */
-@media (prefers-reduced-motion: reduce) {
-  .col,
-  .bar i,
-  .checks,
-  .chev,
-  .check .bx { transition: none; }
-  .busy::before { animation: none; }
-  .card.dragclone { transform: none; }
-  html { scroll-behavior: auto; }
+.flash {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+  font-weight: 700;
+  animation: kb-rise var(--dur-2) var(--ease-out);
 }
-.flash { margin: var(--sp-2) 0 0; font-size: var(--fs-sm); line-height: var(--lh-body); font-weight: 700; }
+/* The form's outcome messages, as a flex child of the pinned action row: the
+   row's height is set by its buttons and it is always in view, so a message
+   coming or going can neither resize the modal nor be covered by the row —
+   a paragraph above the row did both, which read as flicker. Sits beside the
+   Save it reports on; wraps under the buttons on a narrow phone. */
+.actions .statusline {
+  flex: 1 1 140px;
+  min-width: 0;
+  text-align: right;
+}
+.statusline .flash {
+  /* Clamped to the buttons' two-line height: a long server error must not
+     grow the pinned row (the full text is in the title attribute). */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin: 0;
+  animation: kb-rise var(--dur-2) var(--ease-out);
+}
 .flash.ok { color: var(--green-text); }
 .flash.err { color: var(--red-text); }
 .mnote {
@@ -1455,6 +1683,10 @@ body {
   cursor: pointer;
   box-shadow: 3px 3px 0 var(--ink);
 }
+.gate-btn:hover:not(:disabled, :active) {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--ink);
+}
 .gate-btn:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
 .gate-btn:disabled {
   opacity: 0.45;
@@ -1539,4 +1771,53 @@ body {
   font-weight: 600;
   font-size: var(--fs-md);
   opacity: 0.75;
+}
+
+/* ---------- reduced motion ----------
+   Keep every state change, drop the movement that carries it. Confetti is
+   skipped in JS (see lib/confetti.ts) rather than here, because a canvas
+   animation has no transition to switch off. Everything else that moves in
+   kb is listed here: the column tint, the progress bar, the checklist
+   accordion, the chevron, the checkbox fill, the busy pulse, the drag
+   clone's tilt, the button hover/press glide, the calendar buttons' hover
+   fill, and every entrance (the kb-fade / kb-pop / kb-drop / kb-rise
+   keyframes) — surfaces and messages appear in place instead.
+
+   THIS BLOCK MUST STAY LAST IN THE SHEET. A media query adds no specificity,
+   so any later rule at the same specificity re-enables the animation it
+   switches off — that exact bug shipped once (the .flash rules below the old
+   block quietly won). a11y.test.ts enforces the ordering. */
+@media (prefers-reduced-motion: reduce) {
+  .col,
+  .bar i,
+  .checks,
+  .chev,
+  .check .bx,
+  .app-header button,
+  .modal .actions button,
+  .gate-btn,
+  .modal form,
+  .modal .mrow,
+  .modal input,
+  .modal select,
+  .modal textarea,
+  .datebtn,
+  .datepop .dhead button,
+  .datepop .dfoot button,
+  .datepop .dday,
+  .emojibtn,
+  .emojifoot button { transition: none; }
+  .busy::before { animation: none; }
+  .modal-backdrop,
+  .modal,
+  .emojipop,
+  .labeldrop,
+  .datepop,
+  .flash,
+  .statusline .flash,
+  .ai-note.flash,
+  .notice,
+  .app-header button.reconnect { animation: none; }
+  .card.dragclone { transform: none; }
+  html { scroll-behavior: auto; }
 }

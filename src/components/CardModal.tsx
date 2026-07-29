@@ -4,6 +4,7 @@ import { newTask, STATUS_LABEL } from '../lib/model';
 import type { AIStoryRequest, StoryDraft } from '../lib/api';
 import { isAbortError } from '../lib/api';
 import { useDialogFocus } from '../lib/focus';
+import { DateField } from './DateField';
 import { EmojiField, firstEmoji } from './EmojiField';
 import { LabelsCombobox } from './LabelsCombobox';
 
@@ -197,23 +198,32 @@ export function CardModal({
               aria-invalid={aiError !== null}
               aria-describedby={aiError ? aiErrorId : undefined}
             />
+            {/* One button that becomes the cancel while the request runs, and
+                one note slot that carries hint, progress or failure: a second
+                button mounting beside the first, or an error paragraph
+                mounting below the row, both moved the form mid-action. */}
             <div className="ai-row">
               <button
                 type="button"
                 className="ai-go"
-                onClick={() => void runDraft()}
-                disabled={aiBusy || !aiPrompt.trim()}
+                onClick={aiBusy ? cancelDraft : () => void runDraft()}
+                disabled={!aiBusy && !aiPrompt.trim()}
               >
-                {aiBusy ? 'Drafting…' : 'Draft'}
+                {aiBusy ? 'Cancel' : 'Draft'}
               </button>
-              {aiBusy && (
-                <button type="button" className="ai-stop" onClick={cancelDraft}>
-                  Cancel
-                </button>
-              )}
               {aiBusy ? (
                 <span className="ai-note busy" role="status">
                   Drafting the card…
+                </span>
+              ) : aiError ? (
+                <span
+                  key={aiError}
+                  className="ai-note flash err"
+                  id={aiErrorId}
+                  role="alert"
+                  title={aiError}
+                >
+                  {aiError}
                 </span>
               ) : (
                 <span className="ai-note">
@@ -221,11 +231,6 @@ export function CardModal({
                 </span>
               )}
             </div>
-            {aiError && (
-              <p className="flash err" id={aiErrorId} role="alert">
-                {aiError}
-              </p>
-            )}
           </div>
         )}
         {/* Inert while a draft is running: these fields are about to be
@@ -277,12 +282,7 @@ export function CardModal({
             </div>
             <div>
               <label htmlFor="f-due">Due</label>
-              <input
-                id="f-due"
-                type="date"
-                value={due}
-                onChange={(e) => setDue(e.target.value)}
-              />
+              <DateField inputId="f-due" value={due} onChange={setDue} />
             </div>
             <div>
               <label htmlFor="f-effort">Effort</label>

@@ -128,11 +128,11 @@ export function ReconnectModal({
           saved to it. Your board is safe on this device and will be pushed as
           soon as the session is restored.
         </p>
-        {error && (
-          <p className="flash err" id={errorId} role="alert">
-            {error}
-          </p>
-        )}
+        {/* The failure message rides in the action row's reserved slot (same
+            pattern as Settings): mounted above the controls it grew the modal
+            and jumped the buttons at the exact moment the user was about to
+            press one. Keyed so a repeat failure is a fresh node — a role that
+            appears by mutation is not reliably announced. */}
         {identity.kind === 'azure' ? (
           <>
             <button
@@ -150,6 +150,19 @@ export function ReconnectModal({
               <button type="button" onClick={onClose} disabled={busy}>
                 Work offline
               </button>
+              <span className="statusline">
+                {error && (
+                  <span
+                    key={error}
+                    className="flash err"
+                    id={errorId}
+                    role="alert"
+                    title={error}
+                  >
+                    {error}
+                  </span>
+                )}
+              </span>
             </div>
           </>
         ) : (
@@ -174,6 +187,19 @@ export function ReconnectModal({
               <button type="button" onClick={onClose} disabled={busy}>
                 Work offline
               </button>
+              <span className="statusline">
+                {error && (
+                  <span
+                    key={error}
+                    className="flash err"
+                    id={errorId}
+                    role="alert"
+                    title={error}
+                  >
+                    {error}
+                  </span>
+                )}
+              </span>
               <button
                 type="submit"
                 className="save"

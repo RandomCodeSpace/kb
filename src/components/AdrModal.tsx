@@ -228,33 +228,45 @@ export function AdrModal({ onSplit, onAdd, onClose }: AdrModalProps) {
                 />
               </div>
             </div>
-            {tooBig && (
-              <p className="flash err" id={sizeErrorId} role="alert">
-                that ADR is over {Math.round(ADR_MAX_BYTES / 1024)} KiB — trim it
-                first
-              </p>
-            )}
-            {error && (
-              <p className="flash err" id={errorId} role="alert">
-                {error}
-              </p>
-            )}
-            {busy && (
-              <p className="flash busy" role="status">
-                Splitting the ADR…
-              </p>
-            )}
-            {/* Cancel on the left, the primary action on the right. */}
+            {/* Cancel on the left, the primary action on the right. The
+                outcome messages ride in the row's reserved slot (same pattern
+                as Settings): mounted above it they resized the modal on every
+                action, and the label swaps hold floor widths for the same
+                reason. One message at a time — a running split, then the
+                size refusal (it blocks the button), then the last failure. */}
             <div className="actions">
               <button
                 type="button"
+                className="cancel-split"
                 onClick={busy ? cancelSplit : onClose}
               >
                 {busy ? 'Cancel split' : 'Cancel'}
               </button>
+              <span className="statusline">
+                {busy ? (
+                  <span className="flash busy" role="status">
+                    Splitting the ADR…
+                  </span>
+                ) : tooBig ? (
+                  <span className="flash err" id={sizeErrorId} role="alert">
+                    that ADR is over {Math.round(ADR_MAX_BYTES / 1024)} KiB —
+                    trim it first
+                  </span>
+                ) : error ? (
+                  <span
+                    key={error}
+                    className="flash err"
+                    id={errorId}
+                    role="alert"
+                    title={error}
+                  >
+                    {error}
+                  </span>
+                ) : null}
+              </span>
               <button
                 type="button"
-                className="save"
+                className="save propose"
                 onClick={() => void run()}
                 disabled={busy || adr.trim() === '' || tooBig}
               >

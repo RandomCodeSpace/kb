@@ -22,11 +22,35 @@ export interface SettingsModalProps {
   onSaved: (settings: AISettings) => void;
 }
 
-type Flash =
+export type Flash =
   | { kind: 'idle' }
   | { kind: 'busy' }
   | { kind: 'ok'; msg: string }
   | { kind: 'err'; msg: string };
+
+/** What the form's one status line shows; see formStatus. */
+export type FormStatus =
+  | { kind: 'idle' }
+  | { kind: 'busy'; msg: string }
+  | { kind: 'ok'; msg: string }
+  | { kind: 'err'; msg: string; source: 'save' | 'test' };
+
+/**
+ * The one message the form shows for its save and test outcomes. One slot
+ * with a reserved line instead of a paragraph per outcome, because paragraphs
+ * mounting and unmounting resized the modal on every action — which read as
+ * the screen flickering. Priority: a running test, then errors (a failed save
+ * stays visible over a later successful test — the save is still unsaved),
+ * then successes.
+ */
+export function formStatus(save: Flash, test: Flash): FormStatus {
+  if (test.kind === 'busy') return { kind: 'busy', msg: 'Testing the connection…' };
+  if (test.kind === 'err') return { kind: 'err', msg: test.msg, source: 'test' };
+  if (save.kind === 'err') return { kind: 'err', msg: save.msg, source: 'save' };
+  if (test.kind === 'ok') return { kind: 'ok', msg: `✓ ${test.msg}` };
+  if (save.kind === 'ok') return { kind: 'ok', msg: save.msg };
+  return { kind: 'idle' };
+}
 
 /**
  * What "Test connection" sends: the values in the form, so a key can be
@@ -95,16 +119,14 @@ export function SettingsModal({
   const onDialogKeyDown = useDialogFocus(boxRef);
   const errorId = useId();
   const busy = save.kind === 'busy' || test.kind === 'busy';
+  const status = formStatus(save, test);
   // Save and test failures are about the connection these three fields
-  // describe, so all three point at whichever messages are showing rather than
-  // leaving a keyboard user to find them by chance.
+  // describe, so all three point at the showing message rather than leaving a
+  // keyboard user to find it by chance.
   // A load failure is not in this list: it replaces the form rather than
   // annotating it, so no field is left to point at the message.
-  const errorIds: string[] = [];
-  if (save.kind === 'err') errorIds.push(`${errorId}-save`);
-  if (test.kind === 'err') errorIds.push(`${errorId}-test`);
-  const failed = errorIds.length > 0;
-  const describedBy = failed ? errorIds.join(' ') : undefined;
+  const failed = status.kind === 'err';
+  const describedBy = failed ? `${errorId}-status` : undefined;
   // The Escape handler is bound once, so it reads the save through a ref;
   // state captured in that closure would be the value at subscription time.
   const savingRef = useRef(false);
@@ -337,53 +359,61 @@ export function SettingsModal({
               checked before it is saved. Leave the key blank to test the saved
               one. A key typed here is used for that one request only.
             </p>
-            {test.kind === 'busy' && (
-              <p className="flash busy" role="status">
-                Testing the connection…
-              </p>
-            )}
-            {save.kind === 'ok' && (
-              <p className="flash ok" role="status">
-                {save.msg}
-              </p>
-            )}
-            {save.kind === 'err' && (
-              <p className="flash err" id={`${errorId}-save`} role="alert">
-                {save.msg}
-              </p>
-            )}
-            {test.kind === 'ok' && (
-              <p className="flash ok" role="status">
-                ✓ {test.msg}
-              </p>
-            )}
-            {test.kind === 'err' && (
-              <p className="flash err" id={`${errorId}-test`} role="alert">
-                {test.msg}
-              </p>
-            )}
             {/* Close and Test on the left, the primary action on the right.
                 Close is locked while a request is in flight, like the backdrop:
                 closing mid-save would discard the key being saved along with
                 any error the request is about to report. Last in the form so
-                the pinned row covers nothing. */}
+                the pinned row covers nothing.
+
+                The outcome message lives inside this row (see formStatus): the
+                row is pinned and its height is set by the buttons, so the
+                message is always in view and its coming and going can never
+                resize the modal — a paragraph above the row did both. */}
             <div className="actions">
               <button type="button" onClick={onClose} disabled={busy}>
                 Close
               </button>
               {test.kind === 'busy' ? (
-                <button type="button" onClick={cancelTest}>
+                <button type="button" className="test" onClick={cancelTest}>
                   Cancel test
                 </button>
               ) : (
                 <button
                   type="button"
+                  className="test"
                   onClick={() => void handleTest()}
                   disabled={!loaded || busy}
                 >
                   Test connection
                 </button>
               )}
+              {/* Keyed on kind+message: without it React mutates one span's
+                  role and text in place, and a role that appears by mutation
+                  is not reliably announced — a fresh node in the DOM is. The
+                  title carries the untruncated message (the line clamps at
+                  two rows so a long server error cannot grow the row). */}
+              <span className="statusline">
+                {status.kind === 'err' ? (
+                  <span
+                    key={`err:${status.msg}`}
+                    className="flash err"
+                    id={`${errorId}-status`}
+                    role="alert"
+                    title={status.msg}
+                  >
+                    {status.msg}
+                  </span>
+                ) : status.kind !== 'idle' ? (
+                  <span
+                    key={`${status.kind}:${status.msg}`}
+                    className={`flash ${status.kind}`}
+                    role="status"
+                    title={status.msg}
+                  >
+                    {status.msg}
+                  </span>
+                ) : null}
+              </span>
               <button type="submit" className="save" disabled={!loaded || busy}>
                 {save.kind === 'busy' ? 'Saving…' : 'Save'}
               </button>
