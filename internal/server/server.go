@@ -50,6 +50,7 @@ type server struct {
 	fileServer   http.Handler
 	store        *store.Store
 	aiClient     *http.Client // injectable for tests
+	forgeClient  *http.Client // injectable for tests
 	issuer       string
 	jwks         *jwksCache
 	authenticate func(*http.Request) (string, error)
@@ -98,6 +99,7 @@ func newServer(cfg Config, static fs.FS, st *store.Store) *server {
 		fileServer:   http.FileServerFS(static),
 		store:        st,
 		aiClient:     newAIClient(),
+		forgeClient:  newForgeClient(),
 		allowedHosts: parseAllowedHosts(cfg.AllowedHosts),
 	}
 	switch {
@@ -143,6 +145,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /api/ai/test", s.withAuth(s.handleAITest))
 	mux.HandleFunc("POST /api/ai/story", s.withAuth(s.handleAIStory))
 	mux.HandleFunc("POST /api/ai/stories", s.withAuth(s.handleAIStories))
+	mux.HandleFunc("GET /api/integrations", s.withAuth(s.handleGetIntegrations))
+	mux.HandleFunc("PUT /api/integrations/{name}", s.withAuth(s.handlePutIntegration))
+	mux.HandleFunc("DELETE /api/integrations/{name}", s.withAuth(s.handleDeleteIntegration))
+	mux.HandleFunc("POST /api/integrations/{name}/test", s.withAuth(s.handleTestIntegration))
 	mux.HandleFunc("/", s.handleStatic)
 	return withLogging(s.withAPIGuard(mux))
 }
