@@ -84,6 +84,23 @@ type importLinksRequest struct {
 	Items  []importLinksItem `json:"items"`
 }
 
+type importDriftRequest struct {
+	Source      string `json:"source"`
+	ExternalKey string `json:"external_key"`
+}
+
+type importDriftResponse struct {
+	State         string `json:"state"`
+	Link          string `json:"link"`
+	URL           string `json:"url"`
+	TitleChanged  *bool  `json:"title_changed,omitempty"`
+	UpstreamTitle string `json:"upstream_title"`
+	BaselineTitle string `json:"baseline_title"`
+	BaselineAt    string `json:"baseline_at"`
+	CheckedAt     string `json:"checked_at"`
+	Summary       string `json:"summary"`
+}
+
 type importLinksItem struct {
 	ExternalKey string `json:"external_key"`
 	Link        string `json:"link"`
@@ -951,6 +968,156 @@ func (s *server) handleImportLinks(w http.ResponseWriter, r *http.Request, user 
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleImportDrift compares one scoped imported issue with a fresh forge
+// read. It never writes to the forge and advances the baseline only when the
+// first check has no prior server-authoritative comparison point.
+func (s *server) handleImportDrift(w http.ResponseWriter, r *http.Request, user string) {
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var req importDriftRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	imported, err := s.store.ImportedAs(user, []string{req.ExternalKey})
+	if err != nil {
+		log.Print("forge: import drift provenance lookup failed")
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	provenance, found := imported[req.ExternalKey]
+	if !found {
+		http.Error(w, "import link not found", http.StatusNotFound)
+		return
+	}
+	if !strings.EqualFold(req.Source, provenance.Source) {
+		http.Error(w, "source does not match imported item", http.StatusBadRequest)
+		return
+	}
+
+	// Keep this authorization sequence in lockstep with handleImportPreview:
+	// list, parse, select, match, decrypt, verify, then assign the PAT.
+	sources, err := s.store.ForgeSources(user)
+	if err != nil {
+		log.Print("forge: import drift source lookup failed")
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	ref, err := parseForgeRef(sources, req.Source, provenance.URL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	selected, found := forgeSourceByName(sources, req.Source)
+	if !found {
+		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		return
+	}
+	if ref.Source.Name != selected.Name {
+		http.Error(w, "reference does not match selected source", http.StatusBadRequest)
+		return
+	}
+	if provenance.Kind != selected.Kind {
+		http.Error(w, "imported item kind does not match selected source", http.StatusBadRequest)
+		return
+	}
+	if ref.Issue <= 0 {
+		http.Error(w, "issue reference required", http.StatusBadRequest)
+		return
+	}
+	kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
+	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
+		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		return
+	}
+	ref.pat = pat
+
+	ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
+	defer cancel()
+	issue, err := s.fetchIssue(ctx, ref)
+	if err != nil {
+		writeAIError(w, user, "import drift", err)
+		return
+	}
+	checkedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	current := store.NewImportBaseline(issue.Title, issue.Body, checkedAt)
+
+	baseline, present, err := s.importDriftBaseline(user, req.ExternalKey, current)
+	if err != nil {
+		log.Print("forge: import drift baseline resolution failed")
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	response := importDriftResponse{
+		Link:          provenance.Link,
+		URL:           provenance.URL,
+		UpstreamTitle: issue.Title,
+		CheckedAt:     checkedAt,
+		Summary:       "",
+	}
+	if !present {
+		response.State = "baseline_recorded"
+		response.BaselineTitle = current.Title
+		response.BaselineAt = current.At
+		writeJSON(w, response)
+		return
+	}
+
+	titleChanged := current.Title != baseline.Title
+	response.TitleChanged = &titleChanged
+	response.BaselineTitle = baseline.Title
+	response.BaselineAt = baseline.At
+	if !titleChanged && current.Hash == baseline.Hash {
+		response.State = "unchanged"
+		writeJSON(w, response)
+		return
+	}
+	response.State = "drifted"
+	response.Summary = s.importDriftSummary(user, baseline, current)
+	writeJSON(w, response)
+}
+
+func (s *server) importDriftBaseline(user, externalKey string, current store.ImportBaseline) (store.ImportBaseline, bool, error) {
+	lock := s.importDriftLocks.get(user)
+	lock.Lock()
+	defer lock.Unlock()
+
+	baseline, present, err := s.store.ImportBaseline(user, externalKey)
+	if err != nil || present {
+		return baseline, present, err
+	}
+	if err := s.store.SetImportBaseline(user, externalKey, current); err != nil {
+		return store.ImportBaseline{}, false, err
+	}
+	return current, false, nil
+}
+
+func (s *server) importDriftSummary(user string, baseline, current store.ImportBaseline) string {
+	cfg, err := s.storedAIConfig(user)
+	if err != nil || strings.TrimSpace(cfg.baseURL) == "" {
+		return ""
+	}
+	prompt := fmt.Sprintf(
+		"Summarize the material change in plain text. Do not invent details.\n\nBaseline title:\n%s\nBaseline excerpt:\n%s\n\nCurrent title:\n%s\nCurrent excerpt:\n%s",
+		truncateImportText(baseline.Title, maxImportCommentBytes),
+		baseline.Excerpt,
+		truncateImportText(current.Title, maxImportCommentBytes),
+		current.Excerpt,
+	)
+	prompt = truncateImportText(prompt, maxImportPackBytes)
+	content, err := s.chat(user, cfg, []chatMessage{
+		{Role: "system", Content: "Summarize an imported issue change using only the supplied titles and excerpts."},
+		{Role: "user", Content: prompt},
+	}, 0, false)
+	if err != nil {
+		return ""
+	}
+	return truncateImportText(strings.TrimSpace(content), maxImportCommentBytes)
 }
 
 func (s *server) importDuplicates(scope string, issues []forgeIssue) ([]*importDuplicate, error) {

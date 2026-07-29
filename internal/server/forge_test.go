@@ -1519,6 +1519,307 @@ func TestImportLinksAreScopedByAuthenticatedUser(t *testing.T) {
 	}
 }
 
+type decodedImportDriftResponse struct {
+	State         string `json:"state"`
+	Link          string `json:"link"`
+	URL           string `json:"url"`
+	TitleChanged  *bool  `json:"title_changed"`
+	UpstreamTitle string `json:"upstream_title"`
+	BaselineTitle string `json:"baseline_title"`
+	BaselineAt    string `json:"baseline_at"`
+	CheckedAt     string `json:"checked_at"`
+	Summary       string `json:"summary"`
+}
+
+type importDriftIssueState struct {
+	Title string
+	Body  string
+}
+
+func postImportDrift(t *testing.T, h http.Handler, source, externalKey string, headers map[string]string) (*httptest.ResponseRecorder, decodedImportDriftResponse) {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"source": source, "external_key": externalKey})
+	if err != nil {
+		t.Fatalf("marshal drift request: %v", err)
+	}
+	w := doReq(t, h, http.MethodPost, "/api/import/drift", string(body), headers)
+	var response decodedImportDriftResponse
+	if w.Code == http.StatusOK {
+		decodeForgeJSON(t, w, &response)
+	}
+	return w, response
+}
+
+func seedImportDrift(t *testing.T, st *store.Store, scope, source, kind, baseURL, pat, externalKey, storedURL string) {
+	t.Helper()
+	if _, err := st.SetForgeSource(scope, source, kind, &baseURL, &pat); err != nil {
+		t.Fatalf("seed drift forge source: %v", err)
+	}
+	if err := st.RecordImportLinks(scope, []store.ImportLink{{
+		Source: source, Kind: kind, ExternalKey: externalKey,
+		Link: kind + "#42", URL: storedURL, Title: "Imported title",
+	}}); err != nil {
+		t.Fatalf("seed drift provenance: %v", err)
+	}
+}
+
+// Regression: the first check must establish one server-authoritative baseline,
+// later reads must compare against it, and drift reads must never advance it.
+func TestImportDriftBaselineLifecycleAndCorrectPAT(t *testing.T) {
+	const pat = "glpat-drift-secret"
+	var forgeCalls atomic.Int32
+	var badPAT atomic.Bool
+	var issueState atomic.Value
+	issueState.Store(importDriftIssueState{Title: "Initial title", Body: "Initial body"})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forgeCalls.Add(1)
+		if r.Header.Get("PRIVATE-TOKEN") != pat {
+			badPAT.Store(true)
+		}
+		if strings.HasSuffix(r.URL.Path, "/notes") {
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		issue := issueState.Load().(importDriftIssueState)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"iid": 42, "title": issue.Title, "description": issue.Body,
+			"web_url": "https://upstream-response.invalid/changed",
+		})
+	}))
+	defer upstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	h, st := newIntegrationsHandler(t)
+	key := "gitlab:local/group/project#42"
+	storedURL := upstream.URL + "/group/project/-/issues/42"
+	seedImportDrift(t, st, "default", "Primary", "gitlab", upstream.URL, pat, key, storedURL)
+
+	first, recorded := postImportDrift(t, h, "PRIMARY", key, nil)
+	if first.Code != http.StatusOK || recorded.State != "baseline_recorded" || recorded.TitleChanged != nil ||
+		recorded.Link != "gitlab#42" || recorded.URL != storedURL || recorded.UpstreamTitle != "Initial title" ||
+		recorded.BaselineTitle != "Initial title" || recorded.BaselineAt != recorded.CheckedAt || recorded.Summary != "" {
+		t.Fatalf("first drift response = %d %+v", first.Code, recorded)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, recorded.CheckedAt); err != nil {
+		t.Fatalf("checked_at %q is not RFC3339Nano: %v", recorded.CheckedAt, err)
+	}
+	baseline, found, err := st.ImportBaseline("default", key)
+	wantBaseline := store.NewImportBaseline("Initial title", "Initial body", recorded.CheckedAt)
+	if err != nil || !found || baseline != wantBaseline {
+		t.Fatalf("persisted first baseline = (%+v, %t, %v), want %+v", baseline, found, err, wantBaseline)
+	}
+
+	second, unchanged := postImportDrift(t, h, "primary", key, nil)
+	if second.Code != http.StatusOK || unchanged.State != "unchanged" || unchanged.TitleChanged == nil || *unchanged.TitleChanged ||
+		unchanged.BaselineTitle != "Initial title" || unchanged.BaselineAt != recorded.CheckedAt {
+		t.Fatalf("unchanged drift response = %d %+v", second.Code, unchanged)
+	}
+
+	issueState.Store(importDriftIssueState{Title: "Initial title", Body: "Changed body"})
+	third, bodyDrift := postImportDrift(t, h, "primary", key, nil)
+	if third.Code != http.StatusOK || bodyDrift.State != "drifted" || bodyDrift.TitleChanged == nil || *bodyDrift.TitleChanged {
+		t.Fatalf("body drift response = %d %+v", third.Code, bodyDrift)
+	}
+
+	issueState.Store(importDriftIssueState{Title: "Changed title", Body: "Changed body"})
+	fourth, titleDrift := postImportDrift(t, h, "primary", key, nil)
+	if fourth.Code != http.StatusOK || titleDrift.State != "drifted" || titleDrift.TitleChanged == nil || !*titleDrift.TitleChanged {
+		t.Fatalf("title drift response = %d %+v", fourth.Code, titleDrift)
+	}
+	fifth, repeated := postImportDrift(t, h, "primary", key, nil)
+	if fifth.Code != http.StatusOK || repeated.State != "drifted" || repeated.BaselineAt != recorded.CheckedAt {
+		t.Fatalf("repeated drift response = %d %+v", fifth.Code, repeated)
+	}
+	after, found, err := st.ImportBaseline("default", key)
+	if err != nil || !found || after != baseline {
+		t.Fatalf("baseline after repeated drift = (%+v, %t, %v), want unchanged %+v", after, found, err, baseline)
+	}
+	if forgeCalls.Load() != 10 {
+		t.Fatalf("forge requests = %d, want issue+notes for five checks", forgeCalls.Load())
+	}
+	if badPAT.Load() {
+		t.Fatal("forge request did not carry the configured PAT")
+	}
+}
+
+// Regression: an optional drift summary gets one bounded plain-text call and
+// must never disclose credentials or either forge URL to the model.
+func TestImportDriftAISummaryIsSingleBoundedSecretFreeCall(t *testing.T) {
+	const pat = "glpat-never-send"
+	body := "Current body"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/notes") {
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"iid": 42, "title": "Current title", "description": body,
+			"web_url": "https://upstream-response.invalid/secret-path",
+		})
+	}))
+	defer upstream.Close()
+	fakeAI := &fakeOpenAI{content: strings.Repeat("é", maxImportCommentBytes)}
+	aiUpstream := httptest.NewServer(fakeAI.handler())
+	defer aiUpstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, st := newIntegrationsHandler(t)
+	key := "gitlab:local/group/project#42"
+	storedURL := upstream.URL + "/group/project/-/issues/42"
+	seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, pat, key, storedURL)
+	if err := st.SetImportBaseline("default", key, store.NewImportBaseline("Old title", "Old body", "2026-07-29T10:00:00Z")); err != nil {
+		t.Fatalf("seed baseline: %v", err)
+	}
+	configureAI(t, h, aiUpstream.URL, "drift-model", "sk-ai-secret")
+
+	w, response := postImportDrift(t, h, "primary", key, nil)
+	if w.Code != http.StatusOK || response.State != "drifted" || fakeAI.calls != 1 {
+		t.Fatalf("AI drift response = %d %+v, calls=%d", w.Code, response, fakeAI.calls)
+	}
+	if len(response.Summary) != maxImportCommentBytes || !utf8.ValidString(response.Summary) {
+		t.Fatalf("summary length/UTF-8 = %d/%t, want %d/true",
+			len(response.Summary), utf8.ValidString(response.Summary), maxImportCommentBytes)
+	}
+	var request chatRequest
+	if err := json.Unmarshal(fakeAI.reqBody, &request); err != nil {
+		t.Fatalf("decode AI drift request: %v", err)
+	}
+	if request.ResponseFormat != nil {
+		t.Fatal("drift summary requested JSON mode instead of plain text")
+	}
+	for _, secret := range []string{pat, storedURL, "https://upstream-response.invalid/secret-path", "sk-ai-secret"} {
+		if strings.Contains(string(fakeAI.reqBody), secret) {
+			t.Fatalf("AI drift prompt disclosed forbidden value %q", secret)
+		}
+	}
+	if len(request.Messages) != 2 || len(request.Messages[1].Content) > maxImportPackBytes {
+		t.Fatalf("AI drift prompt messages/bytes = %d/%d, want 2/<=%d", len(request.Messages), len(request.Messages[1].Content), maxImportPackBytes)
+	}
+	for _, expected := range []string{"Old title", "Old body", "Current title", "Current body"} {
+		if !strings.Contains(request.Messages[1].Content, expected) {
+			t.Fatalf("AI drift prompt omitted comparison text %q", expected)
+		}
+	}
+}
+
+// Regression: AI is best-effort; failure or absent configuration cannot turn a
+// valid drift comparison into an error or trigger an unconfigured request.
+func TestImportDriftAIFailureDegradesAndUnconfiguredAICallsNothing(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		configure   bool
+		status      int
+		wantAICalls int
+	}{
+		{name: "upstream failure", configure: true, status: http.StatusInternalServerError, wantAICalls: 1},
+		{name: "unconfigured", wantAICalls: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/notes") {
+					_, _ = io.WriteString(w, `[]`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"iid":42,"title":"new","description":"new body"}`)
+			}))
+			defer upstream.Close()
+			fakeAI := &fakeOpenAI{status: test.status}
+			aiUpstream := httptest.NewServer(fakeAI.handler())
+			defer aiUpstream.Close()
+
+			t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+			t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+			h, st := newIntegrationsHandler(t)
+			key := "gitlab:local/group/project#42"
+			seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "", key, upstream.URL+"/group/project/-/issues/42")
+			if err := st.SetImportBaseline("default", key, store.NewImportBaseline("old", "old body", "2026-07-29T10:00:00Z")); err != nil {
+				t.Fatalf("seed baseline: %v", err)
+			}
+			if test.configure {
+				configureAI(t, h, aiUpstream.URL, "drift-model", "")
+			}
+
+			w, response := postImportDrift(t, h, "primary", key, nil)
+			if w.Code != http.StatusOK || response.State != "drifted" || response.Summary != "" || fakeAI.calls != test.wantAICalls {
+				t.Fatalf("best-effort AI response = %d %+v, calls=%d", w.Code, response, fakeAI.calls)
+			}
+		})
+	}
+}
+
+// Regression: provenance, source, and issue validation must complete before
+// credentials are assigned, so rejected checks make zero forge requests.
+func TestImportDriftRejectsInvalidOrUnauthorizedChecksWithoutEgress(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer upstream.Close()
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	h, st := newIntegrationsHandler(t)
+	seedImportDrift(t, st, "alice", "primary", "gitlab", upstream.URL, "secret", "alice-key", upstream.URL+"/group/project/-/issues/42")
+	seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "secret", "unconfigured-url", "https://unconfigured.invalid/group/project/-/issues/42")
+	if err := st.RecordImportLinks("default", []store.ImportLink{
+		{Source: "primary", Kind: "gitlab", ExternalKey: "project-only", Link: "gitlab", URL: upstream.URL + "/group/project", Title: "project"},
+		{Source: "different", Kind: "gitlab", ExternalKey: "source-mismatch", Link: "gitlab#42", URL: upstream.URL + "/group/project/-/issues/42", Title: "source"},
+		{Source: "primary", Kind: "github", ExternalKey: "kind-mismatch", Link: "github#42", URL: upstream.URL + "/group/project/-/issues/42", Title: "kind"},
+	}); err != nil {
+		t.Fatalf("seed rejected provenance: %v", err)
+	}
+
+	tests := []struct {
+		name, source, key string
+		headers           map[string]string
+		wantCode          int
+	}{
+		{name: "unknown key", source: "primary", key: "missing", wantCode: http.StatusNotFound},
+		{name: "Bob cannot read Alice", source: "primary", key: "alice-key", headers: map[string]string{"X-KB-User": "Bob"}, wantCode: http.StatusNotFound},
+		{name: "unconfigured stored URL", source: "primary", key: "unconfigured-url", wantCode: http.StatusBadRequest},
+		{name: "source mismatch", source: "primary", key: "source-mismatch", wantCode: http.StatusBadRequest},
+		{name: "kind mismatch", source: "primary", key: "kind-mismatch", wantCode: http.StatusBadRequest},
+		{name: "non-issue reference", source: "primary", key: "project-only", wantCode: http.StatusBadRequest},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			before := calls.Load()
+			w, _ := postImportDrift(t, h, test.source, test.key, test.headers)
+			if w.Code != test.wantCode || calls.Load() != before {
+				t.Fatalf("rejected drift = %d body=%q, forge calls %d -> %d", w.Code, w.Body.String(), before, calls.Load())
+			}
+		})
+	}
+}
+
+// Regression: forge failures are opaque while storage failures remain generic.
+func TestImportDriftFailuresAreOpaque(t *testing.T) {
+	t.Run("forge upstream", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "sensitive upstream detail", http.StatusInternalServerError)
+		}))
+		defer upstream.Close()
+		t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+		h, st := newIntegrationsHandler(t)
+		key := "gitlab:local/group/project#42"
+		seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "", key, upstream.URL+"/group/project/-/issues/42")
+		w, _ := postImportDrift(t, h, "primary", key, nil)
+		if w.Code != http.StatusBadGateway || strings.TrimSpace(w.Body.String()) != "connection failed" {
+			t.Fatalf("forge failure = %d %q, want opaque 502", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("store", func(t *testing.T) {
+		h, st := newIntegrationsHandler(t)
+		if err := st.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		w, _ := postImportDrift(t, h, "primary", "key", nil)
+		if w.Code != http.StatusInternalServerError || strings.TrimSpace(w.Body.String()) != "storage error" {
+			t.Fatalf("store failure = %d %q, want generic 500", w.Code, w.Body.String())
+		}
+	})
+}
+
 // Import references cannot select an unconfigured host, and a configured
 // private source still obeys the forge client's opaque SSRF guard.
 func TestImportPreviewRejectsUnconfiguredAndPrivateForgeHosts(t *testing.T) {

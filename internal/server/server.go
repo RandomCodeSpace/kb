@@ -61,6 +61,10 @@ type server struct {
 	// boardLocks serializes the read-compare-write of an If-Match board PUT
 	// so two in-flight PUTs cannot both pass the version check.
 	boardLocks boardLocks
+
+	// importDriftLocks serializes first-baseline creation per user so two
+	// simultaneous checks cannot both claim a different comparison anchor.
+	importDriftLocks boardLocks
 }
 
 // boardLocks hands out one mutex per board. Per-user rather than global so a
@@ -148,6 +152,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /api/ai/stories", s.withAuth(s.handleAIStories))
 	mux.HandleFunc("POST /api/import/preview", s.withAuth(s.handleImportPreview))
 	mux.HandleFunc("POST /api/import/links", s.withAuth(s.handleImportLinks))
+	mux.HandleFunc("POST /api/import/drift", s.withAuth(s.handleImportDrift))
 	mux.HandleFunc("GET /api/integrations", s.withAuth(s.handleGetIntegrations))
 	mux.HandleFunc("PUT /api/integrations/{name}", s.withAuth(s.handlePutIntegration))
 	mux.HandleFunc("DELETE /api/integrations/{name}", s.withAuth(s.handleDeleteIntegration))
