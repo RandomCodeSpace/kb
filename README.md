@@ -107,9 +107,10 @@ stored AI API keys and forge PATs (see [Integrations](#integrations) and
 | GET    | `/api/health`     | none | `200` JSON `{"ok":true}`                                              |
 | GET    | `/api/config`     | none | `200` JSON `{"azure_client_id","azure_tenant_id"}` (see Entra below)  |
 | GET    | `/api/board`      | yes  | `200` `text/markdown` (your board), `404` if none saved yet; both carry an `ETag` |
-| PUT    | `/api/board`      | yes  | Body is `text/markdown`; replaces your board; `204`, or `409` on a stale `If-Match` |
+| PUT    | `/api/board`      | yes  | Body is `text/markdown`; replaces your board; `204`, or `409` on a stale `If-Match`. Send `Accept: application/json` to get `200` with `{"task_ids":[…]}` instead (see below) |
 | GET    | `/api/labels`     | yes  | `200` JSON array of your labels, most recently used first             |
 | GET    | `/api/similar`    | yes  | Similar-card advisory for query text; cheap stubs only                |
+| POST   | `/api/tombstones` | yes  | Record why a card was killed: `{"task_id","reason"}`; responds `204`  |
 | GET    | `/api/settings`   | yes  | `200` JSON `{"ai_base_url","ai_model","has_key"}` (never the key)     |
 | PUT    | `/api/settings`   | yes  | JSON patch `{"ai_base_url","ai_model","ai_key"}`; responds `204`      |
 | GET    | `/api/integrations` | yes | List configured forge sources; returns `has_token`, never the PAT   |
@@ -117,6 +118,8 @@ stored AI API keys and forge PATs (see [Integrations](#integrations) and
 | POST   | `/api/integrations/{name}/test` | yes | Test source access; returns an opaque result               |
 | POST   | `/api/import/preview` | yes | Fetch and transform configured forge issues for review             |
 | POST   | `/api/import/links` | yes | Record selected cards' canonical import provenance                  |
+| POST   | `/api/import/drift` | yes | Compare one imported card against its upstream issue, on request    |
+| POST   | `/api/import/drift/accept` | yes | Advance that card's baseline after you review the change     |
 | POST   | `/api/ai/test`    | yes  | 1-token ping of the configured endpoint; `{"ok":true}` or error       |
 | POST   | `/api/ai/story`   | yes  | Prompt in, structured card draft out (see AI assist)                  |
 | POST   | `/api/ai/stories` | yes  | ADR or configured forge issue in, `{"stories":[…]}` out (see AI assist) |
@@ -140,6 +143,21 @@ writer; refetch, merge, and retry. The `404` from a board that does not exist
 yet carries the token too, so a first write is conditional as well. A `PUT`
 with no `If-Match` is unconditional and last-writer-wins, which will silently
 delete tasks another surface created — always send the token.
+
+**Write acknowledgement (opt-in).** By default `PUT /api/board` answers `204`
+with no body, and that is what the CLI and any wildcard `Accept: */*` client
+receives. A client that sends a literal `Accept: application/json` instead gets
+`200` and `{"task_ids":[…]}`: the server's canonical task id for every card, in
+the order the markdown serialized them. `Accept: application/json;q=0` opts back
+out. Both responses carry the same `ETag`, and a stale `If-Match` still answers
+`409` either way, so concurrency behaves identically on both paths.
+
+The board format has no place to carry an id, and the server mints one for any
+card it has not seen before. So a client that needs to talk about a specific
+card right after creating it — kb's own SPA does this when recording why a card
+was killed — otherwise has to guess which row it just wrote, and guesses wrongly
+when two cards share a title. This is the one way to learn those ids without
+putting them on the wire.
 
 ## The board format
 
