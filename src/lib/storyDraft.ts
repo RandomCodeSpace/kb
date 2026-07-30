@@ -2,6 +2,7 @@ import type { Effort, Prio } from './model';
 
 export interface StoryDraft {
   title: string;
+  emoji: string;
   desc: string;
   prio: Prio;
   due: string;
@@ -11,6 +12,7 @@ export interface StoryDraft {
 }
 
 const DUE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const EMOJI_RE = /^\p{Extended_Pictographic}(?:️)?/u;
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
 
 function oneLine(value: string): string {
@@ -48,6 +50,10 @@ export function coerceStoryDraft(body: unknown): StoryDraft {
     : [];
   return {
     title: typeof fields.title === 'string' ? oneLine(fields.title) : '',
+    emoji:
+      typeof fields.emoji === 'string'
+        ? (fields.emoji.trim().match(EMOJI_RE)?.[0] ?? '')
+        : '',
     desc: typeof fields.desc === 'string' ? multiLine(fields.desc) : '',
     prio,
     due,

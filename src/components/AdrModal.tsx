@@ -73,6 +73,7 @@ export function rowsToTasks(rows: readonly StoryRow[], status: Status): Task[] {
     .map((r) =>
       newTask({
         title: r.title.trim(),
+        emoji: r.draft.emoji,
         desc: r.draft.desc,
         status,
         prio: r.prio,

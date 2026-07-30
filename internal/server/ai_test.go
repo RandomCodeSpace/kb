@@ -132,7 +132,7 @@ func configureAI(t *testing.T, h http.Handler, baseURL, model, key string) {
 }
 
 func TestAIStoryHappyPath(t *testing.T) {
-	fake := &fakeOpenAI{content: `{"title":" Ship it ","desc":"Do the thing","prio":9,"due":"not-a-date","effort":"m","tags":["backend",42,""],"checks":[{"text":"step one","done":true},{"text":""},"junk"]}`}
+	fake := &fakeOpenAI{content: `{"title":" Ship it ","emoji":"🛠️","desc":"Do the thing","prio":9,"due":"not-a-date","effort":"m","tags":["backend",42,""],"checks":[{"text":"step one","done":true},{"text":""},"junk"]}`}
 	upstream := httptest.NewServer(fake.handler())
 	defer upstream.Close()
 
@@ -170,6 +170,7 @@ func TestAIStoryHappyPath(t *testing.T) {
 	}
 	want := storyDraft{
 		Title:  "Ship it",
+		Emoji:  "🛠️",
 		Desc:   "Do the thing",
 		Prio:   4,   // clamped from 9
 		Due:    "",  // invalid date dropped
@@ -179,6 +180,61 @@ func TestAIStoryHappyPath(t *testing.T) {
 	}
 	if !reflect.DeepEqual(draft, want) {
 		t.Errorf("draft = %+v, want %+v", draft, want)
+	}
+}
+
+// Decorative model output must never make an otherwise usable draft fail the
+// same field validation that protects every board write.
+func TestAIDraftEmojiIsNormalizedNotRejected(t *testing.T) {
+	tests := []struct {
+		name  string
+		emoji string
+		want  string
+	}{
+		{name: "multiple emoji keep the leading token", emoji: "🚀✨", want: "🚀"},
+		{name: "a shortcode is dropped", emoji: ":rocket:", want: ""},
+		{name: "one valid emoji passes through", emoji: "🧭", want: "🧭"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content, err := json.Marshal(map[string]any{
+				"stories": []any{map[string]any{
+					"title": "Ship the draft",
+					"emoji": tt.emoji,
+				}},
+			})
+			if err != nil {
+				t.Fatalf("marshal assistant reply: %v", err)
+			}
+			fake := &fakeOpenAI{content: string(content)}
+			upstream := httptest.NewServer(fake.handler())
+			defer upstream.Close()
+
+			t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+			h, _ := newTestServer(t, Config{})
+			configureAI(t, h, upstream.URL, "m", "")
+
+			w := doReq(t, h, "POST", "/api/ai/stories", `{"adr":"# Ship the draft"}`, nil)
+			if w.Code != http.StatusOK {
+				t.Fatalf("POST stories: got %d (body=%s)", w.Code, w.Body)
+			}
+			var response struct {
+				Stories []storyDraft `json:"stories"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatalf("stories JSON: %v (body=%s)", err, w.Body)
+			}
+			if len(response.Stories) != 1 {
+				t.Fatalf("got %d stories, want the usable draft to survive: %+v", len(response.Stories), response.Stories)
+			}
+			draft := response.Stories[0]
+			if draft.Emoji != tt.want {
+				t.Errorf("emoji = %q, want %q", draft.Emoji, tt.want)
+			}
+			if err := validateDraft(draft); err != nil {
+				t.Errorf("normalized draft was rejected: %v", err)
+			}
+		})
 	}
 }
 
