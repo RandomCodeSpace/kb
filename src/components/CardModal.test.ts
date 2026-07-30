@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { DriftResult, SimilarItem } from '../lib/api';
-import { driftMessage, killedChipText, taskImportLinks } from './CardModal';
+import {
+  driftMessage,
+  killedChipText,
+  similarKey,
+  taskImportLinks,
+  visibleSimilarItems,
+} from './CardModal';
 import type { Task } from '../lib/model';
 
 function killed(overrides: Partial<SimilarItem> = {}): SimilarItem {
@@ -99,5 +105,80 @@ describe('taskImportLinks', () => {
     } as Task;
 
     expect(taskImportLinks(task)).toEqual(['gitlab#42', 'github#7']);
+  });
+});
+
+// Index-based React keys reused the wrong row after a removal, especially when
+// distinct cards shared the same title.
+describe('similarKey', () => {
+  it('prefers a card id over a link and a title', () => {
+    expect(
+      similarKey({
+        id: 'card-1',
+        link: 'gitlab#1',
+        title: 'Duplicate',
+        via: 'card',
+      }),
+    ).toBe('id:card-1');
+  });
+
+  it('uses a link before falling back to the title', () => {
+    expect(
+      similarKey({
+        link: 'gitlab#1',
+        title: 'Imported duplicate',
+        via: 'import',
+      }),
+    ).toBe('link:gitlab#1');
+    expect(
+      similarKey({ title: 'Rejected duplicate', via: 'killed' }),
+    ).toBe('title:Rejected duplicate');
+  });
+
+  it('keeps equal-title cards distinct when their ids differ', () => {
+    const first: SimilarItem = {
+      id: 'card-1',
+      title: 'Duplicate',
+      via: 'card',
+    };
+    const second: SimilarItem = {
+      id: 'card-2',
+      title: 'Duplicate',
+      via: 'card',
+    };
+
+    expect(similarKey(first)).not.toBe(similarKey(second));
+  });
+});
+
+// Per-row dismissal must neither hide surviving candidates nor leak into a
+// later result set whose keys happen to repeat.
+describe('visibleSimilarItems', () => {
+  const items: SimilarItem[] = [
+    { id: 'card-1', title: 'First', via: 'card' },
+    { id: 'card-2', title: 'Second', via: 'card' },
+    { link: 'gitlab#3', title: 'Third', via: 'import' },
+  ];
+
+  it('removes one key while leaving the other rows visible', () => {
+    expect(
+      visibleSimilarItems(items, new Set([similarKey(items[1]!)])),
+    ).toEqual([items[0], items[2]]);
+  });
+
+  it('returns an empty list after every row is removed', () => {
+    expect(
+      visibleSimilarItems(items, new Set(items.map(similarKey))),
+    ).toEqual([]);
+  });
+
+  it('shows a fresh result set after stale removal keys are reset', () => {
+    const fresh: SimilarItem[] = [
+      { id: 'card-1', title: 'First result for another query', via: 'card' },
+    ];
+    const stale = new Set([similarKey(fresh[0]!)]);
+
+    expect(visibleSimilarItems(fresh, stale)).toEqual([]);
+    expect(visibleSimilarItems(fresh, new Set())).toEqual(fresh);
   });
 });
