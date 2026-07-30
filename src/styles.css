@@ -173,6 +173,13 @@ body {
   background: transparent;
   border: 0;
 }
+/* Chromium paints a scroll thumb over the rounded scroller's border at each
+   end of its travel. Insetting only column tracks by the 18px inner radius
+   keeps that native paint inside the curve without changing content's scroll
+   range. */
+.col::-webkit-scrollbar-track {
+  margin-block: 18px;
+}
 ::-webkit-scrollbar-thumb {
   background-color: var(--dim);
   /* A pill, like every other soft shape in kb. The transparent border insets
