@@ -18,6 +18,12 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
 func closeForgeResponse(t *testing.T, response *http.Response) {
 	t.Helper()
 	if _, err := io.Copy(io.Discard, response.Body); err != nil {
@@ -1376,6 +1382,12 @@ func TestImportLinksRecordsCanonicalProvenanceAndUpserts(t *testing.T) {
 		t.Fatalf("first import = %+v, want %+v", got, want)
 	}
 
+	// Re-recording provenance is still import journaling, not implicit drift
+	// acceptance. Only the revision-bound accept endpoint advances this value.
+	baseline := store.NewImportBaseline("Compared title", "Compared body", "2026-07-29T10:00:00Z")
+	if err := st.SetImportBaseline("default", key, baseline); err != nil {
+		t.Fatalf("seed import baseline: %v", err)
+	}
 	post(`{"source":"gitlab.main","items":[{"external_key":"gitlab:forge.example/group/project#42","link":"gitlab#42-refreshed","url":"https://forge.example/group/project/-/issues/42?refresh=1","title":"Refreshed import title"}]}`)
 	want.Link = "gitlab#42-refreshed"
 	want.URL = "https://forge.example/group/project/-/issues/42?refresh=1"
@@ -1383,6 +1395,10 @@ func TestImportLinksRecordsCanonicalProvenanceAndUpserts(t *testing.T) {
 	got, err = st.ImportedAs("default", []string{key})
 	if err != nil || len(got) != 1 || got[key] != want {
 		t.Fatalf("upsert import = %+v, %v; want %+v", got, err, want)
+	}
+	after, found, err := st.ImportBaseline("default", key)
+	if err != nil || !found || after != baseline {
+		t.Fatalf("baseline after provenance upsert = (%+v, %t, %v), want unchanged %+v", after, found, err, baseline)
 	}
 }
 
@@ -1517,6 +1533,613 @@ func TestImportLinksAreScopedByAuthenticatedUser(t *testing.T) {
 	if found, err := st.ImportedAs("alice", []string{"blocked"}); err != nil || len(found) != 0 {
 		t.Fatalf("Bob-only source wrote Alice provenance: %+v, %v", found, err)
 	}
+}
+
+// Regression: provenance lookup must keep every exact scoped candidate, even
+// when different projects share the short forge link, without making egress.
+func TestImportProvenanceReturnsAllScopedCandidatesWithoutEgress(t *testing.T) {
+	st := newTestStore(t)
+	s := newServer(Config{}, testStatic, st)
+	var egress atomic.Int32
+	denyEgress := roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		egress.Add(1)
+		return nil, errors.New("unexpected egress")
+	})
+	s.forgeClient = &http.Client{Transport: denyEgress}
+	s.aiClient = &http.Client{Transport: denyEgress}
+	h := s.handler()
+
+	const sharedLink = "gitlab#42"
+	if err := st.RecordImportLinks("alice", []store.ImportLink{
+		{Source: "primary", Kind: "gitlab", ExternalKey: "gitlab:gitlab.example/acme/zeta#42", Link: sharedLink, URL: "https://gitlab.example/acme/zeta/-/issues/42", Title: "Zeta issue"},
+		{Source: "primary", Kind: "gitlab", ExternalKey: "gitlab:gitlab.example/acme/alpha#42", Link: sharedLink, URL: "https://gitlab.example/acme/alpha/-/issues/42", Title: "Alpha issue"},
+		{Source: "primary", Kind: "gitlab", ExternalKey: "gitlab:gitlab.example/acme/only-alice#99", Link: "gitlab#99", URL: "https://gitlab.example/acme/only-alice/-/issues/99", Title: "Alice only"},
+	}); err != nil {
+		t.Fatalf("seed Alice provenance: %v", err)
+	}
+	if err := st.RecordImportLinks("bob", []store.ImportLink{{
+		Source: "other", Kind: "gitlab", ExternalKey: "gitlab:gitlab.example/other/project#42", Link: sharedLink, URL: "https://gitlab.example/other/project/-/issues/42", Title: "Bob issue",
+	}}); err != nil {
+		t.Fatalf("seed Bob provenance: %v", err)
+	}
+
+	w := doReq(t, h, http.MethodPost, "/api/import/provenance", `{"link":" gitlab#42 "}`, map[string]string{"X-KB-User": "Alice"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("Alice provenance lookup = %d body=%q, want 200", w.Code, w.Body.String())
+	}
+	var response importProvenanceResponse
+	decodeForgeJSON(t, w, &response)
+	want := []importProvenanceItem{
+		{Source: "primary", ExternalKey: "gitlab:gitlab.example/acme/alpha#42", Title: "Alpha issue", URL: "https://gitlab.example/acme/alpha/-/issues/42"},
+		{Source: "primary", ExternalKey: "gitlab:gitlab.example/acme/zeta#42", Title: "Zeta issue", URL: "https://gitlab.example/acme/zeta/-/issues/42"},
+	}
+	if len(response.Items) != len(want) {
+		t.Fatalf("Alice provenance items = %+v, want %+v", response.Items, want)
+	}
+	for i := range want {
+		if response.Items[i] != want[i] {
+			t.Fatalf("Alice provenance item %d = %+v, want %+v", i, response.Items[i], want[i])
+		}
+	}
+	var raw struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw provenance response: %v", err)
+	}
+	for _, item := range raw.Items {
+		if len(item) != 4 || item["source"] == nil || item["external_key"] == nil || item["title"] == nil || item["url"] == nil ||
+			item["link"] != nil || item["kind"] != nil || item["pat"] != nil {
+			t.Fatalf("provenance item exposed non-public fields: %+v", item)
+		}
+	}
+	if egress.Load() != 0 {
+		t.Fatalf("provenance lookup made %d egress requests, want 0", egress.Load())
+	}
+
+	bob := doReq(t, h, http.MethodPost, "/api/import/provenance", `{"link":"gitlab#99"}`, map[string]string{"X-KB-User": "Bob"})
+	if bob.Code != http.StatusNotFound || egress.Load() != 0 {
+		t.Fatalf("Bob cross-scope lookup = %d body=%q egress=%d, want 404 and 0", bob.Code, bob.Body.String(), egress.Load())
+	}
+}
+
+// Regression: malformed or absent links must fail before a scoped store lookup.
+func TestImportProvenanceRejectsMalformedOrMissingLinks(t *testing.T) {
+	h, _ := newIntegrationsHandler(t)
+	for _, test := range []struct {
+		name, body string
+	}{
+		{name: "malformed JSON", body: `{"link":`},
+		{name: "missing link", body: `{}`},
+		{name: "blank link", body: `{"link":"   "}`},
+		{name: "too long", body: fmt.Sprintf(`{"link":%q}`, strings.Repeat("x", 2049))},
+		{name: "line feed", body: `{"link":"gitlab#42\n"}`},
+		{name: "carriage return", body: `{"link":"gitlab#42\r"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			w := doReq(t, h, http.MethodPost, "/api/import/provenance", test.body, nil)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("POST import provenance = %d body=%q, want 400", w.Code, w.Body.String())
+			}
+		})
+	}
+
+	missing := doReq(t, h, http.MethodPost, "/api/import/provenance", `{"link":"gitlab#404"}`, nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing import provenance = %d body=%q, want 404", missing.Code, missing.Body.String())
+	}
+}
+
+// Regression: failed local provenance reads disclose neither store detail nor
+// an alternate lookup result.
+func TestImportProvenanceStorageFailuresStayGeneric(t *testing.T) {
+	h, st := newIntegrationsHandler(t)
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	w := doReq(t, h, http.MethodPost, "/api/import/provenance", `{"link":"gitlab#42"}`, nil)
+	if w.Code != http.StatusInternalServerError || strings.TrimSpace(w.Body.String()) != "storage error" {
+		t.Fatalf("closed-store provenance = %d body=%q, want generic 500", w.Code, w.Body.String())
+	}
+}
+
+type decodedImportDriftResponse struct {
+	State         string `json:"state"`
+	Link          string `json:"link"`
+	URL           string `json:"url"`
+	TitleChanged  *bool  `json:"title_changed"`
+	UpstreamTitle string `json:"upstream_title"`
+	BaselineTitle string `json:"baseline_title"`
+	BaselineAt    string `json:"baseline_at"`
+	CheckedAt     string `json:"checked_at"`
+	Summary       string `json:"summary"`
+	Revision      string `json:"revision"`
+}
+
+type decodedImportDriftAcceptResponse struct {
+	BaselineAt string `json:"baseline_at"`
+}
+
+type importDriftIssueState struct {
+	Title string
+	Body  string
+}
+
+func postImportDrift(t *testing.T, h http.Handler, source, externalKey string, headers map[string]string) (*httptest.ResponseRecorder, decodedImportDriftResponse) {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"source": source, "external_key": externalKey})
+	if err != nil {
+		t.Fatalf("marshal drift request: %v", err)
+	}
+	w := doReq(t, h, http.MethodPost, "/api/import/drift", string(body), headers)
+	var response decodedImportDriftResponse
+	if w.Code == http.StatusOK {
+		decodeForgeJSON(t, w, &response)
+	}
+	return w, response
+}
+
+func postImportDriftAccept(t *testing.T, h http.Handler, source, externalKey, revision string, headers map[string]string) (*httptest.ResponseRecorder, decodedImportDriftAcceptResponse) {
+	t.Helper()
+	body, err := json.Marshal(importDriftAcceptRequest{Source: source, ExternalKey: externalKey, Revision: revision})
+	if err != nil {
+		t.Fatalf("marshal drift accept request: %v", err)
+	}
+	w := doReq(t, h, http.MethodPost, "/api/import/drift/accept", string(body), headers)
+	var response decodedImportDriftAcceptResponse
+	if w.Code == http.StatusOK {
+		decodeForgeJSON(t, w, &response)
+	}
+	return w, response
+}
+
+func seedImportDrift(t *testing.T, st *store.Store, scope, source, kind, baseURL, pat, externalKey, storedURL string) {
+	t.Helper()
+	if _, err := st.SetForgeSource(scope, source, kind, &baseURL, &pat); err != nil {
+		t.Fatalf("seed drift forge source: %v", err)
+	}
+	if err := st.RecordImportLinks(scope, []store.ImportLink{{
+		Source: source, Kind: kind, ExternalKey: externalKey,
+		Link: kind + "#42", URL: storedURL, Title: "Imported title",
+	}}); err != nil {
+		t.Fatalf("seed drift provenance: %v", err)
+	}
+}
+
+// Regression: the first check must establish one server-authoritative baseline,
+// later reads must compare against it, and drift reads must never advance it.
+func TestImportDriftBaselineLifecycleAndCorrectPAT(t *testing.T) {
+	const pat = "glpat-drift-secret"
+	var forgeCalls atomic.Int32
+	var badPAT atomic.Bool
+	var issueState atomic.Value
+	issueState.Store(importDriftIssueState{Title: "Initial title", Body: "Initial body"})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forgeCalls.Add(1)
+		if r.Header.Get("PRIVATE-TOKEN") != pat {
+			badPAT.Store(true)
+		}
+		if strings.HasSuffix(r.URL.Path, "/notes") {
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		issue := issueState.Load().(importDriftIssueState)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"iid": 42, "title": issue.Title, "description": issue.Body,
+			"web_url": "https://upstream-response.invalid/changed",
+		})
+	}))
+	defer upstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	h, st := newIntegrationsHandler(t)
+	key := "gitlab:local/group/project#42"
+	storedURL := upstream.URL + "/group/project/-/issues/42"
+	seedImportDrift(t, st, "default", "Primary", "gitlab", upstream.URL, pat, key, storedURL)
+
+	first, recorded := postImportDrift(t, h, "PRIMARY", key, nil)
+	if first.Code != http.StatusOK || recorded.State != "baseline_recorded" || recorded.TitleChanged != nil ||
+		recorded.Link != "gitlab#42" || recorded.URL != storedURL || recorded.UpstreamTitle != "Initial title" ||
+		recorded.BaselineTitle != "Initial title" || recorded.BaselineAt != recorded.CheckedAt || recorded.Summary != "" {
+		t.Fatalf("first drift response = %d %+v", first.Code, recorded)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, recorded.CheckedAt); err != nil {
+		t.Fatalf("checked_at %q is not RFC3339Nano: %v", recorded.CheckedAt, err)
+	}
+	baseline, found, err := st.ImportBaseline("default", key)
+	wantBaseline := store.NewImportBaseline("Initial title", "Initial body", recorded.CheckedAt)
+	if err != nil || !found || baseline != wantBaseline {
+		t.Fatalf("persisted first baseline = (%+v, %t, %v), want %+v", baseline, found, err, wantBaseline)
+	}
+
+	second, unchanged := postImportDrift(t, h, "primary", key, nil)
+	if second.Code != http.StatusOK || unchanged.State != "unchanged" || unchanged.TitleChanged == nil || *unchanged.TitleChanged ||
+		unchanged.BaselineTitle != "Initial title" || unchanged.BaselineAt != recorded.CheckedAt {
+		t.Fatalf("unchanged drift response = %d %+v", second.Code, unchanged)
+	}
+
+	issueState.Store(importDriftIssueState{Title: "Initial title", Body: "Changed body"})
+	third, bodyDrift := postImportDrift(t, h, "primary", key, nil)
+	if third.Code != http.StatusOK || bodyDrift.State != "drifted" || bodyDrift.TitleChanged == nil || *bodyDrift.TitleChanged {
+		t.Fatalf("body drift response = %d %+v", third.Code, bodyDrift)
+	}
+
+	issueState.Store(importDriftIssueState{Title: "Changed title", Body: "Changed body"})
+	fourth, titleDrift := postImportDrift(t, h, "primary", key, nil)
+	if fourth.Code != http.StatusOK || titleDrift.State != "drifted" || titleDrift.TitleChanged == nil || !*titleDrift.TitleChanged {
+		t.Fatalf("title drift response = %d %+v", fourth.Code, titleDrift)
+	}
+	fifth, repeated := postImportDrift(t, h, "primary", key, nil)
+	if fifth.Code != http.StatusOK || repeated.State != "drifted" || repeated.BaselineAt != recorded.CheckedAt {
+		t.Fatalf("repeated drift response = %d %+v", fifth.Code, repeated)
+	}
+	after, found, err := st.ImportBaseline("default", key)
+	if err != nil || !found || after != baseline {
+		t.Fatalf("baseline after repeated drift = (%+v, %t, %v), want unchanged %+v", after, found, err, baseline)
+	}
+	if forgeCalls.Load() != 10 {
+		t.Fatalf("forge requests = %d, want issue+notes for five checks", forgeCalls.Load())
+	}
+	if badPAT.Load() {
+		t.Fatal("forge request did not carry the configured PAT")
+	}
+}
+
+// Regression: only a drifted response exposes the server-issued revision; it
+// binds both title and full body and supports a single-read, idempotent accept.
+func TestImportDriftRevisionAndAccept(t *testing.T) {
+	const pat = "glpat-accept-secret"
+	var forgeCalls atomic.Int32
+	var issueState atomic.Value
+	issueState.Store(importDriftIssueState{Title: "Initial title", Body: "Initial body"})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("forge method = %s, want GET", r.Method)
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		forgeCalls.Add(1)
+		if strings.HasSuffix(r.URL.Path, "/notes") {
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		issue := issueState.Load().(importDriftIssueState)
+		_ = json.NewEncoder(w).Encode(map[string]any{"iid": 42, "title": issue.Title, "description": issue.Body})
+	}))
+	defer upstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	st := newTestStore(t)
+	s := newServer(Config{}, testStatic, st)
+	t.Cleanup(s.forgeClient.CloseIdleConnections)
+	var aiCalls atomic.Int32
+	s.aiClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		aiCalls.Add(1)
+		return nil, errors.New("unexpected AI request")
+	})}
+	h := s.handler()
+	key := "gitlab:local/group/project#42"
+	seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, pat, key, upstream.URL+"/group/project/-/issues/42")
+
+	first, recorded := postImportDrift(t, h, "primary", key, nil)
+	if first.Code != http.StatusOK || recorded.State != "baseline_recorded" || recorded.Revision != "" || strings.Contains(first.Body.String(), `"revision"`) {
+		t.Fatalf("baseline response = %d %+v body=%q, want no revision", first.Code, recorded, first.Body.String())
+	}
+	issueState.Store(importDriftIssueState{Title: "Initial title", Body: "Changed body"})
+	second, bodyDrift := postImportDrift(t, h, "primary", key, nil)
+	if second.Code != http.StatusOK || bodyDrift.State != "drifted" || !validImportDriftRevision(bodyDrift.Revision) {
+		t.Fatalf("body drift response = %d %+v", second.Code, bodyDrift)
+	}
+	issueState.Store(importDriftIssueState{Title: "Changed title", Body: "Changed body"})
+	third, titleDrift := postImportDrift(t, h, "primary", key, nil)
+	if third.Code != http.StatusOK || titleDrift.State != "drifted" || !validImportDriftRevision(titleDrift.Revision) || titleDrift.Revision == bodyDrift.Revision {
+		t.Fatalf("title drift response = %d %+v, body revision=%q", third.Code, titleDrift, bodyDrift.Revision)
+	}
+
+	beforeStale := forgeCalls.Load()
+	stale, _ := postImportDriftAccept(t, h, "primary", key, bodyDrift.Revision, nil)
+	if stale.Code != http.StatusConflict || forgeCalls.Load() != beforeStale+1 {
+		t.Fatalf("stale accept = %d body=%q forge=%d->%d, want 409 and one snapshot GET", stale.Code, stale.Body.String(), beforeStale, forgeCalls.Load())
+	}
+	baseline, found, err := st.ImportBaseline("default", key)
+	if err != nil || !found || baseline.Title != "Initial title" || baseline.Hash != store.NewImportBaseline("Initial title", "Initial body", "").Hash {
+		t.Fatalf("baseline after stale accept = (%+v, %t, %v), want initial", baseline, found, err)
+	}
+
+	accepted, advanced := postImportDriftAccept(t, h, "primary", key, titleDrift.Revision, nil)
+	if accepted.Code != http.StatusOK || advanced.BaselineAt == "" {
+		t.Fatalf("matching accept = %d %+v body=%q", accepted.Code, advanced, accepted.Body.String())
+	}
+	afterAccept, found, err := st.ImportBaseline("default", key)
+	if err != nil || !found || afterAccept.At != advanced.BaselineAt || importDriftRevision(afterAccept) != titleDrift.Revision {
+		t.Fatalf("accepted baseline = (%+v, %t, %v), want revision=%q at=%q", afterAccept, found, err, titleDrift.Revision, advanced.BaselineAt)
+	}
+	next, unchanged := postImportDrift(t, h, "primary", key, nil)
+	if next.Code != http.StatusOK || unchanged.State != "unchanged" || unchanged.Revision != "" || strings.Contains(next.Body.String(), `"revision"`) {
+		t.Fatalf("next drift response = %d %+v body=%q, want unchanged without revision", next.Code, unchanged, next.Body.String())
+	}
+	beforeRetry := forgeCalls.Load()
+	retry, retried := postImportDriftAccept(t, h, "primary", key, titleDrift.Revision, nil)
+	if retry.Code != http.StatusOK || retried.BaselineAt != advanced.BaselineAt || forgeCalls.Load() != beforeRetry {
+		t.Fatalf("retry accept = %d %+v forge=%d->%d, want idempotent no egress", retry.Code, retried, beforeRetry, forgeCalls.Load())
+	}
+	if aiCalls.Load() != 0 {
+		t.Fatalf("drift accept made %d AI calls, want 0", aiCalls.Load())
+	}
+}
+
+// Regression: rejected accepts fail before forge egress where possible and
+// cannot move another user's or a mismatched target's baseline.
+func TestImportDriftAcceptRejectsInvalidTargetsAndPreservesBaseline(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("forge method = %s, want GET", r.Method)
+		}
+		calls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"iid": 42, "title": "Current", "description": "Current body"})
+	}))
+	defer upstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	h, st := newIntegrationsHandler(t)
+	const key = "gitlab:local/group/project#42"
+	seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "secret", key, upstream.URL+"/group/project/-/issues/42")
+	old := store.NewImportBaseline("Old", "Old body", "2026-07-29T10:00:00Z")
+	if err := st.SetImportBaseline("default", key, old); err != nil {
+		t.Fatalf("seed baseline: %v", err)
+	}
+	seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "secret", "no-baseline", upstream.URL+"/group/project/-/issues/42")
+	seedImportDrift(t, st, "alice", "primary", "gitlab", upstream.URL, "secret", "alice-key", upstream.URL+"/group/project/-/issues/42")
+	if err := st.RecordImportLinks("default", []store.ImportLink{
+		{Source: "primary", Kind: "github", ExternalKey: "kind-mismatch", Link: "github#42", URL: upstream.URL + "/group/project/-/issues/42", Title: "wrong kind"},
+		{Source: "primary", Kind: "gitlab", ExternalKey: "host-mismatch", Link: "gitlab#42", URL: "https://unconfigured.invalid/group/project/-/issues/42", Title: "wrong host"},
+	}); err != nil {
+		t.Fatalf("seed rejected accept provenance: %v", err)
+	}
+
+	validButStale := importDriftRevision(store.NewImportBaseline("Different", "body", ""))
+	tests := []struct {
+		name, source, externalKey, revision string
+		headers                             map[string]string
+		wantCode                            int
+		wantEgress                          bool
+	}{
+		{name: "tampered revision", source: "primary", externalKey: key, revision: strings.ToUpper(validButStale), wantCode: http.StatusBadRequest},
+		{name: "malformed revision", source: "primary", externalKey: key, revision: "short", wantCode: http.StatusBadRequest},
+		{name: "cross scope", source: "primary", externalKey: "alice-key", revision: validButStale, wantCode: http.StatusNotFound},
+		{name: "source mismatch", source: "other", externalKey: key, revision: validButStale, wantCode: http.StatusBadRequest},
+		{name: "kind mismatch", source: "primary", externalKey: "kind-mismatch", revision: validButStale, wantCode: http.StatusBadRequest},
+		{name: "host mismatch", source: "primary", externalKey: "host-mismatch", revision: validButStale, wantCode: http.StatusBadRequest},
+		{name: "absent baseline", source: "primary", externalKey: "no-baseline", revision: validButStale, wantCode: http.StatusConflict},
+		{name: "stale revision", source: "primary", externalKey: key, revision: validButStale, wantCode: http.StatusConflict, wantEgress: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			before := calls.Load()
+			w, _ := postImportDriftAccept(t, h, test.source, test.externalKey, test.revision, test.headers)
+			gotEgress := calls.Load() != before
+			if w.Code != test.wantCode || gotEgress != test.wantEgress {
+				t.Fatalf("rejected accept = %d body=%q egress=%t, want %d/%t", w.Code, w.Body.String(), gotEgress, test.wantCode, test.wantEgress)
+			}
+		})
+	}
+	after, found, err := st.ImportBaseline("default", key)
+	if err != nil || !found || after != old {
+		t.Fatalf("baseline after rejected accepts = (%+v, %t, %v), want %+v", after, found, err, old)
+	}
+}
+
+// Regression: acceptance maps forge and store failures to the same opaque,
+// generic errors as the drift read; neither path may expose implementation
+// details in a client response.
+func TestImportDriftAcceptFailuresStayOpaque(t *testing.T) {
+	t.Run("forge upstream", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "sensitive upstream detail", http.StatusInternalServerError)
+		}))
+		defer upstream.Close()
+		t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+		h, st := newIntegrationsHandler(t)
+		key := "gitlab:local/group/project#42"
+		seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "", key, upstream.URL+"/group/project/-/issues/42")
+		if err := st.SetImportBaseline("default", key, store.NewImportBaseline("Old", "Old", "2026-07-29T10:00:00Z")); err != nil {
+			t.Fatalf("seed baseline: %v", err)
+		}
+		w, _ := postImportDriftAccept(t, h, "primary", key, importDriftRevision(store.NewImportBaseline("Current", "Current", "")), nil)
+		if w.Code != http.StatusBadGateway || strings.TrimSpace(w.Body.String()) != "connection failed" {
+			t.Fatalf("forge accept failure = %d %q, want opaque 502", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("store", func(t *testing.T) {
+		h, st := newIntegrationsHandler(t)
+		if err := st.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		w, _ := postImportDriftAccept(t, h, "primary", "key", strings.Repeat("a", 64), nil)
+		if w.Code != http.StatusInternalServerError || strings.TrimSpace(w.Body.String()) != "storage error" {
+			t.Fatalf("store accept failure = %d %q, want generic 500", w.Code, w.Body.String())
+		}
+	})
+}
+
+// Regression: an optional drift summary gets one bounded plain-text call and
+// must never disclose credentials or either forge URL to the model.
+func TestImportDriftAISummaryIsSingleBoundedSecretFreeCall(t *testing.T) {
+	const pat = "glpat-never-send"
+	body := "Current body"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/notes") {
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"iid": 42, "title": "Current title", "description": body,
+			"web_url": "https://upstream-response.invalid/secret-path",
+		})
+	}))
+	defer upstream.Close()
+	fakeAI := &fakeOpenAI{content: strings.Repeat("é", maxImportCommentBytes)}
+	aiUpstream := httptest.NewServer(fakeAI.handler())
+	defer aiUpstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, st := newIntegrationsHandler(t)
+	key := "gitlab:local/group/project#42"
+	storedURL := upstream.URL + "/group/project/-/issues/42"
+	seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, pat, key, storedURL)
+	if err := st.SetImportBaseline("default", key, store.NewImportBaseline("Old title", "Old body", "2026-07-29T10:00:00Z")); err != nil {
+		t.Fatalf("seed baseline: %v", err)
+	}
+	configureAI(t, h, aiUpstream.URL, "drift-model", "sk-ai-secret")
+
+	w, response := postImportDrift(t, h, "primary", key, nil)
+	if w.Code != http.StatusOK || response.State != "drifted" || fakeAI.calls != 1 {
+		t.Fatalf("AI drift response = %d %+v, calls=%d", w.Code, response, fakeAI.calls)
+	}
+	if len(response.Summary) != maxImportCommentBytes || !utf8.ValidString(response.Summary) {
+		t.Fatalf("summary length/UTF-8 = %d/%t, want %d/true",
+			len(response.Summary), utf8.ValidString(response.Summary), maxImportCommentBytes)
+	}
+	var request chatRequest
+	if err := json.Unmarshal(fakeAI.reqBody, &request); err != nil {
+		t.Fatalf("decode AI drift request: %v", err)
+	}
+	if request.ResponseFormat != nil {
+		t.Fatal("drift summary requested JSON mode instead of plain text")
+	}
+	for _, secret := range []string{pat, storedURL, "https://upstream-response.invalid/secret-path", "sk-ai-secret"} {
+		if strings.Contains(string(fakeAI.reqBody), secret) {
+			t.Fatalf("AI drift prompt disclosed forbidden value %q", secret)
+		}
+	}
+	if len(request.Messages) != 2 || len(request.Messages[1].Content) > maxImportPackBytes {
+		t.Fatalf("AI drift prompt messages/bytes = %d/%d, want 2/<=%d", len(request.Messages), len(request.Messages[1].Content), maxImportPackBytes)
+	}
+	for _, expected := range []string{"Old title", "Old body", "Current title", "Current body"} {
+		if !strings.Contains(request.Messages[1].Content, expected) {
+			t.Fatalf("AI drift prompt omitted comparison text %q", expected)
+		}
+	}
+}
+
+// Regression: AI is best-effort; failure or absent configuration cannot turn a
+// valid drift comparison into an error or trigger an unconfigured request.
+func TestImportDriftAIFailureDegradesAndUnconfiguredAICallsNothing(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		configure   bool
+		status      int
+		wantAICalls int
+	}{
+		{name: "upstream failure", configure: true, status: http.StatusInternalServerError, wantAICalls: 1},
+		{name: "unconfigured", wantAICalls: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/notes") {
+					_, _ = io.WriteString(w, `[]`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"iid":42,"title":"new","description":"new body"}`)
+			}))
+			defer upstream.Close()
+			fakeAI := &fakeOpenAI{status: test.status}
+			aiUpstream := httptest.NewServer(fakeAI.handler())
+			defer aiUpstream.Close()
+
+			t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+			t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+			h, st := newIntegrationsHandler(t)
+			key := "gitlab:local/group/project#42"
+			seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "", key, upstream.URL+"/group/project/-/issues/42")
+			if err := st.SetImportBaseline("default", key, store.NewImportBaseline("old", "old body", "2026-07-29T10:00:00Z")); err != nil {
+				t.Fatalf("seed baseline: %v", err)
+			}
+			if test.configure {
+				configureAI(t, h, aiUpstream.URL, "drift-model", "")
+			}
+
+			w, response := postImportDrift(t, h, "primary", key, nil)
+			if w.Code != http.StatusOK || response.State != "drifted" || response.Summary != "" || fakeAI.calls != test.wantAICalls {
+				t.Fatalf("best-effort AI response = %d %+v, calls=%d", w.Code, response, fakeAI.calls)
+			}
+		})
+	}
+}
+
+// Regression: provenance, source, and issue validation must complete before
+// credentials are assigned, so rejected checks make zero forge requests.
+func TestImportDriftRejectsInvalidOrUnauthorizedChecksWithoutEgress(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer upstream.Close()
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	h, st := newIntegrationsHandler(t)
+	seedImportDrift(t, st, "alice", "primary", "gitlab", upstream.URL, "secret", "alice-key", upstream.URL+"/group/project/-/issues/42")
+	seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "secret", "unconfigured-url", "https://unconfigured.invalid/group/project/-/issues/42")
+	if err := st.RecordImportLinks("default", []store.ImportLink{
+		{Source: "primary", Kind: "gitlab", ExternalKey: "project-only", Link: "gitlab", URL: upstream.URL + "/group/project", Title: "project"},
+		{Source: "different", Kind: "gitlab", ExternalKey: "source-mismatch", Link: "gitlab#42", URL: upstream.URL + "/group/project/-/issues/42", Title: "source"},
+		{Source: "primary", Kind: "github", ExternalKey: "kind-mismatch", Link: "github#42", URL: upstream.URL + "/group/project/-/issues/42", Title: "kind"},
+	}); err != nil {
+		t.Fatalf("seed rejected provenance: %v", err)
+	}
+
+	tests := []struct {
+		name, source, key string
+		headers           map[string]string
+		wantCode          int
+	}{
+		{name: "unknown key", source: "primary", key: "missing", wantCode: http.StatusNotFound},
+		{name: "Bob cannot read Alice", source: "primary", key: "alice-key", headers: map[string]string{"X-KB-User": "Bob"}, wantCode: http.StatusNotFound},
+		{name: "unconfigured stored URL", source: "primary", key: "unconfigured-url", wantCode: http.StatusBadRequest},
+		{name: "source mismatch", source: "primary", key: "source-mismatch", wantCode: http.StatusBadRequest},
+		{name: "kind mismatch", source: "primary", key: "kind-mismatch", wantCode: http.StatusBadRequest},
+		{name: "non-issue reference", source: "primary", key: "project-only", wantCode: http.StatusBadRequest},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			before := calls.Load()
+			w, _ := postImportDrift(t, h, test.source, test.key, test.headers)
+			if w.Code != test.wantCode || calls.Load() != before {
+				t.Fatalf("rejected drift = %d body=%q, forge calls %d -> %d", w.Code, w.Body.String(), before, calls.Load())
+			}
+		})
+	}
+}
+
+// Regression: forge failures are opaque while storage failures remain generic.
+func TestImportDriftFailuresAreOpaque(t *testing.T) {
+	t.Run("forge upstream", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "sensitive upstream detail", http.StatusInternalServerError)
+		}))
+		defer upstream.Close()
+		t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+		h, st := newIntegrationsHandler(t)
+		key := "gitlab:local/group/project#42"
+		seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "", key, upstream.URL+"/group/project/-/issues/42")
+		w, _ := postImportDrift(t, h, "primary", key, nil)
+		if w.Code != http.StatusBadGateway || strings.TrimSpace(w.Body.String()) != "connection failed" {
+			t.Fatalf("forge failure = %d %q, want opaque 502", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("store", func(t *testing.T) {
+		h, st := newIntegrationsHandler(t)
+		if err := st.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		w, _ := postImportDrift(t, h, "primary", "key", nil)
+		if w.Code != http.StatusInternalServerError || strings.TrimSpace(w.Body.String()) != "storage error" {
+			t.Fatalf("store failure = %d %q, want generic 500", w.Code, w.Body.String())
+		}
+	})
 }
 
 // Import references cannot select an unconfigured host, and a configured

@@ -34,9 +34,12 @@ import {
   getLabels,
   getSettings,
   importPreview,
+  killReasonRequest,
   recordImportLinks,
+  recordTombstone,
 } from './lib/api';
 import { boardLabels, unionLabels } from './lib/labels';
+import { acknowledgedTombstones } from './lib/graveyard';
 import { burst } from './lib/confetti';
 import { AdrModal } from './components/AdrModal';
 import {
@@ -126,8 +129,14 @@ interface ConfirmState {
   body?: string;
   confirmLabel?: string;
   destructive?: boolean;
+  inputLabel?: string;
+  inputPlaceholder?: string;
+  inputMaxLength?: number;
+  inputRequired?: boolean;
+  secondaryLabel?: string;
+  onSecondary?: () => void;
   /** Omitted for an acknowledgement: the dialog then only closes. */
-  onConfirm?: () => void;
+  onConfirm?: (inputValue: string) => void;
 }
 
 /** "3 tasks", "1 task" — the import confirmation names what it would replace. */
@@ -187,6 +196,24 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const boardRef = useRef(board);
   boardRef.current = board;
+  // Browser task ids never cross the markdown wire. Reasons wait here until
+  // the cancelling PUT acknowledges the corresponding SQLite task id.
+  const pendingTombstonesRef = useRef(new Map<string, string>());
+  const drainTombstones = useCallback(
+    (pushed: Board, taskIDs: ReadonlyMap<string, string>) => {
+      for (const ready of acknowledgedTombstones(
+        pendingTombstonesRef.current,
+        pushed,
+        taskIDs,
+      )) {
+        // Best-effort means one POST attempt per acknowledged decision. Remove
+        // it first so a later unrelated board save cannot duplicate the call.
+        pendingTombstonesRef.current.delete(ready.clientTaskId);
+        void recordTombstone(identity, ready.serverTaskId, ready.reason);
+      }
+    },
+    [identity],
+  );
   // Whether the user has work in progress a board refresh would discard.
   const openWorkRef = useRef(false);
   openWorkRef.current = modal !== null || ship !== null;
@@ -266,11 +293,12 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
         (err) => {
           if (!cancelled) onSaveError(err);
         },
-        (pushed) => {
+        (pushed, taskIDs) => {
           // Only an ack for the newest edit may clear the dirty flag.
           const fresh = editGenRef.current === gen;
           if (fresh) setDirty(ns, false);
           if (cancelled) return;
+          drainTombstones(pushed, taskIDs);
           // A 409 merge wrote a different board than we sent — that is now
           // the server's state, so it becomes ours. Unconditionally: the
           // merged-in tasks must survive a newer edit too, or the next save
@@ -310,7 +338,15 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
     return () => {
       cancelled = true;
     };
-  }, [identity, remote, ns, onSaveError, adopt, carryMerged]);
+  }, [
+    identity,
+    remote,
+    ns,
+    onSaveError,
+    adopt,
+    carryMerged,
+    drainTombstones,
+  ]);
 
   useEffect(() => {
     store.save(board);
@@ -319,20 +355,35 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
     const gen = editGenRef.current;
     setDirty(ns, true);
     if (!syncOnRef.current) return;
-    remote.saveRemoteDebounced(identity, board, onSaveError, (pushed) => {
-      // After a 409 merge the board that reached the server carries tasks we
-      // have never seen; take them or the next save deletes them again. This
-      // happens even when the ack is stale, because RemoteStore has already
-      // committed to the merged version — the next PUT would carry a matching
-      // If-Match and drop those tasks with no conflict and no error.
-      carryMerged(board, pushed);
-      // A stale ack (a newer edit exists) must not clear the dirty flag the
-      // newer edit depends on for crash/offline safety.
-      if (editGenRef.current !== gen) return;
-      setDirty(ns, false);
-      setSync('ok');
-    });
-  }, [board, store, remote, identity, ns, onSaveError, carryMerged]);
+    remote.saveRemoteDebounced(
+      identity,
+      board,
+      onSaveError,
+      (pushed, taskIDs) => {
+        drainTombstones(pushed, taskIDs);
+        // After a 409 merge the board that reached the server carries tasks we
+        // have never seen; take them or the next save deletes them again. This
+        // happens even when the ack is stale, because RemoteStore has already
+        // committed to the merged version — the next PUT would carry a matching
+        // If-Match and drop those tasks with no conflict and no error.
+        carryMerged(board, pushed);
+        // A stale ack (a newer edit exists) must not clear the dirty flag the
+        // newer edit depends on for crash/offline safety.
+        if (editGenRef.current !== gen) return;
+        setDirty(ns, false);
+        setSync('ok');
+      },
+    );
+  }, [
+    board,
+    store,
+    remote,
+    identity,
+    ns,
+    onSaveError,
+    carryMerged,
+    drainTombstones,
+  ]);
 
   useEffect(() => {
     // Server-only extras: label suggestions and AI settings. Failures degrade
@@ -368,6 +419,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
     window.addEventListener('pagehide', flush);
     return () => {
       window.removeEventListener('pagehide', flush);
+      pendingTombstonesRef.current.clear();
       remote.cancel();
     };
   }, [remote]);
@@ -550,14 +602,45 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
    */
   const handleDelete = useCallback(
     (taskId: string) => {
-      applyMove(taskId, 'cancelled');
-      setModal(null);
+      const kill = () => {
+        applyMove(taskId, 'cancelled');
+        setModal(null);
+      };
+      setConfirm({
+        title: 'Why reject this card?',
+        body: 'The card moves to Cancelled. A short reason helps future similar-work checks.',
+        confirmLabel: 'Kill with reason',
+        destructive: true,
+        inputLabel: 'Reason',
+        inputPlaceholder: 'e.g. superseded by the SSO work',
+        // 500 UTF-16 code units stay below the server's 2000-byte ceiling,
+        // including the three-byte replacement for an unpaired surrogate.
+        inputMaxLength: 500,
+        inputRequired: true,
+        secondaryLabel: 'Kill without a reason',
+        onSecondary: kill,
+        onConfirm: (reason) => {
+          // Move first: the board stays responsive and starts its PUT before
+          // the deliberately best-effort graveyard annotation is queued.
+          kill();
+          const request = killReasonRequest(taskId, reason);
+          if (request) {
+            pendingTombstonesRef.current.set(
+              request.taskId,
+              request.reason,
+            );
+          }
+        },
+      });
     },
     [applyMove],
   );
 
   const handleRestore = useCallback(
-    (taskId: string) => applyMove(taskId, 'todo'),
+    (taskId: string) => {
+      pendingTombstonesRef.current.delete(taskId);
+      applyMove(taskId, 'todo');
+    },
     [applyMove],
   );
 
@@ -569,6 +652,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
       confirmLabel: 'Delete permanently',
       destructive: true,
       onConfirm: () => {
+        pendingTombstonesRef.current.delete(taskId);
         setBoard((b) => ({ ...b, tasks: b.tasks.filter((t) => t.id !== taskId) }));
         setModal(null);
       },
@@ -869,6 +953,12 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
           body={confirm.body}
           confirmLabel={confirm.confirmLabel}
           destructive={confirm.destructive}
+          inputLabel={confirm.inputLabel}
+          inputPlaceholder={confirm.inputPlaceholder}
+          inputMaxLength={confirm.inputMaxLength}
+          inputRequired={confirm.inputRequired}
+          secondaryLabel={confirm.secondaryLabel}
+          onSecondary={confirm.onSecondary}
           onConfirm={confirm.onConfirm}
           onClose={() => setConfirm(null)}
         />

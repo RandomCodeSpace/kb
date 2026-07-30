@@ -186,6 +186,7 @@ func TestTokenMode(t *testing.T) {
 	for _, tc := range []struct{ method, path, body string }{
 		{"GET", "/api/labels", ""},
 		{"GET", "/api/similar?q=needle", ""},
+		{"POST", "/api/tombstones", `{"task_id":"x","reason":"why"}`},
 		{"GET", "/api/settings", ""},
 		{"PUT", "/api/settings", `{"ai_model":"m"}`},
 		{"POST", "/api/ai/test", ""},
@@ -268,6 +269,157 @@ func TestSimilarEndpoint(t *testing.T) {
 		}
 		if w = doReq(t, h, "GET", "/api/similar?q=three", "", nil); w.Code != http.StatusInternalServerError {
 			t.Fatalf("closed store similar = %d, want 500", w.Code)
+		}
+	})
+}
+
+func tombstoneBody(t *testing.T, taskID, reason string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"task_id": taskID, "reason": reason})
+	if err != nil {
+		t.Fatalf("marshal tombstone body: %v", err)
+	}
+	return string(body)
+}
+
+// TestTombstoneEndpoint keeps recording advisory and scoped while preserving
+// the ordinary similarity response shape for cards without a reason.
+func TestTombstoneEndpoint(t *testing.T) {
+	t.Run("records and surfaces a killed reason without changing live items", func(t *testing.T) {
+		h, st := newTestServer(t, Config{})
+		killed, err := st.AddTask("default", board.Task{
+			Title:  "Advisory marker rejected",
+			Status: board.StatusCancelled,
+		})
+		if err != nil {
+			t.Fatalf("AddTask killed: %v", err)
+		}
+		live, err := st.AddTask("default", board.Task{
+			Title:  "Advisory marker active",
+			Status: board.StatusTodo,
+		})
+		if err != nil {
+			t.Fatalf("AddTask live: %v", err)
+		}
+		const reason = "Superseded by the SSO work"
+		w := doReq(t, h, "POST", "/api/tombstones", tombstoneBody(t, killed.ID, reason), nil)
+		if w.Code != http.StatusNoContent || w.Body.Len() != 0 {
+			t.Fatalf("POST tombstone = %d %q, want 204 with no body", w.Code, w.Body)
+		}
+		recorded, found, err := st.Tombstone("default", killed.ID)
+		if err != nil || !found || recorded.Reason != reason || recorded.KilledAt == "" {
+			t.Fatalf("stored Tombstone = %+v, %t, %v", recorded, found, err)
+		}
+
+		w = doReq(t, h, "GET", "/api/similar?q=advisory+marker", "", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET similar = %d %q", w.Code, w.Body)
+		}
+		var response struct {
+			Items []map[string]any `json:"items"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode similar response: %v", err)
+		}
+		var killedItem, liveItem map[string]any
+		for _, item := range response.Items {
+			switch item["id"] {
+			case killed.ID:
+				killedItem = item
+			case live.ID:
+				liveItem = item
+			}
+		}
+		if killedItem == nil || liveItem == nil {
+			t.Fatalf("similar items = %+v, want killed %q and live %q", response.Items, killed.ID, live.ID)
+		}
+		if killedItem["via"] != "killed" ||
+			killedItem["reason"] != reason ||
+			killedItem["killed_at"] != recorded.KilledAt {
+			t.Errorf("killed similar item = %+v", killedItem)
+		}
+		if _, ok := liveItem["reason"]; ok {
+			t.Errorf("live similar item includes reason: %+v", liveItem)
+		}
+		if _, ok := liveItem["killed_at"]; ok {
+			t.Errorf("live similar item includes killed_at: %+v", liveItem)
+		}
+	})
+
+	t.Run("rejects missing empty oversized and multiline fields", func(t *testing.T) {
+		h, _ := newTestServer(t, Config{})
+		tests := []struct {
+			name string
+			body string
+		}{
+			{name: "missing task id", body: `{"reason":"why"}`},
+			{name: "empty reason", body: tombstoneBody(t, "task", "")},
+			{name: "oversized reason", body: tombstoneBody(t, "task", strings.Repeat("x", 2001))},
+			{name: "line feed", body: tombstoneBody(t, "task", "first\nsecond")},
+			{name: "carriage return", body: tombstoneBody(t, "task", "first\rsecond")},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				w := doReq(t, h, "POST", "/api/tombstones", test.body, nil)
+				if w.Code != http.StatusBadRequest {
+					t.Fatalf("POST tombstone = %d %q, want 400", w.Code, w.Body)
+				}
+			})
+		}
+	})
+
+	t.Run("accepts an unknown task id as a harmless best-effort request", func(t *testing.T) {
+		h, _ := newTestServer(t, Config{})
+		// A stale client may still post an unknown ID. Accept it so annotation
+		// failure cannot block the kill; the scoped orphan sweep drops it. The
+		// SPA waits for the board PUT's canonical-ID acknowledgement instead.
+		w := doReq(t, h, "POST", "/api/tombstones", tombstoneBody(t, "not-saved-yet", "A race-safe reason"), nil)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("POST unknown tombstone = %d %q, want 204", w.Code, w.Body)
+		}
+	})
+
+	t.Run("keeps a posted reason inside the authenticated scope", func(t *testing.T) {
+		h, st := newTestServer(t, Config{})
+		const title = "Scoped advisory sentinel"
+		alice, err := st.AddTask("alice", board.Task{Title: title, Status: board.StatusCancelled})
+		if err != nil {
+			t.Fatalf("AddTask alice: %v", err)
+		}
+		bob, err := st.AddTask("bob", board.Task{Title: title, Status: board.StatusCancelled})
+		if err != nil {
+			t.Fatalf("AddTask bob: %v", err)
+		}
+		const bobReason = "Rejected only for bob"
+		bobHeaders := map[string]string{"X-KB-User": "Bob"}
+		w := doReq(t, h, "POST", "/api/tombstones", tombstoneBody(t, bob.ID, bobReason), bobHeaders)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("POST bob tombstone = %d %q", w.Code, w.Body)
+		}
+
+		aliceHeaders := map[string]string{"X-KB-User": "Alice"}
+		w = doReq(t, h, "GET", "/api/similar?q=scoped+advisory+sentinel", "", aliceHeaders)
+		var aliceResponse similarResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &aliceResponse); err != nil {
+			t.Fatalf("decode alice similar response: %v", err)
+		}
+		if len(aliceResponse.Items) != 1 ||
+			aliceResponse.Items[0].ID != alice.ID ||
+			aliceResponse.Items[0].Reason != "" ||
+			aliceResponse.Items[0].KilledAt != "" {
+			t.Fatalf("alice similar response = %+v", aliceResponse)
+		}
+
+		w = doReq(t, h, "GET", "/api/similar?q=scoped+advisory+sentinel", "", bobHeaders)
+		var bobResponse similarResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &bobResponse); err != nil {
+			t.Fatalf("decode bob similar response: %v", err)
+		}
+		if len(bobResponse.Items) != 1 ||
+			bobResponse.Items[0].ID != bob.ID ||
+			bobResponse.Items[0].Reason != bobReason ||
+			bobResponse.Items[0].Via != "killed" {
+			t.Fatalf("bob similar response = %+v", bobResponse)
 		}
 	})
 }

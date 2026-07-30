@@ -110,6 +110,27 @@ CREATE TRIGGER import_links_fts_ad AFTER DELETE ON import_links BEGIN
 END;
 INSERT INTO tasks_fts(id, scope, title, body, tags)
   SELECT id, user, title, "desc", tags FROM tasks;
+	`,
+	// v4: decision-graveyard reasons and lazy import-drift baselines. Tombstones
+	// deliberately have no FTS mirror, triggers, or index because searches use
+	// the card title already in tasks_fts and only join a reason onto that hit.
+	// The scoped task ID key follows ReplaceBoard's stable identity for matched
+	// cards; a retitle instead leaves a harmless orphan for the bounded sweep.
+	// There is deliberately no tasks foreign key because ReplaceBoard deletes
+	// and reinserts its rows, which would otherwise cascade a reason away.
+	// Empty baseline defaults preserve existing imports as "not recorded yet".
+	`
+CREATE TABLE tombstones (
+  scope     TEXT NOT NULL,
+  task_id   TEXT NOT NULL,
+  reason    TEXT NOT NULL,
+  killed_at TEXT NOT NULL,
+  PRIMARY KEY (scope, task_id)
+);
+ALTER TABLE import_links ADD COLUMN baseline_title TEXT NOT NULL DEFAULT '';
+ALTER TABLE import_links ADD COLUMN baseline_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE import_links ADD COLUMN baseline_excerpt TEXT NOT NULL DEFAULT '';
+ALTER TABLE import_links ADD COLUMN baseline_at TEXT NOT NULL DEFAULT '';
 `,
 }
 

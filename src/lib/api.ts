@@ -147,6 +147,34 @@ export interface RecordImportLinksRequest {
   items: ImportLinkItem[];
 }
 
+export type DriftState = 'baseline_recorded' | 'unchanged' | 'drifted';
+
+export interface DriftResult {
+  state: DriftState;
+  link: string;
+  url: string;
+  title_changed?: boolean;
+  upstream_title: string;
+  baseline_title: string;
+  baseline_at: string;
+  checked_at: string;
+  summary: string;
+  revision?: string;
+}
+
+export interface AcceptDriftResult {
+  baseline_at: string;
+}
+
+export class DriftConflictError extends Error {}
+
+export interface ImportProvenance {
+  source: string;
+  external_key: string;
+  title: string;
+  url: string;
+}
+
 /** Short error text from a failed response body, never echoing secrets. */
 async function errText(res: Response, fallback: string): Promise<string> {
   try {
@@ -451,19 +479,229 @@ export async function recordImportLinks(
   }
 }
 
+function driftText(
+  fields: Record<string, unknown>,
+  name: string,
+  allowEmpty = false,
+): string {
+  const value = fields[name];
+  if (typeof value !== 'string' || (!allowEmpty && value.trim() === '')) {
+    throw new Error('invalid drift response');
+  }
+  return value;
+}
+
+/**
+ * Keep a malformed response from claiming that a comparison or baseline write
+ * happened. Explicit drift checks fail visibly instead of guessing at state.
+ */
+export function coerceDriftResult(body: unknown): DriftResult {
+  if (typeof body !== 'object' || body === null) {
+    throw new Error('invalid drift response');
+  }
+  const fields = body as Record<string, unknown>;
+  const state =
+    fields.state === 'baseline_recorded' ||
+    fields.state === 'unchanged' ||
+    fields.state === 'drifted'
+      ? fields.state
+      : null;
+  if (state === null) throw new Error('invalid drift response');
+
+  const baselineAt = driftText(fields, 'baseline_at');
+  const checkedAt = driftText(fields, 'checked_at');
+  if (
+    Number.isNaN(Date.parse(baselineAt)) ||
+    Number.isNaN(Date.parse(checkedAt))
+  ) {
+    throw new Error('invalid drift response');
+  }
+
+  const result: DriftResult = {
+    state,
+    link: driftText(fields, 'link'),
+    url: driftText(fields, 'url'),
+    upstream_title: driftText(fields, 'upstream_title', true),
+    baseline_title: driftText(fields, 'baseline_title', true),
+    baseline_at: baselineAt,
+    checked_at: checkedAt,
+    summary: driftText(fields, 'summary', true),
+  };
+  if (state !== 'baseline_recorded') {
+    if (typeof fields.title_changed !== 'boolean') {
+      throw new Error('invalid drift response');
+    }
+    result.title_changed = fields.title_changed;
+  }
+  if (state === 'drifted') {
+    if (
+      typeof fields.revision !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(fields.revision)
+    ) {
+      throw new Error('invalid drift response');
+    }
+    result.revision = fields.revision;
+  }
+  return result;
+}
+
+function coerceImportProvenance(value: unknown): ImportProvenance | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const fields = value as Record<string, unknown>;
+  const source = importText(fields.source);
+  const externalKey = importText(fields.external_key);
+  const url = importText(fields.url);
+  if (source === undefined || externalKey === undefined || url === undefined) {
+    return null;
+  }
+  return {
+    source,
+    external_key: externalKey,
+    title: typeof fields.title === 'string' ? fields.title : '',
+    url,
+  };
+}
+
+export function coerceImportProvenanceItems(
+  body: unknown,
+): ImportProvenance[] {
+  if (typeof body !== 'object' || body === null) {
+    throw new Error('invalid import provenance response');
+  }
+  const items = (body as Record<string, unknown>).items;
+  if (!Array.isArray(items)) {
+    throw new Error('invalid import provenance response');
+  }
+  const coerced = items.map(coerceImportProvenance);
+  if (coerced.some((item) => item === null)) {
+    throw new Error('invalid import provenance response');
+  }
+  return coerced as ImportProvenance[];
+}
+
+export async function getImportProvenance(
+  identity: Identity,
+  link: string,
+  signal: AbortSignal,
+): Promise<ImportProvenance[]> {
+  const res = await authedFetch(identity, '/api/import/provenance', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ link }),
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(
+      await errText(res, `import provenance lookup failed: ${res.status}`),
+    );
+  }
+  return coerceImportProvenanceItems(await res.json());
+}
+
+export async function checkDrift(
+  identity: Identity,
+  source: string,
+  externalKey: string,
+  signal: AbortSignal,
+): Promise<DriftResult> {
+  const res = await authedFetch(identity, '/api/import/drift', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source, external_key: externalKey }),
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(await errText(res, `drift check failed: ${res.status}`));
+  }
+  return coerceDriftResult(await res.json());
+}
+
+export async function acceptDrift(
+  identity: Identity,
+  source: string,
+  externalKey: string,
+  revision: string,
+  signal: AbortSignal,
+): Promise<AcceptDriftResult> {
+  const res = await authedFetch(identity, '/api/import/drift/accept', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source, external_key: externalKey, revision }),
+    signal,
+  });
+  if (!res.ok) {
+    const message = await errText(
+      res,
+      `drift acceptance failed: ${res.status}`,
+    );
+    if (res.status === 409) throw new DriftConflictError(message);
+    throw new Error(message);
+  }
+  const body: unknown = await res.json();
+  const fields = (
+    typeof body === 'object' && body !== null ? body : {}
+  ) as Record<string, unknown>;
+  const baselineAt =
+    typeof fields.baseline_at === 'string' ? fields.baseline_at : '';
+  if (baselineAt === '' || Number.isNaN(Date.parse(baselineAt))) {
+    throw new Error('invalid drift acceptance response');
+  }
+  return { baseline_at: baselineAt };
+}
+
+/**
+ * Keep reason capture testable without mounting a dialog. The endpoint uses
+ * snake_case, but the UI carries the task id in its usual client-side shape.
+ */
+export function killReasonRequest(
+  taskId: string,
+  reason: string,
+): { taskId: string; reason: string } | null {
+  const trimmed = reason.trim();
+  return trimmed === '' ? null : { taskId, reason: trimmed };
+}
+
+/**
+ * Journal why a card was killed. This is deliberately best-effort: the board
+ * move has already happened, so losing its annotation must never undo it.
+ */
+export async function recordTombstone(
+  identity: Identity,
+  taskId: string,
+  reason: string,
+): Promise<void> {
+  try {
+    const res = await authedFetch(identity, '/api/tombstones', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId, reason }),
+    });
+    if (!res.ok) return;
+  } catch {
+    // The card is already cancelled; the graveyard annotation is secondary.
+  }
+}
+
 export interface SimilarItem {
   id?: string;
   title: string;
   status?: string;
-  via: 'card' | 'import';
+  via: 'card' | 'import' | 'killed';
   link?: string;
+  reason?: string;
+  killedAt?: string;
 }
 
 function coerceSimilarItem(item: unknown): SimilarItem | null {
   if (typeof item !== 'object' || item === null) return null;
   const fields = item as Record<string, unknown>;
   const title = typeof fields.title === 'string' ? fields.title.trim() : '';
-  const via = fields.via === 'card' || fields.via === 'import' ? fields.via : null;
+  const via =
+    fields.via === 'card' ||
+    fields.via === 'import' ||
+    fields.via === 'killed'
+      ? fields.via
+      : null;
   if (title === '' || via === null) return null;
   return {
     ...(typeof fields.id === 'string' ? { id: fields.id } : {}),
@@ -471,6 +709,10 @@ function coerceSimilarItem(item: unknown): SimilarItem | null {
     ...(typeof fields.status === 'string' ? { status: fields.status } : {}),
     via,
     ...(typeof fields.link === 'string' ? { link: fields.link } : {}),
+    ...(typeof fields.reason === 'string' ? { reason: fields.reason } : {}),
+    ...(typeof fields.killed_at === 'string'
+      ? { killedAt: fields.killed_at }
+      : {}),
   };
 }
 

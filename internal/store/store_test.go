@@ -156,6 +156,43 @@ func TestReplaceBoardPreservesIdentity(t *testing.T) {
 	}
 }
 
+func TestReplaceBoardWithTaskIDsReturnsCommittedRequestOrder(t *testing.T) {
+	s := newStore(t)
+	in := board.Board{Title: "B", Tasks: []board.Task{
+		{Title: "Duplicate", Desc: "first", Status: board.StatusTodo, Prio: 3},
+		{Title: "Duplicate", Desc: "second", Status: board.StatusTodo, Prio: 3},
+	}}
+
+	ids, err := s.ReplaceBoardWithTaskIDs("u", in)
+	if err != nil {
+		t.Fatalf("ReplaceBoardWithTaskIDs: %v", err)
+	}
+	if len(ids) != len(in.Tasks) {
+		t.Fatalf("task IDs = %v, want one per input task", ids)
+	}
+	if ids[0] == "" || ids[1] == "" || ids[0] == ids[1] {
+		t.Fatalf("task IDs = %v, want distinct non-empty IDs", ids)
+	}
+	stored, err := s.Board("u")
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	for i := range in.Tasks {
+		if stored.Tasks[i].Desc != in.Tasks[i].Desc || stored.Tasks[i].ID != ids[i] {
+			t.Errorf("stored task[%d] = (%q, %q), want (%q, %q)",
+				i, stored.Tasks[i].Desc, stored.Tasks[i].ID, in.Tasks[i].Desc, ids[i])
+		}
+	}
+
+	preserved, err := s.ReplaceBoardWithTaskIDs("u", in)
+	if err != nil {
+		t.Fatalf("second ReplaceBoardWithTaskIDs: %v", err)
+	}
+	if !reflect.DeepEqual(preserved, ids) {
+		t.Errorf("preserved task IDs = %v, want %v", preserved, ids)
+	}
+}
+
 func TestTaskCRUD(t *testing.T) {
 	s := newStore(t)
 	t1, err := s.AddTask("u", board.Task{Title: "First"})
@@ -297,13 +334,14 @@ func TestMigrateV3FromV2(t *testing.T) {
 	}
 	defer s.Close()
 
-	// Then: v3 records its version and makes each required index object.
+	// Then: the current schema records its version and retains every v3 index
+	// object needed to search the legacy task immediately.
 	var version string
 	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != "3" {
-		t.Fatalf("schema version = %q, want 3", version)
+	if version != "4" {
+		t.Fatalf("schema version = %q, want 4", version)
 	}
 	for _, table := range []string{"tasks_fts", "import_links_fts"} {
 		var definition string
@@ -633,7 +671,7 @@ func TestOpenRepairsLegacyCredentialURLSuffixes(t *testing.T) {
 	if _, baseURL, _ := mustForgePAT(t, s, "bob", "loaded"); strings.ContainsAny(baseURL, "?#") {
 		t.Fatal("scoped forge load returned a suffix")
 	}
-	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil || version != "3" {
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil || version != "4" {
 		t.Fatalf("schema version changed during repair err=%v", err)
 	}
 }
