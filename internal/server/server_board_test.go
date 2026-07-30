@@ -98,7 +98,7 @@ func TestPutBoardTaskIDAcknowledgement(t *testing.T) {
 		if err != nil || !found || got.Reason != reason {
 			t.Fatalf("Tombstone = %+v, %t, %v; want returned ID and reason", got, found, err)
 		}
-		hits, err := st.SearchSimilar("default", "Duplicate", "", 10)
+		hits, err := st.SearchSimilar("default", "Duplicate", "", nil, 10)
 		if err != nil {
 			t.Fatalf("SearchSimilar: %v", err)
 		}
@@ -126,6 +126,96 @@ func TestPutBoardTaskIDAcknowledgement(t *testing.T) {
 			t.Fatal("PUT returned no ETag")
 		}
 	})
+}
+
+// A response assembled from incidental task-slice order would pair browser ids
+// with the wrong canonical cards as soon as that slice stops being status-first.
+func TestBoardTaskIDsUseMarkdownWireOrder(t *testing.T) {
+	b := board.Board{Tasks: []board.Task{
+		{ID: "done", Title: "Duplicate", Status: board.StatusDone},
+		{ID: "todo-first", Title: "Duplicate", Status: board.StatusTodo},
+		{ID: "doing", Title: "Other", Status: board.StatusDoing},
+		{ID: "todo-second", Title: "Duplicate", Status: board.StatusTodo},
+	}}
+
+	got := boardTaskIDs(b)
+	want := []string{"todo-first", "todo-second", "doing", "done"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("boardTaskIDs = %v, want markdown wire order %v", got, want)
+	}
+}
+
+// A fresh browser parse has new ids, so its first edit needs a positional
+// acknowledgement from the exact markdown snapshot it loaded.
+func TestGetBoardTaskIDAcknowledgement(t *testing.T) {
+	const wire = "# B\n\n## To Do\n\n- [ ] Duplicate\n  first\n- [ ] Duplicate\n  second\n\n## Doing\n\n- [ ] Other\n\n## Done\n\n- [x] Duplicate\n  done\n"
+	h, _ := newTestServer(t, Config{})
+	put := doReq(t, h, "PUT", "/api/board", wire, map[string]string{
+		"Accept": "application/json",
+	})
+	if put.Code != http.StatusOK {
+		t.Fatalf("seed PUT = %d %q, want 200", put.Code, put.Body)
+	}
+	var putResponse struct {
+		TaskIDs []string `json:"task_ids"`
+	}
+	if err := json.Unmarshal(put.Body.Bytes(), &putResponse); err != nil {
+		t.Fatalf("decode PUT response: %v", err)
+	}
+
+	got := doReq(t, h, "GET", "/api/board", "", map[string]string{
+		"Accept": "application/json",
+	})
+	if got.Code != http.StatusOK {
+		t.Fatalf("JSON GET = %d %q, want 200", got.Code, got.Body)
+	}
+	if contentType := got.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("JSON GET Content-Type = %q, want application/json", contentType)
+	}
+	if vary := strings.Join(got.Header().Values("Vary"), ","); !strings.Contains(vary, "Accept") {
+		t.Fatalf("JSON GET Vary = %q, want Accept", vary)
+	}
+	if got.Header().Get("ETag") != put.Header().Get("ETag") {
+		t.Fatalf("JSON GET ETag = %q, want PUT token %q",
+			got.Header().Get("ETag"), put.Header().Get("ETag"))
+	}
+	var response struct {
+		Board   string   `json:"board"`
+		TaskIDs []string `json:"task_ids"`
+	}
+	if err := json.Unmarshal(got.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode GET response: %v (body=%s)", err, got.Body)
+	}
+	if response.Board != wire {
+		t.Errorf("JSON GET board = %q, want unchanged markdown %q", response.Board, wire)
+	}
+	if !reflect.DeepEqual(response.TaskIDs, putResponse.TaskIDs) {
+		t.Errorf("JSON GET task IDs = %v, want PUT acknowledgement order %v",
+			response.TaskIDs, putResponse.TaskIDs)
+	}
+
+	for name, accept := range map[string]string{
+		"no Accept": "",
+		"wildcard":  "*/*",
+		"zero JSON": "application/json;q=0, text/markdown",
+	} {
+		t.Run(name+" keeps markdown", func(t *testing.T) {
+			headers := map[string]string{}
+			if accept != "" {
+				headers["Accept"] = accept
+			}
+			legacy := doReq(t, h, "GET", "/api/board", "", headers)
+			if legacy.Code != http.StatusOK || legacy.Body.String() != wire {
+				t.Fatalf("GET = %d %q, want unchanged markdown", legacy.Code, legacy.Body)
+			}
+			if contentType := legacy.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/markdown") {
+				t.Fatalf("Content-Type = %q, want text/markdown", contentType)
+			}
+			if vary := strings.Join(legacy.Header().Values("Vary"), ","); !strings.Contains(vary, "Accept") {
+				t.Fatalf("Vary = %q, want Accept", vary)
+			}
+		})
+	}
 }
 
 func TestHealthAndStatic(t *testing.T) {
@@ -334,7 +424,9 @@ func TestBoardVersionToken(t *testing.T) {
 func TestBoardVersionTokenOnMissingBoard(t *testing.T) {
 	h, st := newTestServer(t, Config{})
 
-	w := doReq(t, h, "GET", "/api/board", "", nil)
+	w := doReq(t, h, "GET", "/api/board", "", map[string]string{
+		"Accept": "application/json",
+	})
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("GET with no board: got %d, want 404", w.Code)
 	}

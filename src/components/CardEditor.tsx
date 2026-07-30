@@ -65,6 +65,7 @@ export function CardEditor({
 
   const applyDraft = (draft: StoryDraft) => {
     if (draft.title !== '') onTitleChange(draft.title);
+    setEmoji(firstEmoji(draft.emoji));
     setDesc(draft.desc);
     setPrio(draft.prio);
     setDue(draft.due);

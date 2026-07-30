@@ -292,6 +292,12 @@ func matchEmoji(s string) string {
 	return s[:size]
 }
 
+// LeadingEmoji returns the leading emoji token recognized by the markdown
+// grammar, or an empty string when s does not start with one.
+func LeadingEmoji(s string) string {
+	return matchEmoji(s)
+}
+
 // ContainsSpace reports whether s contains a rune the wire format's token
 // splitter treats as whitespace (JavaScript's \s class). Fields serialized
 // as single tokens (tags) must not contain any.

@@ -35,16 +35,23 @@ type similarResponse struct {
 	Items []similarItem `json:"items"`
 }
 
+const maxSimilarExcludeLinks = 100
+
 func (s *server) handleSimilar(w http.ResponseWriter, r *http.Request, user string) {
-	query := r.URL.Query().Get("q")
+	params := r.URL.Query()
+	query := params.Get("q")
 	response := similarResponse{Items: []similarItem{}}
 	if utf8.RuneCountInString(strings.TrimSpace(query)) < 3 {
 		writeJSON(w, response)
 		return
 	}
-	hits, err := s.store.SearchSimilar(user, query, r.URL.Query().Get("exclude"), 3)
+	excludeLinks := params["exclude_link"]
+	if len(excludeLinks) > maxSimilarExcludeLinks {
+		excludeLinks = excludeLinks[:maxSimilarExcludeLinks]
+	}
+	hits, err := s.store.SearchSimilar(user, query, params.Get("exclude"), excludeLinks, 3)
 	if err != nil {
-		log.Printf("search similar for %s: %v", user, err)
+		log.Printf("search similar for %s: %s", logSafe(user), logSafe(err.Error()))
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		return
 	}
@@ -99,10 +106,10 @@ func writeJSON(w http.ResponseWriter, v any) {
 	}
 }
 
-// acceptsJSONAcknowledgement reports whether the caller explicitly accepts a
-// JSON PUT acknowledgement. Wildcards retain the legacy 204 response because
-// they do not opt in to the acknowledgement contract.
-func acceptsJSONAcknowledgement(r *http.Request) bool {
+// acceptsJSON reports whether the caller explicitly accepts a JSON response.
+// Wildcards retain each endpoint's legacy response because they do not opt in
+// to the acknowledgement contract.
+func acceptsJSON(r *http.Request) bool {
 	for _, header := range r.Header.Values("Accept") {
 		for _, value := range strings.Split(header, ",") {
 			mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(value))
@@ -133,29 +140,47 @@ func boardETag(md string) string {
 	return `"` + hex.EncodeToString(sum[:16]) + `"`
 }
 
-// currentBoard returns the stored board's wire form and version token. A
-// user with no board yet has the empty wire form, so a client that has never
-// seen a board and a client whose board was deleted agree on the token.
-func (s *server) currentBoard(user string) (string, string, error) {
+// boardTaskIDs returns ids in the same status-first order Serialize writes.
+// Board currently arrives in that order from the store too, but keeping this
+// explicit prevents a future query-order change from corrupting positional
+// browser-id acknowledgements.
+func boardTaskIDs(b board.Board) []string {
+	ids := make([]string, 0, len(b.Tasks))
+	for _, status := range board.Statuses {
+		for _, task := range b.Tasks {
+			if task.Status == status {
+				ids = append(ids, task.ID)
+			}
+		}
+	}
+	return ids
+}
+
+// currentBoard returns one stored snapshot's wire form, version token, and
+// canonical task ids. A user with no board yet has the empty wire form, so a
+// client that has never seen a board and a client whose board was deleted
+// agree on the token.
+func (s *server) currentBoard(user string) (string, string, []string, error) {
 	has, err := s.store.HasBoard(user)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	if !has {
-		return "", boardETag(""), nil
+		return "", boardETag(""), nil, nil
 	}
 	b, err := s.store.Board(user)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	md := board.Serialize(b)
-	return md, boardETag(md), nil
+	return md, boardETag(md), boardTaskIDs(b), nil
 }
 
-func (s *server) handleGetBoard(w http.ResponseWriter, _ *http.Request, user string) {
-	md, etag, err := s.currentBoard(user)
+func (s *server) handleGetBoard(w http.ResponseWriter, r *http.Request, user string) {
+	w.Header().Add("Vary", "Accept")
+	md, etag, taskIDs, err := s.currentBoard(user)
 	if err != nil {
-		log.Printf("read board for %s: %v", user, err)
+		log.Printf("read board for %s: %s", logSafe(user), logSafe(err.Error()))
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		return
 	}
@@ -166,6 +191,13 @@ func (s *server) handleGetBoard(w http.ResponseWriter, _ *http.Request, user str
 	w.Header().Set("ETag", etag)
 	if md == "" {
 		http.Error(w, "no board saved", http.StatusNotFound)
+		return
+	}
+	if acceptsJSON(r) {
+		writeJSON(w, struct {
+			Board   string   `json:"board"`
+			TaskIDs []string `json:"task_ids"`
+		}{Board: md, TaskIDs: taskIDs})
 		return
 	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
@@ -195,9 +227,9 @@ func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user str
 	mu.Lock()
 	defer mu.Unlock()
 	if want := strings.TrimSpace(r.Header.Get("If-Match")); want != "" {
-		_, etag, err := s.currentBoard(user)
+		_, etag, _, err := s.currentBoard(user)
 		if err != nil {
-			log.Printf("read board for %s: %v", user, err)
+			log.Printf("read board for %s: %s", logSafe(user), logSafe(err.Error()))
 			http.Error(w, "storage error", http.StatusInternalServerError)
 			return
 		}
@@ -209,18 +241,18 @@ func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user str
 	}
 	taskIDs, err := s.store.ReplaceBoardWithTaskIDs(user, board.Parse(string(body)))
 	if err != nil {
-		log.Printf("write board for %s: %v", user, err)
+		log.Printf("write board for %s: %s", logSafe(user), logSafe(err.Error()))
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		return
 	}
-	_, etag, err := s.currentBoard(user)
+	_, etag, _, err := s.currentBoard(user)
 	if err != nil {
-		log.Printf("read board for %s: %v", user, err)
+		log.Printf("read board for %s: %s", logSafe(user), logSafe(err.Error()))
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("ETag", etag)
-	if acceptsJSONAcknowledgement(r) {
+	if acceptsJSON(r) {
 		writeJSON(w, struct {
 			TaskIDs []string `json:"task_ids"`
 		}{TaskIDs: taskIDs})

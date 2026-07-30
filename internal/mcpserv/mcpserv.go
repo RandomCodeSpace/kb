@@ -286,7 +286,7 @@ func (k *kb) searchSimilar(_ context.Context, _ *mcp.CallToolRequest, in searchS
 	if limit > 10 {
 		limit = 10
 	}
-	hits, err := k.st.SearchSimilar(k.user, in.Query, "", limit)
+	hits, err := k.st.SearchSimilar(k.user, in.Query, "", nil, limit)
 	if err != nil {
 		return nil, searchSimilarOutput{}, err
 	}
@@ -330,7 +330,7 @@ func (k *kb) duplicateCheck(_ context.Context, _ *mcp.CallToolRequest, in duplic
 			similarLimit = 3
 		}
 		query := strings.TrimSpace(in.Title + " " + in.Body)
-		hits, err := k.st.SearchSimilar(k.user, query, "", similarLimit)
+		hits, err := k.st.SearchSimilar(k.user, query, "", nil, similarLimit)
 		if err != nil {
 			return nil, duplicateCheckOutput{}, err
 		}

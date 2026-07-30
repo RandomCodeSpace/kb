@@ -727,15 +727,21 @@ export function coerceSimilarItems(body: unknown): SimilarItem[] {
     : [];
 }
 
+const SIMILAR_EXCLUDE_LINK_LIMIT = 100;
+
 export async function getSimilar(
   identity: Identity,
   q: string,
   excludeId?: string,
+  excludeLinks: readonly string[] = [],
   signal?: AbortSignal,
 ): Promise<SimilarItem[]> {
   try {
     const params = new URLSearchParams({ q });
     if (excludeId) params.set('exclude', excludeId);
+    for (const link of excludeLinks.slice(0, SIMILAR_EXCLUDE_LINK_LIMIT)) {
+      params.append('exclude_link', link);
+    }
     const res = await authedFetch(identity, `/api/similar?${params}`, { signal });
     if (!res.ok) return [];
     return coerceSimilarItems(await res.json());

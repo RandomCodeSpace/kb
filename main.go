@@ -9,12 +9,15 @@ import (
 	"embed"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/RandomCodeSpace/kb/internal/server"
 	"github.com/RandomCodeSpace/kb/internal/store"
@@ -51,6 +54,37 @@ func envOr(key, def string) string {
 	return def
 }
 
+type emptyCloser struct{}
+
+func (emptyCloser) Close() error { return nil }
+
+// logSafe keeps operator-controlled paths and errors on one physical log line.
+func logSafe(s string) string {
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// configureLogging points the standard logger at path, returning the closer the
+// caller defers. An empty path leaves stderr alone.
+func configureLogging(path string) (io.Closer, error) {
+	if path == "" {
+		return emptyCloser{}, nil
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(os.Stderr, "kb: writing logs to %q\n", logSafe(path))
+	log.SetOutput(file)
+	return file, nil
+}
+
 // checkSecret rejects a truncated or hand-made settings-encryption secret. An
 // empty <data>/secret derives the AES key from SHA-256("") — a key anyone can
 // compute — and the store would use it without complaint. Refusing to start
@@ -84,7 +118,14 @@ func main() {
 	}
 	port := flag.String("port", envOr("KB_PORT", "8080"), "listen port (env KB_PORT)")
 	dataDir := flag.String("data", defaultDataDir(), "board storage directory (env KB_DATA)")
+	logPath := flag.String("log", envOr("KB_LOG_FILE", ""), "write logs to this file instead of stderr (env KB_LOG_FILE)")
 	flag.Parse()
+
+	logCloser, err := configureLogging(*logPath)
+	if err != nil {
+		log.Fatalf("configure log file %q: %s", logSafe(*logPath), logSafe(err.Error()))
+	}
+	defer logCloser.Close()
 
 	cfg := server.Config{
 		Token:        os.Getenv("KB_TOKEN"),

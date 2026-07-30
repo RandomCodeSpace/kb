@@ -1294,7 +1294,7 @@ func (s *server) importDuplicates(scope string, issues []forgeIssue) ([]*importD
 			duplicates[i] = &importDuplicate{ID: links[0].ID, Title: links[0].Title, Via: "link"}
 			continue
 		}
-		similar, err := s.store.SearchSimilar(scope, issue.Title, "", 1)
+		similar, err := s.store.SearchSimilar(scope, issue.Title, "", nil, 1)
 		if err != nil {
 			return nil, err
 		}

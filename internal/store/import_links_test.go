@@ -45,7 +45,7 @@ func TestImportLinksUpsertRefreshesAllFieldsAndSupportsBatchLookup(t *testing.T)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ImportedAs = %+v, want %+v", got, want)
 	}
-	hits, err := s.SearchSimilar("alice", "updatedunique", "", 3)
+	hits, err := s.SearchSimilar("alice", "updatedunique", "", nil, 3)
 	if err != nil {
 		t.Fatalf("SearchSimilar import: %v", err)
 	}

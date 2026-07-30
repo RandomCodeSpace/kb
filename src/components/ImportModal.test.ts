@@ -5,6 +5,7 @@ import { importRowsToTasks, toImportRows } from './ImportModal';
 function draft(over: Partial<ImportDraft> = {}): ImportDraft {
   return {
     title: 'replace the legacy login',
+    emoji: '🔐',
     desc: 'Keep the migration reversible.',
     prio: 2,
     due: '',
@@ -68,6 +69,7 @@ describe('importRowsToTasks', () => {
     const [task] = importRowsToTasks(rows, 'doing');
 
     expect(task.title).toBe('ship the reviewed login change');
+    expect(task.emoji).toBe('🔐');
     expect(task.status).toBe('doing');
     expect(task.tags).toContain('link::gitlab#42');
     expect(task.checks).toEqual([{ text: 'cover rollback', done: false }]);

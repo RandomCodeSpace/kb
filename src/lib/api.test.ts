@@ -239,6 +239,7 @@ describe('import API', () => {
       drafts: [
         {
           title: 'ship login',
+          emoji: '',
           desc: '',
           prio: 3,
           due: '',
@@ -649,6 +650,7 @@ describe('coerceStoryDraft', () => {
   it('passes a well-formed draft through', () => {
     const d = coerceStoryDraft({
       title: '  Ship it ',
+      emoji: ' 🚀 ',
       desc: 'do the thing',
       prio: 2,
       due: '2026-08-01',
@@ -658,6 +660,7 @@ describe('coerceStoryDraft', () => {
     });
     expect(d).toEqual({
       title: 'Ship it',
+      emoji: '🚀',
       desc: 'do the thing',
       prio: 2,
       due: '2026-08-01',
@@ -673,6 +676,7 @@ describe('coerceStoryDraft', () => {
   it('defaults every field for junk input', () => {
     expect(coerceStoryDraft('nope')).toEqual({
       title: '',
+      emoji: '',
       desc: '',
       prio: 3,
       due: '',
@@ -680,6 +684,12 @@ describe('coerceStoryDraft', () => {
       tags: [],
       checks: [],
     });
+  });
+
+  it('keeps a valid emoji, clamps multiples, and drops malformed text', () => {
+    expect(coerceStoryDraft({ emoji: ' ⚙️ ' }).emoji).toBe('⚙️');
+    expect(coerceStoryDraft({ emoji: '🚀✨' }).emoji).toBe('🚀');
+    expect(coerceStoryDraft({ emoji: ':rocket:' }).emoji).toBe('');
   });
 
   it('clamps out-of-range prio to 3', () => {

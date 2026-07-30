@@ -173,6 +173,13 @@ body {
   background: transparent;
   border: 0;
 }
+/* Chromium paints a scroll thumb over the rounded scroller's border at each
+   end of its travel. Insetting only column tracks by the 18px inner radius
+   keeps that native paint inside the curve without changing content's scroll
+   range. */
+.col::-webkit-scrollbar-track {
+  margin-block: 18px;
+}
 ::-webkit-scrollbar-thumb {
   background-color: var(--dim);
   /* A pill, like every other soft shape in kb. The transparent border insets
@@ -1120,11 +1127,14 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.similar button {
+.similar > button {
   grid-column: 2;
   grid-row: 1;
+}
+.similar button {
   box-sizing: border-box;
   width: var(--tap);
+  min-width: var(--tap);
   min-height: var(--tap);
   padding: 0;
   color: var(--ink);
@@ -1135,6 +1145,10 @@ body {
   font-weight: 800;
   line-height: var(--lh-flat);
   cursor: pointer;
+}
+.similar-row > button {
+  flex: none;
+  margin-left: auto;
 }
 
 /* ---------- forge integrations ----------

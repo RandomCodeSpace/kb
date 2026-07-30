@@ -12,6 +12,7 @@ import {
 function draft(over: Partial<StoryDraft> = {}): StoryDraft {
   return {
     title: 'add a health endpoint',
+    emoji: '🩺',
     desc: 'so the SPA can detect the server',
     prio: 3,
     due: '',
@@ -110,6 +111,7 @@ describe('rowsToTasks', () => {
     rows[0].effort = 'S';
     const [t] = rowsToTasks(rows, 'todo');
     expect(t.title).toBe('renamed');
+    expect(t.emoji).toBe('🩺');
     expect(t.prio).toBe(1);
     expect(t.effort).toBe('S');
     // Untouched fields still come from the draft.

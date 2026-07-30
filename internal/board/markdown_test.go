@@ -68,6 +68,31 @@ func projection(b Board) boardProj {
 	return p
 }
 
+// AI replies can include extra text or multiple symbols, so callers need the
+// exact leading token the unchanged markdown grammar would preserve.
+func TestLeadingEmojiNormalization(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "bare emoji", in: "🚀", want: "🚀"},
+		{name: "emoji with variation selector", in: "⚙️", want: "⚙️"},
+		{name: "two emoji", in: "🚀✨", want: "🚀"},
+		{name: "shortcode", in: ":rocket:", want: ""},
+		{name: "leading text", in: "ship 🚀", want: ""},
+		{name: "empty", in: "", want: ""},
+		{name: "multibyte non emoji", in: "界", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := LeadingEmoji(tt.in); got != tt.want {
+				t.Errorf("LeadingEmoji(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStatusValid(t *testing.T) {
 	for _, s := range Statuses {
 		if !s.Valid() {

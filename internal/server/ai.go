@@ -122,19 +122,19 @@ func (e *aiError) Error() string { return e.msg }
 
 // storySystemPrompt forces a strict-JSON reply in the draft shape.
 const storySystemPrompt = `You write kanban cards. Respond with a single JSON object only — no prose, no code fences — using exactly these keys:
-{"title":"short imperative title","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}]}
-prio is an integer from 1 (highest) to 4 (lowest); 3 is the default.`
+{"title":"short imperative title","emoji":"🚀","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}]}
+prio is an integer from 1 (highest) to 4 (lowest); 3 is the default. emoji is exactly one emoji character that suits the work, or an empty string when nothing fits.`
 
 // storiesSystemPrompt asks for the same card shape, many at a time, wrapped
 // in a {"stories": [...]} object because json_object mode forbids a bare
 // top-level array.
 const storiesSystemPrompt = `You split an architecture decision record into kanban cards. Respond with a single JSON object only — no prose, no code fences — of the form:
-{"stories":[{"title":"short imperative title","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}]}]}
-prio is an integer from 1 (highest) to 4 (lowest); 3 is the default. Each story must be independently deliverable. Tags are single words with no spaces.`
+{"stories":[{"title":"short imperative title","emoji":"🚀","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}]}]}
+prio is an integer from 1 (highest) to 4 (lowest); 3 is the default. emoji is exactly one emoji character that suits the work, or an empty string when nothing fits. Each story must be independently deliverable. Tags are single words with no spaces.`
 
 const importSystemPrompt = `You transform forge issues into kanban-card proposals. Respond with a single JSON object only — no prose, no code fences — of the form:
-{"stories":[{"title":"short imperative title","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}],"source":1}]}
-source must be the positive integer Source number from the supplied forge issue. Do not copy source text verbatim; propose independently actionable work.`
+{"stories":[{"title":"short imperative title","emoji":"🚀","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}],"source":1}]}
+emoji is exactly one emoji character that suits the work, or an empty string when nothing fits. source must be the positive integer Source number from the supplied forge issue. Do not copy source text verbatim; propose independently actionable work.`
 
 // Bounds for POST /api/ai/stories: an ADR is prose, not a payload, and the
 // story count is clamped so one request cannot fan out unboundedly.
@@ -150,6 +150,7 @@ const (
 // storyDraft is the coerced card draft returned by POST /api/ai/story.
 type storyDraft struct {
 	Title  string       `json:"title"`
+	Emoji  string       `json:"emoji"`
 	Desc   string       `json:"desc"`
 	Prio   int          `json:"prio"`
 	Due    string       `json:"due"`
@@ -695,6 +696,7 @@ func truncateImportText(text string, max int) string {
 func validateDraft(d storyDraft) error {
 	return store.ValidateTaskFields(board.Task{
 		Title:  d.Title,
+		Emoji:  d.Emoji,
 		Desc:   d.Desc,
 		Due:    d.Due,
 		Effort: d.Effort,
@@ -711,6 +713,9 @@ func coerceDraftMap(m map[string]any) storyDraft {
 	d := storyDraft{Prio: 3, Tags: []string{}, Checks: []draftCheck{}}
 	if v, ok := m["title"].(string); ok {
 		d.Title = strings.TrimSpace(stripControl(v))
+	}
+	if v, ok := m["emoji"].(string); ok {
+		d.Emoji = board.LeadingEmoji(strings.TrimSpace(v))
 	}
 	if v, ok := m["desc"].(string); ok {
 		// Descriptions are serialized as indented lines, so newlines survive

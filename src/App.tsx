@@ -20,7 +20,7 @@ import {
   sanitizeUser,
   saveIdentity,
 } from './lib/auth';
-import { RemoteStore } from './lib/remote';
+import { mergeTaskIDMaps, RemoteStore } from './lib/remote';
 import type {
   AISettings,
   AIStoryRequest,
@@ -158,6 +158,11 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
   // Seeding clears the dirty flag (see LocalStore.loadOrSeed), so a demo board
   // is never pushed over a board the server already has.
   const [board, setBoard] = useState<Board>(() => store.loadOrSeed().board);
+  // Browser ids stay on the local board; write acknowledgements supply the
+  // canonical ids needed by server-side exclusion.
+  const [canonicalTaskIDs, setCanonicalTaskIDs] = useState<
+    ReadonlyMap<string, string>
+  >(() => new Map());
   const [modal, setModal] = useState<ModalState | null>(null);
   const [ship, setShip] = useState<ShipPrompt | null>(null);
   const [streak, setStreak] = useState<number>(() => shippedToday(ns));
@@ -199,6 +204,12 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
   // Browser task ids never cross the markdown wire. Reasons wait here until
   // the cancelling PUT acknowledges the corresponding SQLite task id.
   const pendingTombstonesRef = useRef(new Map<string, string>());
+  const rememberTaskIDs = useCallback(
+    (taskIDs: ReadonlyMap<string, string>) => {
+      setCanonicalTaskIDs((current) => mergeTaskIDMaps(current, taskIDs));
+    },
+    [],
+  );
   const drainTombstones = useCallback(
     (pushed: Board, taskIDs: ReadonlyMap<string, string>) => {
       for (const ready of acknowledgedTombstones(
@@ -298,6 +309,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
           const fresh = editGenRef.current === gen;
           if (fresh) setDirty(ns, false);
           if (cancelled) return;
+          rememberTaskIDs(taskIDs);
           drainTombstones(pushed, taskIDs);
           // A 409 merge wrote a different board than we sent — that is now
           // the server's state, so it becomes ours. Unconditionally: the
@@ -315,7 +327,9 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
       let remoteBoard: Board | null = null;
       if (!loadDirty(ns)) {
         try {
-          remoteBoard = await remote.loadRemote(identity);
+          remoteBoard = await remote.loadRemote(identity, (taskIDs) => {
+            if (!cancelled) rememberTaskIDs(taskIDs);
+          });
         } catch (err) {
           // Server present but board fetch failed — keep the local board,
           // report the failure, and do not enable autosave over broken auth.
@@ -346,6 +360,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
     adopt,
     carryMerged,
     drainTombstones,
+    rememberTaskIDs,
   ]);
 
   useEffect(() => {
@@ -360,6 +375,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
       board,
       onSaveError,
       (pushed, taskIDs) => {
+        rememberTaskIDs(taskIDs);
         drainTombstones(pushed, taskIDs);
         // After a 409 merge the board that reached the server carries tasks we
         // have never seen; take them or the next save deletes them again. This
@@ -383,6 +399,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
     onSaveError,
     carryMerged,
     drainTombstones,
+    rememberTaskIDs,
   ]);
 
   useEffect(() => {
@@ -882,6 +899,11 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
           // allow: SIZE_OK - A5 needs authenticated advisory lookup; decomposing BoardApp is out of scope.
           identity={identity}
           state={modal}
+          canonicalTaskId={
+            modal.mode === 'edit'
+              ? canonicalTaskIDs.get(modal.task.id)
+              : undefined
+          }
           labels={allLabels}
           aiDraft={aiDraft}
           onSave={handleSave}

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Identity } from '../lib/auth';
 import type { Status, Task } from '../lib/model';
 import { STATUS_LABEL } from '../lib/model';
@@ -28,6 +28,8 @@ export type ModalState =
 export interface CardModalProps {
   state: ModalState;
   identity: Identity;
+  /** Canonical server id acknowledged for the edited browser task. */
+  canonicalTaskId?: string;
   /** Suggestions for the labels combobox (server labels ∪ board tags). */
   labels: string[];
   /**
@@ -100,23 +102,47 @@ export function taskImportLinks(task: Task): string[] {
   return [...found];
 }
 
+/**
+ * Identity for a similar-items row. Prefixes keep the id, link, and title
+ * namespaces distinct when two server values happen to contain the same text.
+ */
+export function similarKey(item: SimilarItem): string {
+  if (item.id !== undefined) return `id:${item.id}`;
+  if (item.link !== undefined) return `link:${item.link}`;
+  return `title:${item.title}`;
+}
+
+/** Return only rows whose stable identities have not been dismissed. */
+export function visibleSimilarItems(
+  items: readonly SimilarItem[],
+  removed: ReadonlySet<string>,
+): SimilarItem[] {
+  return items.filter((item) => !removed.has(similarKey(item)));
+}
+
 export function CardModal({
   state,
   identity,
+  canonicalTaskId,
   labels,
   aiDraft,
   onSave,
   onDelete,
   onClose,
 }: CardModalProps) {
-  const excludeId = state.mode === 'edit' ? state.task.id : undefined;
+  const excludeId = state.mode === 'edit' ? canonicalTaskId : undefined;
   const [title, setTitle] = useState(state.mode === 'edit' ? state.task.title : '');
   const [aiBusy, setAiBusy] = useState(false);
   const [items, setItems] = useState<SimilarItem[]>([]);
   const [dismissed, setDismissed] = useState(false);
+  const [removedSimilar, setRemovedSimilar] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [lastQ, setLastQ] = useState('');
-  const importLinks =
-    state.mode === 'edit' ? taskImportLinks(state.task) : [];
+  const importLinks = useMemo(
+    () => (state.mode === 'edit' ? taskImportLinks(state.task) : []),
+    [state],
+  );
   const [selectedLink, setSelectedLink] = useState(importLinks[0] ?? '');
   const [provenance, setProvenance] = useState<ImportProvenance[]>([]);
   const [selectedExternalKey, setSelectedExternalKey] = useState('');
@@ -166,6 +192,7 @@ export function CardModal({
     if (!shouldQuery(title, lastQ)) {
       if (Array.from(title.trim()).length < 3) {
         setItems([]);
+        setRemovedSimilar(new Set());
         setLastQ('');
       }
       return;
@@ -176,10 +203,12 @@ export function CardModal({
         identity,
         title,
         excludeId,
+        importLinks,
         ctrl.signal,
       ).then((next) => {
         if (ctrl.signal.aborted) return;
         setItems(next);
+        setRemovedSimilar(new Set());
         setLastQ(title.trim());
         setDismissed(false);
       });
@@ -188,11 +217,12 @@ export function CardModal({
       clearTimeout(timer);
       ctrl.abort();
     };
-  }, [excludeId, identity, lastQ, title]);
+  }, [excludeId, identity, importLinks, lastQ, title]);
 
   const selectedProvenance = provenance.find(
     (item) => item.external_key === selectedExternalKey,
   );
+  const visibleItems = visibleSimilarItems(items, removedSimilar);
 
   const runDrift = async (candidate?: ImportProvenance) => {
     driftCancel.current?.abort();
@@ -334,15 +364,16 @@ export function CardModal({
           cancelRef={draftCancel}
           titleExtras={
             <>
-              {!dismissed && items.length > 0 && (
+              {!dismissed && visibleItems.length > 0 && (
                 <div className="similar">
                   <span className="similar-head" role="status">
-                    {items.length} similar{' '}
-                    {items.length === 1 ? 'item' : 'items'} — is this a
+                    {visibleItems.length} similar{' '}
+                    {visibleItems.length === 1 ? 'item' : 'items'} — is this a
                     duplicate?
                   </span>
                   <div className="similar-list">
-                    {items.map((item, index) => {
+                    {visibleItems.map((item) => {
+                      const key = similarKey(item);
                       const killedText =
                         item.via === 'killed'
                           ? killedChipText(item, new Date())
@@ -350,7 +381,7 @@ export function CardModal({
                       return (
                         <div
                           className={`similar-row${killedText ? ' killed' : ''}`}
-                          key={`${item.title}:${index}`}
+                          key={key}
                         >
                           <span
                             className={`similar-via${killedText ? ' killed' : ''}`}
@@ -373,6 +404,19 @@ export function CardModal({
                               ? `${killedText.slice(KILLED_PREFIX.length)} \u00b7 ${item.title}`
                               : item.title}
                           </span>
+                          <button
+                            type="button"
+                            aria-label={`Dismiss ${item.title}`}
+                            onClick={() =>
+                              setRemovedSimilar((current) => {
+                                const next = new Set(current);
+                                next.add(key);
+                                return next;
+                              })
+                            }
+                          >
+                            ✕
+                          </button>
                         </div>
                       );
                     })}
