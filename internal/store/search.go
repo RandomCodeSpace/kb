@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -30,11 +31,16 @@ type Tombstone struct {
 	KilledAt string
 }
 
+// SimilarityFloor rejects FTS candidates sharing too little title vocabulary.
+const SimilarityFloor = 0.34
+
+func searchTokenBoundary(r rune) bool {
+	return unicode.IsSpace(r) || unicode.IsControl(r)
+}
+
 // FtsQuery converts untrusted text to a bounded OR of literal FTS phrases.
 func FtsQuery(raw string) string {
-	tokens := strings.FieldsFunc(raw, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.IsControl(r)
-	})
+	tokens := strings.FieldsFunc(raw, searchTokenBoundary)
 	if len(tokens) > 12 {
 		tokens = tokens[:12]
 	}
@@ -44,25 +50,90 @@ func FtsQuery(raw string) string {
 	return strings.Join(tokens, " OR ")
 }
 
-// SearchSimilar returns scoped card hits first, then import-provenance hits.
+// Similarity is the Sorensen-Dice coefficient over normalized token sets.
+// It is pure and deterministic so the duplicate threshold can be tested
+// without a database.
+func Similarity(a, b string) float64 {
+	aSet := similarityTokenSet(a)
+	bSet := similarityTokenSet(b)
+	if len(aSet) == 0 || len(bSet) == 0 {
+		return 0
+	}
+	overlap := 0
+	for token := range aSet {
+		if _, ok := bSet[token]; ok {
+			overlap++
+		}
+	}
+	return 2 * float64(overlap) / float64(len(aSet)+len(bSet))
+}
+
+func similarityTokenSet(raw string) map[string]struct{} {
+	tokens := normalizedSimilarityTokens(raw)
+	set := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		set[token] = struct{}{}
+	}
+	return set
+}
+
+func normalizedSimilarityTokens(raw string) []string {
+	tokens := strings.FieldsFunc(strings.ToLower(raw), searchTokenBoundary)
+	normalized := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		token = strings.TrimFunc(token, unicode.IsPunct)
+		if utf8.RuneCountInString(token) < 3 {
+			continue
+		}
+		normalized = append(normalized, token)
+	}
+	return normalized
+}
+
+func normalizedSimilarityText(raw string) string {
+	return strings.Join(normalizedSimilarityTokens(raw), " ")
+}
+
+type scoredSimilarHit struct {
+	hit   SimilarHit
+	score float64
+}
+
+// SearchSimilar returns scoped card and import-provenance hits ranked by title
+// similarity.
 func (s *Store) SearchSimilar(scope, query, excludeID string, limit int) ([]SimilarHit, error) {
 	match := FtsQuery(query)
 	if match == "" || limit <= 0 {
 		return nil, nil
 	}
+	candidateLimit := limit * 8
+	if candidateLimit < 24 {
+		candidateLimit = 24
+	}
+	normalizedQuery := normalizedSimilarityText(query)
+	var candidates []scoredSimilarHit
+	keepCandidate := func(hit SimilarHit) {
+		score := Similarity(query, hit.Title)
+		exactPhrase := normalizedQuery != "" &&
+			strings.Contains(normalizedSimilarityText(hit.Title), normalizedQuery)
+		if score < SimilarityFloor && !exactPhrase {
+			return
+		}
+		candidates = append(candidates, scoredSimilarHit{hit: hit, score: score})
+	}
+
 	rows, err := s.db.Query(`
-	SELECT f.id, f.title, t.status,
-	       COALESCE(g.reason, ''), COALESCE(g.killed_at, '')
+		SELECT f.id, f.title, t.status,
+		       COALESCE(g.reason, ''), COALESCE(g.killed_at, '')
 	FROM tasks_fts f
 	JOIN tasks t ON t.id = f.id AND t.user = ?1
-	LEFT JOIN tombstones g ON g.scope = ?1 AND g.task_id = f.id
-	WHERE tasks_fts MATCH ?2 AND f.scope = ?1 AND f.id <> ?3
-	ORDER BY bm25(tasks_fts, 5.0, 1.0, 3.0) LIMIT ?4`,
-		scope, match, excludeID, limit)
+		LEFT JOIN tombstones g ON g.scope = ?1 AND g.task_id = f.id
+		WHERE tasks_fts MATCH ?2 AND f.scope = ?1 AND f.id <> ?3
+		ORDER BY bm25(tasks_fts, 5.0, 1.0, 3.0) LIMIT ?4`,
+		scope, match, excludeID, candidateLimit)
 	if err != nil {
 		return nil, fmt.Errorf("store: search tasks: %w", err)
 	}
-	var hits []SimilarHit
 	for rows.Next() {
 		var hit SimilarHit
 		if err := rows.Scan(&hit.ID, &hit.Title, &hit.Status, &hit.Reason, &hit.KilledAt); err != nil {
@@ -75,7 +146,7 @@ func (s *Store) SearchSimilar(scope, query, excludeID string, limit int) ([]Simi
 			hit.Via = "card"
 			hit.Reason, hit.KilledAt = "", ""
 		}
-		hits = append(hits, hit)
+		keepCandidate(hit)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -84,17 +155,14 @@ func (s *Store) SearchSimilar(scope, query, excludeID string, limit int) ([]Simi
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("store: close task search: %w", err)
 	}
-	if len(hits) == limit {
-		return hits, nil
-	}
 
 	rows, err = s.db.Query(`
-SELECT f.title, l.link
-FROM import_links_fts f
-JOIN import_links l ON l.scope = f.scope AND l.external_key = f.external_key
-WHERE import_links_fts MATCH ?2 AND f.scope = ?1
-ORDER BY bm25(import_links_fts, 5.0) LIMIT ?3`,
-		scope, match, limit-len(hits))
+		SELECT f.title, l.link
+		FROM import_links_fts f
+		JOIN import_links l ON l.scope = f.scope AND l.external_key = f.external_key
+		WHERE import_links_fts MATCH ?2 AND f.scope = ?1
+		ORDER BY bm25(import_links_fts, 5.0) LIMIT ?3`,
+		scope, match, candidateLimit)
 	if err != nil {
 		return nil, fmt.Errorf("store: search imports: %w", err)
 	}
@@ -105,7 +173,7 @@ ORDER BY bm25(import_links_fts, 5.0) LIMIT ?3`,
 			return nil, fmt.Errorf("store: scan import search: %w", err)
 		}
 		hit.Via = "import"
-		hits = append(hits, hit)
+		keepCandidate(hit)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -113,6 +181,19 @@ ORDER BY bm25(import_links_fts, 5.0) LIMIT ?3`,
 	}
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("store: close import search: %w", err)
+	}
+
+	// Stable sorting preserves each FTS query's bm25 order, and card-first
+	// behavior across query branches, when similarity scores tie.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	var hits []SimilarHit
+	for _, candidate := range candidates {
+		hits = append(hits, candidate.hit)
 	}
 	return hits, nil
 }

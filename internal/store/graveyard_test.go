@@ -325,6 +325,27 @@ func TestSearchSimilarReportsKilledCardsWithTheirReason(t *testing.T) {
 	}
 }
 
+// TestSearchSimilarStillReportsAGenuineKilledNearMatch prevents the relevance
+// gate from hiding rejected work when its title is a real reworded duplicate.
+func TestSearchSimilarStillReportsAGenuineKilledNearMatch(t *testing.T) {
+	s := newStore(t)
+	killed := addSearchTask(t, s, board.Task{
+		Title:  "Reject legacy SSO login for the admin portal",
+		Status: board.StatusCancelled,
+	})
+	if err := s.RecordTombstone("alice", killed.ID, "The replacement shipped elsewhere"); err != nil {
+		t.Fatalf("RecordTombstone: %v", err)
+	}
+
+	hits, err := s.SearchSimilar("alice", "SSO login for admins", "", 3)
+	if err != nil {
+		t.Fatalf("SearchSimilar: %v", err)
+	}
+	if len(hits) != 1 || hits[0].ID != killed.ID || hits[0].Via != "killed" {
+		t.Fatalf("SearchSimilar = %+v, want killed near-match %q", hits, killed.ID)
+	}
+}
+
 // TestCancelledCardWithoutATombstoneIsStillAnOrdinaryHit avoids inventing a
 // rejection reason for cancelled cards created before the graveyard existed.
 func TestCancelledCardWithoutATombstoneIsStillAnOrdinaryHit(t *testing.T) {
