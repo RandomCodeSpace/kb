@@ -64,12 +64,12 @@ func TestFtsQueryCapsInputAndEmptySearchDoesNoWork(t *testing.T) {
 		if got := FtsQuery(raw); got != "" {
 			t.Fatalf("FtsQuery(%q) = %q, want empty", raw, got)
 		}
-		hits, err := newStore(t).SearchSimilar("alice", raw, "", 3)
+		hits, err := newStore(t).SearchSimilar("alice", raw, "", nil, 3)
 		if err != nil || hits != nil {
 			t.Fatalf("SearchSimilar(%q) = %#v, %v, want nil, nil", raw, hits, err)
 		}
 	}
-	if hits, err := newStore(t).SearchSimilar("alice", "card", "", 0); err != nil || hits != nil {
+	if hits, err := newStore(t).SearchSimilar("alice", "card", "", nil, 0); err != nil || hits != nil {
 		t.Fatalf("SearchSimilar(limit=0) = %#v, %v, want nil, nil", hits, err)
 	}
 }
@@ -150,7 +150,7 @@ func TestGenuineNearMatchesStillSurface(t *testing.T) {
 
 	for query, target := range targets {
 		t.Run(query, func(t *testing.T) {
-			hits, err := s.SearchSimilar("alice", query, "", 3)
+			hits, err := s.SearchSimilar("alice", query, "", nil, 3)
 			if err != nil {
 				t.Fatalf("SearchSimilar(%q): %v", query, err)
 			}
@@ -200,7 +200,7 @@ func TestSearchSimilarWidensCandidatesBeforeFiltering(t *testing.T) {
 				t.Fatalf("card fixture rank = %d, want %d", rank, tt.noiseCount)
 			}
 
-			hits, err := s.SearchSimilar("alice", query, "", tt.limit)
+			hits, err := s.SearchSimilar("alice", query, "", nil, tt.limit)
 			if err != nil {
 				t.Fatalf("SearchSimilar: %v", err)
 			}
@@ -216,7 +216,7 @@ func TestSearchSimilarWidensCandidatesBeforeFiltering(t *testing.T) {
 				t.Fatalf("import fixture rank = %d, want %d", rank, tt.noiseCount)
 			}
 
-			hits, err := s.SearchSimilar("alice", query, "", tt.limit)
+			hits, err := s.SearchSimilar("alice", query, "", nil, tt.limit)
 			if err != nil {
 				t.Fatalf("SearchSimilar: %v", err)
 			}
@@ -244,7 +244,7 @@ func TestSearchSimilarOrdersBySimilarityAndPreservesBM25Ties(t *testing.T) {
 			t.Fatalf("test fixture BM25 ranks lower=%d higher=%d, want lower-similarity hit first", lowerRank, higherRank)
 		}
 
-		hits, err := s.SearchSimilar("alice", query, "", 2)
+		hits, err := s.SearchSimilar("alice", query, "", nil, 2)
 		if err != nil {
 			t.Fatalf("SearchSimilar: %v", err)
 		}
@@ -268,7 +268,7 @@ func TestSearchSimilarOrdersBySimilarityAndPreservesBM25Ties(t *testing.T) {
 			want[0], want[1] = want[1], want[0]
 		}
 
-		hits, err := s.SearchSimilar("alice", query, "", 2)
+		hits, err := s.SearchSimilar("alice", query, "", nil, 2)
 		if err != nil {
 			t.Fatalf("SearchSimilar: %v", err)
 		}
@@ -278,8 +278,83 @@ func TestSearchSimilarOrdersBySimilarityAndPreservesBM25Ties(t *testing.T) {
 	})
 }
 
+// TestSearchSimilarExcludesTheEditedCard locks down canonical-ID exclusion so
+// a perfect self-match cannot become the advisory panel's top result.
+func TestSearchSimilarExcludesTheEditedCard(t *testing.T) {
+	s := newStore(t)
+	edited := addSearchTask(t, s, board.Task{Title: "Add SSO login for admins"})
+
+	hits, err := s.SearchSimilar("alice", edited.Title, edited.ID, nil, 3)
+	if err != nil {
+		t.Fatalf("SearchSimilar: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("SearchSimilar = %+v, want the edited card excluded", hits)
+	}
+}
+
+// TestSearchSimilarExcludesTheEditedCardsOwnImportRow records the second
+// self-match path while preserving a distinct card with the same title.
+func TestSearchSimilarExcludesTheEditedCardsOwnImportRow(t *testing.T) {
+	s := newStore(t)
+	const title = "Add SSO login for admins"
+	edited := addSearchTask(t, s, board.Task{
+		Title: title,
+		Tags:  []string{"link::gitlab#42"},
+	})
+	other := addSearchTask(t, s, board.Task{Title: title})
+	if err := s.RecordImportLinks("alice", []ImportLink{{
+		ExternalKey: "gitlab-42",
+		Link:        "gitlab#42",
+		Title:       title,
+	}}); err != nil {
+		t.Fatalf("RecordImportLinks: %v", err)
+	}
+
+	hits, err := s.SearchSimilar(
+		"alice",
+		title,
+		edited.ID,
+		[]string{"gitlab#42"},
+		3,
+	)
+	if err != nil {
+		t.Fatalf("SearchSimilar: %v", err)
+	}
+	if len(hits) != 1 || hits[0].ID != other.ID || hits[0].Via != "card" {
+		t.Fatalf("SearchSimilar = %+v, want distinct card %q only", hits, other.ID)
+	}
+}
+
+// TestSearchSimilarCapsImportExclusions keeps direct callers from turning one
+// advisory lookup into an unbounded set allocation.
+func TestSearchSimilarCapsImportExclusions(t *testing.T) {
+	s := newStore(t)
+	const title = "bounded import exclusion sentinel"
+	if err := s.RecordImportLinks("alice", []ImportLink{{
+		ExternalKey: "target",
+		Link:        "gitlab#target",
+		Title:       title,
+	}}); err != nil {
+		t.Fatalf("RecordImportLinks: %v", err)
+	}
+	excludeLinks := make([]string, maxSimilarExcludeLinks)
+	for i := range excludeLinks {
+		excludeLinks[i] = "unknown"
+	}
+	excludeLinks = append(excludeLinks, "gitlab#target")
+
+	hits, err := s.SearchSimilar("alice", title, "", excludeLinks, 3)
+	if err != nil {
+		t.Fatalf("SearchSimilar: %v", err)
+	}
+	if len(hits) != 1 || hits[0].Link != "gitlab#target" {
+		t.Fatalf("SearchSimilar = %+v, want target beyond exclusion cap", hits)
+	}
+}
+
 func TestSearchSimilarWithEmbeddedNULHasNoSQLSyntaxError(t *testing.T) {
-	hits, err := newStore(t).SearchSimilar("alice", "abc\x00def", "", 10)
+	hits, err := newStore(t).SearchSimilar("alice", "abc\x00def", "", nil, 10)
 	if err != nil {
 		t.Fatalf("SearchSimilar embedded NUL: %v", err)
 	}
@@ -407,7 +482,7 @@ func TestSearchSimilarReturnsCardsBeforeImportsAndCapsMergedResults(t *testing.T
 	}); err != nil {
 		t.Fatalf("RecordImportLinks: %v", err)
 	}
-	hits, err := s.SearchSimilar("alice", "shared marker", "", 2)
+	hits, err := s.SearchSimilar("alice", "shared marker", "", nil, 2)
 	if err != nil {
 		t.Fatalf("SearchSimilar: %v", err)
 	}
@@ -443,7 +518,7 @@ func TestScopeIsolation(t *testing.T) {
 		other := scopes[1-i]
 		t.Run(scope, func(t *testing.T) {
 			for _, query := range []string{"scope title marker", "scope body marker"} {
-				hits, err := s.SearchSimilar(scope, query, "", 10)
+				hits, err := s.SearchSimilar(scope, query, "", nil, 10)
 				if err != nil {
 					t.Fatalf("SearchSimilar(%q): %v", query, err)
 				}
@@ -466,7 +541,7 @@ func TestScopeIsolation(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(found, want) {
 				t.Fatalf("ImportedAs(%q) = %+v, %v, want %+v", scope, found, err, want)
 			}
-			hits, err := s.SearchSimilar(scope, "isolated import sentinel", "", 10)
+			hits, err := s.SearchSimilar(scope, "isolated import sentinel", "", nil, 10)
 			own, foreign := false, false
 			for _, hit := range hits {
 				own = own || hit.Via == "import" && hit.Title == provenance[scope][1].Title
@@ -481,7 +556,7 @@ func TestScopeIsolation(t *testing.T) {
 
 func requireNoHits(t *testing.T, s *Store, scope, query string) {
 	t.Helper()
-	hits, err := s.SearchSimilar(scope, query, "", 10)
+	hits, err := s.SearchSimilar(scope, query, "", nil, 10)
 	if err != nil {
 		t.Fatalf("SearchSimilar(%q): %v", query, err)
 	}
@@ -501,7 +576,7 @@ func addSearchTask(t *testing.T, s *Store, task board.Task) board.Task {
 
 func requireSingleCardHit(t *testing.T, s *Store, scope, query, id string, status board.Status) {
 	t.Helper()
-	hits, err := s.SearchSimilar(scope, query, "", 10)
+	hits, err := s.SearchSimilar(scope, query, "", nil, 10)
 	if err != nil {
 		t.Fatalf("SearchSimilar(%q): %v", query, err)
 	}

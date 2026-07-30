@@ -53,11 +53,46 @@ function invalidTaskIDs(): Error {
   return new Error('PUT /api/board returned invalid task ids');
 }
 
+function invalidBoardSnapshot(): Error {
+  return new Error('GET /api/board returned invalid board snapshot');
+}
+
 /**
- * Convert the negotiated acknowledgement into client-id -> canonical-id
- * entries. The server returns ids in parsed markdown order, not Board.tasks
- * order, so the positions must be paired through wireTasks().
+ * Convert a negotiated response body into client-id -> canonical-id entries.
+ * The server returns ids in parsed markdown order, not Board.tasks order, so
+ * the positions must be paired through wireTasks().
  */
+function taskIDMapFromBody(
+  body: unknown,
+  pushed: Board,
+  invalid: () => Error,
+): ReadonlyMap<string, string> {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    throw invalid();
+  }
+  const ids = (body as Record<string, unknown>).task_ids;
+  const tasks = wireTasks(pushed);
+  if (!Array.isArray(ids) || ids.length !== tasks.length) {
+    throw invalid();
+  }
+
+  const mapped = new Map<string, string>();
+  const seenCanonical = new Set<string>();
+  for (let i = 0; i < tasks.length; i++) {
+    const canonicalID = ids[i];
+    if (
+      typeof canonicalID !== 'string' ||
+      canonicalID.trim() === '' ||
+      seenCanonical.has(canonicalID)
+    ) {
+      throw invalid();
+    }
+    seenCanonical.add(canonicalID);
+    mapped.set(tasks[i]!.id, canonicalID);
+  }
+  return mapped;
+}
+
 async function taskIDMap(
   res: Response,
   pushed: Board,
@@ -73,30 +108,23 @@ async function taskIDMap(
   } catch {
     throw invalidTaskIDs();
   }
-  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-    throw invalidTaskIDs();
-  }
-  const ids = (body as Record<string, unknown>).task_ids;
-  const tasks = wireTasks(pushed);
-  if (!Array.isArray(ids) || ids.length !== tasks.length) {
-    throw invalidTaskIDs();
-  }
+  return taskIDMapFromBody(body, pushed, invalidTaskIDs);
+}
 
-  const mapped = new Map<string, string>();
-  const seenCanonical = new Set<string>();
-  for (let i = 0; i < tasks.length; i++) {
-    const canonicalID = ids[i];
-    if (
-      typeof canonicalID !== 'string' ||
-      canonicalID.trim() === '' ||
-      seenCanonical.has(canonicalID)
-    ) {
-      throw invalidTaskIDs();
-    }
-    seenCanonical.add(canonicalID);
-    mapped.set(tasks[i]!.id, canonicalID);
+/**
+ * Accumulate partial write acknowledgements without mutating the prior map.
+ * A later acknowledgement for the same browser id is authoritative.
+ */
+export function mergeTaskIDMaps(
+  current: ReadonlyMap<string, string>,
+  acknowledged: ReadonlyMap<string, string>,
+): ReadonlyMap<string, string> {
+  if (acknowledged.size === 0) return current;
+  const merged = new Map(current);
+  for (const [clientID, canonicalID] of acknowledged) {
+    merged.set(clientID, canonicalID);
   }
-  return mapped;
+  return merged;
 }
 
 /**
@@ -173,9 +201,18 @@ export class RemoteStore {
     }
   }
 
-  /** null when the server has no board yet (404); throws on other failures. */
-  async loadRemote(identity: Identity): Promise<Board | null> {
-    const res = await authedFetch(identity, '/api/board');
+  /**
+   * null when the server has no board yet (404); throws on other failures.
+   * JSON-capable servers return canonical ids with the same board snapshot;
+   * legacy markdown responses remain readable but cannot seed that map.
+   */
+  async loadRemote(
+    identity: Identity,
+    onTaskIDs?: (taskIDs: ReadonlyMap<string, string>) => void,
+  ): Promise<Board | null> {
+    const res = await authedFetch(identity, '/api/board', {
+      headers: { Accept: 'application/json' },
+    });
     if (res.status === 404) {
       // The 404 carries the version of "no board", so keep it: without a
       // token our first PUT would be unconditional, and that write is the one
@@ -185,10 +222,36 @@ export class RemoteStore {
       return null;
     }
     if (!res.ok) throw new Error(`GET /api/board failed: ${res.status}`);
-    const board = parse(await res.text());
+    let loaded: Board;
+    let taskIDs: ReadonlyMap<string, string> | null = null;
+    const contentType = res.headers
+      .get('Content-Type')
+      ?.split(';', 1)[0]
+      ?.trim()
+      .toLowerCase();
+    if (contentType === 'application/json') {
+      let body: unknown;
+      try {
+        body = await res.json();
+      } catch {
+        throw invalidBoardSnapshot();
+      }
+      if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        throw invalidBoardSnapshot();
+      }
+      const markdown = (body as Record<string, unknown>).board;
+      if (typeof markdown !== 'string' || markdown.trim() === '') {
+        throw invalidBoardSnapshot();
+      }
+      loaded = parse(markdown);
+      taskIDs = taskIDMapFromBody(body, loaded, invalidBoardSnapshot);
+    } else {
+      loaded = parse(await res.text());
+    }
     this.etag = res.headers.get('ETag');
-    this.base = board;
-    return board;
+    this.base = loaded;
+    if (taskIDs) onTaskIDs?.(taskIDs);
+    return loaded;
   }
 
   private putBoard(

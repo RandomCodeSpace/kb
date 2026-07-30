@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Identity } from '../lib/auth';
 import type { Status, Task } from '../lib/model';
 import { STATUS_LABEL } from '../lib/model';
@@ -28,6 +28,8 @@ export type ModalState =
 export interface CardModalProps {
   state: ModalState;
   identity: Identity;
+  /** Canonical server id acknowledged for the edited browser task. */
+  canonicalTaskId?: string;
   /** Suggestions for the labels combobox (server labels ∪ board tags). */
   labels: string[];
   /**
@@ -103,20 +105,23 @@ export function taskImportLinks(task: Task): string[] {
 export function CardModal({
   state,
   identity,
+  canonicalTaskId,
   labels,
   aiDraft,
   onSave,
   onDelete,
   onClose,
 }: CardModalProps) {
-  const excludeId = state.mode === 'edit' ? state.task.id : undefined;
+  const excludeId = state.mode === 'edit' ? canonicalTaskId : undefined;
   const [title, setTitle] = useState(state.mode === 'edit' ? state.task.title : '');
   const [aiBusy, setAiBusy] = useState(false);
   const [items, setItems] = useState<SimilarItem[]>([]);
   const [dismissed, setDismissed] = useState(false);
   const [lastQ, setLastQ] = useState('');
-  const importLinks =
-    state.mode === 'edit' ? taskImportLinks(state.task) : [];
+  const importLinks = useMemo(
+    () => (state.mode === 'edit' ? taskImportLinks(state.task) : []),
+    [state],
+  );
   const [selectedLink, setSelectedLink] = useState(importLinks[0] ?? '');
   const [provenance, setProvenance] = useState<ImportProvenance[]>([]);
   const [selectedExternalKey, setSelectedExternalKey] = useState('');
@@ -176,6 +181,7 @@ export function CardModal({
         identity,
         title,
         excludeId,
+        importLinks,
         ctrl.signal,
       ).then((next) => {
         if (ctrl.signal.aborted) return;
@@ -188,7 +194,7 @@ export function CardModal({
       clearTimeout(timer);
       ctrl.abort();
     };
-  }, [excludeId, identity, lastQ, title]);
+  }, [excludeId, identity, importLinks, lastQ, title]);
 
   const selectedProvenance = provenance.find(
     (item) => item.external_key === selectedExternalKey,

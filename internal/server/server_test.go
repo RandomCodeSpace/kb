@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -253,6 +255,82 @@ func TestSimilarEndpoint(t *testing.T) {
 		if len(importGot.Items[0]) != 3 || importGot.Items[0]["link"] != "link::gitlab#7" ||
 			importGot.Items[0]["title"] != "archive provenance import" || importGot.Items[0]["via"] != "import" {
 			t.Errorf("import similar item = %v, want lowercase title/link/via only", importGot.Items[0])
+		}
+	})
+
+	// Repeated provenance exclusions prevent both imported self-match rows while
+	// an unknown link remains a harmless no-op.
+	t.Run("honors repeated import exclusions and ignores unknown links", func(t *testing.T) {
+		h, st := newTestServer(t, Config{})
+		const title = "shared imported duplicate"
+		card, err := st.AddTask("default", board.Task{Title: title})
+		if err != nil {
+			t.Fatalf("AddTask: %v", err)
+		}
+		if err := st.RecordImportLinks("default", []store.ImportLink{
+			{ExternalKey: "one", Link: "gitlab#1", Title: title},
+			{ExternalKey: "two", Link: "gitlab#2", Title: title},
+			{ExternalKey: "three", Link: "gitlab#3", Title: title},
+		}); err != nil {
+			t.Fatalf("RecordImportLinks: %v", err)
+		}
+		params := url.Values{"q": {title}}
+		params.Add("exclude_link", "gitlab#1")
+		params.Add("exclude_link", "gitlab#2")
+		params.Add("exclude_link", "unknown#99")
+
+		w := doReq(t, h, http.MethodGet, "/api/similar?"+params.Encode(), "", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET similar: got %d, want 200 (body=%s)", w.Code, w.Body)
+		}
+		var got similarResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("similar JSON: %v", err)
+		}
+		if len(got.Items) != 2 {
+			t.Fatalf("similar items = %+v, want card and unexcluded import", got.Items)
+		}
+		foundCard, foundImport := false, false
+		for _, item := range got.Items {
+			if item.Link == "gitlab#1" || item.Link == "gitlab#2" {
+				t.Fatalf("excluded import appeared in similar results: %+v", item)
+			}
+			foundCard = foundCard || item.ID == card.ID
+			foundImport = foundImport || item.Link == "gitlab#3"
+		}
+		if !foundCard || !foundImport {
+			t.Fatalf("similar items = %+v, want card %q and gitlab#3", got.Items, card.ID)
+		}
+	})
+
+	// The repeated query list is capped before it reaches the store; a value
+	// beyond that boundary cannot expand per-request filtering work.
+	t.Run("caps repeated import exclusions", func(t *testing.T) {
+		h, st := newTestServer(t, Config{})
+		const title = "bounded provenance sentinel"
+		if err := st.RecordImportLinks("default", []store.ImportLink{{
+			ExternalKey: "target",
+			Link:        "gitlab#target",
+			Title:       title,
+		}}); err != nil {
+			t.Fatalf("RecordImportLinks: %v", err)
+		}
+		params := url.Values{"q": {title}}
+		for i := range maxSimilarExcludeLinks {
+			params.Add("exclude_link", "unknown#"+strconv.Itoa(i))
+		}
+		params.Add("exclude_link", "gitlab#target")
+
+		w := doReq(t, h, http.MethodGet, "/api/similar?"+params.Encode(), "", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET similar: got %d, want 200 (body=%s)", w.Code, w.Body)
+		}
+		var got similarResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("similar JSON: %v", err)
+		}
+		if len(got.Items) != 1 || got.Items[0].Link != "gitlab#target" {
+			t.Fatalf("similar items = %+v, want target beyond exclusion cap", got.Items)
 		}
 	})
 

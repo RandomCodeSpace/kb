@@ -34,6 +34,8 @@ type Tombstone struct {
 // SimilarityFloor rejects FTS candidates sharing too little title vocabulary.
 const SimilarityFloor = 0.34
 
+const maxSimilarExcludeLinks = 100
+
 func searchTokenBoundary(r rune) bool {
 	return unicode.IsSpace(r) || unicode.IsControl(r)
 }
@@ -101,10 +103,17 @@ type scoredSimilarHit struct {
 
 // SearchSimilar returns scoped card and import-provenance hits ranked by title
 // similarity.
-func (s *Store) SearchSimilar(scope, query, excludeID string, limit int) ([]SimilarHit, error) {
+func (s *Store) SearchSimilar(scope, query, excludeID string, excludeLinks []string, limit int) ([]SimilarHit, error) {
 	match := FtsQuery(query)
 	if match == "" || limit <= 0 {
 		return nil, nil
+	}
+	if len(excludeLinks) > maxSimilarExcludeLinks {
+		excludeLinks = excludeLinks[:maxSimilarExcludeLinks]
+	}
+	excludedLinks := make(map[string]struct{}, len(excludeLinks))
+	for _, link := range excludeLinks {
+		excludedLinks[link] = struct{}{}
 	}
 	candidateLimit := limit * 8
 	if candidateLimit < 24 {
@@ -173,6 +182,9 @@ func (s *Store) SearchSimilar(scope, query, excludeID string, limit int) ([]Simi
 			return nil, fmt.Errorf("store: scan import search: %w", err)
 		}
 		hit.Via = "import"
+		if _, excluded := excludedLinks[hit.Link]; excluded {
+			continue
+		}
 		keepCandidate(hit)
 	}
 	if err := rows.Err(); err != nil {

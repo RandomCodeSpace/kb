@@ -292,7 +292,7 @@ func TestSearchSimilarReportsKilledCardsWithTheirReason(t *testing.T) {
 		t.Fatalf("RecordTombstone: %v", err)
 	}
 
-	hits, err := s.SearchSimilar("alice", "shared authentication marker", "", 10)
+	hits, err := s.SearchSimilar("alice", "shared authentication marker", "", nil, 10)
 	if err != nil {
 		t.Fatalf("SearchSimilar: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestSearchSimilarStillReportsAGenuineKilledNearMatch(t *testing.T) {
 		t.Fatalf("RecordTombstone: %v", err)
 	}
 
-	hits, err := s.SearchSimilar("alice", "SSO login for admins", "", 3)
+	hits, err := s.SearchSimilar("alice", "SSO login for admins", "", nil, 3)
 	if err != nil {
 		t.Fatalf("SearchSimilar: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestCancelledCardWithoutATombstoneIsStillAnOrdinaryHit(t *testing.T) {
 		Status: board.StatusCancelled,
 	})
 
-	hits, err := s.SearchSimilar("alice", "ordinary cancelled compatibility sentinel", "", 10)
+	hits, err := s.SearchSimilar("alice", "ordinary cancelled compatibility sentinel", "", nil, 10)
 	if err != nil {
 		t.Fatalf("SearchSimilar: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestGraveyardScopeIsolation(t *testing.T) {
 		other := scopes[1-index]
 		t.Run(scope, func(t *testing.T) {
 			for _, query := range []string{"shared", "graveyard", "alpha", "beta", "gamma", title} {
-				hits, err := s.SearchSimilar(scope, query, "", 10)
+				hits, err := s.SearchSimilar(scope, query, "", nil, 10)
 				if err != nil {
 					t.Fatalf("SearchSimilar(%q): %v", query, err)
 				}
@@ -453,7 +453,7 @@ func TestRetitledCardOrphansItsTombstoneHarmlessly(t *testing.T) {
 		t.Fatalf("orphan Tombstone = found %t, err %v", found, err)
 	}
 
-	hits, err := s.SearchSimilar("alice", "retitled graveyard identity", "", 10)
+	hits, err := s.SearchSimilar("alice", "retitled graveyard identity", "", nil, 10)
 	if err != nil {
 		t.Fatalf("SearchSimilar retitled card: %v", err)
 	}

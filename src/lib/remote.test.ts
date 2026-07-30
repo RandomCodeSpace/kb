@@ -3,7 +3,7 @@ import type { Board } from './model';
 import { newTask } from './model';
 import { parse, serialize, wireTasks } from './markdown';
 import type { Identity } from './auth';
-import { mergeBoards, RemoteStore } from './remote';
+import { mergeBoards, mergeTaskIDMaps, RemoteStore } from './remote';
 
 const identity: Identity = { kind: 'manual', id: 'alice' };
 
@@ -57,8 +57,53 @@ function saveWithTaskIDs(store: RemoteStore, b: Board): Promise<SaveResult> {
   });
 }
 
+function remoteSnapshot(
+  b: Board,
+  taskIDs: readonly string[],
+  etag = 'v1',
+): Response {
+  return new Response(
+    JSON.stringify({ board: serialize(b), task_ids: taskIDs }),
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        ETag: etag,
+      },
+    },
+  );
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+// A write acknowledgement contains only that write's identities; replacing
+// the prior map makes older cards start self-matching again.
+describe('mergeTaskIDMaps', () => {
+  it('adds later acknowledgements without dropping earlier mappings', () => {
+    const earlier = new Map([
+      ['client-a', 'server-a'],
+      ['client-b', 'server-b'],
+    ]);
+
+    const merged = mergeTaskIDMaps(
+      earlier,
+      new Map([
+        ['client-b', 'server-b-new'],
+        ['client-c', 'server-c'],
+      ]),
+    );
+
+    expect([...merged]).toEqual([
+      ['client-a', 'server-a'],
+      ['client-b', 'server-b-new'],
+      ['client-c', 'server-c'],
+    ]);
+    expect([...earlier]).toEqual([
+      ['client-a', 'server-a'],
+      ['client-b', 'server-b'],
+    ]);
+  });
 });
 
 describe('mergeBoards', () => {
@@ -115,6 +160,64 @@ describe('mergeBoards', () => {
 });
 
 describe('RemoteStore concurrency', () => {
+  // Previously only PUTs acknowledged canonical ids, leaving a freshly loaded
+  // card able to match itself until somebody edited and saved it once.
+  it('maps a freshly loaded board to canonical ids before its first edit', async () => {
+    const store = new RemoteStore();
+    const serverBoard: Board = {
+      title: 'kb',
+      tasks: [
+        newTask({ title: 'Duplicate', status: 'done' }),
+        newTask({ title: 'Duplicate', status: 'todo' }),
+        newTask({ title: 'Doing other', status: 'doing' }),
+      ],
+    };
+    const canonical = ['todo-server', 'doing-server', 'done-server'];
+    const calls = stubFetch([remoteSnapshot(serverBoard, canonical)]);
+    let loadedIDs: ReadonlyMap<string, string> | undefined;
+
+    const loaded = await store.loadRemote(identity, (taskIDs) => {
+      loadedIDs = taskIDs;
+    });
+
+    expect(calls[0]!.headers.Accept).toBe('application/json');
+    expect(loaded).not.toBeNull();
+    expect(loadedIDs).toBeDefined();
+    expect([...loadedIDs!]).toEqual(
+      wireTasks(loaded!).map((task, index) => [task.id, canonical[index]!]),
+    );
+  });
+
+  // A corrupt positional map could suppress an unrelated card, which is worse
+  // than leaving a duplicate advisory visible.
+  it.each([
+    ['invalid JSON', '{'],
+    ['a missing board', '{"task_ids":[]}'],
+    ['a non-string board', '{"board":7,"task_ids":[]}'],
+    [
+      'a task-id count mismatch',
+      JSON.stringify({ board: serialize(board('A')), task_ids: [] }),
+    ],
+    [
+      'duplicate canonical ids',
+      JSON.stringify({
+        board: serialize(board('A', 'B')),
+        task_ids: ['server-a', 'server-a'],
+      }),
+    ],
+  ])('rejects a JSON board snapshot with %s', async (_case, bodyText) => {
+    const store = new RemoteStore();
+    stubFetch([
+      new Response(bodyText, {
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ]);
+
+    await expect(store.loadRemote(identity)).rejects.toThrow(
+      'GET /api/board returned invalid board snapshot',
+    );
+  });
+
   it('sends the version it last read back as If-Match', async () => {
     const store = new RemoteStore();
     const calls = stubFetch([
@@ -299,9 +402,9 @@ describe('RemoteStore concurrency', () => {
   it('maps a 409 retry against the merged board that was actually pushed', async () => {
     const store = new RemoteStore();
     stubFetch([
-      new Response(serialize(board('A')), { headers: { ETag: 'v1' } }),
+      remoteSnapshot(board('A'), ['server-a'], 'v1'),
       new Response('conflict', { status: 409 }),
-      new Response(serialize(board('A', 'B')), { headers: { ETag: 'v2' } }),
+      remoteSnapshot(board('A', 'B'), ['server-a', 'server-b'], 'v2'),
       new Response(
         JSON.stringify({
           task_ids: ['server-a', 'server-c', 'server-b'],
