@@ -2,6 +2,7 @@ package main
 
 import (
 	"io/fs"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,110 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/server"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
+
+// Redirected logs can contain private board metadata, so the file must be
+// private, retain earlier entries, and leave the process logger recoverable.
+func TestConfigureLoggingCreatesAPrivateAppendOnlyFile(t *testing.T) {
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+	t.Cleanup(func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	})
+	log.SetFlags(log.LstdFlags)
+
+	path := filepath.Join(t.TempDir(), "kb.log")
+	first, err := configureLogging(path)
+	if err != nil {
+		t.Fatalf("configureLogging(first): %v", err)
+	}
+	log.Print("first log line")
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first log file: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat log file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("log file mode = %04o, want 0600", got)
+	}
+	if got := log.Flags(); got != log.LstdFlags {
+		t.Errorf("log flags = %d, want %d", got, log.LstdFlags)
+	}
+
+	second, err := configureLogging(path)
+	if err != nil {
+		t.Fatalf("configureLogging(second): %v", err)
+	}
+	log.Print("second log line")
+	if err := second.Close(); err != nil {
+		t.Fatalf("close second log file: %v", err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	got := string(content)
+	firstAt := strings.Index(got, "first log line")
+	secondAt := strings.Index(got, "second log line")
+	if firstAt < 0 || secondAt < 0 || firstAt >= secondAt {
+		t.Errorf("appended log = %q, want both lines in order", got)
+	}
+}
+
+// An unset destination is the compatibility path: it must not alter stderr or
+// leave callers with a closer that panics when deferred.
+func TestConfigureLoggingWithAnEmptyPathLeavesTheLoggerUnchanged(t *testing.T) {
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+	t.Cleanup(func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	})
+
+	closer, err := configureLogging("")
+	if err != nil {
+		t.Fatalf("configureLogging(empty): %v", err)
+	}
+	if closer == nil {
+		t.Fatal("configureLogging(empty) returned a nil closer")
+	}
+	if got := log.Writer(); got != previousWriter {
+		t.Errorf("log writer = %T, want original %T", got, previousWriter)
+	}
+	if got := log.Flags(); got != previousFlags {
+		t.Errorf("log flags = %d, want %d", got, previousFlags)
+	}
+	if err := closer.Close(); err != nil {
+		t.Errorf("close empty-path closer: %v", err)
+	}
+}
+
+// A typo in the destination must stop startup instead of silently sending
+// sensitive logs somewhere the operator is not watching.
+func TestConfigureLoggingReturnsAnErrorForAnUnopenablePath(t *testing.T) {
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+	t.Cleanup(func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	})
+
+	path := filepath.Join(t.TempDir(), "missing", "kb.log")
+	closer, err := configureLogging(path)
+	if err == nil {
+		if closer != nil {
+			_ = closer.Close()
+		}
+		t.Fatal("configureLogging(unopenable) returned no error")
+	}
+	if got := log.Writer(); got != previousWriter {
+		t.Errorf("log writer changed after error: got %T, want %T", got, previousWriter)
+	}
+}
 
 // TestWiring exercises the startup path main performs: secret creation,
 // SQLite store at <data>/kb.db, legacy markdown import from the data dir,

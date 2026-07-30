@@ -808,6 +808,7 @@ You need one app registration; no client secret, no Graph permissions.
 | `KB_AI_ALLOW_PRIVATE`  | server, runtime    | unset                | `1` lets the AI proxy reach loopback/private addresses (local Ollama)        |
 | `KB_FORGE_ALLOW_PRIVATE` | server, runtime  | unset                | Comma-separated forge hostnames allowed to resolve privately; `1` or `*` allows all |
 | `KB_DATA`              | all modes, runtime | `~/.local/share/kb`  | Data directory: `kb.db`, `secret`, legacy `.md` boards (`--data` overrides)  |
+| `KB_LOG_FILE`          | server, runtime    | unset                | Append logs to this file, created with mode `0600` (`--log` overrides)       |
 | `KB_TOKEN`             | server, runtime    | unset                | Shared bearer token; enables token mode when Azure vars are unset            |
 | `KB_AZURE_TENANT_ID`   | server, runtime    | unset                | Entra tenant ID; with client ID, enables Entra mode; served to the SPA by `GET /api/config` |
 | `KB_AZURE_CLIENT_ID`   | server, runtime    | unset                | Entra app (client) ID; expected token audience; served to the SPA by `GET /api/config` |
@@ -821,6 +822,11 @@ You need one app registration; no client secret, no Graph permissions.
 
 Mode precedence at startup: Azure pair set → Entra mode; else `KB_TOKEN` set →
 token mode; else open mode.
+
+When `KB_LOG_FILE` or `--log` is set, kb opens the file once in append mode and
+creates it with permissions `0600`. Log rotation is the operator's job. kb does
+not reopen the handle on `SIGHUP`, so `logrotate` configurations must use
+`copytruncate`. With neither setting, logs continue to go to stderr.
 
 ## Running under systemd
 
