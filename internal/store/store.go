@@ -521,14 +521,21 @@ func (s *Store) replaceBoardConditional(user string, b board.Board, canonicalIDs
 }
 
 func (s *Store) replaceBoardConditionalReceipt(user string, b board.Board, canonicalIDs []*string, condition BoardWriteCondition, operationID, requestHash string, allowNewReceipt bool) ([]string, int64, bool, error) {
+	request := boardReplacementRequest{
+		user:            user,
+		board:           b,
+		canonicalIDs:    canonicalIDs,
+		condition:       condition,
+		operationID:     operationID,
+		requestHash:     requestHash,
+		allowNewReceipt: allowNewReceipt,
+	}
 	var taskIDs []string
 	var revision int64
 	var replayed bool
 	err := s.withTx(func(tx *sql.Tx) error {
 		var err error
-		taskIDs, revision, replayed, err = s.replaceBoardConditionalReceiptTx(
-			tx, user, b, canonicalIDs, condition, operationID, requestHash, allowNewReceipt,
-		)
+		taskIDs, revision, replayed, err = s.replaceBoardConditionalReceiptTx(tx, request)
 		return err
 	})
 	if err != nil {
@@ -537,25 +544,35 @@ func (s *Store) replaceBoardConditionalReceipt(user string, b board.Board, canon
 	return taskIDs, revision, replayed, nil
 }
 
-func (s *Store) replaceBoardConditionalReceiptTx(tx *sql.Tx, user string, b board.Board, canonicalIDs []*string, condition BoardWriteCondition, operationID, requestHash string, allowNewReceipt bool) ([]string, int64, bool, error) {
-	taskIDs, revision, replayed, err := loadBoardWriteReceiptTx(tx, user, operationID, requestHash)
+type boardReplacementRequest struct {
+	user            string
+	board           board.Board
+	canonicalIDs    []*string
+	condition       BoardWriteCondition
+	operationID     string
+	requestHash     string
+	allowNewReceipt bool
+}
+
+func (s *Store) replaceBoardConditionalReceiptTx(tx *sql.Tx, request boardReplacementRequest) ([]string, int64, bool, error) {
+	taskIDs, revision, replayed, err := loadBoardWriteReceiptTx(tx, request.user, request.operationID, request.requestHash)
 	if err != nil || replayed {
 		return taskIDs, revision, replayed, err
 	}
-	if revision, err = evaluateBoardWriteConditionTx(tx, user, condition, true); err != nil {
+	if revision, err = evaluateBoardWriteConditionTx(tx, request.user, request.condition, true); err != nil {
 		return nil, revision, false, err
 	}
-	if !validNewReceipt(operationID, allowNewReceipt) {
+	if !validNewReceipt(request.operationID, request.allowNewReceipt) {
 		return nil, revision, false, ErrInvalidTaskIDs
 	}
-	taskIDs, err = s.replaceBoardTx(tx, user, b, canonicalIDs)
+	taskIDs, err = s.replaceBoardTx(tx, request.user, request.board, request.canonicalIDs)
 	if err != nil {
 		return nil, revision, false, err
 	}
-	if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); err != nil {
+	if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, request.user).Scan(&revision); err != nil {
 		return nil, 0, false, fmt.Errorf("store: committed board revision: %w", err)
 	}
-	if err := insertBoardWriteReceiptTx(tx, user, operationID, requestHash, taskIDs, revision); err != nil {
+	if err := insertBoardWriteReceiptTx(tx, request.user, request.operationID, request.requestHash, taskIDs, revision); err != nil {
 		return nil, revision, false, err
 	}
 	return taskIDs, revision, false, nil
