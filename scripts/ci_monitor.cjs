@@ -4,7 +4,7 @@
 // It deliberately wraps every GitHub CLI observation with an explicit repository.
 
 const { execFileSync, spawnSync } = require('node:child_process');
-const { readFileSync, readdirSync } = require('node:fs');
+const { existsSync, readFileSync, readdirSync } = require('node:fs');
 const { join } = require('node:path');
 
 const HELP = `usage: node scripts/ci_monitor.cjs <command> [arguments]
@@ -73,15 +73,15 @@ function positiveInteger(value, label) {
 
 function checkActions(files) {
   function actionFiles(directory) {
+    if (!existsSync(directory)) return [];
     return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) return actionFiles(path);
-      return /(?:action\.ya?ml)$/.test(entry.name) ? [path] : [];
+      return /\.ya?ml$/.test(entry.name) ? [path] : [];
     });
   }
   const selected = files.length ? files : [
-    '.github/workflows/quality.yml',
-    '.github/workflows/sonar-exact-revision.yml',
+    ...actionFiles('.github/workflows'),
     ...actionFiles('.github/actions'),
   ];
   let failures = 0;
