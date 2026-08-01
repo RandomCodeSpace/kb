@@ -202,15 +202,19 @@ async function testSonarOriginPinning() {
   global.fetch = async (url) => {
     const parsed = new URL(url);
     seen.push(parsed.href);
-    const body = parsed.pathname === '/api/ce/task'
-      ? { task: { status: 'SUCCESS', analysisId: 'analysis-1', componentKey: process.env.SONAR_PROJECT_KEY } }
-      : { analyses: [{ key: 'analysis-1', revision: head }] };
+    const body = { task: {
+      status: 'SUCCESS',
+      analysisId: 'analysis-1',
+      branch: process.env.CANDIDATE_REF,
+      componentKey: process.env.SONAR_PROJECT_KEY,
+      scannerContext: `sonar.scm.revision=${head}\n`,
+    } };
     return { ok: true, json: async () => body };
   };
   const { main: verifySonarTask } = require('../../.github/actions/protected-sonar/verify-sonar-task.cjs');
   writeFileSync(reportPath, 'serverUrl=https://sonarcloud.io/untrusted/path\nceTaskId=task-1\n');
   await verifySonarTask();
-  assert.equal(seen.length, 2);
+  assert.equal(seen.length, 1);
   assert.ok(seen.every((url) => new URL(url).origin === 'https://sonarcloud.io'));
 
   const requestCount = seen.length;

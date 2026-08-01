@@ -67,6 +67,12 @@ class WorkflowStructureTest(unittest.TestCase):
         self.assertIn("repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}", job)
         self.assertIn("ref: ${{ github.event.pull_request.head.sha || github.sha }}", job)
 
+    def test_sonar_verifier_hostile_fixture_runs_in_ci(self):
+        self.assertIn(
+            "node .github/actions/protected-sonar/verify-sonar-task.test.cjs",
+            QUALITY,
+        )
+
     def test_branch_and_pr_control_plane_classification_match(self):
         branch = SONAR.split('elif [ "$ANALYSIS_MODE" = branch ]; then', 1)[1].split("else", 1)[0]
         self.assertIn('guard-control-plane.sh "$guard_base" "$CANDIDATE_SHA" --classify', branch)
