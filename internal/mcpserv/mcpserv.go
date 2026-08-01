@@ -305,20 +305,6 @@ func (k *kb) searchSimilar(_ context.Context, _ *mcp.CallToolRequest, in searchS
 func (k *kb) duplicateCheck(_ context.Context, _ *mcp.CallToolRequest, in duplicateCheckInput) (*mcp.CallToolResult, duplicateCheckOutput, error) {
 	out := duplicateCheckOutput{Candidates: make([]similarStub, 0)}
 	seenIDs := make(map[string]struct{})
-	appendHits := func(hits []store.SimilarHit) {
-		for _, hit := range hits {
-			if len(out.Candidates) >= duplicateCheckMaxCandidates {
-				return
-			}
-			if hit.ID != "" {
-				if _, seen := seenIDs[hit.ID]; seen {
-					continue
-				}
-				seenIDs[hit.ID] = struct{}{}
-			}
-			out.Candidates = append(out.Candidates, toSimilarStub(hit))
-		}
-	}
 
 	// Exact provenance is stronger evidence, so its cards stay ahead of text
 	// matches and win when the same task appears through both paths.
@@ -327,7 +313,7 @@ func (k *kb) duplicateCheck(_ context.Context, _ *mcp.CallToolRequest, in duplic
 		if err != nil {
 			return nil, duplicateCheckOutput{}, err
 		}
-		appendHits(hits)
+		out.Candidates = appendDuplicateCandidates(out.Candidates, hits, seenIDs)
 	}
 	if remaining := duplicateCheckMaxCandidates - len(out.Candidates); remaining > 0 {
 		similarLimit := remaining
@@ -339,9 +325,25 @@ func (k *kb) duplicateCheck(_ context.Context, _ *mcp.CallToolRequest, in duplic
 		if err != nil {
 			return nil, duplicateCheckOutput{}, err
 		}
-		appendHits(hits)
+		out.Candidates = appendDuplicateCandidates(out.Candidates, hits, seenIDs)
 	}
 	return nil, out, nil
+}
+
+func appendDuplicateCandidates(candidates []similarStub, hits []store.SimilarHit, seenIDs map[string]struct{}) []similarStub {
+	for _, hit := range hits {
+		if len(candidates) >= duplicateCheckMaxCandidates {
+			return candidates
+		}
+		if hit.ID != "" {
+			if _, seen := seenIDs[hit.ID]; seen {
+				continue
+			}
+			seenIDs[hit.ID] = struct{}{}
+		}
+		candidates = append(candidates, toSimilarStub(hit))
+	}
+	return candidates
 }
 
 func (k *kb) addTask(_ context.Context, _ *mcp.CallToolRequest, in addTaskInput) (*mcp.CallToolResult, taskJSON, error) {
