@@ -384,6 +384,42 @@ func parseEffort(s string) (string, error) {
 
 // --- commands ---
 
+func taskFromAddFlags(title string, cf cardFlags, set map[string]bool) (board.Task, error) {
+	t := board.Task{Title: title, Desc: cf.desc, Emoji: cf.emoji}
+	if cf.status != "" {
+		st, err := parseStatus(cf.status)
+		if err != nil {
+			return board.Task{}, err
+		}
+		t.Status = st
+	}
+	if set["prio"] {
+		if cf.prio < 1 || cf.prio > 4 {
+			return board.Task{}, fmt.Errorf("invalid prio %d (want 1-4)", cf.prio)
+		}
+		t.Prio = cf.prio
+	}
+	var err error
+	if t.Due, err = parseDue(cf.due); err != nil {
+		return board.Task{}, err
+	}
+	if t.Effort, err = parseEffort(cf.effort); err != nil {
+		return board.Task{}, err
+	}
+	blocked, err := resolveBlocked(set, &cf)
+	if err != nil {
+		return board.Task{}, err
+	}
+	if blocked != nil {
+		t.Blocked = *blocked
+	}
+	t.Tags = append([]string(nil), cf.tags...)
+	for _, c := range cf.checks {
+		t.Checks = append(t.Checks, parseCheckFlag(c))
+	}
+	return t, nil
+}
+
 func (a *app) cmdAdd(args []string) int {
 	fs, user, data := a.newFlagSet("add")
 	var cf cardFlags
@@ -399,41 +435,9 @@ func (a *app) cmdAdd(args []string) int {
 	if strings.TrimSpace(title) == "" {
 		return a.usageErr(errors.New("title must not be empty"))
 	}
-	set := setFlags(fs)
-	t := board.Task{Title: title, Desc: cf.desc, Emoji: cf.emoji}
-	if cf.status != "" {
-		st, err := parseStatus(cf.status)
-		if err != nil {
-			return a.usageErr(err)
-		}
-		t.Status = st
-	}
-	if set["prio"] {
-		if cf.prio < 1 || cf.prio > 4 {
-			return a.usageErr(fmt.Errorf("invalid prio %d (want 1-4)", cf.prio))
-		}
-		t.Prio = cf.prio
-	}
-	due, err := parseDue(cf.due)
+	t, err := taskFromAddFlags(title, cf, setFlags(fs))
 	if err != nil {
 		return a.usageErr(err)
-	}
-	t.Due = due
-	eff, err := parseEffort(cf.effort)
-	if err != nil {
-		return a.usageErr(err)
-	}
-	t.Effort = eff
-	blocked, err := resolveBlocked(set, &cf)
-	if err != nil {
-		return a.usageErr(err)
-	}
-	if blocked != nil {
-		t.Blocked = *blocked
-	}
-	t.Tags = append([]string(nil), cf.tags...)
-	for _, c := range cf.checks {
-		t.Checks = append(t.Checks, parseCheckFlag(c))
 	}
 	return a.withBackend(*user, *data, func(be backend) error {
 		it, err := be.add(t)
