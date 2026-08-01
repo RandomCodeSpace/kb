@@ -844,15 +844,6 @@ func TestImportMarkdownDir(t *testing.T) {
 	if err != nil || len(bobTasks) != 1 || bobTasks[0].Title != "Bobs live task" {
 		t.Errorf("bob tasks = %v, %v, want only the live task", bobTasks, err)
 	}
-	if _, err := s.db.Exec(`DELETE FROM tasks WHERE user = 'bob'`); err != nil {
-		t.Fatalf("clear bob: %v", err)
-	}
-	if n, err := s.ImportMarkdownDir(dir); err != nil || n != 0 {
-		t.Errorf("import after clearing skipped user = %d, %v, want 0", n, err)
-	}
-	if bobTasks, err := s.ListTasks("bob", ""); err != nil || len(bobTasks) != 0 {
-		t.Errorf("bob tasks after permanent skip = %v, %v, want none", bobTasks, err)
-	}
 
 	// Second run imports nothing and duplicates nothing.
 	if n, err := s.ImportMarkdownDir(dir); err != nil || n != 0 {
@@ -881,6 +872,33 @@ func TestImportMarkdownDir(t *testing.T) {
 	// Nonexistent dir is a no-op.
 	if n, err := s.ImportMarkdownDir(filepath.Join(dir, "nope")); err != nil || n != 0 {
 		t.Errorf("missing dir import = %d, %v, want 0, nil", n, err)
+	}
+}
+
+func TestMarkdownImportExistingTaskSkipIsPermanent(t *testing.T) {
+	s := newStore(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bob.md"), []byte("# Bob Board\n\n## To Do\n\n- [ ] Bobs file task\n"), 0o644); err != nil {
+		t.Fatalf("write bob.md: %v", err)
+	}
+	if _, err := s.AddTask("bob", board.Task{Title: "Bobs live task"}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	if n, err := s.ImportMarkdownDir(dir); err != nil || n != 0 {
+		t.Errorf("initial existing-task import = %d, %v, want 0", n, err)
+	}
+	bobTasks, err := s.ListTasks("bob", "")
+	if err != nil || len(bobTasks) != 1 || bobTasks[0].Title != "Bobs live task" {
+		t.Errorf("bob tasks = %v, %v, want only the live task", bobTasks, err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM tasks WHERE user = 'bob'`); err != nil {
+		t.Fatalf("clear bob: %v", err)
+	}
+	if n, err := s.ImportMarkdownDir(dir); err != nil || n != 0 {
+		t.Errorf("import after clearing skipped user = %d, %v, want 0", n, err)
+	}
+	if bobTasks, err := s.ListTasks("bob", ""); err != nil || len(bobTasks) != 0 {
+		t.Errorf("bob tasks after permanent skip = %v, %v, want none", bobTasks, err)
 	}
 }
 
