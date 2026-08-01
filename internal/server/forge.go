@@ -21,14 +21,15 @@ import (
 )
 
 const (
-	forgeTimeout       = 20 * time.Second
-	maxForgeDrainBytes = 64 << 10
-	maxForgeBodyBytes  = 2 << 20
-	maxImportIssues    = 20
-	maxForgeComments   = 20
-	maxForgeCommentLen = 1 << 10
-	importFetchTimeout = 25 * time.Second
-	maxImportLinks     = 100
+	forgeTimeout                  = 20 * time.Second
+	maxForgeDrainBytes            = 64 << 10
+	maxForgeBodyBytes             = 2 << 20
+	maxImportIssues               = 20
+	maxForgeComments              = 20
+	maxForgeCommentLen            = 1 << 10
+	importFetchTimeout            = 25 * time.Second
+	maxImportLinks                = 100
+	invalidIntegrationNameMessage = "invalid integration name"
 )
 
 type forgeSourceResponse struct {
@@ -45,6 +46,16 @@ type forgeSourcesResponse struct {
 type forgeTestResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+type forgeTestProbe struct {
+	BaseURL *string `json:"base_url"`
+	PAT     *string `json:"pat"`
+}
+
+type forgeTestTarget struct {
+	baseURL string
+	pat     string
 }
 
 type forgeRef struct {
@@ -300,40 +311,11 @@ func parseGitLabRef(source store.ForgeSource, path string) (forgeRef, error) {
 	}
 	n := len(parts)
 	if n >= 3 && parts[n-3] == "-" {
-		project := strings.Join(parts[:n-3], "/")
-		if project == "" {
-			return forgeRef{}, errors.New("invalid forge reference")
-		}
-		id, err := forgeRefID(parts[n-1])
-		if err != nil {
-			return forgeRef{}, err
-		}
-		ref := forgeRef{Source: source, Kind: source.Kind, Project: project}
-		switch parts[n-2] {
-		case "issues":
-			ref.Issue = id
-		case "milestones":
-			ref.Milestone = id
-		case "boards":
-			// Phase 1 resolves a board to its project; list and label filters are out of scope.
-		default:
-			return forgeRef{}, errors.New("invalid forge reference")
-		}
-		return ref, nil
+		return parseGitLabScopedRef(source, parts[:n-3], parts[n-2], parts[n-1])
 	}
 	if n >= 3 && (parts[n-2] == "issues" || parts[n-2] == "milestones") {
-		project := strings.Join(parts[:n-2], "/")
-		if project == "" {
-			return forgeRef{}, errors.New("invalid forge reference")
-		}
-		id, err := forgeRefID(parts[n-1])
+		ref, err := parseGitLabScopedRef(source, parts[:n-2], parts[n-2], parts[n-1])
 		if err == nil {
-			ref := forgeRef{Source: source, Kind: source.Kind, Project: project}
-			if parts[n-2] == "issues" {
-				ref.Issue = id
-			} else {
-				ref.Milestone = id
-			}
 			return ref, nil
 		}
 	}
@@ -343,6 +325,29 @@ func parseGitLabRef(source store.ForgeSource, path string) (forgeRef, error) {
 		}
 	}
 	return forgeRef{Source: source, Kind: source.Kind, Project: strings.Join(parts, "/")}, nil
+}
+
+func parseGitLabScopedRef(source store.ForgeSource, projectParts []string, resource, rawID string) (forgeRef, error) {
+	project := strings.Join(projectParts, "/")
+	if project == "" {
+		return forgeRef{}, errors.New("invalid forge reference")
+	}
+	id, err := forgeRefID(rawID)
+	if err != nil {
+		return forgeRef{}, err
+	}
+	ref := forgeRef{Source: source, Kind: source.Kind, Project: project}
+	switch resource {
+	case "issues":
+		ref.Issue = id
+	case "milestones":
+		ref.Milestone = id
+	case "boards":
+		// Phase 1 resolves a board to its project; list and label filters are out of scope.
+	default:
+		return forgeRef{}, errors.New("invalid forge reference")
+	}
+	return ref, nil
 }
 
 func parseGitHubRef(source store.ForgeSource, path string) (forgeRef, error) {
@@ -469,10 +474,21 @@ func (s *server) fetchIssues(ctx context.Context, ref forgeRef, max int) (issues
 	if err != nil {
 		return nil, 0, false, "", err
 	}
+	return s.fetchIssuePages(ctx, ref, apiBase, listPath, query, max)
+}
 
+type forgeIssuePageState struct {
+	issues         []forgeIssue
+	totalHint      int
+	fallbackTotal  int
+	hasGitLabTotal bool
+	truncated      bool
+	note           string
+}
+
+func (s *server) fetchIssuePages(ctx context.Context, ref forgeRef, apiBase, listPath string, query url.Values, max int) ([]forgeIssue, int, bool, string, error) {
+	state := forgeIssuePageState{}
 	page := 1
-	fallbackTotal := 0
-	hasGitLabTotal := false
 	for {
 		if page > 1 {
 			query.Set("page", strconv.Itoa(page))
@@ -481,18 +497,10 @@ func (s *server) fetchIssues(ctx context.Context, ref forgeRef, max int) (issues
 		if err != nil {
 			return nil, 0, false, "", err
 		}
-		if ref.Kind == "gitlab" {
-			if total := forgeTotalHint(response.header); total >= 0 {
-				totalHint = total
-				hasGitLabTotal = true
-			}
-		}
+		state.observeTotal(ref.Kind, response.header)
 		if forgeRateLimited(ref.Kind, response) {
-			if !hasGitLabTotal {
-				totalHint = fallbackTotal
-			}
-			note = fmt.Sprintf("rate limited — partial results (%d of %d)", len(issues), totalHint)
-			return issues, totalHint, true, note, nil
+			state.markRateLimited()
+			return state.result()
 		}
 		if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
 			return nil, 0, false, "", forgeRequestError(ref, listPath)
@@ -502,50 +510,67 @@ func (s *server) fetchIssues(ctx context.Context, ref forgeRef, max int) (issues
 		if err != nil {
 			return nil, 0, false, "", forgeRequestError(ref, listPath)
 		}
-		fallbackTotal += len(batch)
-		remaining := max - len(issues)
-		if len(batch) > remaining {
-			issues = append(issues, batch[:remaining]...)
-			truncated = true
-			break
-		}
-		issues = append(issues, batch...)
-		hasNext := forgeHasNextPage(ref.Kind, response.header)
-		if len(issues) >= max {
-			truncated = hasNext
-			break
-		}
-		if !hasNext {
+		if state.appendBatch(batch, max, forgeHasNextPage(ref.Kind, response.header)) {
 			break
 		}
 		page++
 	}
-	if !hasGitLabTotal {
-		totalHint = fallbackTotal
+	return state.result()
+}
+
+func (state *forgeIssuePageState) observeTotal(kind string, header http.Header) {
+	if kind != "gitlab" {
+		return
 	}
-	if totalHint > len(issues) {
-		truncated = true
+	total := forgeTotalHint(header)
+	if total >= 0 {
+		state.totalHint = total
+		state.hasGitLabTotal = true
 	}
-	return issues, totalHint, truncated, "", nil
+}
+
+func (state *forgeIssuePageState) markRateLimited() {
+	if !state.hasGitLabTotal {
+		state.totalHint = state.fallbackTotal
+	}
+	state.truncated = true
+	state.note = fmt.Sprintf("rate limited — partial results (%d of %d)", len(state.issues), state.totalHint)
+}
+
+func (state *forgeIssuePageState) appendBatch(batch []forgeIssue, max int, hasNext bool) bool {
+	state.fallbackTotal += len(batch)
+	remaining := max - len(state.issues)
+	if len(batch) > remaining {
+		state.issues = append(state.issues, batch[:remaining]...)
+		state.truncated = true
+		return true
+	}
+	state.issues = append(state.issues, batch...)
+	if len(state.issues) >= max {
+		state.truncated = hasNext
+		return true
+	}
+	return !hasNext
+}
+
+func (state *forgeIssuePageState) result() ([]forgeIssue, int, bool, string, error) {
+	if !state.hasGitLabTotal {
+		state.totalHint = state.fallbackTotal
+	}
+	if state.totalHint > len(state.issues) {
+		state.truncated = true
+	}
+	return state.issues, state.totalHint, state.truncated, state.note, nil
 }
 
 func (s *server) forgeIssuesList(ctx context.Context, ref forgeRef, apiBase string) (string, url.Values, error) {
-	listPath, err := forgeProjectIssuesPath(ref)
+	listPath, query, err := forgeIssueListRequest(ref)
 	if err != nil {
-		return "", nil, forgeRequestError(ref, "")
-	}
-	query := url.Values{"per_page": {"50"}}
-	if ref.Kind == "gitlab" {
-		query.Set("state", "opened")
-	} else if ref.Kind == "github" {
-		query.Set("state", "open")
-	} else {
 		return "", nil, forgeRequestError(ref, listPath)
 	}
 	if ref.Milestone == 0 {
 		return listPath, query, nil
 	}
-
 	milestonePath, err := forgeMilestonePath(ref)
 	if err != nil {
 		return "", nil, forgeRequestError(ref, "")
@@ -557,25 +582,51 @@ func (s *server) forgeIssuesList(ctx context.Context, ref forgeRef, apiBase stri
 	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
 		return "", nil, forgeRequestError(ref, milestonePath)
 	}
+	if !setForgeMilestoneQuery(ref.Kind, query, response.body) {
+		return "", nil, forgeRequestError(ref, milestonePath)
+	}
+	return listPath, query, nil
+}
+
+func forgeIssueListRequest(ref forgeRef) (string, url.Values, error) {
+	listPath, err := forgeProjectIssuesPath(ref)
+	if err != nil {
+		return "", nil, err
+	}
+	query := url.Values{"per_page": {"50"}}
 	switch ref.Kind {
+	case "gitlab":
+		query.Set("state", "opened")
+	case "github":
+		query.Set("state", "open")
+	default:
+		return listPath, nil, errors.New("invalid forge kind")
+	}
+	return listPath, query, nil
+}
+
+func setForgeMilestoneQuery(kind string, query url.Values, body []byte) bool {
+	switch kind {
 	case "gitlab":
 		var milestone struct {
 			Title string `json:"title"`
 		}
-		if err := json.Unmarshal(response.body, &milestone); err != nil || milestone.Title == "" {
-			return "", nil, forgeRequestError(ref, milestonePath)
+		if err := json.Unmarshal(body, &milestone); err != nil || milestone.Title == "" {
+			return false
 		}
 		query.Set("milestone", milestone.Title)
 	case "github":
 		var milestone struct {
 			Number int `json:"number"`
 		}
-		if err := json.Unmarshal(response.body, &milestone); err != nil || milestone.Number <= 0 {
-			return "", nil, forgeRequestError(ref, milestonePath)
+		if err := json.Unmarshal(body, &milestone); err != nil || milestone.Number <= 0 {
+			return false
 		}
 		query.Set("milestone", strconv.Itoa(milestone.Number))
+	default:
+		return false
 	}
-	return listPath, query, nil
+	return true
 }
 
 func (s *server) fetchForgeComments(ctx context.Context, ref forgeRef, apiBase, issuePath string) ([]string, error) {
@@ -591,12 +642,20 @@ func (s *server) fetchForgeComments(ctx context.Context, ref forgeRef, apiBase, 
 		return nil, forgeRequestError(ref, commentsPath)
 	}
 
+	comments, err := parseForgeComments(ref.Kind, response.body)
+	if err != nil {
+		return nil, forgeRequestError(ref, commentsPath)
+	}
+	return comments, nil
+}
+
+func parseForgeComments(kind string, body []byte) ([]string, error) {
 	comments := make([]string, 0, maxForgeComments)
-	switch ref.Kind {
+	switch kind {
 	case "gitlab":
 		var notes []gitLabNote
-		if err := json.Unmarshal(response.body, &notes); err != nil {
-			return nil, forgeRequestError(ref, commentsPath)
+		if err := json.Unmarshal(body, &notes); err != nil {
+			return nil, err
 		}
 		for _, note := range notes {
 			if !note.System {
@@ -605,14 +664,14 @@ func (s *server) fetchForgeComments(ctx context.Context, ref forgeRef, apiBase, 
 		}
 	case "github":
 		var raw []gitHubComment
-		if err := json.Unmarshal(response.body, &raw); err != nil {
-			return nil, forgeRequestError(ref, commentsPath)
+		if err := json.Unmarshal(body, &raw); err != nil {
+			return nil, err
 		}
 		for _, comment := range raw {
 			comments = appendBoundedForgeComment(comments, comment.Body)
 		}
 	default:
-		return nil, forgeRequestError(ref, commentsPath)
+		return nil, errors.New("invalid forge kind")
 	}
 	return comments, nil
 }
@@ -861,13 +920,13 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 	}
 	var req importPreviewRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	sources, err := s.store.ForgeSources(user)
 	if err != nil {
 		log.Printf("forge: list sources for %s failed", user)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	ref, err := parseForgeRef(sources, req.Source, req.Ref)
@@ -877,7 +936,7 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 	}
 	selected, found := forgeSourceByName(sources, req.Source)
 	if !found {
-		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
 		return
 	}
 	if ref.Source.Name != selected.Name {
@@ -886,7 +945,7 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 	}
 	kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
 	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
-		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
 		return
 	}
 	ref.pat = pat
@@ -901,7 +960,7 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 	duplicates, err := s.importDuplicates(user, issues)
 	if err != nil {
 		log.Printf("forge: duplicate lookup for %s failed", user)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	fetched := len(issues)
@@ -932,21 +991,27 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	response.Drafts = buildImportPreviewDrafts(ref, drafts, issues, duplicates)
+	writeJSON(w, response)
+}
+
+func buildImportPreviewDrafts(ref forgeRef, drafts []storyDraft, issues []forgeIssue, duplicates []*importDuplicate) []importPreviewDraft {
+	previews := make([]importPreviewDraft, 0, len(drafts))
 	for _, draft := range drafts {
 		preview := importPreviewDraft{storyDraft: draft}
 		preview.Tags = stripModelLinkTags(preview.Tags)
-		if draft.Source > 0 && draft.Source <= sourceCount {
+		if draft.Source > 0 && draft.Source <= len(issues) {
 			issue := issues[draft.Source-1]
 			link, externalKey := importIssueProvenance(ref, issue)
-			preview.Tags = append(preview.Tags, "link::"+link)
+			preview.Tags = append(preview.Tags, linkTagPrefix+link)
 			preview.Link = link
 			preview.ExternalKey = externalKey
 			preview.URL = issue.URL
 			preview.DuplicateOf = duplicates[draft.Source-1]
 		}
-		response.Drafts = append(response.Drafts, preview)
+		previews = append(previews, preview)
 	}
-	writeJSON(w, response)
+	return previews
 }
 
 // handleImportLinks records client-selected import provenance without loading
@@ -959,7 +1024,7 @@ func (s *server) handleImportLinks(w http.ResponseWriter, r *http.Request, user 
 	}
 	var req importLinksRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	if len(req.Items) > maxImportLinks {
@@ -980,12 +1045,12 @@ func (s *server) handleImportLinks(w http.ResponseWriter, r *http.Request, user 
 	sources, err := s.store.ForgeSources(user)
 	if err != nil {
 		log.Printf("forge: list import sources for %s failed: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	source, found := forgeSourceByName(sources, req.Source)
 	if !found {
-		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
 		return
 	}
 	links := make([]store.ImportLink, len(req.Items))
@@ -1001,7 +1066,7 @@ func (s *server) handleImportLinks(w http.ResponseWriter, r *http.Request, user 
 			return
 		}
 		log.Printf("forge: record import links for %s failed: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1017,7 +1082,7 @@ func (s *server) handleImportProvenance(w http.ResponseWriter, r *http.Request, 
 	}
 	var req importProvenanceRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	link := strings.TrimSpace(req.Link)
@@ -1028,7 +1093,7 @@ func (s *server) handleImportProvenance(w http.ResponseWriter, r *http.Request, 
 	links, err := s.store.ImportLinksByLink(user, link)
 	if err != nil {
 		log.Print("forge: import provenance lookup failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	if len(links) == 0 {
@@ -1054,7 +1119,7 @@ func (s *server) handleImportDrift(w http.ResponseWriter, r *http.Request, user 
 	}
 	var req importDriftRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 
@@ -1076,7 +1141,7 @@ func (s *server) handleImportDrift(w http.ResponseWriter, r *http.Request, user 
 	baseline, present, err := s.importDriftBaseline(user, req.ExternalKey, current)
 	if err != nil {
 		log.Print("forge: import drift baseline resolution failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	response := importDriftResponse{
@@ -1118,7 +1183,7 @@ func (s *server) handleImportDriftAccept(w http.ResponseWriter, r *http.Request,
 	}
 	var req importDriftAcceptRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	if !validImportDriftRevision(req.Revision) {
@@ -1138,7 +1203,7 @@ func (s *server) handleImportDriftAccept(w http.ResponseWriter, r *http.Request,
 	baseline, present, err := s.store.ImportBaseline(user, req.ExternalKey)
 	if err != nil {
 		log.Print("forge: import drift accept baseline lookup failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	if !present {
@@ -1164,7 +1229,7 @@ func (s *server) handleImportDriftAccept(w http.ResponseWriter, r *http.Request,
 	}
 	if err := s.store.SetImportBaseline(user, req.ExternalKey, current); err != nil {
 		log.Print("forge: import drift accept baseline update failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, importDriftAcceptResponse{BaselineAt: current.At})
@@ -1176,7 +1241,7 @@ func (s *server) authorizeImportDriftTarget(w http.ResponseWriter, user, source,
 	imported, err := s.store.ImportedAs(user, []string{externalKey})
 	if err != nil {
 		log.Print("forge: import drift provenance lookup failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return store.ImportLink{}, forgeRef{}, false
 	}
 	provenance, found := imported[externalKey]
@@ -1194,7 +1259,7 @@ func (s *server) authorizeImportDriftTarget(w http.ResponseWriter, user, source,
 	sources, err := s.store.ForgeSources(user)
 	if err != nil {
 		log.Print("forge: import drift source lookup failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return store.ImportLink{}, forgeRef{}, false
 	}
 	ref, err := parseForgeRef(sources, source, provenance.URL)
@@ -1204,7 +1269,7 @@ func (s *server) authorizeImportDriftTarget(w http.ResponseWriter, user, source,
 	}
 	selected, found := forgeSourceByName(sources, source)
 	if !found {
-		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
 		return store.ImportLink{}, forgeRef{}, false
 	}
 	if ref.Source.Name != selected.Name {
@@ -1221,7 +1286,7 @@ func (s *server) authorizeImportDriftTarget(w http.ResponseWriter, user, source,
 	}
 	kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
 	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
-		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
 		return store.ImportLink{}, forgeRef{}, false
 	}
 	ref.pat = pat
@@ -1286,7 +1351,7 @@ func (s *server) importDriftSummary(user string, baseline, current store.ImportB
 func (s *server) importDuplicates(scope string, issues []forgeIssue) ([]*importDuplicate, error) {
 	duplicates := make([]*importDuplicate, len(issues))
 	for i, issue := range issues {
-		links, err := s.store.TasksByLink(scope, "link::"+issue.Ref)
+		links, err := s.store.TasksByLink(scope, linkTagPrefix+issue.Ref)
 		if err != nil {
 			return nil, err
 		}
@@ -1318,7 +1383,7 @@ func importRefKind(ref forgeRef) string {
 func stripModelLinkTags(tags []string) []string {
 	filtered := make([]string, 0, len(tags))
 	for _, tag := range tags {
-		if !strings.HasPrefix(tag, "link::") {
+		if !strings.HasPrefix(tag, linkTagPrefix) {
 			filtered = append(filtered, tag)
 		}
 	}
@@ -1340,7 +1405,7 @@ func (s *server) handleGetIntegrations(w http.ResponseWriter, _ *http.Request, u
 	sources, err := s.store.ForgeSources(user)
 	if err != nil {
 		log.Printf("forge: list integrations for %s failed: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	response := forgeSourcesResponse{Sources: make([]forgeSourceResponse, 0, len(sources))}
@@ -1358,7 +1423,7 @@ func (s *server) handleGetIntegrations(w http.ResponseWriter, _ *http.Request, u
 func (s *server) handlePutIntegration(w http.ResponseWriter, r *http.Request, user string) {
 	name := r.PathValue("name")
 	if !validForgeSourceName(name) {
-		http.Error(w, "invalid integration name", http.StatusBadRequest)
+		http.Error(w, invalidIntegrationNameMessage, http.StatusBadRequest)
 		return
 	}
 
@@ -1372,7 +1437,7 @@ func (s *server) handlePutIntegration(w http.ResponseWriter, r *http.Request, us
 		PAT     *string `json:"pat"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	if req.Kind != "gitlab" && req.Kind != "github" {
@@ -1397,7 +1462,7 @@ func (s *server) handlePutIntegration(w http.ResponseWriter, r *http.Request, us
 			return
 		}
 		log.Printf("forge: save integration for %s failed: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	if tokenCleared {
@@ -1410,12 +1475,12 @@ func (s *server) handlePutIntegration(w http.ResponseWriter, r *http.Request, us
 func (s *server) handleDeleteIntegration(w http.ResponseWriter, r *http.Request, user string) {
 	name := r.PathValue("name")
 	if !validForgeSourceName(name) {
-		http.Error(w, "invalid integration name", http.StatusBadRequest)
+		http.Error(w, invalidIntegrationNameMessage, http.StatusBadRequest)
 		return
 	}
 	if err := s.store.DeleteForgeSource(user, name); err != nil {
 		log.Printf("forge: delete integration for %s failed: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1424,7 +1489,7 @@ func (s *server) handleDeleteIntegration(w http.ResponseWriter, r *http.Request,
 func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, user string) {
 	name := r.PathValue("name")
 	if !validForgeSourceName(name) {
-		http.Error(w, "invalid integration name", http.StatusBadRequest)
+		http.Error(w, invalidIntegrationNameMessage, http.StatusBadRequest)
 		return
 	}
 
@@ -1432,15 +1497,10 @@ func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, u
 	if !ok {
 		return
 	}
-	var probe struct {
-		BaseURL *string `json:"base_url"`
-		PAT     *string `json:"pat"`
-	}
-	if len(bytes.TrimSpace(body)) > 0 {
-		if err := json.Unmarshal(body, &probe); err != nil {
-			http.Error(w, "invalid JSON body", http.StatusBadRequest)
-			return
-		}
+	probe, err := parseForgeTestProbe(body)
+	if err != nil {
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
+		return
 	}
 
 	kind, storedBase, storedPAT, err := s.store.ForgePAT(user, name)
@@ -1450,38 +1510,65 @@ func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 
-	baseURL := storedBase
-	suppliedBase := ""
-	if probe.BaseURL != nil {
-		suppliedBase = strings.TrimSpace(*probe.BaseURL)
-	}
-	if suppliedBase != "" {
-		normalized, err := normalizeForgeProbeBase(suppliedBase)
-		if err != nil {
-			writeJSON(w, forgeTestResponse{Error: err.Error()})
-			return
-		}
-		baseURL = normalized.String()
-	}
-
-	pat := storedPAT
-	suppliedPAT := ""
-	if probe.PAT != nil {
-		suppliedPAT = strings.TrimSpace(*probe.PAT)
-	}
-	if suppliedPAT != "" {
-		pat = suppliedPAT
-	}
-	if suppliedPAT == "" && suppliedBase != "" && storedPAT != "" &&
-		!store.SameAIOrigin(storedBase, baseURL) {
-		writeJSON(w, forgeTestResponse{Error: "enter the token to test a different endpoint"})
-		return
-	}
-
-	apiBase, err := forgeAPIBase(kind, baseURL)
+	target, err := resolveForgeTestTarget(storedBase, storedPAT, probe)
 	if err != nil {
 		writeJSON(w, forgeTestResponse{Error: err.Error()})
 		return
+	}
+
+	request, err := newForgeTestRequest(r.Context(), kind, target)
+	if err != nil {
+		writeJSON(w, forgeTestResponse{Error: err.Error()})
+		return
+	}
+	if !s.forgeConnectionOK(request, user) {
+		writeJSON(w, forgeTestResponse{Error: connectionFailedMessage})
+		return
+	}
+	writeJSON(w, forgeTestResponse{OK: true})
+}
+
+func parseForgeTestProbe(body []byte) (forgeTestProbe, error) {
+	var probe forgeTestProbe
+	if len(bytes.TrimSpace(body)) == 0 {
+		return probe, nil
+	}
+	err := json.Unmarshal(body, &probe)
+	return probe, err
+}
+
+func resolveForgeTestTarget(storedBase, storedPAT string, probe forgeTestProbe) (forgeTestTarget, error) {
+	target := forgeTestTarget{baseURL: storedBase, pat: storedPAT}
+	suppliedBase := trimmedForgeProbeValue(probe.BaseURL)
+	if suppliedBase != "" {
+		normalized, err := normalizeForgeProbeBase(suppliedBase)
+		if err != nil {
+			return forgeTestTarget{}, err
+		}
+		target.baseURL = normalized.String()
+	}
+	suppliedPAT := trimmedForgeProbeValue(probe.PAT)
+	if suppliedPAT != "" {
+		target.pat = suppliedPAT
+	}
+	if suppliedPAT == "" && suppliedBase != "" && storedPAT != "" &&
+		!store.SameAIOrigin(storedBase, target.baseURL) {
+		return forgeTestTarget{}, errors.New("enter the token to test a different endpoint")
+	}
+	return target, nil
+}
+
+func trimmedForgeProbeValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
+func newForgeTestRequest(ctx context.Context, kind string, target forgeTestTarget) (*http.Request, error) {
+	apiBase, err := forgeAPIBase(kind, target.baseURL)
+	if err != nil {
+		return nil, err
 	}
 	endpoint := apiBase
 	switch kind {
@@ -1490,45 +1577,44 @@ func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, u
 	case "github":
 		endpoint += "/user"
 	default:
-		writeJSON(w, forgeTestResponse{Error: "invalid forge kind"})
-		return
+		return nil, errors.New("invalid forge kind")
 	}
-
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		writeJSON(w, forgeTestResponse{Error: "invalid forge base URL"})
-		return
+		return nil, errors.New("invalid forge base URL")
 	}
-	switch kind {
-	case "gitlab":
-		if pat != "" {
-			request.Header.Set("PRIVATE-TOKEN", pat)
-		}
-	case "github":
+	setForgeTestHeaders(request, kind, target.pat)
+	return request, nil
+}
+
+func setForgeTestHeaders(request *http.Request, kind, pat string) {
+	if kind == "gitlab" && pat != "" {
+		request.Header.Set("PRIVATE-TOKEN", pat)
+	}
+	if kind == "github" {
 		if pat != "" {
 			request.Header.Set("Authorization", "Bearer "+pat)
 		}
 		request.Header.Set("Accept", "application/vnd.github+json")
 	}
+}
 
+func (s *server) forgeConnectionOK(request *http.Request, user string) bool {
 	response, err := s.forgeClient.Do(request)
 	if err != nil {
 		log.Printf("forge: connection test for %s failed: %v", user, err)
-		writeJSON(w, forgeTestResponse{Error: "connection failed"})
-		return
+		return false
 	}
 	drainErr := drainForgeResponse(response)
 	if drainErr != nil {
 		log.Printf("forge: connection test for %s failed while closing response: %v", user, drainErr)
-		writeJSON(w, forgeTestResponse{Error: "connection failed"})
-		return
+		return false
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		log.Printf("forge: connection test for %s failed: upstream status %d", user, response.StatusCode)
-		writeJSON(w, forgeTestResponse{Error: "connection failed"})
-		return
+		return false
 	}
-	writeJSON(w, forgeTestResponse{OK: true})
+	return true
 }
 
 func drainForgeResponse(response *http.Response) error {

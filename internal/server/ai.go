@@ -241,12 +241,12 @@ func (s *server) storedAIConfig(user string) (aiConfig, error) {
 	set, err := s.store.AISettings(user)
 	if err != nil {
 		log.Printf("ai: settings for %s: %v", user, err)
-		return aiConfig{}, &aiError{http.StatusInternalServerError, "storage error"}
+		return aiConfig{}, &aiError{http.StatusInternalServerError, storageErrorMessage}
 	}
 	key, err := s.store.AIKey(user)
 	if err != nil {
 		log.Printf("ai: key for %s: %v", user, err)
-		return aiConfig{}, &aiError{http.StatusInternalServerError, "storage error"}
+		return aiConfig{}, &aiError{http.StatusInternalServerError, storageErrorMessage}
 	}
 	return aiConfig{baseURL: set.BaseURL, model: set.Model, key: key}, nil
 }
@@ -286,7 +286,7 @@ func (s *server) chat(user string, cfg aiConfig, msgs []chatMessage, maxTokens i
 	if err != nil {
 		return "", &aiError{http.StatusBadRequest, "invalid AI endpoint"}
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(contentTypeHeader, jsonMediaType)
 	if cfg.key != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.key)
 	}
@@ -369,7 +369,7 @@ func (s *server) handleAITest(w http.ResponseWriter, r *http.Request, user strin
 	var req aiTestRequest
 	if len(bytes.TrimSpace(body)) > 0 {
 		if err := json.Unmarshal(body, &req); err != nil {
-			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 			return
 		}
 	}
@@ -378,7 +378,7 @@ func (s *server) handleAITest(w http.ResponseWriter, r *http.Request, user strin
 		var ae *aiError
 		if errors.As(err, &ae) && ae.code == http.StatusBadGateway {
 			log.Printf("ai: test for %s failed: %s", user, ae.msg)
-			msg = "connection failed"
+			msg = connectionFailedMessage
 		}
 		writeJSON(w, result{Error: msg})
 		return
@@ -420,7 +420,7 @@ func (s *server) handleAIStory(w http.ResponseWriter, r *http.Request, user stri
 		Task   json.RawMessage `json:"task"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	if req.Mode != "create" && req.Mode != "update" {
@@ -462,7 +462,7 @@ func (s *server) handleAIStory(w http.ResponseWriter, r *http.Request, user stri
 // goes to the server log only. Configuration errors (400: no or invalid base
 // URL) describe the caller's own settings and pass through.
 func writeAIError(w http.ResponseWriter, user, op string, err error) {
-	code, msg := http.StatusBadGateway, "connection failed"
+	code, msg := http.StatusBadGateway, connectionFailedMessage
 	var ae *aiError
 	if errors.As(err, &ae) {
 		code = ae.code
@@ -476,72 +476,82 @@ func writeAIError(w http.ResponseWriter, user, op string, err error) {
 	http.Error(w, msg, code)
 }
 
-// handleAIStories splits one ADR into several card drafts. It shares the
-// proxy client, timeout, SSRF guard and opaque error mapping with
-// /api/ai/story — there is deliberately no second HTTP path — and the ADR
-// text itself is never stored.
-func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user string) {
+type aiStoriesRequest struct {
+	ADR    string `json:"adr"`
+	URL    string `json:"url"`
+	Source string `json:"source"`
+	Max    int    `json:"max"`
+}
+
+type aiStoriesInput struct {
+	adr      string
+	link     string
+	issueURL string
+}
+
+func decodeAIStoriesRequest(w http.ResponseWriter, r *http.Request) (aiStoriesRequest, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
-	var req struct {
-		ADR    string `json:"adr"`
-		URL    string `json:"url"`
-		Source string `json:"source"`
-		Max    int    `json:"max"`
-	}
+	var req aiStoriesRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
-		return
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
+		return aiStoriesRequest{}, false
 	}
 	hasADR := strings.TrimSpace(req.ADR) != ""
 	hasURL := strings.TrimSpace(req.URL) != ""
 	if hasADR == hasURL {
 		http.Error(w, "provide adr or url", http.StatusBadRequest)
-		return
+		return aiStoriesRequest{}, false
 	}
 	if hasADR && len(req.ADR) > maxADRBytes {
 		http.Error(w, "adr too large (max 64 KiB)", http.StatusRequestEntityTooLarge)
-		return
+		return aiStoriesRequest{}, false
 	}
-	adr, link, issueURL := req.ADR, "", ""
-	if hasURL {
-		sources, err := s.store.ForgeSources(user)
-		if err != nil {
-			log.Printf("forge: list sources for stories for %s failed", user)
-			http.Error(w, "storage error", http.StatusInternalServerError)
-			return
-		}
-		ref, err := parseForgeRef(sources, req.Source, req.URL)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		selected, found := forgeSourceByName(sources, req.Source)
-		if !found {
-			http.Error(w, "configured source unavailable", http.StatusBadRequest)
-			return
-		}
-		if ref.Source.Name != selected.Name {
-			http.Error(w, "reference does not match selected source", http.StatusBadRequest)
-			return
-		}
-		kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
-		if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
-			http.Error(w, "configured source unavailable", http.StatusBadRequest)
-			return
-		}
-		ref.pat = pat
-		ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
-		defer cancel()
-		issue, err := s.fetchIssue(ctx, ref)
-		if err != nil {
-			writeAIError(w, user, "stories", err)
-			return
-		}
-		adr = forgeIssueADR(issue)
-		link, _ = importIssueProvenance(ref, issue)
-		issueURL = issue.URL
+	return req, true
+}
+
+func (s *server) resolveAIStoriesInput(w http.ResponseWriter, r *http.Request, user string, req aiStoriesRequest) (aiStoriesInput, bool) {
+	if strings.TrimSpace(req.ADR) != "" {
+		return aiStoriesInput{adr: req.ADR}, true
 	}
-	max := req.Max
+
+	sources, err := s.store.ForgeSources(user)
+	if err != nil {
+		log.Printf("forge: list sources for stories for %s failed", user)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
+		return aiStoriesInput{}, false
+	}
+	ref, err := parseForgeRef(sources, req.Source, req.URL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return aiStoriesInput{}, false
+	}
+	selected, found := forgeSourceByName(sources, req.Source)
+	if !found {
+		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
+		return aiStoriesInput{}, false
+	}
+	if ref.Source.Name != selected.Name {
+		http.Error(w, "reference does not match selected source", http.StatusBadRequest)
+		return aiStoriesInput{}, false
+	}
+	kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
+	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
+		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
+		return aiStoriesInput{}, false
+	}
+	ref.pat = pat
+	ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
+	defer cancel()
+	issue, err := s.fetchIssue(ctx, ref)
+	if err != nil {
+		writeAIError(w, user, "stories", err)
+		return aiStoriesInput{}, false
+	}
+	link, _ := importIssueProvenance(ref, issue)
+	return aiStoriesInput{adr: forgeIssueADR(issue), link: link, issueURL: issue.URL}, true
+}
+
+func normalizeStoryCount(max int) int {
 	if max == 0 {
 		max = defaultStoryCount
 	}
@@ -551,9 +561,26 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 	if max > maxStoryCount {
 		max = maxStoryCount
 	}
+	return max
+}
+
+// handleAIStories splits one ADR into several card drafts. It shares the
+// proxy client, timeout, SSRF guard and opaque error mapping with
+// /api/ai/story — there is deliberately no second HTTP path — and the ADR
+// text itself is never stored.
+func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user string) {
+	req, ok := decodeAIStoriesRequest(w, r)
+	if !ok {
+		return
+	}
+	input, ok := s.resolveAIStoriesInput(w, r, user, req)
+	if !ok {
+		return
+	}
+	max := normalizeStoryCount(req.Max)
 	msgs := []chatMessage{
 		{Role: "system", Content: storiesSystemPrompt},
-		{Role: "user", Content: fmt.Sprintf("Split this ADR into at most %d stories:\n\n%s", max, adr)},
+		{Role: "user", Content: fmt.Sprintf("Split this ADR into at most %d stories:\n\n%s", max, input.adr)},
 	}
 	content, err := s.chatCompletion(user, msgs, 0, true)
 	if err != nil {
@@ -565,16 +592,16 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	if link != "" {
+	if input.link != "" {
 		for i := range stories {
-			stories[i].Tags = append(stripModelLinkTags(stories[i].Tags), "link::"+link)
+			stories[i].Tags = append(stripModelLinkTags(stories[i].Tags), linkTagPrefix+input.link)
 		}
 	}
 	writeJSON(w, struct {
 		Stories []storyDraft `json:"stories"`
 		Link    string       `json:"link,omitempty"`
 		URL     string       `json:"url,omitempty"`
-	}{Stories: stories, Link: link, URL: issueURL})
+	}{Stories: stories, Link: input.link, URL: input.issueURL})
 }
 
 // forgeIssueADR turns one fetched issue and its bounded human discussion into
@@ -726,6 +753,16 @@ func validateDraft(d storyDraft) error {
 // "x\n- [x] forged !1" would otherwise serialize as an extra board line.
 func coerceDraftMap(m map[string]any) storyDraft {
 	d := storyDraft{Prio: 3, Tags: []string{}, Checks: []draftCheck{}}
+	coerceDraftTextFields(m, &d)
+	coerceDraftPrio(m, &d)
+	coerceDraftDue(m, &d)
+	coerceDraftEffort(m, &d)
+	coerceDraftTags(m, &d)
+	coerceDraftChecks(m, &d)
+	return d
+}
+
+func coerceDraftTextFields(m map[string]any, d *storyDraft) {
 	if v, ok := m["title"].(string); ok {
 		d.Title = strings.TrimSpace(stripControl(v))
 	}
@@ -737,6 +774,9 @@ func coerceDraftMap(m map[string]any) storyDraft {
 		// the wire; every other control character is still stripped.
 		d.Desc = stripControlKeepLines(v)
 	}
+}
+
+func coerceDraftPrio(m map[string]any, d *storyDraft) {
 	switch v := m["prio"].(type) {
 	case float64:
 		d.Prio = clampPrio(int(v))
@@ -745,6 +785,9 @@ func coerceDraftMap(m map[string]any) storyDraft {
 			d.Prio = clampPrio(n)
 		}
 	}
+}
+
+func coerceDraftDue(m map[string]any, d *storyDraft) {
 	if v, ok := m["due"].(string); ok {
 		due := strings.TrimSpace(v)
 		// Shape and calendar validity both: "2026-13-45" matches the pattern
@@ -755,12 +798,18 @@ func coerceDraftMap(m map[string]any) storyDraft {
 			}
 		}
 	}
+}
+
+func coerceDraftEffort(m map[string]any, d *storyDraft) {
 	if v, ok := m["effort"].(string); ok {
 		switch e := strings.ToUpper(strings.TrimSpace(v)); e {
 		case "S", "M", "L":
 			d.Effort = e
 		}
 	}
+}
+
+func coerceDraftTags(m map[string]any, d *storyDraft) {
 	if vs, ok := m["tags"].([]any); ok {
 		for _, v := range vs {
 			tag, ok := v.(string)
@@ -776,6 +825,9 @@ func coerceDraftMap(m map[string]any) storyDraft {
 			d.Tags = append(d.Tags, tag)
 		}
 	}
+}
+
+func coerceDraftChecks(m map[string]any, d *storyDraft) {
 	if vs, ok := m["checks"].([]any); ok {
 		for _, v := range vs {
 			cm, ok := v.(map[string]any)
@@ -790,7 +842,6 @@ func coerceDraftMap(m map[string]any) storyDraft {
 			d.Checks = append(d.Checks, draftCheck{Text: text, Done: done})
 		}
 	}
-	return d
 }
 
 // logSafe makes an untrusted value safe to interpolate into a log line. The

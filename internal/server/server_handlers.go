@@ -38,7 +38,17 @@ type similarResponse struct {
 	Items []similarItem `json:"items"`
 }
 
-const maxSimilarExcludeLinks = 100
+const (
+	maxSimilarExcludeLinks             = 100
+	contentTypeHeader                  = "Content-Type"
+	jsonMediaType                      = "application/json"
+	storageErrorMessage                = "storage error"
+	invalidJSONBodyMessage             = "invalid JSON body"
+	invalidBoardPayloadMessage         = "invalid board payload"
+	configuredSourceUnavailableMessage = "configured source unavailable"
+	linkTagPrefix                      = "link::"
+	connectionFailedMessage            = "connection failed"
+)
 
 func (s *server) handleSimilar(w http.ResponseWriter, r *http.Request, user string) {
 	params := r.URL.Query()
@@ -55,7 +65,7 @@ func (s *server) handleSimilar(w http.ResponseWriter, r *http.Request, user stri
 	hits, err := s.store.SearchSimilar(user, query, params.Get("exclude"), excludeLinks, 3)
 	if err != nil {
 		log.Printf("search similar for %s: %s", logSafe(user), logSafe(err.Error()))
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	for _, hit := range hits {
@@ -79,7 +89,7 @@ func (s *server) handleTombstone(w http.ResponseWriter, r *http.Request, user st
 	}
 	var req tombstoneRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	if strings.TrimSpace(req.TaskID) == "" {
@@ -98,7 +108,7 @@ func (s *server) handleTombstone(w http.ResponseWriter, r *http.Request, user st
 			return
 		}
 		log.Printf("record tombstone for %s: %v", logSafe(user), err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -107,7 +117,7 @@ func (s *server) handleTombstone(w http.ResponseWriter, r *http.Request, user st
 // writeJSON encodes v with the JSON content type; encode errors after the
 // header is out can only be logged.
 func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, jsonMediaType)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("write json: %v", err)
 	}
@@ -120,7 +130,7 @@ func acceptsJSON(r *http.Request) bool {
 	for _, header := range r.Header.Values("Accept") {
 		for _, value := range strings.Split(header, ",") {
 			mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(value))
-			if err != nil || mediaType != "application/json" {
+			if err != nil || mediaType != jsonMediaType {
 				continue
 			}
 			if q, ok := params["q"]; ok {
@@ -136,7 +146,7 @@ func acceptsJSON(r *http.Request) bool {
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, jsonMediaType)
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
@@ -179,7 +189,7 @@ func (s *server) handleGetBoard(w http.ResponseWriter, r *http.Request, user str
 	snapshot, etag, err := s.currentBoard(user)
 	if err != nil {
 		log.Printf("read board for %s: %s", logSafe(user), logSafe(err.Error()))
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	md := board.Serialize(snapshot.Board)
@@ -199,7 +209,7 @@ func (s *server) handleGetBoard(w http.ResponseWriter, r *http.Request, user str
 		}{Board: md, TaskIDs: snapshot.TaskIDs})
 		return
 	}
-	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set(contentTypeHeader, "text/markdown; charset=utf-8")
 	_, _ = io.WriteString(w, md)
 }
 
@@ -208,109 +218,147 @@ func (s *server) handleGetBoard(w http.ResponseWriter, r *http.Request, user str
 // so a client that sends If-Match with the token from its GET is told 409
 // instead, and can refetch and merge. Clients that send no If-Match keep the
 // old last-writer-wins behavior.
+func shouldInvokeBoardSnapshotHook(want string, isJSON bool) bool {
+	return want != "" || isJSON
+}
+
+func boardOperationID(r *http.Request) (string, error) {
+	if len(r.Header.Values("Idempotency-Key")) > 1 {
+		return "", errors.New("multiple idempotency keys")
+	}
+	operationID := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if operationID == "" {
+		return "", nil
+	}
+	parsed, err := uuid.Parse(operationID)
+	if err != nil || parsed.String() != strings.ToLower(operationID) {
+		return "", errors.New("invalid idempotency key")
+	}
+	return operationID, nil
+}
+
+func boardPutRequestHash(mediaType string, body []byte) string {
+	hashInput := append([]byte(mediaType+"\x00"), body...)
+	return fmt.Sprintf("%x", sha256.Sum256(hashInput))
+}
+
+func (s *server) writeBoardJSONParseError(w http.ResponseWriter, user, want string) {
+	condition := boardWriteCondition(want)
+	if condition.Present {
+		_, err := s.store.CheckBoardWriteCondition(user, condition)
+		var conflict *store.RevisionConflictError
+		switch {
+		case errors.As(err, &conflict):
+			writeBoardConflict(w, boardETag(conflict.CurrentRevision))
+			return
+		case err != nil:
+			log.Printf("check board condition for %s: %s", logSafe(user), logSafe(err.Error()))
+			http.Error(w, storageErrorMessage, http.StatusInternalServerError)
+			return
+		}
+	}
+	http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
+}
+
+func containsTaskCreation(ids []*string) bool {
+	for _, id := range ids {
+		if id == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func boardPutCondition(want string, isJSON bool, revision int64) store.BoardWriteCondition {
+	condition := boardWriteCondition(want)
+	if want == "" && isJSON {
+		return store.BoardWriteCondition{Present: true, Revisions: []int64{revision}}
+	}
+	return condition
+}
+
+func (s *server) replaceBoard(
+	user string,
+	nextBoard board.Board,
+	canonicalIDs []*string,
+	condition store.BoardWriteCondition,
+	operationID, requestHash string,
+	isJSON bool,
+) ([]string, int64, bool, error) {
+	if condition.Present || operationID != "" {
+		return s.store.ReplaceBoardConditionalWithReceipt(
+			user, nextBoard, canonicalIDs, condition, operationID, requestHash,
+			isJSON && containsTaskCreation(canonicalIDs),
+		)
+	}
+	taskIDs, revision, err := s.store.ReplaceBoardWithTaskIDsAndRevision(user, nextBoard)
+	if err == nil && s.afterUnconditionalBoardReplace != nil {
+		s.afterUnconditionalBoardReplace()
+	}
+	return taskIDs, revision, false, err
+}
+
+func writeBoardPutError(w http.ResponseWriter, user string, err error) {
+	var conflict *store.RevisionConflictError
+	switch {
+	case errors.As(err, &conflict):
+		writeBoardConflict(w, boardETag(conflict.CurrentRevision))
+	case errors.Is(err, store.ErrInvalidTaskIDs):
+		http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
+	default:
+		log.Printf("write board for %s: %s", logSafe(user), logSafe(err.Error()))
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
+	}
+}
+
 func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user string) {
 	body, ok := readBody(w, r)
 	if !ok {
 		return
 	}
-	operationValues := r.Header.Values("Idempotency-Key")
-	if len(operationValues) > 1 {
-		http.Error(w, "invalid board payload", http.StatusBadRequest)
+	operationID, err := boardOperationID(r)
+	if err != nil {
+		http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
 		return
 	}
-	operationID := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if operationID != "" {
-		parsed, err := uuid.Parse(operationID)
-		if err != nil || parsed.String() != strings.ToLower(operationID) {
-			http.Error(w, "invalid board payload", http.StatusBadRequest)
-			return
-		}
-	}
-	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	hashInput := append([]byte(mediaType+"\x00"), body...)
-	requestHash := fmt.Sprintf("%x", sha256.Sum256(hashInput))
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get(contentTypeHeader))
+	isJSON := mediaType == jsonMediaType
+	requestHash := boardPutRequestHash(mediaType, body)
 
-	snapshot, etag, err := s.currentBoard(user)
+	snapshot, _, err := s.currentBoard(user)
 	if err != nil {
 		log.Printf("read board for %s: %s", logSafe(user), logSafe(err.Error()))
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	want := strings.TrimSpace(strings.Join(r.Header.Values("If-Match"), ","))
-	if s.afterConditionalBoardSnapshot != nil && want != "" {
+	if s.afterConditionalBoardSnapshot != nil && shouldInvokeBoardSnapshotHook(want, isJSON) {
 		s.afterConditionalBoardSnapshot()
 	}
 
-	isJSON := mediaType == "application/json"
 	nextBoard := board.Parse(string(body))
 	var canonicalIDs []*string
 	if isJSON {
 		var parseErr error
 		nextBoard, canonicalIDs, parseErr = parseBoardJSONPut(body)
 		if parseErr != nil {
-			condition := boardWriteCondition(want)
-			if condition.Present {
-				_, conditionErr := s.store.CheckBoardWriteCondition(user, condition)
-				var conflict *store.RevisionConflictError
-				switch {
-				case errors.As(conditionErr, &conflict):
-					writeBoardConflict(w, boardETag(conflict.CurrentRevision))
-					return
-				case conditionErr != nil:
-					log.Printf("check board condition for %s: %s", logSafe(user), logSafe(conditionErr.Error()))
-					http.Error(w, "storage error", http.StatusInternalServerError)
-					return
-				}
-			}
-			http.Error(w, "invalid board payload", http.StatusBadRequest)
+			s.writeBoardJSONParseError(w, user, want)
 			return
 		}
 	}
-	hasCreates := false
-	for _, id := range canonicalIDs {
-		if id == nil {
-			hasCreates = true
-			break
-		}
-	}
-	condition := boardWriteCondition(want)
-	if want == "" && isJSON {
-		condition = store.BoardWriteCondition{Present: true, Revisions: []int64{snapshot.Revision}}
-	}
-
-	var taskIDs []string
-	var revision int64
-	var replayed bool
-	switch {
-	case condition.Present || operationID != "":
-		taskIDs, revision, replayed, err = s.store.ReplaceBoardConditionalWithReceipt(
-			user, nextBoard, canonicalIDs, condition, operationID, requestHash, isJSON && hasCreates,
-		)
-	default:
-		taskIDs, revision, err = s.store.ReplaceBoardWithTaskIDsAndRevision(user, nextBoard)
-		if err == nil && s.afterUnconditionalBoardReplace != nil {
-			s.afterUnconditionalBoardReplace()
-		}
-	}
+	condition := boardPutCondition(want, isJSON, snapshot.Revision)
+	taskIDs, revision, replayed, err := s.replaceBoard(
+		user, nextBoard, canonicalIDs, condition, operationID, requestHash, isJSON,
+	)
 	if err != nil {
-		var conflict *store.RevisionConflictError
-		switch {
-		case errors.As(err, &conflict):
-			writeBoardConflict(w, boardETag(conflict.CurrentRevision))
-		case errors.Is(err, store.ErrInvalidTaskIDs):
-			http.Error(w, "invalid board payload", http.StatusBadRequest)
-		default:
-			log.Printf("write board for %s: %s", logSafe(user), logSafe(err.Error()))
-			http.Error(w, "storage error", http.StatusInternalServerError)
-		}
+		writeBoardPutError(w, user, err)
 		return
 	}
 	if replayed || acceptsJSON(r) {
 		writeBoardAcknowledgement(w, taskIDs, revision, replayed)
 		return
 	}
-	etag = boardETag(revision)
-	w.Header().Set("ETag", etag)
+	w.Header().Set("ETag", boardETag(revision))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -334,38 +382,20 @@ func parseBoardJSONPut(body []byte) (board.Board, []*string, error) {
 	var ids []*string
 	seen := make(map[string]bool, 2)
 	for decoder.More() {
-		fieldToken, err := decoder.Token()
+		field, err := nextBoardJSONField(decoder, seen)
 		if err != nil {
 			return board.Board{}, nil, err
 		}
-		field, ok := fieldToken.(string)
-		if !ok || seen[field] {
-			return board.Board{}, nil, errors.New("invalid or duplicate board payload field")
-		}
-		seen[field] = true
 		switch field {
 		case "board":
-			var decoded *string
-			if err := decoder.Decode(&decoded); err != nil {
-				return board.Board{}, nil, err
-			}
-			if decoded == nil {
-				return board.Board{}, nil, errors.New("board must be a string")
-			}
-			markdown = *decoded
+			markdown, err = decodeBoardJSONMarkdown(decoder)
 		case "task_ids":
-			var idsJSON json.RawMessage
-			if err := decoder.Decode(&idsJSON); err != nil {
-				return board.Board{}, nil, err
-			}
-			if bytes.Equal(bytes.TrimSpace(idsJSON), []byte("null")) {
-				return board.Board{}, nil, errors.New("task_ids must be an array")
-			}
-			if err := json.Unmarshal(idsJSON, &ids); err != nil {
-				return board.Board{}, nil, err
-			}
+			ids, err = decodeBoardJSONTaskIDs(decoder)
 		default:
 			return board.Board{}, nil, errors.New("unknown board payload field")
+		}
+		if err != nil {
+			return board.Board{}, nil, err
 		}
 	}
 	if _, err := decoder.Token(); err != nil {
@@ -378,6 +408,45 @@ func parseBoardJSONPut(body []byte) (board.Board, []*string, error) {
 		return board.Board{}, nil, err
 	}
 	return board.Parse(markdown), ids, nil
+}
+
+func nextBoardJSONField(decoder *json.Decoder, seen map[string]bool) (string, error) {
+	fieldToken, err := decoder.Token()
+	if err != nil {
+		return "", err
+	}
+	field, ok := fieldToken.(string)
+	if !ok || seen[field] {
+		return "", errors.New("invalid or duplicate board payload field")
+	}
+	seen[field] = true
+	return field, nil
+}
+
+func decodeBoardJSONMarkdown(decoder *json.Decoder) (string, error) {
+	var decoded *string
+	if err := decoder.Decode(&decoded); err != nil {
+		return "", err
+	}
+	if decoded == nil {
+		return "", errors.New("board must be a string")
+	}
+	return *decoded, nil
+}
+
+func decodeBoardJSONTaskIDs(decoder *json.Decoder) ([]*string, error) {
+	var idsJSON json.RawMessage
+	if err := decoder.Decode(&idsJSON); err != nil {
+		return nil, err
+	}
+	if bytes.Equal(bytes.TrimSpace(idsJSON), []byte("null")) {
+		return nil, errors.New("task_ids must be an array")
+	}
+	var ids []*string
+	if err := json.Unmarshal(idsJSON, &ids); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
@@ -456,7 +525,7 @@ func (s *server) handleLabels(w http.ResponseWriter, _ *http.Request, user strin
 	labels, err := s.store.Labels(user)
 	if err != nil {
 		log.Printf("labels for %s: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	if labels == nil {
@@ -477,7 +546,7 @@ func (s *server) handleGetSettings(w http.ResponseWriter, _ *http.Request, user 
 	set, err := s.store.AISettings(user)
 	if err != nil {
 		log.Printf("settings for %s: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, settingsResponse{BaseURL: set.BaseURL, Model: set.Model, HasKey: set.HasKey})
@@ -491,7 +560,7 @@ func (s *server) handlePutSettings(w http.ResponseWriter, r *http.Request, user 
 		Key     *string `json:"ai_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	if req.BaseURL != nil && strings.TrimSpace(*req.BaseURL) != "" {
@@ -503,7 +572,7 @@ func (s *server) handlePutSettings(w http.ResponseWriter, r *http.Request, user 
 	keyCleared, err := s.store.SetAISettings(user, req.BaseURL, req.Model, req.Key)
 	if err != nil {
 		log.Printf("save settings for %s: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	if keyCleared {

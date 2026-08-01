@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -953,6 +954,87 @@ func TestUnconditionalPutReturnsItsOwnCommittedIDsAndRevision(t *testing.T) {
 	after, err := a.ReadBoardSnapshot("default")
 	if err != nil || after.Board.Title != "External" {
 		t.Fatalf("external board after rejected follow-up = %+v err=%v", after.Board, err)
+	}
+}
+
+func TestJSONBoardPutWithoutIfMatchConflictsWithWriterAfterSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kb.db")
+	st, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	srv := newServer(Config{}, testStatic, st)
+	h := srv.handler()
+	seed := doReq(t, h, http.MethodPut, "/api/board", "# Seed\n\n## To Do\n\n- [ ] Keep\n", map[string]string{
+		"Accept": "application/json",
+	})
+	if seed.Code != http.StatusOK {
+		t.Fatalf("seed PUT = %d %q", seed.Code, seed.Body)
+	}
+	var seedAck struct {
+		TaskIDs []string `json:"task_ids"`
+	}
+	if err := json.Unmarshal(seed.Body.Bytes(), &seedAck); err != nil || len(seedAck.TaskIDs) != 1 {
+		t.Fatalf("seed acknowledgement = %q err=%v", seed.Body, err)
+	}
+
+	writer, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	tx, err := writer.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE meta SET v = 'External' WHERE k = 'board_title:default'`); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"board":    "# Mine\n\n## To Do\n\n- [ ] Keep\n",
+		"task_ids": seedAck.TaskIDs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotTaken := make(chan struct{})
+	continueWrite := make(chan struct{})
+	srv.afterConditionalBoardSnapshot = func() {
+		close(snapshotTaken)
+		<-continueWrite
+	}
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		result <- doReq(t, h, http.MethodPut, "/api/board", string(payload), map[string]string{
+			"Content-Type": "application/json",
+			"Accept":       "application/json",
+		})
+	}()
+
+	<-snapshotTaken
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	close(continueWrite)
+
+	w := <-result
+	if w.Code != http.StatusConflict {
+		t.Fatalf("JSON PUT after snapshot race = %d %q, want 409", w.Code, w.Body)
+	}
+	committed, err := st.ReadBoardSnapshot("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.Board.Title != "External" || len(committed.Board.Tasks) != 1 || committed.Board.Tasks[0].Title != "Keep" {
+		t.Fatalf("committed external snapshot = %+v, want title External with task Keep", committed.Board)
+	}
+	if w.Header().Get("ETag") != boardETag(committed.Revision) || w.Header().Get("ETag") == seed.Header().Get("ETag") {
+		t.Fatalf("conflict ETag = %q, want current %q after seed %q",
+			w.Header().Get("ETag"), boardETag(committed.Revision), seed.Header().Get("ETag"))
 	}
 }
 
