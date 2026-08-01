@@ -59,6 +59,21 @@ const importRequest = {
   }],
 };
 
+const unorderedExternalKeys = ['a', '😀', '2', 'é', 'A', '10'];
+const codeUnitOrderedExternalKeys = ['é', '😀', '10', '2', 'A', 'a'];
+
+function importRequestFor(externalKey: string) {
+  return {
+    source: 'ordering',
+    items: [{
+      external_key: externalKey,
+      link: `link-${externalKey}`,
+      url: `https://example.test/${encodeURIComponent(externalKey)}`,
+      title: `title-${externalKey}`,
+    }],
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -83,6 +98,62 @@ beforeEach(() => {
 });
 
 describe('MetadataOutbox', () => {
+  it('lists mixed external keys in storage-key code-unit order regardless of insertion order', async () => {
+    const outbox = new MetadataOutbox('alice', {
+      storage, locks: locks as unknown as LockManager, generation: generations(),
+    });
+    for (const externalKey of unorderedExternalKeys) {
+      await outbox.enqueueImportLinks(importRequestFor(externalKey));
+    }
+
+    expect(outbox.records().map((record) =>
+      record.kind === 'import' ? record.item.external_key : record.clientTaskId,
+    )).toEqual(codeUnitOrderedExternalKeys);
+  });
+
+  it('drains mixed external keys in storage-key code-unit order regardless of insertion order', async () => {
+    const sent: string[] = [];
+    const outbox = new MetadataOutbox('alice', {
+      storage,
+      locks: locks as unknown as LockManager,
+      generation: generations(),
+      sendImport: (_identity, request) => {
+        sent.push(request.items[0]!.external_key);
+        return Promise.resolve();
+      },
+    });
+    for (const externalKey of unorderedExternalKeys) {
+      await outbox.enqueueImportLinks(importRequestFor(externalKey));
+    }
+
+    await outbox.drain(identity);
+
+    expect(sent).toEqual(codeUnitOrderedExternalKeys);
+  });
+
+  it('reconciles mixed external keys in storage-key code-unit order regardless of insertion order', async () => {
+    const outbox = new MetadataOutbox('alice', {
+      storage, locks: locks as unknown as LockManager, generation: generations(),
+    });
+    for (const externalKey of unorderedExternalKeys) {
+      await outbox.enqueueImportLinks(importRequestFor(externalKey));
+    }
+    for (const [key, raw] of storage.values) {
+      storage.values.set(key, JSON.stringify({ ...JSON.parse(raw), state: 'sending' }));
+    }
+    const reconciled: string[] = [];
+    const setItem = vi.spyOn(storage, 'setItem').mockImplementation((key, value) => {
+      storage.values.set(key, String(value));
+      const record = JSON.parse(String(value)) as { item?: { external_key?: string } };
+      if (record.item?.external_key) reconciled.push(record.item.external_key);
+    });
+
+    await outbox.reconcile(cancelled, new Map());
+
+    expect(reconciled).toEqual(codeUnitOrderedExternalKeys);
+    setItem.mockRestore();
+  });
+
   it.each(['acknowledgement', 'startup'])(
     'blocks %s drain when durable reconciliation fails',
     async () => {

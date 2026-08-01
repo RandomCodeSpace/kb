@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { StrictMode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IdentityGate } from './IdentityGate';
 
@@ -42,14 +43,29 @@ describe('IdentityGate DOM', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('Sign-in failed');
   });
 
-  it('does not publish Azure availability after unmount', async () => {
-    let resolve!: (value: boolean) => void;
-    auth.azureAvailable.mockReturnValue(new Promise<boolean>((r) => { resolve = r; }));
-    const { container, unmount } = render(<IdentityGate onIdentity={vi.fn()} />);
-    unmount();
-    resolve(true);
-    await Promise.resolve();
-    expect(container).toBeEmptyDOMElement();
+  it('ignores Azure availability from a cleaned-up StrictMode effect', async () => {
+    const availability = Array.from({ length: 2 }, () => {
+      let resolve!: (value: boolean) => void;
+      const promise = new Promise<boolean>((done) => { resolve = done; });
+      return { promise, resolve };
+    });
+    auth.azureAvailable
+      .mockReturnValueOnce(availability[0].promise)
+      .mockReturnValueOnce(availability[1].promise);
+
+    render(
+      <StrictMode>
+        <IdentityGate onIdentity={vi.fn()} />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(auth.azureAvailable).toHaveBeenCalledTimes(2));
+    const azure = screen.getByRole('button', { name: 'Sign in with Microsoft' });
+
+    await act(async () => availability[0].resolve(true));
+    expect(azure).toBeDisabled();
+
+    await act(async () => availability[1].resolve(true));
+    await waitFor(() => expect(azure).toBeEnabled());
   });
 
   it('handles availability rejection, provider Error, blank submit, invalid characters, and token omission', async () => {
