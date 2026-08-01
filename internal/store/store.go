@@ -956,36 +956,50 @@ func (s *Store) UpdateAndMoveTask(user, idPrefix string, patch TaskPatch, moveTo
 	}
 	var out board.Task
 	err := s.withTx(func(tx *sql.Tx) error {
-		id, err := resolveID(tx, user, idPrefix)
-		if err != nil {
-			return err
-		}
-		t, err := s.patchTask(tx, user, id, patch)
-		if err != nil {
-			return err
-		}
-		if guard != nil {
-			if err := guard(t); err != nil {
-				return err
-			}
-		}
-		if moveTo != nil {
-			if t, err = moveTask(tx, user, t, *moveTo); err != nil {
-				return err
-			}
-			if *moveTo != board.StatusCancelled {
-				if _, err := tx.Exec(`DELETE FROM tombstones WHERE scope = ? AND task_id = ?`, user, t.ID); err != nil {
-					return fmt.Errorf("store: delete restored task tombstone: %w", err)
-				}
-			}
-		}
-		out = t
-		return nil
+		var err error
+		out, err = s.updateAndMoveTaskTx(tx, user, idPrefix, patch, moveTo, guard)
+		return err
 	})
 	if err != nil {
 		return board.Task{}, err
 	}
 	return out, nil
+}
+
+func (s *Store) updateAndMoveTaskTx(tx *sql.Tx, user, idPrefix string, patch TaskPatch, moveTo *board.Status, guard func(board.Task) error) (board.Task, error) {
+	id, err := resolveID(tx, user, idPrefix)
+	if err != nil {
+		return board.Task{}, err
+	}
+	task, err := s.patchTask(tx, user, id, patch)
+	if err != nil {
+		return board.Task{}, err
+	}
+	if guard != nil {
+		if err := guard(task); err != nil {
+			return board.Task{}, err
+		}
+	}
+	if moveTo == nil {
+		return task, nil
+	}
+	task, err = moveTask(tx, user, task, *moveTo)
+	if err != nil {
+		return board.Task{}, err
+	}
+	if *moveTo != board.StatusCancelled {
+		if err := deleteRestoredTaskTombstoneTx(tx, user, task.ID); err != nil {
+			return board.Task{}, err
+		}
+	}
+	return task, nil
+}
+
+func deleteRestoredTaskTombstoneTx(tx *sql.Tx, user, taskID string) error {
+	if _, err := tx.Exec(`DELETE FROM tombstones WHERE scope = ? AND task_id = ?`, user, taskID); err != nil {
+		return fmt.Errorf("store: delete restored task tombstone: %w", err)
+	}
+	return nil
 }
 
 // patchTask merges patch into the task with id and writes it back, returning
