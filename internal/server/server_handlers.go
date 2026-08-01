@@ -222,30 +222,110 @@ func shouldInvokeBoardSnapshotHook(want string, isJSON bool) bool {
 	return want != "" || isJSON
 }
 
+func boardOperationID(r *http.Request) (string, error) {
+	if len(r.Header.Values("Idempotency-Key")) > 1 {
+		return "", errors.New("multiple idempotency keys")
+	}
+	operationID := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if operationID == "" {
+		return "", nil
+	}
+	parsed, err := uuid.Parse(operationID)
+	if err != nil || parsed.String() != strings.ToLower(operationID) {
+		return "", errors.New("invalid idempotency key")
+	}
+	return operationID, nil
+}
+
+func boardPutRequestHash(mediaType string, body []byte) string {
+	hashInput := append([]byte(mediaType+"\x00"), body...)
+	return fmt.Sprintf("%x", sha256.Sum256(hashInput))
+}
+
+func (s *server) writeBoardJSONParseError(w http.ResponseWriter, user, want string) {
+	condition := boardWriteCondition(want)
+	if condition.Present {
+		_, err := s.store.CheckBoardWriteCondition(user, condition)
+		var conflict *store.RevisionConflictError
+		switch {
+		case errors.As(err, &conflict):
+			writeBoardConflict(w, boardETag(conflict.CurrentRevision))
+			return
+		case err != nil:
+			log.Printf("check board condition for %s: %s", logSafe(user), logSafe(err.Error()))
+			http.Error(w, storageErrorMessage, http.StatusInternalServerError)
+			return
+		}
+	}
+	http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
+}
+
+func containsTaskCreation(ids []*string) bool {
+	for _, id := range ids {
+		if id == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func boardPutCondition(want string, isJSON bool, revision int64) store.BoardWriteCondition {
+	condition := boardWriteCondition(want)
+	if want == "" && isJSON {
+		return store.BoardWriteCondition{Present: true, Revisions: []int64{revision}}
+	}
+	return condition
+}
+
+func (s *server) replaceBoard(
+	user string,
+	nextBoard board.Board,
+	canonicalIDs []*string,
+	condition store.BoardWriteCondition,
+	operationID, requestHash string,
+	isJSON bool,
+) ([]string, int64, bool, error) {
+	if condition.Present || operationID != "" {
+		return s.store.ReplaceBoardConditionalWithReceipt(
+			user, nextBoard, canonicalIDs, condition, operationID, requestHash,
+			isJSON && containsTaskCreation(canonicalIDs),
+		)
+	}
+	taskIDs, revision, err := s.store.ReplaceBoardWithTaskIDsAndRevision(user, nextBoard)
+	if err == nil && s.afterUnconditionalBoardReplace != nil {
+		s.afterUnconditionalBoardReplace()
+	}
+	return taskIDs, revision, false, err
+}
+
+func writeBoardPutError(w http.ResponseWriter, user string, err error) {
+	var conflict *store.RevisionConflictError
+	switch {
+	case errors.As(err, &conflict):
+		writeBoardConflict(w, boardETag(conflict.CurrentRevision))
+	case errors.Is(err, store.ErrInvalidTaskIDs):
+		http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
+	default:
+		log.Printf("write board for %s: %s", logSafe(user), logSafe(err.Error()))
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
+	}
+}
+
 func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user string) {
 	body, ok := readBody(w, r)
 	if !ok {
 		return
 	}
-	operationValues := r.Header.Values("Idempotency-Key")
-	if len(operationValues) > 1 {
+	operationID, err := boardOperationID(r)
+	if err != nil {
 		http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
 		return
 	}
-	operationID := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if operationID != "" {
-		parsed, err := uuid.Parse(operationID)
-		if err != nil || parsed.String() != strings.ToLower(operationID) {
-			http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
-			return
-		}
-	}
 	mediaType, _, _ := mime.ParseMediaType(r.Header.Get(contentTypeHeader))
 	isJSON := mediaType == jsonMediaType
-	hashInput := append([]byte(mediaType+"\x00"), body...)
-	requestHash := fmt.Sprintf("%x", sha256.Sum256(hashInput))
+	requestHash := boardPutRequestHash(mediaType, body)
 
-	snapshot, etag, err := s.currentBoard(user)
+	snapshot, _, err := s.currentBoard(user)
 	if err != nil {
 		log.Printf("read board for %s: %s", logSafe(user), logSafe(err.Error()))
 		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
@@ -262,69 +342,23 @@ func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user str
 		var parseErr error
 		nextBoard, canonicalIDs, parseErr = parseBoardJSONPut(body)
 		if parseErr != nil {
-			condition := boardWriteCondition(want)
-			if condition.Present {
-				_, conditionErr := s.store.CheckBoardWriteCondition(user, condition)
-				var conflict *store.RevisionConflictError
-				switch {
-				case errors.As(conditionErr, &conflict):
-					writeBoardConflict(w, boardETag(conflict.CurrentRevision))
-					return
-				case conditionErr != nil:
-					log.Printf("check board condition for %s: %s", logSafe(user), logSafe(conditionErr.Error()))
-					http.Error(w, storageErrorMessage, http.StatusInternalServerError)
-					return
-				}
-			}
-			http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
+			s.writeBoardJSONParseError(w, user, want)
 			return
 		}
 	}
-	hasCreates := false
-	for _, id := range canonicalIDs {
-		if id == nil {
-			hasCreates = true
-			break
-		}
-	}
-	condition := boardWriteCondition(want)
-	if want == "" && isJSON {
-		condition = store.BoardWriteCondition{Present: true, Revisions: []int64{snapshot.Revision}}
-	}
-
-	var taskIDs []string
-	var revision int64
-	var replayed bool
-	switch {
-	case condition.Present || operationID != "":
-		taskIDs, revision, replayed, err = s.store.ReplaceBoardConditionalWithReceipt(
-			user, nextBoard, canonicalIDs, condition, operationID, requestHash, isJSON && hasCreates,
-		)
-	default:
-		taskIDs, revision, err = s.store.ReplaceBoardWithTaskIDsAndRevision(user, nextBoard)
-		if err == nil && s.afterUnconditionalBoardReplace != nil {
-			s.afterUnconditionalBoardReplace()
-		}
-	}
+	condition := boardPutCondition(want, isJSON, snapshot.Revision)
+	taskIDs, revision, replayed, err := s.replaceBoard(
+		user, nextBoard, canonicalIDs, condition, operationID, requestHash, isJSON,
+	)
 	if err != nil {
-		var conflict *store.RevisionConflictError
-		switch {
-		case errors.As(err, &conflict):
-			writeBoardConflict(w, boardETag(conflict.CurrentRevision))
-		case errors.Is(err, store.ErrInvalidTaskIDs):
-			http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
-		default:
-			log.Printf("write board for %s: %s", logSafe(user), logSafe(err.Error()))
-			http.Error(w, storageErrorMessage, http.StatusInternalServerError)
-		}
+		writeBoardPutError(w, user, err)
 		return
 	}
 	if replayed || acceptsJSON(r) {
 		writeBoardAcknowledgement(w, taskIDs, revision, replayed)
 		return
 	}
-	etag = boardETag(revision)
-	w.Header().Set("ETag", etag)
+	w.Header().Set("ETag", boardETag(revision))
 	w.WriteHeader(http.StatusNoContent)
 }
 
