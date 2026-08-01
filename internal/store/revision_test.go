@@ -145,6 +145,143 @@ func TestBoardRevisionCASAcrossHandles(t *testing.T) {
 	}
 }
 
+func TestEqualTitleReorderLegacyAndCanonicalIdentity(t *testing.T) {
+	seed := board.Board{Title: "B", Tasks: []board.Task{
+		{Title: "Duplicate", Desc: "first", Status: board.StatusCancelled, Prio: 3},
+		{Title: "Duplicate", Desc: "second", Status: board.StatusCancelled, Prio: 3},
+	}}
+
+	t.Run("legacy matching keeps positional identity", func(t *testing.T) {
+		s := newStore(t)
+		ids, _, err := s.ReplaceBoardWithTaskIDsAndRevision("u", seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RecordTombstone("u", ids[0], "first reason"); err != nil {
+			t.Fatal(err)
+		}
+		before, err := s.Board("u")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		reordered := board.Board{Title: "B", Tasks: []board.Task{seed.Tasks[1], seed.Tasks[0]}}
+		committed, _, err := s.ReplaceBoardWithTaskIDsAndRevision("u", reordered)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(committed, ids) {
+			t.Fatalf("legacy reordered IDs = %v, want positional identity %v", committed, ids)
+		}
+		after, err := s.Board("u")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range after.Tasks {
+			if !after.Tasks[i].CreatedAt.Equal(before.Tasks[i].CreatedAt) || !after.Tasks[i].MovedAt.Equal(before.Tasks[i].MovedAt) {
+				t.Errorf("legacy task %d timestamps changed: before=%+v after=%+v", i, before.Tasks[i], after.Tasks[i])
+			}
+		}
+		if tombstone, ok, err := s.Tombstone("u", ids[0]); err != nil || !ok || tombstone.Reason != "first reason" {
+			t.Fatalf("legacy tombstone = %+v, %v, %v", tombstone, ok, err)
+		}
+	})
+
+	t.Run("canonical IDs follow reordered tasks", func(t *testing.T) {
+		s := newStore(t)
+		ids, revision, err := s.ReplaceBoardWithTaskIDsAndRevision("u", seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RecordTombstone("u", ids[0], "first reason"); err != nil {
+			t.Fatal(err)
+		}
+		before, err := s.Board("u")
+		if err != nil {
+			t.Fatal(err)
+		}
+		byID := map[string]board.Task{before.Tasks[0].ID: before.Tasks[0], before.Tasks[1].ID: before.Tasks[1]}
+
+		reordered := board.Board{Title: "B", Tasks: []board.Task{seed.Tasks[1], seed.Tasks[0]}}
+		canonical := []*string{&ids[1], &ids[0]}
+		committed, _, err := s.ReplaceBoardIfRevision("u", reordered, canonical, revision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{ids[1], ids[0]}; !reflect.DeepEqual(committed, want) {
+			t.Fatalf("canonical reordered IDs = %v, want %v", committed, want)
+		}
+		after, err := s.Board("u")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, task := range after.Tasks {
+			old := byID[task.ID]
+			if !task.CreatedAt.Equal(old.CreatedAt) || !task.MovedAt.Equal(old.MovedAt) {
+				t.Errorf("canonical task %q timestamps changed: before=%+v after=%+v", task.ID, old, task)
+			}
+		}
+		if tombstone, ok, err := s.Tombstone("u", ids[0]); err != nil || !ok || tombstone.Reason != "first reason" {
+			t.Fatalf("canonical tombstone = %+v, %v, %v", tombstone, ok, err)
+		}
+	})
+}
+
+func TestEmptyTaskPatchIsStrictNoOp(t *testing.T) {
+	s := newStore(t)
+	task, err := s.AddTask("u", board.Task{Title: "Cancelled", Status: board.StatusCancelled, Tags: []string{"stable"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordTombstone("u", task.ID, "keep reason"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.ReadBoardSnapshot("u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var labelLastUsed, labelSequence int64
+	if err := s.db.QueryRow(`SELECT last_used FROM labels WHERE user = ? AND label = ?`, "u", "stable").Scan(&labelLastUsed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT value FROM label_sequence WHERE id = 1`).Scan(&labelSequence); err != nil {
+		t.Fatal(err)
+	}
+	tombstoneBefore, ok, err := s.Tombstone("u", task.ID)
+	if err != nil || !ok {
+		t.Fatalf("tombstone before = %+v, %v, %v", tombstoneBefore, ok, err)
+	}
+
+	updated, err := s.UpdateTask("u", task.ID, TaskPatch{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.ReadBoardSnapshot("u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision {
+		t.Errorf("revision advanced on empty patch: %d -> %d", before.Revision, after.Revision)
+	}
+	if !updated.CreatedAt.Equal(task.CreatedAt) || !updated.MovedAt.Equal(task.MovedAt) {
+		t.Errorf("timestamps changed on empty patch: before=%+v after=%+v", task, updated)
+	}
+	var gotLastUsed, gotSequence int64
+	if err := s.db.QueryRow(`SELECT last_used FROM labels WHERE user = ? AND label = ?`, "u", "stable").Scan(&gotLastUsed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT value FROM label_sequence WHERE id = 1`).Scan(&gotSequence); err != nil {
+		t.Fatal(err)
+	}
+	if gotLastUsed != labelLastUsed || gotSequence != labelSequence {
+		t.Errorf("labels changed on empty patch: last_used %d -> %d, sequence %d -> %d", labelLastUsed, gotLastUsed, labelSequence, gotSequence)
+	}
+	tombstoneAfter, ok, err := s.Tombstone("u", task.ID)
+	if err != nil || !ok || tombstoneAfter != tombstoneBefore {
+		t.Errorf("tombstone changed on empty patch: before=%+v after=%+v ok=%v err=%v", tombstoneBefore, tombstoneAfter, ok, err)
+	}
+}
+
 func TestConditionalCanonicalReplacement(t *testing.T) {
 	s := newStore(t)
 	if err := s.ReplaceBoard("u", board.Board{Title: "B", Tasks: []board.Task{{Title: "Old", Status: board.StatusTodo, Prio: 3}}}); err != nil {
