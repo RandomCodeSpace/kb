@@ -107,7 +107,7 @@ func coverageForgeRequest(source string) string {
 
 func TestAIStoryReturnsStorageErrorWhenStoredKeyCannotDecrypt(t *testing.T) {
 	s, st, path, egress := newAIStorageCoverageServer(t)
-	baseURL, model, key := "https://ai.example", "test-model", "sk-stored"
+	baseURL, model, key := "https://ai.example", "test-model", "sk-g005-corrupt-key"
 	if _, err := st.SetAISettings(coverageUser, &baseURL, &model, &key); err != nil {
 		t.Fatalf("seed AI settings: %v", err)
 	}
