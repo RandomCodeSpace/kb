@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -13,6 +14,51 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
+
+func TestMCPDoneGuardReevaluatesAfterConcurrentUpdate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kb.db")
+	a, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	task, err := a.AddTask("tester", board.Task{Title: "Race"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	var once sync.Once
+	k := &kb{st: a, user: "tester", beforeDoneGuard: func() {
+		once.Do(func() {
+			close(entered)
+			<-resume
+		})
+	}}
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := k.moveTask(context.Background(), nil, moveTaskInput{ID: task.ID, Status: "done"})
+		result <- err
+	}()
+	<-entered
+	blocked := true
+	if _, err := b.UpdateTask("tester", task.ID, store.TaskPatch{Blocked: &blocked}); err != nil {
+		t.Fatal(err)
+	}
+	close(resume)
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("guarded move err=%v, want blocked refusal", err)
+	}
+	stored, err := a.ListTasks("tester", "")
+	if err != nil || len(stored) != 1 || stored[0].Status != board.StatusTodo || !stored[0].Blocked {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+}
 
 // connect spins up the MCP server over an in-memory transport against a temp
 // DB and returns a connected client session.

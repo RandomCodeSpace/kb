@@ -3,13 +3,16 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
 func TestPutBodyLimit(t *testing.T) {
@@ -337,17 +340,17 @@ func TestBlockedAndCancelledSurviveTheAPIRoundTrip(t *testing.T) {
 		t.Errorf("GET body drifted from the fixture:\n--- got ---\n%s\n--- want ---\n%s", w.Body, wire)
 	}
 
-	// A second lap (the client re-serializing what it read) changes nothing,
-	// including the version token.
+	// A second lap keeps the wire unchanged but still advances the database
+	// revision because a successful replacement is a write event.
 	etag := w.Header().Get("ETag")
 	if w := doReq(t, h, "PUT", "/api/board", canonical(w.Body.String()),
 		map[string]string{"If-Match": etag}); w.Code != http.StatusNoContent {
 		t.Fatalf("second PUT: got %d, want 204 (body=%s)", w.Code, w.Body)
 	}
 	if again := doReq(t, h, "GET", "/api/board", "", nil); again.Body.String() != wire ||
-		again.Header().Get("ETag") != etag {
-		t.Errorf("second lap changed the board or its token: etag %q -> %q",
-			etag, again.Header().Get("ETag"))
+		again.Header().Get("ETag") == etag {
+		t.Errorf("second lap wire/token = (%q, %q), want unchanged wire and advanced token from %q",
+			again.Body.String(), again.Header().Get("ETag"), etag)
 	}
 }
 
@@ -456,5 +459,515 @@ func TestBoardVersionTokenOnMissingBoard(t *testing.T) {
 	fresh := doReq(t, h2, "GET", "/api/board", "", nil).Header().Get("ETag")
 	if w := doReq(t, h2, "PUT", "/api/board", seed, map[string]string{"If-Match": fresh}); w.Code != http.StatusNoContent {
 		t.Errorf("first PUT onto an empty board: got %d, want 204 (body=%s)", w.Code, w.Body)
+	}
+}
+
+func TestJSONBoardPutPreservesCanonicalIdentity(t *testing.T) {
+	h, st := newTestServer(t, Config{})
+	const seed = "# B\n\n## To Do\n\n- [ ] Duplicate\n  first\n- [ ] Duplicate\n  second\n"
+	seeded := doReq(t, h, http.MethodPut, "/api/board", seed, map[string]string{"Accept": "application/json"})
+	if seeded.Code != http.StatusOK {
+		t.Fatalf("seed PUT = %d %q", seeded.Code, seeded.Body)
+	}
+	var seedAck struct {
+		TaskIDs []string `json:"task_ids"`
+	}
+	if err := json.Unmarshal(seeded.Body.Bytes(), &seedAck); err != nil || len(seedAck.TaskIDs) != 2 {
+		t.Fatalf("seed acknowledgement = %q err=%v", seeded.Body, err)
+	}
+
+	next := "# B2\n\n## To Do\n\n- [ ] Duplicate\n  second renamed\n- [ ] New\n\n## Doing\n\n- [ ] Duplicate\n  first moved\n"
+	payload, err := json.Marshal(map[string]any{
+		"board":    next,
+		"task_ids": []any{seedAck.TaskIDs[1], nil, seedAck.TaskIDs[0]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := doReq(t, h, http.MethodPut, "/api/board", string(payload), map[string]string{
+		"Content-Type":    "application/json",
+		"Accept":          "application/json",
+		"If-Match":        `"old-content-hash", ` + seeded.Header().Get("ETag"),
+		"Idempotency-Key": "6fa459ea-ee8a-3ca4-894e-db77e160355e",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("JSON PUT = %d %q", w.Code, w.Body)
+	}
+	var ack struct {
+		TaskIDs []string `json:"task_ids"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &ack); err != nil || len(ack.TaskIDs) != 3 {
+		t.Fatalf("JSON acknowledgement = %q err=%v", w.Body, err)
+	}
+	if ack.TaskIDs[0] != seedAck.TaskIDs[1] || ack.TaskIDs[2] != seedAck.TaskIDs[0] || ack.TaskIDs[1] == "" {
+		t.Fatalf("committed IDs = %v, want [%s new %s]", ack.TaskIDs, seedAck.TaskIDs[1], seedAck.TaskIDs[0])
+	}
+	stored, err := st.ReadBoardSnapshot("default")
+	if err != nil || !reflect.DeepEqual(stored.TaskIDs, ack.TaskIDs) {
+		t.Fatalf("stored IDs = %v err=%v, want %v", stored.TaskIDs, err, ack.TaskIDs)
+	}
+	legacyResponse := doReq(t, h, http.MethodPut, "/api/board", string(payload), map[string]string{
+		"Content-Type":    "application/json",
+		"If-Match":        w.Header().Get("ETag"),
+		"Idempotency-Key": "6fa459ea-ee8a-3ca4-894e-db77e160355e",
+	})
+	if legacyResponse.Code != http.StatusOK || legacyResponse.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("receipt replay with legacy Accept = %d %q", legacyResponse.Code, legacyResponse.Body)
+	}
+}
+
+func TestJSONBoardPutValidationIsNonDisclosingAndStaleWins(t *testing.T) {
+	h, st := newTestServer(t, Config{})
+	seed := doReq(t, h, http.MethodPut, "/api/board", "# B\n\n## To Do\n\n- [ ] One\n- [ ] Two\n", map[string]string{"Accept": "application/json"})
+	var ack struct {
+		TaskIDs []string `json:"task_ids"`
+	}
+	if err := json.Unmarshal(seed.Body.Bytes(), &ack); err != nil || len(ack.TaskIDs) != 2 {
+		t.Fatalf("seed acknowledgement = %q err=%v", seed.Body, err)
+	}
+	foreign, err := st.AddTask("other", board.Task{Title: "Foreign", Status: board.StatusTodo, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	etag := seed.Header().Get("ETag")
+	markdown := "# B\n\n## To Do\n\n- [ ] One\n- [ ] Two\n"
+	cases := []string{
+		`{"board":"` + strings.ReplaceAll(markdown, "\n", `\n`) + `","task_ids":["` + ack.TaskIDs[0] + `"]}`,
+		`{"board":"` + strings.ReplaceAll(markdown, "\n", `\n`) + `","task_ids":["` + ack.TaskIDs[0] + `","` + ack.TaskIDs[0] + `"]}`,
+		`{"board":"` + strings.ReplaceAll(markdown, "\n", `\n`) + `","task_ids":["not-a-uuid",null]}`,
+		`{"board":"` + strings.ReplaceAll(markdown, "\n", `\n`) + `","task_ids":["00000000-0000-4000-8000-000000000000",null]}`,
+		`{"board":"` + strings.ReplaceAll(markdown, "\n", `\n`) + `","task_ids":["` + foreign.ID + `",null]}`,
+		`{"board":"` + strings.ReplaceAll(markdown, "\n", `\n`) + `","task_ids":[7,null]}`,
+		`{"board":"` + strings.ReplaceAll(markdown, "\n", `\n`) + `","task_ids":[null,null],"extra":true}`,
+		`{"board":"` + strings.ReplaceAll(markdown, "\n", `\n`) + `","board":"# Other","task_ids":[null,null]}`,
+	}
+	for i, payload := range cases {
+		w := doReq(t, h, http.MethodPut, "/api/board", payload, map[string]string{
+			"Content-Type": "application/json", "If-Match": etag,
+		})
+		if w.Code != http.StatusBadRequest || strings.TrimSpace(w.Body.String()) != "invalid board payload" {
+			t.Errorf("case %d = %d %q, want uniform 400", i, w.Code, w.Body)
+		}
+	}
+	invalidBoardTypes := []struct {
+		name  string
+		value string
+	}{
+		{name: "null", value: `null`},
+		{name: "boolean", value: `true`},
+		{name: "number", value: `7`},
+		{name: "array", value: `[]`},
+		{name: "object", value: `{}`},
+	}
+	beforeInvalidTypes, err := st.ReadBoardSnapshot("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range invalidBoardTypes {
+		t.Run("current rejects board "+tc.name, func(t *testing.T) {
+			payload := `{"board":` + tc.value + `,"task_ids":[null,null]}`
+			w := doReq(t, h, http.MethodPut, "/api/board", payload, map[string]string{
+				"Content-Type": "application/json", "If-Match": etag,
+			})
+			if w.Code != http.StatusBadRequest || strings.TrimSpace(w.Body.String()) != "invalid board payload" {
+				t.Fatalf("board %s = %d %q, want uniform 400", tc.name, w.Code, w.Body)
+			}
+			after, err := st.ReadBoardSnapshot("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, beforeInvalidTypes) {
+				t.Fatalf("board %s changed snapshot: before=%+v after=%+v", tc.name, beforeInvalidTypes, after)
+			}
+		})
+	}
+
+	if _, err := st.AddTask("default", board.Task{Title: "Intervening", Status: board.StatusTodo, Prio: 3}); err != nil {
+		t.Fatal(err)
+	}
+	stale := doReq(t, h, http.MethodPut, "/api/board", cases[2], map[string]string{
+		"Content-Type": "application/json", "If-Match": etag,
+	})
+	if stale.Code != http.StatusConflict || stale.Header().Get("ETag") == "" || stale.Header().Get("ETag") == etag {
+		t.Fatalf("stale invalid PUT = %d etag=%q body=%q, want 409 with current token", stale.Code, stale.Header().Get("ETag"), stale.Body)
+	}
+	currentETag := stale.Header().Get("ETag")
+	beforeStaleTypes, err := st.ReadBoardSnapshot("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range invalidBoardTypes {
+		t.Run("stale rejects before board "+tc.name, func(t *testing.T) {
+			payload := `{"board":` + tc.value + `,"task_ids":[null,null]}`
+			w := doReq(t, h, http.MethodPut, "/api/board", payload, map[string]string{
+				"Content-Type": "application/json", "If-Match": etag,
+			})
+			if w.Code != http.StatusConflict || w.Header().Get("ETag") != currentETag {
+				t.Fatalf("stale board %s = %d etag=%q body=%q, want 409 with %q",
+					tc.name, w.Code, w.Header().Get("ETag"), w.Body, currentETag)
+			}
+			after, err := st.ReadBoardSnapshot("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, beforeStaleTypes) {
+				t.Fatalf("stale board %s changed snapshot: before=%+v after=%+v", tc.name, beforeStaleTypes, after)
+			}
+		})
+	}
+}
+
+func TestIfMatchStarRequiresExistingBoardAndHashTokenUpgrades(t *testing.T) {
+	h, _ := newTestServer(t, Config{})
+	missing := doReq(t, h, http.MethodPut, "/api/board", "# B\n", map[string]string{"If-Match": "*"})
+	if missing.Code != http.StatusConflict || missing.Header().Get("ETag") == "" {
+		t.Fatalf("missing If-Match * = %d etag=%q", missing.Code, missing.Header().Get("ETag"))
+	}
+	stale := doReq(t, h, http.MethodPut, "/api/board", "# B\n", map[string]string{
+		"If-Match": `"0123456789abcdef0123456789abcdef"`,
+	})
+	if stale.Code != http.StatusConflict || stale.Header().Get("ETag") != missing.Header().Get("ETag") {
+		t.Fatalf("old hash token = %d etag=%q, want 409 current %q", stale.Code, stale.Header().Get("ETag"), missing.Header().Get("ETag"))
+	}
+	retry := doReq(t, h, http.MethodPut, "/api/board", "# B\n", map[string]string{"If-Match": stale.Header().Get("ETag")})
+	if retry.Code != http.StatusNoContent {
+		t.Fatalf("refetch/retry = %d %q", retry.Code, retry.Body)
+	}
+}
+
+func TestIfMatchStarPredicateIsTransactional(t *testing.T) {
+	t.Run("missing snapshot followed by concurrent create succeeds", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "kb.db")
+		a, err := store.Open(path, []byte("test-secret"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer a.Close()
+		b, err := store.Open(path, []byte("test-secret"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer b.Close()
+		srv := newServer(Config{}, testStatic, a)
+		srv.afterConditionalBoardSnapshot = func() {
+			srv.afterConditionalBoardSnapshot = nil
+			if err := b.ReplaceBoard("default", board.Parse("# Peer\n")); err != nil {
+				t.Errorf("concurrent create: %v", err)
+			}
+		}
+		w := doReq(t, srv.handler(), http.MethodPut, "/api/board", "# Star\n", map[string]string{"If-Match": "*"})
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("wildcard after concurrent create = %d %q", w.Code, w.Body)
+		}
+		snapshot, err := a.ReadBoardSnapshot("default")
+		if err != nil || snapshot.Board.Title != "Star" {
+			t.Fatalf("committed board = %+v err=%v", snapshot.Board, err)
+		}
+	})
+	t.Run("concurrent mutation still exists", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "kb.db")
+		a, err := store.Open(path, []byte("test-secret"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer a.Close()
+		b, err := store.Open(path, []byte("test-secret"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer b.Close()
+		if err := a.ReplaceBoard("default", board.Parse("# B\n\n## To Do\n\n- [ ] Seed\n")); err != nil {
+			t.Fatal(err)
+		}
+		srv := newServer(Config{}, testStatic, a)
+		srv.afterConditionalBoardSnapshot = func() {
+			srv.afterConditionalBoardSnapshot = nil
+			if _, err := b.AddTask("default", board.Task{Title: "Concurrent"}); err != nil {
+				t.Errorf("concurrent mutation: %v", err)
+			}
+		}
+		w := doReq(t, srv.handler(), http.MethodPut, "/api/board", "# Star\n", map[string]string{"If-Match": "*"})
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("wildcard after mutation = %d %q", w.Code, w.Body)
+		}
+	})
+	t.Run("concurrent deletion conflicts", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "kb.db")
+		a, err := store.Open(path, []byte("test-secret"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer a.Close()
+		b, err := store.Open(path, []byte("test-secret"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer b.Close()
+		if err := a.ReplaceBoard("default", board.Parse("# B\n\n## To Do\n\n- [ ] Seed\n")); err != nil {
+			t.Fatal(err)
+		}
+		srv := newServer(Config{}, testStatic, a)
+		srv.afterConditionalBoardSnapshot = func() {
+			srv.afterConditionalBoardSnapshot = nil
+			if err := b.DeleteBoard("default"); err != nil {
+				t.Errorf("concurrent delete: %v", err)
+			}
+		}
+		w := doReq(t, srv.handler(), http.MethodPut, "/api/board", "# Star\n", map[string]string{"If-Match": "*"})
+		if w.Code != http.StatusConflict {
+			t.Fatalf("wildcard after deletion = %d %q", w.Code, w.Body)
+		}
+	})
+}
+
+func TestJSONBoardCreateReceiptReplay(t *testing.T) {
+	h, st := newTestServer(t, Config{})
+	seed := doReq(t, h, http.MethodPut, "/api/board", "# B\n", map[string]string{"Accept": "application/json"})
+	bodyBytes, err := json.Marshal(map[string]any{
+		"board": "# B\n\n## To Do\n\n- [ ] New\n", "task_ids": []any{nil},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(bodyBytes)
+	headers := map[string]string{
+		"Content-Type": "application/json", "Accept": "application/json",
+		"If-Match":        seed.Header().Get("ETag"),
+		"Idempotency-Key": "6fa459ea-ee8a-3ca4-894e-db77e160355e",
+	}
+	first := doReq(t, h, http.MethodPut, "/api/board", body, headers)
+	if first.Code != http.StatusOK || first.Header().Get("Idempotency-Replayed") != "" {
+		t.Fatalf("first = %d replay=%q body=%q", first.Code, first.Header().Get("Idempotency-Replayed"), first.Body)
+	}
+	before, err := st.ReadBoardSnapshot("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay := doReq(t, h, http.MethodPut, "/api/board", body, headers)
+	if replay.Code != http.StatusOK || replay.Header().Get("Idempotency-Replayed") != "true" || replay.Header().Get("ETag") != first.Header().Get("ETag") || replay.Body.String() != first.Body.String() {
+		t.Fatalf("replay = %d replay=%q etag=%q body=%q", replay.Code, replay.Header().Get("Idempotency-Replayed"), replay.Header().Get("ETag"), replay.Body)
+	}
+	after, err := st.ReadBoardSnapshot("default")
+	if err != nil || after.Revision != before.Revision || !reflect.DeepEqual(after.TaskIDs, before.TaskIDs) {
+		t.Fatalf("replay mutated board before=%+v after=%+v err=%v", before, after, err)
+	}
+	mismatch := doReq(t, h, http.MethodPut, "/api/board", strings.Replace(body, "New", "Other", 1), headers)
+	if mismatch.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched replay = %d %q", mismatch.Code, mismatch.Body)
+	}
+	duplicateRequest := httptest.NewRequest(http.MethodPut, "/api/board", strings.NewReader(body))
+	duplicateRequest.Host = "127.0.0.1:8080"
+	duplicateRequest.Header.Set("Content-Type", "application/json")
+	duplicateRequest.Header.Set("Accept", "application/json")
+	duplicateRequest.Header.Set("If-Match", first.Header().Get("ETag"))
+	duplicateRequest.Header.Add("Idempotency-Key", "6fa459ea-ee8a-3ca4-894e-db77e160355e")
+	duplicateRequest.Header.Add("Idempotency-Key", "6fa459ea-ee8a-3ca4-894e-db77e160355e")
+	duplicateResponse := httptest.NewRecorder()
+	h.ServeHTTP(duplicateResponse, duplicateRequest)
+	if duplicateResponse.Code != http.StatusBadRequest {
+		t.Fatalf("repeated idempotency fields = %d %q", duplicateResponse.Code, duplicateResponse.Body)
+	}
+	cross := map[string]string{}
+	for k, v := range headers {
+		cross[k] = v
+	}
+	cross["X-KB-User"] = "bob"
+	crossUser := doReq(t, h, http.MethodPut, "/api/board", body, cross)
+	if crossUser.Code != http.StatusConflict {
+		t.Fatalf("cross-user key = %d %q", crossUser.Code, crossUser.Body)
+	}
+}
+
+func TestJSONBoardReceiptReplayWinsAfterPeerCommit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kb.db")
+	a, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if err := a.ReplaceBoard("default", board.Parse("# B\n")); err != nil {
+		t.Fatal(err)
+	}
+	srv := newServer(Config{}, testStatic, a)
+	h2 := New(Config{}, testStatic, b)
+	etag := doReq(t, srv.handler(), http.MethodGet, "/api/board", "", nil).Header().Get("ETag")
+	body := `{"board":"# B\n\n## To Do\n\n- [ ] New\n","task_ids":[null]}`
+	headers := map[string]string{
+		"Content-Type": "application/json", "Accept": "application/json",
+		"If-Match": etag, "Idempotency-Key": "6fa459ea-ee8a-3ca4-894e-db77e160355e",
+	}
+	var peer *httptest.ResponseRecorder
+	srv.afterConditionalBoardSnapshot = func() {
+		srv.afterConditionalBoardSnapshot = nil
+		peer = doReq(t, h2, http.MethodPut, "/api/board", body, headers)
+		if peer.Code != http.StatusOK {
+			t.Fatalf("peer create = %d %q", peer.Code, peer.Body)
+		}
+	}
+	replay := doReq(t, srv.handler(), http.MethodPut, "/api/board", body, headers)
+	if replay.Code != http.StatusOK || replay.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("racing replay = %d replay=%q body=%q", replay.Code, replay.Header().Get("Idempotency-Replayed"), replay.Body)
+	}
+	if replay.Header().Get("ETag") != peer.Header().Get("ETag") || replay.Body.String() != peer.Body.String() {
+		t.Fatalf("replay acknowledgement = %q/%q, peer = %q/%q", replay.Header().Get("ETag"), replay.Body, peer.Header().Get("ETag"), peer.Body)
+	}
+	snapshot, err := a.ReadBoardSnapshot("default")
+	if err != nil || len(snapshot.Board.Tasks) != 1 || snapshot.Board.Tasks[0].Title != "New" {
+		t.Fatalf("final board = %+v err=%v", snapshot.Board, err)
+	}
+}
+
+func TestIdempotencyKeyRequiresCreationBearingJSON(t *testing.T) {
+	h, _ := newTestServer(t, Config{})
+	seed := doReq(t, h, http.MethodPut, "/api/board", "# B\n", nil)
+	key := "6fa459ea-ee8a-3ca4-894e-db77e160355e"
+	markdown := doReq(t, h, http.MethodPut, "/api/board", "# B\n", map[string]string{
+		"Content-Type": "text/markdown", "If-Match": seed.Header().Get("ETag"), "Idempotency-Key": key,
+	})
+	if markdown.Code != http.StatusBadRequest || markdown.Body.String() != "invalid board payload\n" {
+		t.Fatalf("markdown idempotency key = %d %q", markdown.Code, markdown.Body)
+	}
+	jsonNoCreate := doReq(t, h, http.MethodPut, "/api/board", `{"board":"# B\n","task_ids":[]}`, map[string]string{
+		"Content-Type": "application/json", "Accept": "application/json",
+		"If-Match": seed.Header().Get("ETag"), "Idempotency-Key": key,
+	})
+	if jsonNoCreate.Code != http.StatusBadRequest || jsonNoCreate.Body.String() != "invalid board payload\n" {
+		t.Fatalf("no-create JSON idempotency key = %d %q", jsonNoCreate.Code, jsonNoCreate.Body)
+	}
+}
+
+func TestConditionalBoardPutAcrossServerInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kb.db")
+	a, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	h1, h2 := New(Config{}, testStatic, a), New(Config{}, testStatic, b)
+	if err := a.ReplaceBoard("default", board.Parse("# B\n\n## To Do\n\n- [ ] Seed\n")); err != nil {
+		t.Fatal(err)
+	}
+	etag := doReq(t, h1, http.MethodGet, "/api/board", "", nil).Header().Get("ETag")
+
+	start := make(chan struct{})
+	results := make(chan int, 2)
+	var wg sync.WaitGroup
+	for _, tc := range []struct {
+		handler http.Handler
+		body    string
+	}{{h1, "# B\n\n## To Do\n\n- [ ] Writer A\n"}, {h2, "# B\n\n## To Do\n\n- [ ] Writer B\n"}} {
+		wg.Add(1)
+		go func(tc struct {
+			handler http.Handler
+			body    string
+		}) {
+			defer wg.Done()
+			<-start
+			r := httptest.NewRequest(http.MethodPut, "/api/board", strings.NewReader(tc.body))
+			r.Host = "127.0.0.1:8080"
+			r.Header.Set("Content-Type", "text/markdown")
+			r.Header.Set("If-Match", etag)
+			w := httptest.NewRecorder()
+			tc.handler.ServeHTTP(w, r)
+			results <- w.Code
+		}(tc)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	counts := map[int]int{}
+	for code := range results {
+		counts[code]++
+	}
+	if counts[http.StatusNoContent] != 1 || counts[http.StatusConflict] != 1 {
+		t.Fatalf("concurrent conditional results = %v, want one 204 and one 409", counts)
+	}
+	snapshot, err := a.ReadBoardSnapshot("default")
+	if err != nil || len(snapshot.Board.Tasks) != 1 || snapshot.Board.Tasks[0].Title == "Seed" {
+		t.Fatalf("committed board = %+v err=%v", snapshot.Board, err)
+	}
+}
+
+func TestUnconditionalPutReturnsItsOwnCommittedIDsAndRevision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kb.db")
+	a, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	srv := newServer(Config{}, testStatic, a)
+	var committed store.BoardSnapshot
+	srv.afterUnconditionalBoardReplace = func() {
+		committed, err = b.ReadBoardSnapshot("default")
+		if err != nil {
+			t.Errorf("read exact unconditional commit: %v", err)
+			return
+		}
+		err = b.ReplaceBoard("default", board.Parse("# External\n\n## To Do\n\n- [ ] Intervening\n"))
+		if err != nil {
+			t.Errorf("intervening replace: %v", err)
+		}
+	}
+	h := srv.handler()
+	w := doReq(t, h, http.MethodPut, "/api/board", "# Legacy\n\n## To Do\n\n- [ ] Mine\n", map[string]string{
+		"Accept": "application/json",
+	})
+	if w.Code != http.StatusOK || err != nil {
+		t.Fatalf("unconditional PUT = %d %q hookErr=%v", w.Code, w.Body, err)
+	}
+	var ack struct {
+		TaskIDs []string `json:"task_ids"`
+	}
+	if decodeErr := json.Unmarshal(w.Body.Bytes(), &ack); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if !reflect.DeepEqual(ack.TaskIDs, committed.TaskIDs) || w.Header().Get("ETag") != boardETag(committed.Revision) {
+		t.Fatalf("response IDs/ETag = %v/%q, exact commit = %v/%q",
+			ack.TaskIDs, w.Header().Get("ETag"), committed.TaskIDs, boardETag(committed.Revision))
+	}
+	current, err := a.ReadBoardSnapshot("default")
+	if err != nil || current.Revision <= committed.Revision || current.Board.Title != "External" {
+		t.Fatalf("current snapshot = %+v err=%v, want later external write", current, err)
+	}
+	stale := doReq(t, h, http.MethodPut, "/api/board", "# Clobber\n", map[string]string{
+		"If-Match": w.Header().Get("ETag"),
+	})
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("follow-up with exact older commit token = %d, want 409", stale.Code)
+	}
+	after, err := a.ReadBoardSnapshot("default")
+	if err != nil || after.Board.Title != "External" {
+		t.Fatalf("external board after rejected follow-up = %+v err=%v", after.Board, err)
+	}
+}
+
+func TestIfMatchCombinesRepeatedHeaderFields(t *testing.T) {
+	h, _ := newTestServer(t, Config{})
+	seed := doReq(t, h, http.MethodPut, "/api/board", "# B\n\n## To Do\n\n- [ ] Seed\n", nil)
+	current := seed.Header().Get("ETag")
+	r := httptest.NewRequest(http.MethodPut, "/api/board", strings.NewReader("# B\n\n## To Do\n\n- [ ] Updated\n"))
+	r.Host = "127.0.0.1:8080"
+	r.Header.Set("Content-Type", "text/markdown")
+	r.Header.Add("If-Match", `"stale"`)
+	r.Header.Add("If-Match", current)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("repeated If-Match fields = %d %q, current token in second field was ignored", w.Code, w.Body)
 	}
 }

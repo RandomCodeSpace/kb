@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -78,8 +79,8 @@ func TestMigrateV4FromV3(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if schemaVersion != "4" {
-		t.Fatalf("schema version = %q, want 4", schemaVersion)
+	if schemaVersion != "6" {
+		t.Fatalf("schema version = %q, want 6", schemaVersion)
 	}
 
 	var tombstonesTable string
@@ -199,8 +200,8 @@ func TestMigrateV4FromV3(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version after no-op migration: %v", err)
 	}
-	if schemaVersion != "4" {
-		t.Errorf("schema version after no-op migrate = %q, want 4", schemaVersion)
+	if schemaVersion != "6" {
+		t.Errorf("schema version after no-op migrate = %q, want 6", schemaVersion)
 	}
 }
 
@@ -208,7 +209,7 @@ func TestMigrateV4FromV3(t *testing.T) {
 // reasoning or the timestamp from the first decision.
 func TestRecordTombstoneIsAnUpsert(t *testing.T) {
 	s := newStore(t)
-	task := addSearchTask(t, s, board.Task{Title: "Retire the legacy login"})
+	task := addSearchTask(t, s, board.Task{Title: "Retire the legacy login", Status: board.StatusCancelled})
 
 	if err := s.RecordTombstone("alice", task.ID, "The first reason"); err != nil {
 		t.Fatalf("RecordTombstone first: %v", err)
@@ -246,6 +247,13 @@ func TestRecordTombstoneIsAnUpsert(t *testing.T) {
 	}
 	if _, err := time.Parse(time.RFC3339Nano, second.KilledAt); err != nil {
 		t.Fatalf("second killed_at = %q: %v", second.KilledAt, err)
+	}
+	var rows int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tombstones WHERE scope = ? AND task_id = ?`, "alice", task.ID).Scan(&rows); err != nil {
+		t.Fatalf("count replayed tombstones: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("replayed tombstone rows = %d, want 1", rows)
 	}
 }
 
@@ -422,9 +430,9 @@ func TestGraveyardScopeIsolation(t *testing.T) {
 	}
 }
 
-// TestRetitledCardOrphansItsTombstoneHarmlessly proves stale reasons cannot
-// attach to the fresh identity minted when ReplaceBoard sees a new title.
-func TestRetitledCardOrphansItsTombstoneHarmlessly(t *testing.T) {
+// TestRetitledCardRemovesItsOldTombstone proves full-board replacement purges
+// reasons whose canonical task identity no longer exists.
+func TestRetitledCardRemovesItsOldTombstone(t *testing.T) {
 	s := newStore(t)
 	original := addSearchTask(t, s, board.Task{
 		Title:  "Original graveyard identity",
@@ -449,8 +457,8 @@ func TestRetitledCardOrphansItsTombstoneHarmlessly(t *testing.T) {
 	if current.Tasks[0].ID == original.ID {
 		t.Fatalf("retitled task kept old ID %q", original.ID)
 	}
-	if _, found, err := s.Tombstone("alice", original.ID); err != nil || !found {
-		t.Fatalf("orphan Tombstone = found %t, err %v", found, err)
+	if got, found, err := s.Tombstone("alice", original.ID); err != nil || found {
+		t.Fatalf("old Tombstone = %+v, found %t, err %v, want removed", got, found, err)
 	}
 
 	hits, err := s.SearchSimilar("alice", "retitled graveyard identity", "", nil, 10)
@@ -487,45 +495,120 @@ func TestPurgingACardSweepsItsTombstone(t *testing.T) {
 	}
 }
 
-// TestRecordTombstoneSweepsOrphansAndKeepsLiveReasons bounds stale rows without
-// deleting a reason that still belongs to a live task.
-func TestRecordTombstoneSweepsOrphansAndKeepsLiveReasons(t *testing.T) {
+// TestRecordTombstoneRequiresACancelledScopedTask rejects missing and active
+// targets without disturbing a valid cancelled task's reason.
+func TestRecordTombstoneRequiresACancelledScopedTask(t *testing.T) {
 	s := newStore(t)
-	orphan := addSearchTask(t, s, board.Task{
-		Title:  "Orphan sweep sentinel",
-		Status: board.StatusCancelled,
-	})
 	live := addSearchTask(t, s, board.Task{
 		Title:  "Live sweep sentinel",
 		Status: board.StatusCancelled,
 	})
-	if err := s.RecordTombstone("alice", orphan.ID, "This row will become orphaned"); err != nil {
-		t.Fatalf("RecordTombstone orphan: %v", err)
-	}
 	if err := s.RecordTombstone("alice", live.ID, "Keep this live reason"); err != nil {
 		t.Fatalf("RecordTombstone live: %v", err)
 	}
-	if _, err := s.db.Exec(
-		`DELETE FROM tasks WHERE user = ? AND id = ?`,
-		"alice", orphan.ID,
-	); err != nil {
-		t.Fatalf("orphan task directly: %v", err)
-	}
-
-	if err := s.RecordTombstone("alice", live.ID, "Keep this refreshed live reason"); err != nil {
-		t.Fatalf("RecordTombstone sweep: %v", err)
-	}
-	if got, found, err := s.Tombstone("alice", orphan.ID); err != nil || found {
-		t.Fatalf("orphan Tombstone after sweep = %+v, %t, %v", got, found, err)
+	active := addSearchTask(t, s, board.Task{Title: "Active sentinel", Status: board.StatusTodo})
+	for _, target := range []struct {
+		name, scope, id string
+	}{
+		{name: "missing", scope: "alice", id: "missing-task"},
+		{name: "active", scope: "alice", id: active.ID},
+		{name: "cross scope", scope: "bob", id: live.ID},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			if err := s.RecordTombstone(target.scope, target.id, "Must be rejected"); !errors.Is(err, ErrTombstoneTaskNotCancelled) {
+				t.Fatalf("RecordTombstone = %v, want ErrTombstoneTaskNotCancelled", err)
+			}
+		})
 	}
 	got, found, err := s.Tombstone("alice", live.ID)
-	if err != nil || !found || got.Reason != "Keep this refreshed live reason" {
-		t.Fatalf("live Tombstone after sweep = %+v, %t, %v", got, found, err)
+	if err != nil || !found || got.Reason != "Keep this live reason" {
+		t.Fatalf("valid Tombstone after rejected writes = %+v, %t, %v", got, found, err)
 	}
-	if err := s.RecordTombstone("alice", "missing-task", "This fresh orphan must be swept"); err != nil {
-		t.Fatalf("RecordTombstone missing task: %v", err)
+}
+
+func TestRestoreAndFullBoardReplacementRemoveTombstones(t *testing.T) {
+	t.Run("task move restore", func(t *testing.T) {
+		s := newStore(t)
+		task := addSearchTask(t, s, board.Task{Title: "Restore me", Status: board.StatusCancelled})
+		if err := s.RecordTombstone("alice", task.ID, "No longer wanted"); err != nil {
+			t.Fatalf("RecordTombstone: %v", err)
+		}
+		if _, err := s.MoveTask("alice", task.ID, board.StatusTodo); err != nil {
+			t.Fatalf("MoveTask restore: %v", err)
+		}
+		if got, found, err := s.Tombstone("alice", task.ID); err != nil || found {
+			t.Fatalf("Tombstone after restore = %+v, %t, %v", got, found, err)
+		}
+	})
+
+	t.Run("combined update and move restore", func(t *testing.T) {
+		s := newStore(t)
+		task := addSearchTask(t, s, board.Task{Title: "Restore and rename", Status: board.StatusCancelled})
+		if err := s.RecordTombstone("alice", task.ID, "Old rejection"); err != nil {
+			t.Fatalf("RecordTombstone: %v", err)
+		}
+		title := "Restored and renamed"
+		to := board.StatusDoing
+		updated, err := s.UpdateAndMoveTask("alice", task.ID, TaskPatch{Title: &title}, &to, nil)
+		if err != nil || updated.Status != to || updated.Title != title {
+			t.Fatalf("UpdateAndMoveTask = %+v, %v", updated, err)
+		}
+		if got, found, err := s.Tombstone("alice", task.ID); err != nil || found {
+			t.Fatalf("Tombstone after combined restore = %+v, %t, %v", got, found, err)
+		}
+	})
+
+	t.Run("full board restore and purge", func(t *testing.T) {
+		s := newStore(t)
+		restored := addSearchTask(t, s, board.Task{Title: "Restore in board", Status: board.StatusCancelled})
+		purged := addSearchTask(t, s, board.Task{Title: "Purge in board", Status: board.StatusCancelled})
+		for _, task := range []board.Task{restored, purged} {
+			if err := s.RecordTombstone("alice", task.ID, "Old reason"); err != nil {
+				t.Fatalf("RecordTombstone(%s): %v", task.ID, err)
+			}
+		}
+		ids := []*string{&restored.ID}
+		snapshot, err := s.ReadBoardSnapshot("alice")
+		if err != nil {
+			t.Fatalf("ReadBoardSnapshot: %v", err)
+		}
+		if _, _, err := s.ReplaceBoardIfRevision("alice", board.Board{Title: "Board", Tasks: []board.Task{{Title: restored.Title, Status: board.StatusTodo}}}, ids, snapshot.Revision); err != nil {
+			t.Fatalf("ReplaceBoardIfRevision: %v", err)
+		}
+		for _, id := range []string{restored.ID, purged.ID} {
+			if got, found, err := s.Tombstone("alice", id); err != nil || found {
+				t.Fatalf("Tombstone(%s) after replacement = %+v, %t, %v", id, got, found, err)
+			}
+		}
+	})
+}
+
+func TestImportProvenanceReplayKeepsOneLogicalRow(t *testing.T) {
+	s := newStore(t)
+	link := ImportLink{
+		Source:      "primary",
+		Kind:        "gitlab",
+		ExternalKey: "gitlab:example.test/group/project#42",
+		Link:        "gitlab#42",
+		URL:         "https://example.test/group/project/-/issues/42",
+		Title:       "Initial import",
 	}
-	if got, found, err := s.Tombstone("alice", "missing-task"); err != nil || found {
-		t.Fatalf("fresh orphan Tombstone after sweep = %+v, %t, %v", got, found, err)
+	if err := s.RecordImportLinks("alice", []ImportLink{link}); err != nil {
+		t.Fatalf("RecordImportLinks first: %v", err)
+	}
+	link.Title = "Refreshed import"
+	if err := s.RecordImportLinks("alice", []ImportLink{link}); err != nil {
+		t.Fatalf("RecordImportLinks replay: %v", err)
+	}
+	var rows int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM import_links WHERE scope = ? AND external_key = ?`, "alice", link.ExternalKey).Scan(&rows); err != nil {
+		t.Fatalf("count import provenance rows: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("replayed import provenance rows = %d, want 1", rows)
+	}
+	got, err := s.ImportedAs("alice", []string{link.ExternalKey})
+	if err != nil || got[link.ExternalKey].Title != link.Title {
+		t.Fatalf("ImportedAs after replay = %+v, %v", got, err)
 	}
 }

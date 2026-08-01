@@ -79,10 +79,15 @@ every row: `tasks` (UUID id, emoji, title, desc, status, prio, due, effort,
 position, tags, checklist, timestamps), `labels` (label registry with
 last-used stamps), and `settings` (AI configuration).
 
-Markdown is now the **wire and export format**, not the storage format:
+Markdown remains the **legacy wire and export format**, not the storage format.
+First-party browser sync can wrap the same markdown in a JSON identity envelope:
 
-- `GET/PUT /api/board` still speak `text/markdown` — the SPA sync API is
-  unchanged, and UI import/export is unchanged.
+- `GET/PUT /api/board` still accept `text/markdown`; UI import/export is
+  unchanged. A markdown `PUT` without `If-Match` retains the legacy
+  unconditional replacement behavior.
+- `Accept: application/json` on `GET` returns the markdown with canonical task
+  ids. `Content-Type: application/json` on `PUT` sends those ids back so
+  renames, moves, and duplicate titles retain identity.
 - A Go markdown codec (same grammar as the frontend's `src/lib/markdown.ts`,
   shared golden test vectors) converts at the boundary.
 
@@ -92,13 +97,19 @@ only for users with no tasks in the database yet. The original `.md` files
 are left untouched, and a user is never reimported (even after exporting or
 deleting tasks).
 
-Why SQLite: the SPA, the CLI, and MCP agents can now write concurrently.
-Whole-file last-write-wins markdown cannot survive that; WAL plus task-level
-operations can.
+Why SQLite: the SPA, the CLI, and MCP agents share one database-backed board
+revision. Task mutations, title changes, and full-board replacements advance
+it. WAL permits concurrent access; conditional full-board writes reject a
+stale revision instead of erasing an intervening task-level write.
 
 The data directory also holds `secret` — an auto-generated encryption key for
 stored AI API keys and forge PATs (see [Integrations](#integrations) and
-[AI assist and settings](#ai-assist-and-settings)).
+[AI assist and settings](#ai-assist-and-settings)). `kb.db`, `kb.db-wal`, and
+`kb.db-shm` are created or tightened to mode `0600`. A generated secret is
+fully written, synced, and closed in a same-directory `0600` temporary file
+before an atomic no-overwrite publication; concurrent creators all use the
+complete winning file. An existing short or invalid secret is reported and
+left unchanged.
 
 ## API
 
@@ -106,8 +117,8 @@ stored AI API keys and forge PATs (see [Integrations](#integrations) and
 | ------ | ----------------- | ---- | --------------------------------------------------------------------- |
 | GET    | `/api/health`     | none | `200` JSON `{"ok":true}`                                              |
 | GET    | `/api/config`     | none | `200` JSON `{"azure_client_id","azure_tenant_id"}` (see Entra below)  |
-| GET    | `/api/board`      | yes  | `200` `text/markdown` (your board), `404` if none saved yet; both carry an `ETag` |
-| PUT    | `/api/board`      | yes  | Body is `text/markdown`; replaces your board; `204`, or `409` on a stale `If-Match`. Send `Accept: application/json` to get `200` with `{"task_ids":[…]}` instead (see below) |
+| GET    | `/api/board`      | yes  | `200` `text/markdown`, or JSON `{"board","task_ids"}` when requested; `404` if none exists; every result carries an `ETag` |
+| PUT    | `/api/board`      | yes  | `text/markdown` or JSON `{"board","task_ids"}`; `204`, negotiated `200` `{"task_ids":[…]}`, or `409` for a stale `If-Match` |
 | GET    | `/api/labels`     | yes  | `200` JSON array of your labels, most recently used first             |
 | GET    | `/api/similar`    | yes  | Similar-card advisory for query text; cheap stubs only                |
 | POST   | `/api/tombstones` | yes  | Record why a card was killed: `{"task_id","reason"}`; responds `204`  |
@@ -130,34 +141,95 @@ Auth applies to every `/api/*` route except `/api/health` and `/api/config`
 authenticate); static files are always open.
 
 **Content types are enforced.** A request with a body must declare it:
-`text/markdown` on `PUT /api/board`, `application/json` everywhere else.
-Anything else — including the `text/plain` and form types a cross-site request
-can send without a preflight — is rejected with `415`. This is deliberate: it
-is what stops another site's page from driving your API.
+`PUT /api/board` accepts `text/markdown` or `application/json`;
+`application/json` is required everywhere else. Anything else — including the
+`text/plain` and form types a cross-site request can send without a preflight —
+is rejected with `415`. This is deliberate: it is what stops another site's
+page from driving your API.
 
-**Concurrent writes.** `GET /api/board` returns an `ETag` — a token for the
-board's exact contents, so a write by any surface (SPA, CLI, MCP) changes it.
-Send it back as `If-Match` on your `PUT` and a board that changed underneath
-you answers `409` (with the current `ETag`) instead of overwriting the other
-writer; refetch, merge, and retry. The `404` from a board that does not exist
-yet carries the token too, so a first write is conditional as well. A `PUT`
-with no `If-Match` is unconditional and last-writer-wins, which will silently
-delete tasks another surface created — always send the token.
+**Concurrent writes.** `GET /api/board` returns an opaque, revision-backed
+`ETag`. Every task or board-title mutation and every full-board replacement
+advances that per-user database revision, including writes by the SPA, CLI,
+MCP, or an older binary. Revisions are monotonic, not necessarily contiguous;
+clients must treat the token as opaque.
 
-**Write acknowledgement (opt-in).** By default `PUT /api/board` answers `204`
-with no body, and that is what the CLI and any wildcard `Accept: */*` client
-receives. A client that sends a literal `Accept: application/json` instead gets
-`200` and `{"task_ids":[…]}`: the server's canonical task id for every card, in
-the order the markdown serialized them. `Accept: application/json;q=0` opts back
-out. Both responses carry the same `ETag`, and a stale `If-Match` still answers
-`409` either way, so concurrency behaves identically on both paths.
+Send the token back as `If-Match` on `PUT`. If the board changed underneath
+the client, the server answers `409` with the current `ETag`; refetch, merge,
+and retry. The `404` for a board that does not exist carries a token too, so a
+first write can be conditional. `If-Match: *` succeeds only when a board
+exists at the replacement transaction; concurrent edits do not invalidate the
+wildcard, while a concurrent deletion returns `409`. A pre-upgrade content-hash
+token receives the same `409` and current revision token, after which a normal
+refetch/retry works.
 
-The board format has no place to carry an id, and the server mints one for any
-card it has not seen before. So a client that needs to talk about a specific
-card right after creating it — kb's own SPA does this when recording why a card
-was killed — otherwise has to guess which row it just wrote, and guesses wrongly
-when two cards share a title. This is the one way to learn those ids without
-putting them on the wire.
+Normal SPA sync refetches after a conflict, merges by canonical id when the
+mapping is available, and retries once; a second conflict is surfaced. Remote
+CLI mutations and degraded legacy-browser recovery surface `409` without an
+unsafe unconditional retry.
+
+Only the compatibility path — a `text/markdown` `PUT` with no `If-Match` — is
+unconditional and last-writer-wins. It can silently delete intervening work.
+The JSON path uses a database compare-and-swap even during request handling,
+but clients must still send the `ETag` from their own read to protect the whole
+read/edit/write interval.
+
+**Canonical-id JSON negotiation.** A literal `Accept: application/json` on
+`GET /api/board` returns:
+
+```json
+{"board":"# kb\n...","task_ids":["4bc95ae6-3bf7-4bc2-a578-37af48a5ca85"]}
+```
+
+The ids follow the card order in the serialized markdown. To preserve those
+ids across renames, moves, and duplicate titles, send
+`Content-Type: application/json` on `PUT` with exactly the same two fields:
+
+```json
+{"board":"# kb\n...","task_ids":["4bc95ae6-3bf7-4bc2-a578-37af48a5ca85",null]}
+```
+
+Each string names an existing task owned by the caller; `null` asks the server
+to create a new task. The array length and order must match the cards in the
+markdown. Malformed, duplicate, unknown, or foreign ids receive the same
+non-disclosing `400`. A stale `If-Match` receives `409` before id validation.
+Any request containing `null` must also carry a lowercase UUID
+`Idempotency-Key`. The server stores a user-scoped receipt in the replacement
+transaction. Replaying the same key and exact JSON bytes returns the original
+IDs and `ETag` with `Idempotency-Replayed: true`; reusing the key with a
+different body returns the same non-disclosing `400`. A new key on markdown or
+on JSON without a `null` ID is rejected with that same `400`; the key cannot be
+used as an unrelated request label.
+
+By default a successful `PUT` answers `204` with no body. A literal
+`Accept: application/json` instead negotiates `200` and
+`{"task_ids":[…]}` for the committed cards; wildcard `Accept: */*` and
+`Accept: application/json;q=0` retain `204`. Both success forms carry the
+committed revision `ETag`.
+
+The browser persists an envelope-v3 `pending_board_write` containing the exact
+JSON bytes, original `If-Match`, operation UUID, sent board, and canonical map
+before a create-bearing request. Startup replays that request before normal
+sync, then refetches and three-way merges current local and remote state against
+the acknowledged commit. Edits committed while either replay request is in
+flight are reread and merged before persistence. The pending record is cleared
+only in the same localStorage write that persists its matching acknowledgement.
+An uncertain transport or invalid success response blocks every later save
+until that exact pending request is replayed, reconciled, and durably
+acknowledged. If acknowledgement persistence fails, the stored envelope retains
+the original pending operation; ordinary saves cannot erase it.
+
+**Durable metadata delivery.** The SPA journals cancellation reasons and
+import provenance in a credential-free, per-account local outbox. A reason is
+stored before the board can acknowledge its canonical task id. Queued work is
+retried after startup, an `online` event, and successful board synchronization.
+Network and `5xx` failures remain queued; `401` requests reauthentication;
+permanent `4xx` failures remain visibly blocked. Cross-tab drains use Web
+Locks. If that exclusion is unavailable, work stays queued and the UI reports
+that delivery is blocked rather than risking an unordered write. Restoring or
+purging a cancelled card removes its pending reason before changing the board.
+A delivery failure does not roll back the cancellation or imported cards;
+failure to remove stale intent blocks a restore or purge before the board
+changes.
 
 ## The board format
 
@@ -728,6 +800,21 @@ The server picks its mode from environment variables at startup:
    another address only if you understand that every reachable client can
    read and write every board and settings entry.
 
+In Azure mode, the browser also persists MSAL's immutable `homeAccountId` and
+uses it to select exactly one cached account and namespace local board, dirty,
+canonical-id, and outbox state. It never falls back to MSAL's active account or
+the first cached account. An older email-only identity is upgraded only when
+exactly one cached account has that username; zero or multiple matches require
+sign-in again before a token is requested.
+
+Legacy email-keyed browser state is claimed under a Web Lock. The claim owner
+is recorded before any copy, so the same `homeAccountId` can resume an
+interrupted copy; a different account fails closed. If Web Locks are
+unavailable, kb leaves the legacy data untouched and requires reauthentication
+or manual import instead of guessing ownership. This browser key is separate
+from the server's board identity, which remains the verified token's immutable
+`oid` claim.
+
 ### How identity maps to boards
 
 Every identity owns exactly one board: all rows in the database are keyed by
@@ -947,8 +1034,8 @@ URL makes the server request GitLab or GitHub API data from the selected
 source. A configured PAT travels only in the provider's authentication
 header. The forge client rejects private-address resolution by default; a
 hostname must be explicitly allowlisted with `KB_FORGE_ALLOW_PRIVATE` to
-reach an enterprise LAN. Redirects may not change host, and the client
-ignores `HTTP_PROXY`/`HTTPS_PROXY`.
+reach an enterprise LAN. Redirects follow the policy below. The client ignores
+`HTTP_PROXY`/`HTTPS_PROXY`.
 
 **4. Your own configured LLM endpoint — server-side only.** If you set an AI
 base URL in Settings, the *server* posts chat completions to it; the browser
@@ -960,15 +1047,22 @@ bounded source titles, references, labels, bodies, and comments needed for the
 transformation — nothing else about your board. The endpoint is SSRF-guarded:
 the resolved IP may not be loopback, private, link-local or unspecified
 (unless `KB_AI_ALLOW_PRIVATE=1` opts in for a local model server such as
-Ollama), redirects may not change host, the round trip is capped at 60s, and a
-base URL containing a username or password is rejected outright so a
+Ollama), redirects follow the policy below, the round trip is capped at 60s,
+and a base URL containing a username or password is rejected outright so a
 credential cannot be stored in the clear. This client ignores
 `HTTP_PROXY`/`HTTPS_PROXY`; it dials the endpoint directly.
 
 **5. CLI remote mode.** `kb` with `KB_SERVER` set talks to that server and only
-that server — every request carries your token and replays the whole board, so
-redirects to another host are refused. Without `KB_SERVER` the CLI is purely
-local, and `kb mcp` never opens a socket at all: it speaks stdio.
+that server — every request carries your token and replays the whole board.
+Without `KB_SERVER` the CLI is purely local, and `kb mcp` never opens a socket
+at all: it speaks stdio.
+
+The forge, AI, and remote CLI clients apply the same redirect boundary. The
+normalized hostname and explicit port must remain identical to the original
+request; changing a subdomain or adding, removing, or changing a port is
+rejected. HTTP may upgrade to HTTPS on that same host and port, but HTTPS may
+not downgrade to HTTP. URL credentials and non-HTTP(S) targets are also
+rejected.
 
 Unlike the AI and forge clients, the JWKS and CLI remote clients use Go's
 default transport and therefore honour `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`.
@@ -1015,10 +1109,18 @@ directory and nowhere else.
 
 **Sync semantics**
 
-The markdown wire API is still last-write-wins on the whole board:
-`PUT /api/board` replaces your board, and if the same identity PUTs from two
-places, the later write wins. Since the store is task-level SQLite, the
-replace matches incoming cards to existing ones by title, so ids and creation
-timestamps survive round-trips. Task-level writers — the CLI in local mode
-and MCP tools — update individual rows and are safe to run concurrently with
-the SPA. Keep a copy via markdown export if you want history.
+Every writer participates in the per-user database revision. Local CLI and MCP
+task-level mutations advance it; first-party SPA and remote CLI full-board
+writes send the revision-backed `ETag` they read. If a task-level writer wins
+the race, the stale full-board write receives `409` instead of deleting that
+change. Safety comes from this shared revision invariant, not from task-level
+storage by itself.
+
+The legacy markdown replacement still matches incoming cards to existing rows
+by status/title and then title so ids and creation timestamps can survive a
+round-trip. A markdown `PUT` without `If-Match` remains unconditional for
+compatibility and can overwrite concurrent work. Prefer conditional clients
+and the canonical-id JSON envelope; keep a markdown export if you want history.
+Dirty legacy bootstrap also rereads edits made during its GET or PUT, persists
+the reconciled board and canonical map, and conditionally pushes only the newer
+work. A failed local persistence keeps that board dirty.

@@ -21,7 +21,25 @@ export default defineConfig({
   plugins: [react(), keepDistPlaceholder()],
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.{ts,tsx}'],
+    setupFiles: ['src/test/setup.ts'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json-summary', 'lcov'],
+      reportsDirectory: 'coverage',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: [
+        'src/**/*.test.{ts,tsx}',
+        'src/**/*.d.ts',
+        'src/test/**',
+      ],
+      thresholds: {
+        branches: 95,
+        functions: 95,
+        lines: 95,
+        statements: 95,
+      },
+    },
     // Vitest replaces CSS modules with an empty string by default, which also
     // empties a `?raw` import of the stylesheet — and would make the egress
     // guard's scan of src/styles.css silently vacuous.

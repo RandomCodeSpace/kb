@@ -446,14 +446,26 @@ func TestTombstoneEndpoint(t *testing.T) {
 		}
 	})
 
-	t.Run("accepts an unknown task id as a harmless best-effort request", func(t *testing.T) {
-		h, _ := newTestServer(t, Config{})
-		// A stale client may still post an unknown ID. Accept it so annotation
-		// failure cannot block the kill; the scoped orphan sweep drops it. The
-		// SPA waits for the board PUT's canonical-ID acknowledgement instead.
-		w := doReq(t, h, "POST", "/api/tombstones", tombstoneBody(t, "not-saved-yet", "A race-safe reason"), nil)
-		if w.Code != http.StatusNoContent {
-			t.Fatalf("POST unknown tombstone = %d %q, want 204", w.Code, w.Body)
+	t.Run("rejects unknown and active task ids without disclosing state", func(t *testing.T) {
+		h, st := newTestServer(t, Config{})
+		active, err := st.AddTask("default", board.Task{Title: "Still active", Status: board.StatusTodo})
+		if err != nil {
+			t.Fatalf("AddTask active: %v", err)
+		}
+		otherUser, err := st.AddTask("alice", board.Task{Title: "Private cancellation", Status: board.StatusCancelled})
+		if err != nil {
+			t.Fatalf("AddTask other user: %v", err)
+		}
+		var bodies []string
+		for _, id := range []string{"not-saved-yet", active.ID, otherUser.ID} {
+			w := doReq(t, h, "POST", "/api/tombstones", tombstoneBody(t, id, "A stale reason"), nil)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("POST tombstone %q = %d %q, want 409", id, w.Code, w.Body)
+			}
+			bodies = append(bodies, w.Body.String())
+		}
+		if bodies[0] != bodies[1] || bodies[0] != bodies[2] {
+			t.Fatalf("missing, active, and cross-user errors differ: %q", bodies)
 		}
 	})
 

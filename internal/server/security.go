@@ -148,8 +148,7 @@ func contentTypeAllowed(r *http.Request) bool {
 		return false
 	}
 	if r.URL.Path == "/api/board" {
-		// The board wire format is markdown, not JSON.
-		return mt == "text/markdown"
+		return mt == "text/markdown" || mt == "application/json"
 	}
 	return mt == "application/json"
 }

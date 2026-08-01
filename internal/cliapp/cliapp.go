@@ -173,7 +173,7 @@ type backend interface {
 	// refused unless force, judged on the post-patch task, and rolled back
 	// whole so a refusal persists neither the move nor the patch.
 	update(ref string, p store.TaskPatch, moveTo *board.Status, force bool) (item, error)
-	move(ref string, to board.Status) (item, error)
+	move(ref string, to board.Status, force bool) (item, error)
 	remove(ref string) (item, error)
 	close() error
 }
@@ -632,20 +632,7 @@ func (a *app) cmdRestore(args []string) int {
 // than shipping something the user may not have meant to.
 func (a *app) moveTo(user, data, ref string, to board.Status, force bool) int {
 	return a.withBackend(user, data, func(be backend) error {
-		if to == board.StatusDone && !force {
-			items, err := be.list("")
-			if err != nil {
-				return err
-			}
-			// A failed lookup is not reported here: be.move below resolves ref
-			// itself and phrases id errors in the backend's own terms.
-			if it, ferr := findItem(items, ref); ferr == nil {
-				if err := doneGuardErr(it.ref, it.task); err != nil {
-					return err
-				}
-			}
-		}
-		it, err := be.move(ref, to)
+		it, err := be.move(ref, to, force)
 		if err != nil {
 			return err
 		}

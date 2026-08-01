@@ -29,8 +29,9 @@ func defaultDataDir() (string, error) {
 
 // localBackend runs commands directly against the SQLite store.
 type localBackend struct {
-	st   *store.Store
-	user string
+	st              *store.Store
+	user            string
+	beforeDoneGuard func()
 }
 
 // openLocal opens (creating if needed) <dataDir>/kb.db with the shared
@@ -101,8 +102,17 @@ func (l *localBackend) update(ref string, p store.TaskPatch, moveTo *board.Statu
 	return item{ref: out.ID, task: out}, nil
 }
 
-func (l *localBackend) move(ref string, to board.Status) (item, error) {
-	t, err := l.st.MoveTask(l.user, ref, to)
+func (l *localBackend) move(ref string, to board.Status, force bool) (item, error) {
+	var guard func(board.Task) error
+	if to == board.StatusDone && !force {
+		guard = func(t board.Task) error {
+			if l.beforeDoneGuard != nil {
+				l.beforeDoneGuard()
+			}
+			return doneGuardErr(t.ID, t)
+		}
+	}
+	t, err := l.st.UpdateAndMoveTask(l.user, ref, store.TaskPatch{}, &to, guard)
 	if err != nil {
 		return item{}, friendlyIDErr(err, ref)
 	}

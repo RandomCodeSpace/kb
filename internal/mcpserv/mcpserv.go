@@ -20,6 +20,10 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
+var serveMCP = func(srv *mcp.Server) error {
+	return srv.Run(context.Background(), &mcp.StdioTransport{})
+}
+
 // Run opens (creating if needed) the store at <dataDir>/kb.db, imports any
 // legacy markdown boards in dataDir, and serves the MCP tools for user over
 // stdio until the client disconnects.
@@ -43,7 +47,7 @@ func Run(dataDir, user string) error {
 	if _, err := st.ImportMarkdownDir(dataDir); err != nil {
 		return err
 	}
-	err = newServer(st, user).Run(context.Background(), &mcp.StdioTransport{})
+	err = serveMCP(newServer(st, user))
 	if isClientDisconnect(err) {
 		return nil
 	}
@@ -79,8 +83,9 @@ func isClientDisconnect(err error) bool {
 
 // kb holds the per-process tool state: one store, one fixed user.
 type kb struct {
-	st   *store.Store
-	user string
+	st              *store.Store
+	user            string
+	beforeDoneGuard func()
 }
 
 // newServer builds the MCP server with all seven board tools registered.
@@ -423,16 +428,19 @@ func (k *kb) moveTask(_ context.Context, _ *mcp.CallToolRequest, in moveTaskInpu
 	if err != nil {
 		return nil, taskJSON{}, err
 	}
+	var guard func(board.Task) error
 	if st == board.StatusDone && !in.Force {
-		t, err := k.findTask(in.ID)
-		if err != nil {
-			return nil, taskJSON{}, err
-		}
-		if warn := doneWarning(t); warn != "" {
-			return nil, taskJSON{}, fmt.Errorf("refusing to finish %q: %s — resolve it first, or call move_task again with force: true", t.Title, warn)
+		guard = func(t board.Task) error {
+			if k.beforeDoneGuard != nil {
+				k.beforeDoneGuard()
+			}
+			if warn := doneWarning(t); warn != "" {
+				return fmt.Errorf("refusing to finish %q: %s — resolve it first, or call move_task again with force: true", t.Title, warn)
+			}
+			return nil
 		}
 	}
-	t, err := k.st.MoveTask(k.user, in.ID, st)
+	t, err := k.st.UpdateAndMoveTask(k.user, in.ID, store.TaskPatch{}, &st, guard)
 	if err != nil {
 		return nil, taskJSON{}, k.idError(err, in.ID)
 	}

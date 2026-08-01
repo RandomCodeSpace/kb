@@ -197,6 +197,23 @@ func TestAllowedHostsOptIn(t *testing.T) {
 	}
 }
 
+func TestBoardContentTypesAllowOnlyMarkdownAndJSON(t *testing.T) {
+	for _, contentType := range []string{"text/markdown", "text/markdown; charset=utf-8", "application/json"} {
+		r := httptest.NewRequest(http.MethodPut, "/api/board", strings.NewReader("body"))
+		r.Header.Set("Content-Type", contentType)
+		if !contentTypeAllowed(r) {
+			t.Errorf("Content-Type %q rejected", contentType)
+		}
+	}
+	for _, contentType := range []string{"text/plain", "application/x-www-form-urlencoded", "application/json-seq"} {
+		r := httptest.NewRequest(http.MethodPut, "/api/board", strings.NewReader("body"))
+		r.Header.Set("Content-Type", contentType)
+		if contentTypeAllowed(r) {
+			t.Errorf("Content-Type %q accepted", contentType)
+		}
+	}
+}
+
 // Token and Entra requests carry a bearer credential a cross-origin page
 // cannot mint, so Host is not pinned there by default: a deployment on a real
 // hostname must not 403 on every request until an undocumented env var is

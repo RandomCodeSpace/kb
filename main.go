@@ -7,6 +7,7 @@ package main
 
 import (
 	"embed"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -112,18 +113,44 @@ func newHTTPServer(addr string, h http.Handler) *http.Server {
 	}
 }
 
-func main() {
-	if dispatch() {
-		return
+var listenHTTPServer = func(srv *http.Server) error {
+	return srv.ListenAndServe()
+}
+
+var (
+	loadOrCreateSecret = store.LoadOrCreateSecret
+	openDataStore      = store.Open
+	importMarkdownDir  = func(st *store.Store, dir string) (int, error) { return st.ImportMarkdownDir(dir) }
+	subDistFS          = fs.Sub
+	runMainServer      = runWebServer
+	fatalLog           = log.Fatal
+)
+
+type webFlagError struct{ err error }
+
+func (e *webFlagError) Error() string { return e.err.Error() }
+func (e *webFlagError) Unwrap() error { return e.err }
+
+// runWebServer performs one web-server startup and returns startup/runtime
+// failures to main. Keeping process termination at the outermost boundary
+// makes every wiring branch testable without forking a subprocess.
+func runWebServer(args []string) error {
+	return runWebServerWithFlagOutput(args, os.Stderr)
+}
+
+func runWebServerWithFlagOutput(args []string, output io.Writer) error {
+	flags := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	flags.SetOutput(output)
+	port := flags.String("port", envOr("KB_PORT", "8080"), "listen port (env KB_PORT)")
+	dataDir := flags.String("data", defaultDataDir(), "board storage directory (env KB_DATA)")
+	logPath := flags.String("log", envOr("KB_LOG_FILE", ""), "write logs to this file instead of stderr (env KB_LOG_FILE)")
+	if err := flags.Parse(args); err != nil {
+		return &webFlagError{err: err}
 	}
-	port := flag.String("port", envOr("KB_PORT", "8080"), "listen port (env KB_PORT)")
-	dataDir := flag.String("data", defaultDataDir(), "board storage directory (env KB_DATA)")
-	logPath := flag.String("log", envOr("KB_LOG_FILE", ""), "write logs to this file instead of stderr (env KB_LOG_FILE)")
-	flag.Parse()
 
 	logCloser, err := configureLogging(*logPath)
 	if err != nil {
-		log.Fatalf("configure log file %q: %s", logSafe(*logPath), logSafe(err.Error()))
+		return fmt.Errorf("configure log file %q: %s", logSafe(*logPath), logSafe(err.Error()))
 	}
 	defer logCloser.Close()
 
@@ -134,31 +161,31 @@ func main() {
 		AllowedHosts: os.Getenv("KB_ALLOWED_HOSTS"),
 	}
 	if (cfg.TenantID != "") != (cfg.ClientID != "") {
-		log.Fatal("KB_AZURE_TENANT_ID and KB_AZURE_CLIENT_ID must be set together")
+		return fmt.Errorf("KB_AZURE_TENANT_ID and KB_AZURE_CLIENT_ID must be set together")
 	}
 	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
-		log.Fatalf("create data dir: %v", err)
+		return fmt.Errorf("create data dir: %w", err)
 	}
-	secret, err := store.LoadOrCreateSecret(*dataDir)
+	secret, err := loadOrCreateSecret(*dataDir)
 	if err != nil {
-		log.Fatalf("load secret: %v", err)
+		return fmt.Errorf("load secret: %w", err)
 	}
 	if err := checkSecret(secret, *dataDir); err != nil {
-		log.Fatal(err)
+		return err
 	}
-	st, err := store.Open(filepath.Join(*dataDir, "kb.db"), secret)
+	st, err := openDataStore(filepath.Join(*dataDir, "kb.db"), secret)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %w", err)
 	}
 	defer st.Close()
-	imported, err := st.ImportMarkdownDir(*dataDir)
+	imported, err := importMarkdownDir(st, *dataDir)
 	if err != nil {
-		log.Fatalf("import markdown boards: %v", err)
+		return fmt.Errorf("import markdown boards: %w", err)
 	}
 	log.Printf("imported %d markdown board(s)", imported)
-	static, err := fs.Sub(distFS, "dist")
+	static, err := subDistFS(distFS, "dist")
 	if err != nil {
-		log.Fatalf("embedded dist: %v", err)
+		return fmt.Errorf("embedded dist: %w", err)
 	}
 
 	mode := "open"
@@ -180,7 +207,22 @@ func main() {
 	if mode == "open" && cfg.AllowedHosts == "" && host != "127.0.0.1" && host != "localhost" {
 		log.Printf("warning: open mode accepts only loopback Host headers; set KB_ALLOWED_HOSTS to serve the API on another hostname")
 	}
-	if err := newHTTPServer(addr, server.New(cfg, static, st)).ListenAndServe(); err != nil {
-		log.Fatal(err)
+	return listenHTTPServer(newHTTPServer(addr, server.New(cfg, static, st)))
+}
+
+func main() {
+	if dispatch() {
+		return
+	}
+	if err := runMainServer(os.Args[1:]); err != nil {
+		var flagErr *webFlagError
+		if errors.As(err, &flagErr) {
+			if errors.Is(flagErr, flag.ErrHelp) {
+				return
+			}
+			exitProcess(2)
+			return
+		}
+		fatalLog(err)
 	}
 }

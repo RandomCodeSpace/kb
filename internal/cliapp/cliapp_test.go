@@ -7,11 +7,60 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/store"
 )
+
+func TestLocalDoneGuardReevaluatesAfterConcurrentUpdate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kb.db")
+	a, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	task, err := a.AddTask("u", board.Task{Title: "Race"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	var once sync.Once
+	backend := &localBackend{st: a, user: "u", beforeDoneGuard: func() {
+		once.Do(func() {
+			close(entered)
+			<-resume
+		})
+	}}
+	result := make(chan error, 1)
+	go func() {
+		_, err := backend.move(task.ID, board.StatusDone, false)
+		result <- err
+	}()
+	<-entered
+	blocked := true
+	if _, err := b.UpdateTask("u", task.ID, store.TaskPatch{Blocked: &blocked}); err != nil {
+		t.Fatal(err)
+	}
+	close(resume)
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("guarded move err=%v, want blocked refusal", err)
+	}
+	stored, err := a.ListTasks("u", "")
+	if err != nil || len(stored) != 1 || stored[0].Status != board.StatusTodo || !stored[0].Blocked {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+}
 
 // runCmd invokes Run capturing both streams.
 func runCmd(t *testing.T, args ...string) (stdout, stderr string, code int) {
@@ -546,9 +595,13 @@ type wireServer struct {
 	mu       sync.Mutex
 	doc      string
 	has      bool
+	revision int
 	lastAuth string
 	lastUser string
+	lastETag string
 }
+
+func (s *wireServer) etag() string { return fmt.Sprintf(`"r%d"`, s.revision) }
 
 func (s *wireServer) handler() http.Handler {
 	mux := http.NewServeMux()
@@ -559,6 +612,7 @@ func (s *wireServer) handler() http.Handler {
 		s.lastUser = r.Header.Get("X-KB-User")
 		switch r.Method {
 		case http.MethodGet:
+			w.Header().Set("ETag", s.etag())
 			if !s.has {
 				http.Error(w, "no board saved", http.StatusNotFound)
 				return
@@ -566,8 +620,16 @@ func (s *wireServer) handler() http.Handler {
 			w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 			_, _ = io.WriteString(w, s.doc)
 		case http.MethodPut:
+			s.lastETag = r.Header.Get("If-Match")
+			if s.lastETag != s.etag() {
+				w.Header().Set("ETag", s.etag())
+				http.Error(w, "board changed since it was read", http.StatusConflict)
+				return
+			}
 			b, _ := io.ReadAll(r.Body)
 			s.doc, s.has = string(b), true
+			s.revision++
+			w.Header().Set("ETag", s.etag())
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -608,6 +670,11 @@ func TestRemoteLifecycle(t *testing.T) {
 	if user != "alice" { // CLI lowercases to match server identity sanitization
 		t.Errorf("X-KB-User = %q, want %q", user, "alice")
 	}
+	ws.mu.Lock()
+	if ws.lastETag != `"r0"` {
+		t.Errorf("first mutating PUT If-Match = %q, want 404 token %q", ws.lastETag, `"r0"`)
+	}
+	ws.mu.Unlock()
 
 	if out, errS, code = runCmd(t, "add", "Beta", "--status", "doing", "--tag", "b"); code != 0 || out != "added i2 Beta\n" {
 		t.Fatalf("remote add Beta: code %d output %q stderr %s", code, out, errS)
@@ -826,6 +893,79 @@ func TestRemoteDoneWarning(t *testing.T) {
 	}
 	if doc, _, _ := ws.snapshot(); !strings.Contains(doc, "## Done\n\n- [x] Half done\n") {
 		t.Errorf("done --force did not ship the task:\n%q", doc)
+	}
+}
+
+func TestRemoteMutationConflictsWithoutRetryingOrBypassingDoneGuard(t *testing.T) {
+	const initial = "# B\n\n## To Do\n\n- [ ] Race\n"
+	var mu sync.Mutex
+	doc := initial
+	revision := 1
+	gets, puts := 0, 0
+	var putIfMatch string
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		etag := fmt.Sprintf(`"r%d"`, revision)
+		switch r.Method {
+		case http.MethodGet:
+			gets++
+			w.Header().Set("ETag", etag)
+			_, _ = io.WriteString(w, doc)
+		case http.MethodPut:
+			puts++
+			putIfMatch = r.Header.Get("If-Match")
+			// Deterministically model another writer adding an open checklist
+			// item after the CLI read but before its conditional write.
+			if puts == 1 {
+				doc = "# B\n\n## To Do\n\n- [ ] Race\n  - [ ] newly blocked work\n"
+				revision++
+				etag = fmt.Sprintf(`"r%d"`, revision)
+			}
+			if putIfMatch != etag {
+				w.Header().Set("ETag", etag)
+				http.Error(w, "board changed since it was read", http.StatusConflict)
+				return
+			}
+			t.Fatal("stale remote PUT unexpectedly matched")
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	t.Setenv("KB_SERVER", srv.URL)
+	t.Setenv("KB_SERVER_TOKEN", "")
+
+	_, errS, code := runCmd(t, "done", "i1")
+	if code == 0 || !strings.Contains(errS, "409 Conflict") {
+		t.Fatalf("remote done = code %d stderr %q, want surfaced conflict", code, errS)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gets != 1 || puts != 1 || putIfMatch != `"r1"` {
+		t.Fatalf("requests = GET %d PUT %d If-Match %q, want one bound snapshot and %q", gets, puts, putIfMatch, `"r1"`)
+	}
+	if strings.Contains(doc, "## Done") || !strings.Contains(doc, "newly blocked work") {
+		t.Fatalf("remote board after race = %q, want intervening guarded task intact", doc)
+	}
+}
+
+func TestRemoteMutationFailsClosedWithoutETag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, "# B\n\n## To Do\n\n- [ ] One\n")
+			return
+		}
+		t.Fatal("remote client attempted an unconditional PUT")
+	}))
+	defer srv.Close()
+	t.Setenv("KB_SERVER", srv.URL)
+	t.Setenv("KB_SERVER_TOKEN", "")
+
+	_, errS, code := runCmd(t, "done", "i1", "--force")
+	if code == 0 || !strings.Contains(errS, "no ETag") {
+		t.Fatalf("missing ETag = code %d stderr %q", code, errS)
 	}
 }
 

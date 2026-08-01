@@ -2,13 +2,20 @@ import type {
   AccountInfo,
   PublicClientApplication,
 } from '@azure/msal-browser';
-import { migrateLegacyKeys } from './store';
+import {
+  legacyNamespaceStorageKey,
+  migrateLegacyKeys,
+  namespaceStorageKey,
+  namespaceStorageSuffix,
+} from './store';
 
 export type Identity = {
   kind: 'azure' | 'manual';
   id: string;
   name?: string;
   serverToken?: string;
+  /** Immutable MSAL account key. Required for new Azure identities. */
+  homeAccountId?: string;
 };
 
 const IDENTITY_KEY = 'kb.identity.v1';
@@ -16,6 +23,8 @@ const TOKEN_KEY = 'kb.serverToken.v1';
 const MIGRATED_KEY = 'kb.migrated.identity.v1';
 const SCOPES = ['openid', 'profile', 'email'];
 const CONFIG_TIMEOUT_MS = 1500;
+const AZURE_CLAIM_KEY = 'kb.azure-namespace-claim.v1';
+const AZURE_CLAIM_LOCK = 'kb:azure-namespace-claim:';
 
 let migrated = false;
 
@@ -42,8 +51,8 @@ function ensureMigrated(): void {
  * open an MSAL popup, browsers block popups outside a user gesture.
  */
 export class ReauthRequiredError extends Error {
-  constructor() {
-    super('session expired — sign in again');
+  constructor(message = 'session expired — sign in again') {
+    super(message);
     this.name = 'ReauthRequiredError';
   }
 }
@@ -59,11 +68,23 @@ export function loadIdentity(): Identity | null {
     if (o.kind !== 'azure' && o.kind !== 'manual') return null;
     if (typeof o.id !== 'string' || o.id.trim() === '') return null;
     if (o.name !== undefined && typeof o.name !== 'string') return null;
+    if (
+      o.homeAccountId !== undefined &&
+      (typeof o.homeAccountId !== 'string' || o.homeAccountId.trim() === '')
+    ) return null;
     // The shared server token is session-scoped on purpose: it authorizes
     // every user's board, so it never persists in localStorage. A legacy
     // persisted `serverToken` field is deliberately ignored.
     const serverToken = sessionStorage.getItem(TOKEN_KEY) ?? undefined;
-    return { kind: o.kind, id: o.id, name: o.name, serverToken };
+    return {
+      kind: o.kind,
+      id: o.id,
+      name: o.name,
+      ...(o.kind === 'azure' && typeof o.homeAccountId === 'string'
+        ? { homeAccountId: o.homeAccountId }
+        : {}),
+      serverToken,
+    };
   } catch {
     return null;
   }
@@ -131,6 +152,129 @@ export function sanitizeUser(id: string): string {
     .replace(/[^a-z0-9._@-]/g, '-')
     .replace(/^\.+/, '');
   return cleaned === '' ? 'default' : cleaned;
+}
+
+/** Local state is keyed by immutable Azure account identity, never email. */
+export function identityNamespace(identity: Identity): string {
+  if (identity.kind === 'azure') {
+    if (!identity.homeAccountId?.trim()) throw new ReauthRequiredError();
+    // localStorage keys accept URI escapes; unlike sanitization, this is
+    // injective and cannot collapse two distinct immutable account IDs.
+    return `azure.${encodeURIComponent(identity.homeAccountId)}`;
+  }
+  return sanitizeUser(identity.id);
+}
+
+const NAMESPACED_BASES = [
+  'kb.board.v1',
+  'kb.streak.v1',
+  'kb.dirty.v1',
+  'kb.migrated.v1',
+] as const;
+const OUTBOX_PREFIX = 'kb.outbox.v1';
+
+function outboxLogicalKey(raw: string | null): string | null {
+  if (raw === null) return null;
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (value.kind === 'tombstone' && typeof value.clientTaskId === 'string') {
+      return `tombstone:${value.clientTaskId}`;
+    }
+    if (
+      value.kind === 'import' &&
+      typeof value.item === 'object' && value.item !== null &&
+      typeof (value.item as Record<string, unknown>).external_key === 'string'
+    ) {
+      return `import:${(value.item as Record<string, unknown>).external_key as string}`;
+    }
+  } catch {
+    // Invalid records cannot prove ownership of an ambiguous legacy key.
+  }
+  return null;
+}
+
+function namespaceKey(key: string, from: string, to: string): string | null {
+  for (const base of NAMESPACED_BASES) {
+    if (
+      key === namespaceStorageKey(base, from) ||
+      key === legacyNamespaceStorageKey(base, from)
+    ) return namespaceStorageKey(base, to);
+  }
+
+  const framedSuffix = namespaceStorageSuffix(OUTBOX_PREFIX, from, key);
+  if (framedSuffix !== null && framedSuffix !== '') {
+    return namespaceStorageKey(OUTBOX_PREFIX, to, framedSuffix);
+  }
+  const logical = outboxLogicalKey(localStorage.getItem(key));
+  if (!logical) return null;
+  const suffix = encodeURIComponent(logical);
+  return key === legacyNamespaceStorageKey(OUTBOX_PREFIX, from, suffix)
+    ? namespaceStorageKey(OUTBOX_PREFIX, to, suffix)
+    : null;
+}
+
+function legacyNamespaceKeys(ns: string): string[] {
+  const keys: string[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (key && namespaceKey(key, ns, ns) !== null) keys.push(key);
+    }
+  } catch {
+    throw new ReauthRequiredError(
+      'local account data could not be inspected — sign in again and import it manually',
+    );
+  }
+  return keys;
+}
+
+/**
+ * Non-destructively claims the old email namespace for one immutable account.
+ * The marker is durable before the first copy, so a same-owner retry resumes.
+ */
+export async function claimLegacyAzureNamespace(
+  email: string,
+  homeAccountId: string,
+): Promise<void> {
+  if (!homeAccountId.trim()) throw new ReauthRequiredError();
+  const legacyNS = sanitizeUser(email);
+  const accountNS = identityNamespace({
+    kind: 'azure',
+    id: email,
+    homeAccountId,
+  });
+  if (legacyNS === accountNS) return;
+  const legacyKeys = legacyNamespaceKeys(legacyNS);
+  if (legacyKeys.length === 0) return;
+
+  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+  if (!locks?.request) {
+    throw new ReauthRequiredError(
+      'legacy board data needs a browser storage lock — sign in again and import it manually',
+    );
+  }
+
+  await locks.request(namespaceStorageKey(AZURE_CLAIM_LOCK, legacyNS), async () => {
+    const markerKey = namespaceStorageKey(AZURE_CLAIM_KEY, legacyNS);
+    const legacyMarkerKey = legacyNamespaceStorageKey(AZURE_CLAIM_KEY, legacyNS);
+    const framedOwner = localStorage.getItem(markerKey);
+    const legacyOwner = localStorage.getItem(legacyMarkerKey);
+    const owner = framedOwner ?? legacyOwner;
+    if (owner !== null && owner !== homeAccountId) {
+      throw new ReauthRequiredError(
+        'legacy board data belongs to another Microsoft account — sign in again or import it manually',
+      );
+    }
+    if (framedOwner === null) localStorage.setItem(markerKey, owner ?? homeAccountId);
+
+    // Reread after claiming: another attempt may have completed some keys.
+    for (const key of legacyNamespaceKeys(legacyNS)) {
+      const target = namespaceKey(key, legacyNS, accountNS);
+      if (!target || localStorage.getItem(target) !== null) continue;
+      const value = localStorage.getItem(key);
+      if (value !== null) localStorage.setItem(target, value);
+    }
+  });
 }
 
 export interface AzureConfig {
@@ -265,20 +409,47 @@ export async function signInAzure(): Promise<Identity> {
     (typeof claims.preferred_username === 'string' &&
       claims.preferred_username) ||
     account.username;
-  return { kind: 'azure', id: email, name: account.name };
+  await claimLegacyAzureNamespace(email, account.homeAccountId);
+  return {
+    kind: 'azure',
+    id: email,
+    name: account.name,
+    homeAccountId: account.homeAccountId,
+  };
 }
 
-function pickAccount(
+async function resolveAzureAccount(
   app: PublicClientApplication,
-  id: string,
-): AccountInfo | null {
+  identity: Identity,
+): Promise<{ identity: Identity; account: AccountInfo }> {
   const accounts = app.getAllAccounts();
-  return (
-    accounts.find((a) => a.username.toLowerCase() === id.toLowerCase()) ??
-    app.getActiveAccount() ??
-    accounts[0] ??
-    null
+  if (identity.homeAccountId) {
+    const matches = accounts.filter(
+      (account) => account.homeAccountId === identity.homeAccountId,
+    );
+    if (matches.length !== 1) throw new ReauthRequiredError();
+    return { identity, account: matches[0]! };
+  }
+
+  const matches = accounts.filter(
+    (account) => account.username.toLowerCase() === identity.id.toLowerCase(),
   );
+  if (matches.length !== 1 || !matches[0]!.homeAccountId) {
+    throw new ReauthRequiredError();
+  }
+  const account = matches[0]!;
+  await claimLegacyAzureNamespace(identity.id, account.homeAccountId);
+  const upgraded = { ...identity, homeAccountId: account.homeAccountId };
+  saveIdentity(upgraded);
+  return { identity: upgraded, account };
+}
+
+/** Resolve and persist an old email-only Azure identity before local state mounts. */
+export async function resolveAzureIdentity(identity: Identity): Promise<Identity> {
+  if (identity.kind !== 'azure' || identity.homeAccountId) return identity;
+  if (!(await azureConfig())) throw new ReauthRequiredError();
+  const app = await getPca();
+  return (await resolveAzureAccount(app, identity)).identity;
 }
 
 export async function getApiToken(
@@ -289,10 +460,7 @@ export async function getApiToken(
   if (!(await azureConfig())) return null;
   const msal = await loadMsal();
   const app = await getPca();
-  const account = pickAccount(app, identity.id);
-  // No cached MSAL account: the session is gone even though our identity
-  // persisted. Don't send unauthenticated requests — demand re-auth.
-  if (!account) throw new ReauthRequiredError();
+  const { account } = await resolveAzureAccount(app, identity);
   const request = {
     scopes: SCOPES,
     account,

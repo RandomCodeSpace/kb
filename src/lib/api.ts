@@ -147,6 +147,13 @@ export interface RecordImportLinksRequest {
   items: ImportLinkItem[];
 }
 
+export class MetadataRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'MetadataRequestError';
+  }
+}
+
 export type DriftState = 'baseline_recorded' | 'unchanged' | 'drifted';
 
 export interface DriftResult {
@@ -460,22 +467,23 @@ export async function importPreview(
 }
 
 /**
- * Journal selected source links after cards are added. This is deliberately
- * best-effort: losing provenance must not roll back work already on the board.
+ * Journal selected source links after cards are added. The caller owns durable
+ * retry; rejecting failures is what prevents the outbox from dropping work.
  */
 export async function recordImportLinks(
   identity: Identity,
   req: RecordImportLinksRequest,
 ): Promise<void> {
-  try {
-    const res = await authedFetch(identity, '/api/import/links', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req),
-    });
-    if (!res.ok) return;
-  } catch {
-    // The cards are already committed; the provenance journal is secondary.
+  const res = await authedFetch(identity, '/api/import/links', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    throw new MetadataRequestError(
+      await errText(res, `import provenance write failed: ${res.status}`),
+      res.status,
+    );
   }
 }
 
@@ -662,23 +670,24 @@ export function killReasonRequest(
 }
 
 /**
- * Journal why a card was killed. This is deliberately best-effort: the board
- * move has already happened, so losing its annotation must never undo it.
+ * Journal why a card was killed. The caller owns durable retry; the primary
+ * board move is never rolled back when this rejects.
  */
 export async function recordTombstone(
   identity: Identity,
   taskId: string,
   reason: string,
 ): Promise<void> {
-  try {
-    const res = await authedFetch(identity, '/api/tombstones', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task_id: taskId, reason }),
-    });
-    if (!res.ok) return;
-  } catch {
-    // The card is already cancelled; the graveyard annotation is secondary.
+  const res = await authedFetch(identity, '/api/tombstones', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task_id: taskId, reason }),
+  });
+  if (!res.ok) {
+    throw new MetadataRequestError(
+      await errText(res, `tombstone write failed: ${res.status}`),
+      res.status,
+    );
   }
 }
 

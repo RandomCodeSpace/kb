@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -132,34 +133,124 @@ ALTER TABLE import_links ADD COLUMN baseline_hash TEXT NOT NULL DEFAULT '';
 ALTER TABLE import_links ADD COLUMN baseline_excerpt TEXT NOT NULL DEFAULT '';
 ALTER TABLE import_links ADD COLUMN baseline_at TEXT NOT NULL DEFAULT '';
 `,
+	// v5: one database-backed board revision per user and one database-backed
+	// label sequence. Triggers observe every task and legacy board_title meta
+	// write, including writes from older binaries that know nothing about the
+	// revision table.
+	`
+CREATE TABLE board_revisions (
+  user     TEXT PRIMARY KEY,
+  revision INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO board_revisions(user, revision)
+SELECT user, 1 FROM (
+  SELECT DISTINCT user FROM tasks
+  UNION
+  SELECT DISTINCT substr(k, length('board_title:') + 1)
+    FROM meta WHERE k LIKE 'board_title:%'
+);
+CREATE TABLE label_sequence (
+  id    INTEGER PRIMARY KEY CHECK (id = 1),
+  value INTEGER NOT NULL
+);
+INSERT INTO label_sequence(id, value)
+VALUES (1, COALESCE((SELECT MAX(last_used) FROM labels), 0));
+
+CREATE TRIGGER board_revision_tasks_ai AFTER INSERT ON tasks BEGIN
+  INSERT INTO board_revisions(user, revision) VALUES (new.user, 1)
+  ON CONFLICT(user) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER board_revision_tasks_ad AFTER DELETE ON tasks BEGIN
+  INSERT INTO board_revisions(user, revision) VALUES (old.user, 1)
+  ON CONFLICT(user) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER board_revision_tasks_au AFTER UPDATE ON tasks BEGIN
+  INSERT INTO board_revisions(user, revision) VALUES (old.user, 1)
+  ON CONFLICT(user) DO UPDATE SET revision = revision + 1;
+  INSERT INTO board_revisions(user, revision)
+    SELECT new.user, 1 WHERE new.user <> old.user
+  ON CONFLICT(user) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER board_revision_title_ai AFTER INSERT ON meta
+WHEN new.k LIKE 'board_title:%' BEGIN
+  INSERT INTO board_revisions(user, revision)
+  VALUES (substr(new.k, length('board_title:') + 1), 1)
+  ON CONFLICT(user) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER board_revision_title_ad AFTER DELETE ON meta
+WHEN old.k LIKE 'board_title:%' BEGIN
+  INSERT INTO board_revisions(user, revision)
+  VALUES (substr(old.k, length('board_title:') + 1), 1)
+  ON CONFLICT(user) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER board_revision_title_au AFTER UPDATE ON meta
+WHEN old.k LIKE 'board_title:%' OR new.k LIKE 'board_title:%' BEGIN
+  INSERT INTO board_revisions(user, revision)
+    SELECT substr(old.k, length('board_title:') + 1), 1
+    WHERE old.k LIKE 'board_title:%'
+  ON CONFLICT(user) DO UPDATE SET revision = revision + 1;
+  INSERT INTO board_revisions(user, revision)
+    SELECT substr(new.k, length('board_title:') + 1), 1
+    WHERE new.k LIKE 'board_title:%' AND new.k <> old.k
+  ON CONFLICT(user) DO UPDATE SET revision = revision + 1;
+END;
+`,
+	// v6: durable, user-scoped idempotency receipts for JSON board writes that
+	// create canonical task IDs. Receipts intentionally have no expiry: a
+	// browser can be offline or suspended indefinitely after the commit but
+	// before it persists the acknowledgement.
+	`
+CREATE TABLE board_write_receipts (
+  user         TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  task_ids     TEXT NOT NULL,
+  revision     INTEGER NOT NULL,
+  PRIMARY KEY (user, operation_id)
+);
+`,
 }
 
 // migrate creates the meta table and applies any pending schema versions.
 func migrate(db *sql.DB) error {
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)`); err != nil {
+	// BEGIN IMMEDIATE takes SQLite's write reservation before reading the
+	// version. Two processes opening the same old database therefore cannot
+	// both decide that the same migration is pending.
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("store: migration connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("store: begin migration: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)`); err != nil {
 		return fmt.Errorf("store: create meta: %w", err)
 	}
 	var version int
-	err := db.QueryRow(`SELECT CAST(v AS INTEGER) FROM meta WHERE k = 'schema_version'`).Scan(&version)
+	err = conn.QueryRowContext(ctx, `SELECT CAST(v AS INTEGER) FROM meta WHERE k = 'schema_version'`).Scan(&version)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("store: read schema version: %w", err)
 	}
 	for v := version; v < len(migrations); v++ {
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("store: begin migration: %w", err)
-		}
-		if _, err := tx.Exec(migrations[v]); err != nil {
-			_ = tx.Rollback()
+		if _, err := conn.ExecContext(ctx, migrations[v]); err != nil {
 			return fmt.Errorf("store: migrate to v%d: %w", v+1, err)
 		}
-		if _, err := tx.Exec(`INSERT INTO meta (k, v) VALUES ('schema_version', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`, v+1); err != nil {
-			_ = tx.Rollback()
+		if _, err := conn.ExecContext(ctx, `INSERT INTO meta (k, v) VALUES ('schema_version', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`, v+1); err != nil {
 			return fmt.Errorf("store: record schema version %d: %w", v+1, err)
 		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("store: commit migration v%d: %w", v+1, err)
-		}
 	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("store: commit migrations: %w", err)
+	}
+	committed = true
 	return nil
 }

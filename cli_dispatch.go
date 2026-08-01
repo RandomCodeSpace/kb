@@ -14,7 +14,7 @@ import (
 func init() {
 	for _, cmd := range []string{"add", "list", "update", "move", "done", "cancel", "restore", "rm", "help"} {
 		subcommands[cmd] = func(args []string) error {
-			os.Exit(cliapp.Run(append([]string{cmd}, args...), os.Stdout, os.Stderr))
+			exitProcess(cliapp.Run(append([]string{cmd}, args...), os.Stdout, os.Stderr))
 			return nil // unreachable
 		}
 	}

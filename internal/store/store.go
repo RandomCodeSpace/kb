@@ -12,22 +12,59 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
-	_ "modernc.org/sqlite" // database/sql driver "sqlite"
+	sqliteDriver "modernc.org/sqlite" // database/sql driver "sqlite"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 )
 
 // Sentinel errors for task ID prefix resolution.
 var (
-	ErrNotFound  = errors.New("task not found")
-	ErrAmbiguous = errors.New("ambiguous task id prefix")
+	ErrNotFound       = errors.New("task not found")
+	ErrAmbiguous      = errors.New("ambiguous task id prefix")
+	ErrInvalidTaskIDs = errors.New("invalid canonical task ids")
 )
+
+// RevisionConflictError reports a failed board compare-and-swap. Revisions
+// are opaque monotonic tokens; callers should return CurrentRevision and make
+// the client refetch rather than infer a missing count.
+type RevisionConflictError struct {
+	CurrentRevision int64
+}
+
+func (e *RevisionConflictError) Error() string {
+	return fmt.Sprintf("store: board revision conflict (current %d)", e.CurrentRevision)
+}
+
+// BoardSnapshot is one transactionally consistent view of a user's board.
+type BoardSnapshot struct {
+	Board    board.Board
+	Exists   bool
+	TaskIDs  []string
+	Revision int64
+}
+
+// BoardWriteReceipt is the durable acknowledgement of one creation-bearing
+// JSON board replacement. RequestHash is a digest of the exact accepted body.
+type BoardWriteReceipt struct {
+	RequestHash string
+	TaskIDs     []string
+	Revision    int64
+}
+
+// BoardWriteCondition is the store-owned form of an HTTP If-Match predicate.
+// When Present is false the replacement is unconditional. Star requires an
+// existing board; otherwise any revision in Revisions satisfies the predicate.
+type BoardWriteCondition struct {
+	Present   bool
+	Star      bool
+	Revisions []int64
+}
 
 // dueRe matches the wire-format due date (calendar validity checked
 // separately).
@@ -118,9 +155,9 @@ type TaskPatch struct {
 // pool is capped at one connection so writers serialize instead of hitting
 // SQLITE_BUSY.
 type Store struct {
-	db       *sql.DB
-	aead     cipher.AEAD
-	labelSeq atomic.Int64 // monotonically increasing labels.last_used values
+	db         *sql.DB
+	aead       cipher.AEAD
+	randomRead func([]byte) (int, error)
 }
 
 // dbtx is the subset of *sql.DB and *sql.Tx the query helpers need.
@@ -138,10 +175,29 @@ func Open(path string, secret []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Create the database with private permissions before SQLite opens it. An
+	// existing database is tightened too; SQLite derives WAL/SHM permissions
+	// from the main database file.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("store: create %s: %w", path, err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("store: chmod %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("store: close %s: %w", path, err)
+	}
 	// temp_store(2) keeps sorters and temp tables in memory. The default lets
 	// SQLite spill them to $TMPDIR, which would put board text outside the
 	// data directory — kb promises that nothing does.
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=temp_store(2)")
+	// journal_mode is deliberately not a DSN initialization pragma. On a fresh
+	// database it takes a write lock, so two sql.Open calls could otherwise fail
+	// while acquiring their first connection, before migrate's BEGIN IMMEDIATE
+	// has a chance to serialize them. busy_timeout is connection-local and is
+	// installed first; WAL is enabled after the migration lock is released.
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=temp_store(2)")
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
@@ -150,18 +206,46 @@ func Open(path string, secret []byte) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := enableWAL(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := repairAIBaseURLSuffixes(db); err != nil {
 		db.Close()
 		return nil, err
 	}
-	s := &Store{db: db, aead: aead}
-	var maxSeq sql.NullInt64
-	if err := db.QueryRow(`SELECT MAX(last_used) FROM labels`).Scan(&maxSeq); err != nil {
+	if err := chmodSQLiteFiles(path); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("store: init label sequence: %w", err)
+		return nil, err
 	}
-	s.labelSeq.Store(maxSeq.Int64)
+	s := &Store{db: db, aead: aead}
 	return s, nil
+}
+
+func enableWAL(db *sql.DB) error {
+	for attempt := 0; ; attempt++ {
+		var mode string
+		err := db.QueryRow(`PRAGMA journal_mode=WAL`).Scan(&mode)
+		if err == nil {
+			if !strings.EqualFold(mode, "wal") {
+				return fmt.Errorf("store: enable WAL: journal mode is %q", mode)
+			}
+			return nil
+		}
+		if !isSQLiteBusy(err) || attempt >= 9 {
+			return fmt.Errorf("store: enable WAL: %w", err)
+		}
+		time.Sleep(time.Duration(attempt+1) * time.Millisecond)
+	}
+}
+
+func chmodSQLiteFiles(path string) error {
+	for _, name := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(name, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("store: chmod %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // repairAIBaseURLSuffixes removes pre-validation URL query and fragment
@@ -193,18 +277,38 @@ func (s *Store) Close() error { return s.db.Close() }
 // withTx runs fn inside a transaction, committing on nil and rolling back on
 // error.
 func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("store: begin: %w", err)
+	for attempt := 0; ; attempt++ {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("store: begin: %w", err)
+		}
+		if err := fn(tx); err != nil {
+			_ = tx.Rollback()
+			if isSQLiteBusy(err) && attempt < 9 {
+				time.Sleep(time.Duration(attempt+1) * time.Millisecond)
+				continue
+			}
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			_ = tx.Rollback()
+			if isSQLiteBusy(err) && attempt < 9 {
+				time.Sleep(time.Duration(attempt+1) * time.Millisecond)
+				continue
+			}
+			return fmt.Errorf("store: commit: %w", err)
+		}
+		return nil
 	}
-	if err := fn(tx); err != nil {
-		_ = tx.Rollback()
-		return err
+}
+
+func isSQLiteBusy(err error) bool {
+	var sqliteErr *sqliteDriver.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: commit: %w", err)
-	}
-	return nil
+	code := sqliteErr.Code() & 0xff
+	return code == 5 || code == 6 // SQLITE_BUSY or SQLITE_LOCKED
 }
 
 // taskCols is the canonical select list matched by scanTask.
@@ -219,41 +323,85 @@ func titleKey(user string) string { return "board_title:" + user }
 // Board returns the user's board with tasks ordered by status column order
 // then position. The title defaults to "Board" when none has been stored.
 func (s *Store) Board(user string) (board.Board, error) {
-	b := board.Board{Title: "Board"}
-	var title string
-	switch err := s.db.QueryRow(`SELECT v FROM meta WHERE k = ?`, titleKey(user)).Scan(&title); {
-	case err == nil:
-		b.Title = title
-	case !errors.Is(err, sql.ErrNoRows):
-		return board.Board{}, fmt.Errorf("store: board title: %w", err)
-	}
-	tasks, err := queryTasks(s.db, `SELECT `+taskCols+` FROM tasks WHERE user = ? ORDER BY `+statusRank+`, position`, user)
+	snapshot, err := s.ReadBoardSnapshot(user)
 	if err != nil {
 		return board.Board{}, err
 	}
+	return snapshot.Board, nil
+}
+
+// ReadBoardSnapshot returns the board, existence flag, canonical task IDs,
+// and revision from one SQLite read transaction. A missing board has the
+// default in-memory title, no IDs, Exists false, and revision zero unless a
+// prior board was deleted (in which case its revision remains monotonic).
+func (s *Store) ReadBoardSnapshot(user string) (BoardSnapshot, error) {
+	return s.readBoardSnapshot(user, nil)
+}
+
+func (s *Store) readBoardSnapshot(user string, afterTasks func()) (BoardSnapshot, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return BoardSnapshot{}, fmt.Errorf("store: begin board snapshot: %w", err)
+	}
+	defer tx.Rollback()
+
+	b := board.Board{Title: "Board"}
+	exists := false
+	var title string
+	switch err := tx.QueryRow(`SELECT v FROM meta WHERE k = ?`, titleKey(user)).Scan(&title); {
+	case err == nil:
+		b.Title = title
+		exists = true
+	case !errors.Is(err, sql.ErrNoRows):
+		return BoardSnapshot{}, fmt.Errorf("store: board title: %w", err)
+	}
+	tasks, err := queryTasks(tx, `SELECT `+taskCols+` FROM tasks WHERE user = ? ORDER BY `+statusRank+`, position`, user)
+	if err != nil {
+		return BoardSnapshot{}, err
+	}
 	b.Tasks = tasks
-	return b, nil
+	if len(tasks) > 0 {
+		exists = true
+	}
+	if afterTasks != nil {
+		afterTasks()
+	}
+	ids := make([]string, len(tasks))
+	for i := range tasks {
+		ids[i] = tasks[i].ID
+	}
+	var revision int64
+	switch err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); {
+	case err == nil:
+	case errors.Is(err, sql.ErrNoRows):
+		revision = 0
+	default:
+		return BoardSnapshot{}, fmt.Errorf("store: board revision: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return BoardSnapshot{}, fmt.Errorf("store: commit board snapshot: %w", err)
+	}
+	return BoardSnapshot{Board: b, Exists: exists, TaskIDs: ids, Revision: revision}, nil
 }
 
 // HasBoard reports whether the user has any tasks or has ever had a board
 // saved (a stored title, written by ReplaceBoard and the markdown import).
 func (s *Store) HasBoard(user string) (bool, error) {
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE user = ?`, user).Scan(&n); err != nil {
-		return false, fmt.Errorf("store: has board: %w", err)
-	}
-	if n > 0 {
-		return true, nil
-	}
-	var v string
-	switch err := s.db.QueryRow(`SELECT v FROM meta WHERE k = ?`, titleKey(user)).Scan(&v); {
-	case err == nil:
-		return true, nil
-	case errors.Is(err, sql.ErrNoRows):
-		return false, nil
-	default:
-		return false, fmt.Errorf("store: has board: %w", err)
-	}
+	snapshot, err := s.ReadBoardSnapshot(user)
+	return snapshot.Exists, err
+}
+
+// DeleteBoard removes the board while preserving its monotonic revision.
+func (s *Store) DeleteBoard(user string) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`DELETE FROM tasks WHERE user = ?`, user); err != nil {
+			return fmt.Errorf("store: delete board tasks: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM meta WHERE k = ?`, titleKey(user)); err != nil {
+			return fmt.Errorf("store: delete board title: %w", err)
+		}
+		return nil
+	})
 }
 
 // ReplaceBoard replaces the user's whole board and discards the committed
@@ -271,14 +419,233 @@ func (s *Store) ReplaceBoard(user string, b board.Board) error {
 // deleted. Positions are recomputed from slice order per status and labels are
 // upserted from all task tags.
 func (s *Store) ReplaceBoardWithTaskIDs(user string, b board.Board) ([]string, error) {
-	now := time.Now().UTC()
-	taskIDs := make([]string, len(b.Tasks))
+	taskIDs, _, err := s.ReplaceBoardWithTaskIDsAndRevision(user, b)
+	return taskIDs, err
+}
+
+// ReplaceBoardWithTaskIDsAndRevision performs the same unconditional legacy
+// replacement and returns the revision committed by that exact transaction.
+// Callers must not pair the returned IDs with a revision read afterwards:
+// another process may replace the board between those two observations.
+func (s *Store) ReplaceBoardWithTaskIDsAndRevision(user string, b board.Board) ([]string, int64, error) {
+	var taskIDs []string
+	var revision int64
 	err := s.withTx(func(tx *sql.Tx) error {
-		byStatusTitle, byTitle, err := loadExisting(tx, user)
+		var err error
+		taskIDs, err = s.replaceBoardTx(tx, user, b, nil)
 		if err != nil {
 			return err
 		}
-		matches := make([]*exTask, len(b.Tasks))
+		if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); err != nil {
+			return fmt.Errorf("store: committed board revision: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return taskIDs, revision, nil
+}
+
+// ReplaceBoardIfRevision atomically replaces a board only when expected is
+// still current. canonicalIDs is in b.Tasks order: nil entries create tasks;
+// non-nil entries must be full UUIDs owned by user. A nil slice selects the
+// legacy title-matching behavior. Revision mismatch is checked before any ID
+// validation and returns *RevisionConflictError.
+func (s *Store) ReplaceBoardIfRevision(user string, b board.Board, canonicalIDs []*string, expected int64) ([]string, int64, error) {
+	return s.replaceBoardConditional(user, b, canonicalIDs, BoardWriteCondition{Present: true, Revisions: []int64{expected}})
+}
+
+// ReplaceBoardIfExists atomically evaluates the wildcard existence predicate
+// and performs the replacement in the same transaction. A concurrent edit is
+// allowed; a concurrent deletion returns a revision conflict.
+func (s *Store) ReplaceBoardIfExists(user string, b board.Board, canonicalIDs []*string) ([]string, int64, error) {
+	return s.replaceBoardConditional(user, b, canonicalIDs, BoardWriteCondition{Present: true, Star: true})
+}
+
+// ReplaceBoardIfRevisionWithReceipt is ReplaceBoardIfRevision plus a durable
+// idempotency receipt inserted in the replacement transaction. An exact
+// operation/hash replay returns the original acknowledgement without writing.
+func (s *Store) ReplaceBoardIfRevisionWithReceipt(user string, b board.Board, canonicalIDs []*string, expected int64, operationID, requestHash string) ([]string, int64, bool, error) {
+	return s.ReplaceBoardConditionalWithReceipt(user, b, canonicalIDs, BoardWriteCondition{Present: true, Revisions: []int64{expected}}, operationID, requestHash, true)
+}
+
+// ReplaceBoardIfExistsWithReceipt is the wildcard counterpart of
+// ReplaceBoardIfRevisionWithReceipt.
+func (s *Store) ReplaceBoardIfExistsWithReceipt(user string, b board.Board, canonicalIDs []*string, operationID, requestHash string) ([]string, int64, bool, error) {
+	return s.ReplaceBoardConditionalWithReceipt(user, b, canonicalIDs, BoardWriteCondition{Present: true, Star: true}, operationID, requestHash, true)
+}
+
+// ReplaceBoardConditionalWithReceipt evaluates receipt replay, request-hash
+// identity, If-Match, replacement, and receipt insertion in one transaction.
+// allowNewReceipt must only be true for a parsed creation-bearing JSON write.
+func (s *Store) ReplaceBoardConditionalWithReceipt(user string, b board.Board, canonicalIDs []*string, condition BoardWriteCondition, operationID, requestHash string, allowNewReceipt bool) ([]string, int64, bool, error) {
+	return s.replaceBoardConditionalReceipt(user, b, canonicalIDs, condition, operationID, requestHash, allowNewReceipt)
+}
+
+// CheckBoardWriteCondition preserves conditional-response precedence for an
+// invalid payload. It never authorizes a later write; valid writes re-evaluate
+// the same predicate inside their replacement transaction.
+func (s *Store) CheckBoardWriteCondition(user string, condition BoardWriteCondition) (int64, error) {
+	var revision int64
+	err := s.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`INSERT INTO board_revisions(user, revision) VALUES (?, 0) ON CONFLICT(user) DO NOTHING`, user); err != nil {
+			return fmt.Errorf("store: initialize board revision: %w", err)
+		}
+		if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); err != nil {
+			return fmt.Errorf("store: current board revision: %w", err)
+		}
+		if condition.Star {
+			var exists int
+			if err := tx.QueryRow(`SELECT CASE WHEN EXISTS(SELECT 1 FROM tasks WHERE user = ?) OR EXISTS(SELECT 1 FROM meta WHERE k = ?) THEN 1 ELSE 0 END`, user, titleKey(user)).Scan(&exists); err != nil {
+				return fmt.Errorf("store: inspect board existence: %w", err)
+			}
+			if exists == 0 {
+				return &RevisionConflictError{CurrentRevision: revision}
+			}
+			return nil
+		}
+		if condition.Present {
+			for _, allowed := range condition.Revisions {
+				if revision == allowed {
+					return nil
+				}
+			}
+			return &RevisionConflictError{CurrentRevision: revision}
+		}
+		return nil
+	})
+	return revision, err
+}
+
+// BoardWriteReceipt returns a user's receipt. Operation IDs are scoped by the
+// user column, so another identity cannot observe or replay it.
+func (s *Store) BoardWriteReceipt(user, operationID string) (BoardWriteReceipt, bool, error) {
+	var receipt BoardWriteReceipt
+	var encoded string
+	err := s.db.QueryRow(`SELECT request_hash, task_ids, revision FROM board_write_receipts WHERE user = ? AND operation_id = ?`, user, operationID).
+		Scan(&receipt.RequestHash, &encoded, &receipt.Revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BoardWriteReceipt{}, false, nil
+	}
+	if err != nil {
+		return BoardWriteReceipt{}, false, fmt.Errorf("store: read board write receipt: %w", err)
+	}
+	if err := json.Unmarshal([]byte(encoded), &receipt.TaskIDs); err != nil {
+		return BoardWriteReceipt{}, false, fmt.Errorf("store: decode board write receipt: %w", err)
+	}
+	return receipt, true, nil
+}
+
+func (s *Store) replaceBoardConditional(user string, b board.Board, canonicalIDs []*string, condition BoardWriteCondition) ([]string, int64, error) {
+	ids, revision, _, err := s.replaceBoardConditionalReceipt(user, b, canonicalIDs, condition, "", "", false)
+	return ids, revision, err
+}
+
+func (s *Store) replaceBoardConditionalReceipt(user string, b board.Board, canonicalIDs []*string, condition BoardWriteCondition, operationID, requestHash string, allowNewReceipt bool) ([]string, int64, bool, error) {
+	var taskIDs []string
+	var revision int64
+	var replayed bool
+	err := s.withTx(func(tx *sql.Tx) error {
+		if operationID != "" {
+			var storedHash, encoded string
+			err := tx.QueryRow(`SELECT request_hash, task_ids, revision FROM board_write_receipts WHERE user = ? AND operation_id = ?`, user, operationID).
+				Scan(&storedHash, &encoded, &revision)
+			switch {
+			case err == nil:
+				if storedHash != requestHash || json.Unmarshal([]byte(encoded), &taskIDs) != nil {
+					return ErrInvalidTaskIDs
+				}
+				replayed = true
+				return nil
+			case !errors.Is(err, sql.ErrNoRows):
+				return fmt.Errorf("store: read board write receipt: %w", err)
+			}
+		}
+		if _, err := tx.Exec(`INSERT INTO board_revisions(user, revision) VALUES (?, 0) ON CONFLICT(user) DO NOTHING`, user); err != nil {
+			return fmt.Errorf("store: initialize board revision: %w", err)
+		}
+		if condition.Star {
+			var exists int
+			if err := tx.QueryRow(`SELECT CASE WHEN EXISTS(SELECT 1 FROM tasks WHERE user = ?) OR EXISTS(SELECT 1 FROM meta WHERE k = ?) THEN 1 ELSE 0 END`, user, titleKey(user)).Scan(&exists); err != nil {
+				return fmt.Errorf("store: inspect board existence: %w", err)
+			}
+			if exists == 0 {
+				if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); err != nil {
+					return fmt.Errorf("store: current board revision: %w", err)
+				}
+				return &RevisionConflictError{CurrentRevision: revision}
+			}
+		} else if condition.Present {
+			var current int64
+			if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&current); err != nil {
+				return fmt.Errorf("store: current board revision: %w", err)
+			}
+			matched := false
+			for _, allowed := range condition.Revisions {
+				if current == allowed {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				revision = current
+				return &RevisionConflictError{CurrentRevision: revision}
+			}
+			result, err := tx.Exec(`UPDATE board_revisions SET revision = revision + 1 WHERE user = ? AND revision = ?`, user, current)
+			if err != nil {
+				return fmt.Errorf("store: claim board revision: %w", err)
+			}
+			n, err := result.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("store: inspect board revision claim: %w", err)
+			}
+			if n != 1 {
+				if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); err != nil {
+					return fmt.Errorf("store: current board revision: %w", err)
+				}
+				return &RevisionConflictError{CurrentRevision: revision}
+			}
+		}
+		if operationID != "" && !allowNewReceipt {
+			return ErrInvalidTaskIDs
+		}
+		if allowNewReceipt && operationID == "" {
+			return ErrInvalidTaskIDs
+		}
+		var err error
+		taskIDs, err = s.replaceBoardTx(tx, user, b, canonicalIDs)
+		if err != nil {
+			return err
+		}
+		if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); err != nil {
+			return fmt.Errorf("store: committed board revision: %w", err)
+		}
+		if operationID != "" {
+			encoded, err := json.Marshal(taskIDs)
+			if err != nil {
+				return fmt.Errorf("store: encode board write receipt: %w", err)
+			}
+			if _, err := tx.Exec(`INSERT INTO board_write_receipts(user, operation_id, request_hash, task_ids, revision) VALUES (?, ?, ?, ?, ?)`, user, operationID, requestHash, string(encoded), revision); err != nil {
+				return fmt.Errorf("store: insert board write receipt: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, revision, false, err
+	}
+	return taskIDs, revision, replayed, nil
+}
+
+func (s *Store) replaceBoardTx(tx *sql.Tx, user string, b board.Board, canonicalIDs []*string) ([]string, error) {
+	now := time.Now().UTC()
+	matches := make([]*exTask, len(b.Tasks))
+	if canonicalIDs == nil {
+		byStatusTitle, byTitle, err := loadExisting(tx, user)
+		if err != nil {
+			return nil, err
+		}
 		for i, t := range b.Tasks {
 			for _, e := range byStatusTitle[string(t.Status)+"\x00"+t.Title] {
 				if !e.used {
@@ -298,44 +665,79 @@ func (s *Store) ReplaceBoardWithTaskIDs(user string, b board.Board) ([]string, e
 				}
 			}
 		}
-		if _, err := tx.Exec(`DELETE FROM tasks WHERE user = ?`, user); err != nil {
-			return fmt.Errorf("store: clear board: %w", err)
+	} else {
+		if len(canonicalIDs) != len(b.Tasks) {
+			return nil, ErrInvalidTaskIDs
 		}
-		pos := map[board.Status]int{}
-		for i, t := range b.Tasks {
-			if !t.Status.Valid() {
-				return fmt.Errorf("store: invalid status %q", t.Status)
+		existing, err := loadExistingByID(tx, user)
+		if err != nil {
+			return nil, err
+		}
+		seen := make(map[string]struct{}, len(canonicalIDs))
+		for i, id := range canonicalIDs {
+			if id == nil {
+				continue
 			}
-			if err := validateTaskLines(t); err != nil {
-				return err
+			if _, err := uuid.Parse(*id); err != nil {
+				return nil, ErrInvalidTaskIDs
 			}
-			if t.Prio < 1 || t.Prio > 4 {
-				t.Prio = 3
+			if _, duplicate := seen[*id]; duplicate {
+				return nil, ErrInvalidTaskIDs
 			}
-			t.Position = pos[t.Status]
-			pos[t.Status]++
-			if e := matches[i]; e != nil {
-				t.ID, t.CreatedAt = e.id, e.created
-				if e.status == t.Status {
-					t.MovedAt = e.moved
-				} else {
-					t.MovedAt = now
-				}
+			seen[*id] = struct{}{}
+			e, ok := existing[*id]
+			if !ok {
+				return nil, ErrInvalidTaskIDs
+			}
+			matches[i] = e
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM tasks WHERE user = ?`, user); err != nil {
+		return nil, fmt.Errorf("store: clear board: %w", err)
+	}
+	taskIDs := make([]string, len(b.Tasks))
+	pos := map[board.Status]int{}
+	for i, t := range b.Tasks {
+		if !t.Status.Valid() {
+			return nil, fmt.Errorf("store: invalid status %q", t.Status)
+		}
+		if err := validateTaskLines(t); err != nil {
+			return nil, err
+		}
+		if t.Prio < 1 || t.Prio > 4 {
+			t.Prio = 3
+		}
+		t.Position = pos[t.Status]
+		pos[t.Status]++
+		if e := matches[i]; e != nil {
+			t.ID, t.CreatedAt = e.id, e.created
+			if e.status == t.Status {
+				t.MovedAt = e.moved
 			} else {
-				t.ID, t.CreatedAt, t.MovedAt = uuid.NewString(), now, now
+				t.MovedAt = now
 			}
-			if err := insertTask(tx, user, t); err != nil {
-				return err
-			}
-			taskIDs[i] = t.ID
-			if err := s.upsertLabels(tx, user, t.Tags); err != nil {
-				return err
-			}
+		} else {
+			t.ID, t.CreatedAt, t.MovedAt = uuid.NewString(), now, now
 		}
-		return setMeta(tx, titleKey(user), b.Title)
-	})
-	if err != nil {
+		if err := insertTask(tx, user, t); err != nil {
+			return nil, err
+		}
+		taskIDs[i] = t.ID
+		if err := s.upsertLabels(tx, user, t.Tags); err != nil {
+			return nil, err
+		}
+	}
+	if err := setMeta(tx, titleKey(user), b.Title); err != nil {
 		return nil, err
+	}
+	// Full-board replacement is also the restore/purge transaction. Keep a
+	// reason only when its canonical task still exists and is still cancelled.
+	if _, err := tx.Exec(`
+		DELETE FROM tombstones
+		WHERE scope = ? AND task_id NOT IN (
+			SELECT id FROM tasks WHERE user = ? AND status = 'cancelled'
+		)`, user, user); err != nil {
+		return nil, fmt.Errorf("store: reconcile board tombstones: %w", err)
 	}
 	return taskIDs, nil
 }
@@ -384,6 +786,34 @@ func loadExisting(tx *sql.Tx, user string) (byStatusTitle, byTitle map[string][]
 		return nil, nil, fmt.Errorf("store: load existing tasks: %w", err)
 	}
 	return byStatusTitle, byTitle, nil
+}
+
+func loadExistingByID(tx *sql.Tx, user string) (map[string]*exTask, error) {
+	rows, err := tx.Query(`SELECT id, status, created_at, moved_at FROM tasks WHERE user = ?`, user)
+	if err != nil {
+		return nil, fmt.Errorf("store: load canonical tasks: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]*exTask{}
+	for rows.Next() {
+		var e exTask
+		var status, created, moved string
+		if err := rows.Scan(&e.id, &status, &created, &moved); err != nil {
+			return nil, fmt.Errorf("store: scan canonical task: %w", err)
+		}
+		e.status = board.Status(status)
+		if e.created, err = time.Parse(time.RFC3339Nano, created); err != nil {
+			return nil, fmt.Errorf("store: task %s created_at: %w", e.id, err)
+		}
+		if e.moved, err = time.Parse(time.RFC3339Nano, moved); err != nil {
+			return nil, fmt.Errorf("store: task %s moved_at: %w", e.id, err)
+		}
+		out[e.id] = &e
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: load canonical tasks: %w", err)
+	}
+	return out, nil
 }
 
 // AddTask inserts t for user, assigning a fresh UUID and timestamps and
@@ -463,6 +893,11 @@ func (s *Store) UpdateAndMoveTask(user, idPrefix string, patch TaskPatch, moveTo
 		if moveTo != nil {
 			if t, err = moveTask(tx, user, t, *moveTo); err != nil {
 				return err
+			}
+			if *moveTo != board.StatusCancelled {
+				if _, err := tx.Exec(`DELETE FROM tombstones WHERE scope = ? AND task_id = ?`, user, t.ID); err != nil {
+					return fmt.Errorf("store: delete restored task tombstone: %w", err)
+				}
 			}
 		}
 		out = t
@@ -620,16 +1055,23 @@ func (s *Store) Labels(user string) ([]string, error) {
 }
 
 // upsertLabels records tags as labels; later tags in the slice count as more
-// recently used. The store-wide sequence keeps MRU ordering strict even
-// within one batch.
+// recently used. Sequence allocation happens in the caller's transaction, so
+// two Store handles cannot reuse or reorder process-local counter values.
 func (s *Store) upsertLabels(q dbtx, user string, tags []string) error {
 	for _, tag := range tags {
 		if tag == "" {
 			continue
 		}
+		if _, err := q.Exec(`UPDATE label_sequence SET value = value + 1 WHERE id = 1`); err != nil {
+			return fmt.Errorf("store: advance label sequence: %w", err)
+		}
+		var sequence int64
+		if err := q.QueryRow(`SELECT value FROM label_sequence WHERE id = 1`).Scan(&sequence); err != nil {
+			return fmt.Errorf("store: read label sequence: %w", err)
+		}
 		if _, err := q.Exec(`INSERT INTO labels (user, label, last_used) VALUES (?, ?, ?)
 			ON CONFLICT(user, label) DO UPDATE SET last_used = excluded.last_used`,
-			user, tag, s.labelSeq.Add(1)); err != nil {
+			user, tag, sequence); err != nil {
 			return fmt.Errorf("store: upsert label %q: %w", tag, err)
 		}
 	}

@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,22 +27,52 @@ type remoteBackend struct {
 	client            *http.Client
 }
 
+type remoteBoardSnapshot struct {
+	board board.Board
+	etag  string
+}
+
 // newRemote builds the client for `KB_SERVER` mode. Every request carries the
 // server token and replays the whole board, so a redirect to another host
-// would hand both to that host; redirects may therefore never change host.
+// would hand both to that host. Redirects therefore cannot change host or
+// downgrade an HTTPS connection to HTTP.
 func newRemote(base, token, user string) backend {
 	return &remoteBackend{base: base, token: token, user: user, client: &http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if req.URL.Host != via[0].URL.Host {
-				return errors.New("refusing cross-host redirect")
-			}
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			return nil
-		},
+		Timeout:       30 * time.Second,
+		CheckRedirect: remoteRedirectPolicy,
 	}}
+}
+
+func remoteRedirectPolicy(req *http.Request, via []*http.Request) error {
+	origin := via[0].URL
+	if origin.User != nil || req.URL.User != nil {
+		return errors.New("refusing redirect with URL credentials")
+	}
+	if !isRemoteHTTPURL(origin) || !isRemoteHTTPURL(req.URL) {
+		return errors.New("refusing redirect to non-HTTP(S) URL")
+	}
+	if normalizeRemoteRedirectHost(req.URL.Hostname()) != normalizeRemoteRedirectHost(origin.Hostname()) || req.URL.Port() != origin.Port() {
+		return errors.New("refusing cross-host redirect")
+	}
+	if strings.EqualFold(origin.Scheme, "https") && strings.EqualFold(req.URL.Scheme, "http") {
+		return errors.New("refusing HTTPS-to-HTTP redirect")
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
+}
+
+func isRemoteHTTPURL(u *url.URL) bool {
+	return strings.EqualFold(u.Scheme, "http") || strings.EqualFold(u.Scheme, "https")
+}
+
+func normalizeRemoteRedirectHost(host string) string {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return host
 }
 
 func (r *remoteBackend) close() error { return nil }
@@ -64,10 +96,11 @@ func (r *remoteBackend) list(status board.Status) ([]item, error) {
 }
 
 func (r *remoteBackend) add(t board.Task) (item, error) {
-	b, err := r.fetchBoard()
+	snapshot, err := r.fetchBoardSnapshot(true)
 	if err != nil {
 		return item{}, err
 	}
+	b := snapshot.board
 	// Mirror the store defaults so both modes behave alike.
 	if t.Status == "" {
 		t.Status = board.StatusTodo
@@ -84,17 +117,18 @@ func (r *remoteBackend) add(t board.Task) (item, error) {
 	}
 	b.Tasks = append(b.Tasks, t)
 	renumber(b.Tasks)
-	if err := r.putBoard(b); err != nil {
+	if err := r.putBoard(b, snapshot.etag); err != nil {
 		return item{}, err
 	}
 	return itemAt(b, len(b.Tasks)-1), nil
 }
 
 func (r *remoteBackend) update(ref string, p store.TaskPatch, moveTo *board.Status, force bool) (item, error) {
-	b, err := r.fetchBoard()
+	snapshot, err := r.fetchBoardSnapshot(true)
 	if err != nil {
 		return item{}, err
 	}
+	b := snapshot.board
 	ti, _, err := resolveRef(b, ref)
 	if err != nil {
 		return item{}, err
@@ -125,25 +159,22 @@ func (r *remoteBackend) update(ref string, p store.TaskPatch, moveTo *board.Stat
 		ti = len(b.Tasks) - 1
 	}
 	renumber(b.Tasks)
-	if err := r.putBoard(b); err != nil {
+	if err := r.putBoard(b, snapshot.etag); err != nil {
 		return item{}, err
 	}
 	return itemAt(b, ti), nil
 }
 
-// move carries force: true because the done guard for move/done/cancel runs a
-// level up in app.moveTo, which has already refused (or been waved through
-// with --force) by the time it calls here. Guarding again would re-refuse the
-// moves the user explicitly forced.
-func (r *remoteBackend) move(ref string, to board.Status) (item, error) {
-	return r.update(ref, store.TaskPatch{}, &to, true)
+func (r *remoteBackend) move(ref string, to board.Status, force bool) (item, error) {
+	return r.update(ref, store.TaskPatch{}, &to, force)
 }
 
 func (r *remoteBackend) remove(ref string) (item, error) {
-	b, err := r.fetchBoard()
+	snapshot, err := r.fetchBoardSnapshot(true)
 	if err != nil {
 		return item{}, err
 	}
+	b := snapshot.board
 	ti, norm, err := resolveRef(b, ref)
 	if err != nil {
 		return item{}, err
@@ -151,7 +182,7 @@ func (r *remoteBackend) remove(ref string) (item, error) {
 	removed := b.Tasks[ti]
 	b.Tasks = append(b.Tasks[:ti], b.Tasks[ti+1:]...)
 	renumber(b.Tasks)
-	if err := r.putBoard(b); err != nil {
+	if err := r.putBoard(b, snapshot.etag); err != nil {
 		return item{}, err
 	}
 	return item{ref: norm, task: removed}, nil
@@ -285,35 +316,46 @@ func (r *remoteBackend) newRequest(method, path string, body io.Reader) (*http.R
 // fetchBoard GETs and parses the wire markdown; a 404 (no board saved yet)
 // is an empty board, not an error.
 func (r *remoteBackend) fetchBoard() (board.Board, error) {
+	snapshot, err := r.fetchBoardSnapshot(false)
+	return snapshot.board, err
+}
+
+func (r *remoteBackend) fetchBoardSnapshot(requireETag bool) (remoteBoardSnapshot, error) {
 	req, err := r.newRequest(http.MethodGet, "/api/board", nil)
 	if err != nil {
-		return board.Board{}, err
+		return remoteBoardSnapshot{}, err
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return board.Board{}, fmt.Errorf("GET %s/api/board: %w", r.base, err)
+		return remoteBoardSnapshot{}, fmt.Errorf("GET %s/api/board: %w", r.base, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		return remoteBoardSnapshot{}, httpError("GET /api/board", resp)
+	}
+	etag := strings.TrimSpace(resp.Header.Get("ETag"))
+	if requireETag && etag == "" {
+		return remoteBoardSnapshot{}, errors.New("GET /api/board: server returned no ETag; refusing an unconditional write")
+	}
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		return board.Board{Title: "Board"}, nil
-	case resp.StatusCode != http.StatusOK:
-		return board.Board{}, httpError("GET /api/board", resp)
+		return remoteBoardSnapshot{board: board.Board{Title: "Board"}, etag: etag}, nil
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxWireBody))
 	if err != nil {
-		return board.Board{}, fmt.Errorf("read board: %w", err)
+		return remoteBoardSnapshot{}, fmt.Errorf("read board: %w", err)
 	}
-	return board.Parse(string(data)), nil
+	return remoteBoardSnapshot{board: board.Parse(string(data)), etag: etag}, nil
 }
 
-// putBoard serializes and PUTs the whole board back.
-func (r *remoteBackend) putBoard(b board.Board) error {
+// putBoard serializes and conditionally PUTs the exact snapshot mutation.
+func (r *remoteBackend) putBoard(b board.Board, etag string) error {
 	req, err := r.newRequest(http.MethodPut, "/api/board", strings.NewReader(board.Serialize(b)))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "text/markdown; charset=utf-8")
+	req.Header.Set("If-Match", etag)
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("PUT %s/api/board: %w", r.base, err)

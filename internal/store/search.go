@@ -31,6 +31,10 @@ type Tombstone struct {
 	KilledAt string
 }
 
+// ErrTombstoneTaskNotCancelled is returned for missing, cross-scope, or active
+// task IDs. Callers must keep those cases indistinguishable.
+var ErrTombstoneTaskNotCancelled = errors.New("tombstone task is not cancelled")
+
 // SimilarityFloor rejects FTS candidates sharing too little title vocabulary.
 const SimilarityFloor = 0.34
 
@@ -217,21 +221,26 @@ func (s *Store) RecordTombstone(scope, taskID, reason string) error {
 	}
 	killedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	return s.withTx(func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`
+		result, err := tx.Exec(`
 	INSERT INTO tombstones (scope, task_id, reason, killed_at)
-	VALUES (?, ?, ?, ?)
+	SELECT ?, ?, ?, ?
+	WHERE EXISTS (
+		SELECT 1 FROM tasks
+		WHERE user = ? AND id = ? AND status = 'cancelled'
+	)
 	ON CONFLICT(scope, task_id) DO UPDATE SET
 		reason = excluded.reason,
 		killed_at = excluded.killed_at`,
-			scope, taskID, reason, killedAt); err != nil {
+			scope, taskID, reason, killedAt, scope, taskID)
+		if err != nil {
 			return fmt.Errorf("store: record tombstone: %w", err)
 		}
-		if _, err := tx.Exec(`
-	DELETE FROM tombstones
-	WHERE scope = ? AND task_id NOT IN (
-		SELECT id FROM tasks WHERE user = ?
-	)`, scope, scope); err != nil {
-			return fmt.Errorf("store: sweep tombstones: %w", err)
+		written, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("store: inspect tombstone write: %w", err)
+		}
+		if written != 1 {
+			return ErrTombstoneTaskNotCancelled
 		}
 		return nil
 	})

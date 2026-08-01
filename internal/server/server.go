@@ -58,9 +58,13 @@ type server struct {
 	pinHost      bool
 	csp          string // SPA Content-Security-Policy, fixed at construction
 
-	// boardLocks serializes the read-compare-write of an If-Match board PUT
-	// so two in-flight PUTs cannot both pass the version check.
-	boardLocks boardLocks
+	// afterUnconditionalBoardReplace is a deterministic test seam for writes
+	// by another process after this server commits but before it responds.
+	afterUnconditionalBoardReplace func()
+
+	// afterConditionalBoardSnapshot is a deterministic test seam for a writer
+	// between the handler's preliminary read and the store-owned predicate.
+	afterConditionalBoardSnapshot func()
 
 	// importDriftLocks serializes first-baseline creation per user so two
 	// simultaneous checks cannot both claim a different comparison anchor.

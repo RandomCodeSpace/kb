@@ -4,6 +4,7 @@ import type { Board, Status, Task } from './lib/model';
 import { parse, serialize } from './lib/markdown';
 import {
   bumpShipped,
+  continueAfterLocalPersistence,
   loadDirty,
   LocalStore,
   setDirty,
@@ -11,16 +12,40 @@ import {
   shippedToday,
   unshipToday,
 } from './lib/store';
+import type {
+  DurableSnapshot,
+  DurableVersion,
+  PendingBoardWrite,
+} from './lib/store';
+import {
+  drainAndReport,
+  enqueueIntentBeforeMutation,
+  MetadataOutbox,
+  reconcileAndDrain,
+  removeIntentBeforeMutation,
+} from './lib/outbox';
+import type { OutboxStatus } from './lib/outbox';
 import type { Identity } from './lib/auth';
 import {
   clearIdentity,
   displayName,
+  identityNamespace,
   loadIdentity,
   ReauthRequiredError,
-  sanitizeUser,
+  resolveAzureIdentity,
   saveIdentity,
 } from './lib/auth';
-import { mergeTaskIDMaps, RemoteStore } from './lib/remote';
+import {
+  commitLiveCandidate,
+  mergeAcknowledgedState,
+  recomputeDeletedCanonicalIDs,
+  reconcileLegacyBootstrap,
+  reconcilePendingBoardWrite,
+  reconcileStartupBoardFetch,
+  RemoteStore,
+  sameBoardSemantics,
+} from './lib/remote';
+import type { LiveBoardSnapshot } from './lib/remote';
 import type {
   AISettings,
   AIStoryRequest,
@@ -35,11 +60,8 @@ import {
   getSettings,
   importPreview,
   killReasonRequest,
-  recordImportLinks,
-  recordTombstone,
 } from './lib/api';
 import { boardLabels, unionLabels } from './lib/labels';
-import { acknowledgedTombstones } from './lib/graveyard';
 import { burst } from './lib/confetti';
 import { AdrModal } from './components/AdrModal';
 import {
@@ -78,6 +100,40 @@ interface ShipPrompt {
  */
 const REFRESH_NOTICE =
   'The board was refreshed from the server, so the card you had open was closed. Any unsaved text in it was not kept.';
+const LEGACY_RECOVERY_NOTICE =
+  'This board was recovered from older local data. Tasks changed or deleted while offline could not be identified exactly, so unmatched server tasks were kept.';
+export const LOCAL_PERSISTENCE_NOTICE =
+  'This browser could not save the board locally. Keep this tab open while server sync retries, then free browser storage or allow site data.';
+
+export function mergeConflictNotice(conflicts: readonly string[]): string | null {
+  if (conflicts.length === 0) return null;
+  return `Concurrent edits conflicted in ${conflicts.join(', ')}. Your values and ordering were kept.`;
+}
+
+const NOTICE_SEPARATOR = '\n\n';
+
+export type NoticeEvent =
+  | { type: 'report'; message: string }
+  | { type: 'dismiss' };
+
+export type NoticeTransition = {
+  notice: string | null;
+  announcement: string | null;
+};
+
+/** Pure transition used by the synchronous notice owner in BoardApp. */
+export function transitionNotice(
+  existing: string | null,
+  event: NoticeEvent,
+): NoticeTransition {
+  if (event.type === 'dismiss') return { notice: null, announcement: null };
+  const notices = existing ? existing.split(NOTICE_SEPARATOR) : [];
+  if (notices.includes(event.message)) {
+    return { notice: existing, announcement: null };
+  }
+  notices.push(event.message);
+  return { notice: notices.join(NOTICE_SEPARATOR), announcement: event.message };
+}
 
 const SYNC_TITLE: Record<SyncState, string> = {
   off: 'sync off — local only',
@@ -88,21 +144,68 @@ const SYNC_TITLE: Record<SyncState, string> = {
 
 export default function App() {
   const [identity, setIdentity] = useState<Identity | null>(() => loadIdentity());
+  const [identityError, setIdentityError] = useState<string | null>(null);
 
   const adoptIdentity = (i: Identity) => {
     saveIdentity(i);
+    setIdentityError(null);
     setIdentity(i);
   };
+
+  useEffect(() => {
+    if (!identity || identity.kind !== 'azure' || identity.homeAccountId) return;
+    let cancelled = false;
+    void resolveAzureIdentity(identity).then(
+      (resolved) => {
+        if (!cancelled) adoptIdentity(resolved);
+      },
+      (err: unknown) => {
+        if (!cancelled) {
+          setIdentityError(
+            err instanceof Error ? err.message : 'session expired — sign in again',
+          );
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [identity]);
 
   if (!identity) {
     return <IdentityGate onIdentity={adoptIdentity} />;
   }
+  if (identity.kind === 'azure' && !identity.homeAccountId) {
+    return (
+      <main className="gate">
+        <div className="gate-card">
+          <h1>kb</h1>
+          {identityError ? (
+            <>
+              <p className="gate-error" role="alert">{identityError}</p>
+              <button
+                type="button"
+                className="gate-btn"
+                onClick={() => {
+                  clearIdentity();
+                  setIdentity(null);
+                }}
+              >
+                Sign in again
+              </button>
+            </>
+          ) : (
+            <p className="gate-note">Restoring your Microsoft session…</p>
+          )}
+        </div>
+      </main>
+    );
+  }
   return (
     <BoardApp
-      // Keyed on the id alone: restoring a session replaces the identity
-      // object but is the same person, and remounting would throw away the
-      // board state and any open card.
-      key={identity.id}
+      // Immutable account namespace: restoring a session does not remount,
+      // while switching Microsoft accounts cannot reuse local board state.
+      key={identityNamespace(identity)}
       identity={identity}
       onIdentity={adoptIdentity}
       onSignOut={() => {
@@ -152,17 +255,18 @@ interface BoardAppProps {
 }
 
 function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
-  const ns = sanitizeUser(identity.id);
+  const ns = identityNamespace(identity);
   const store = useMemo(() => new LocalStore(ns), [ns]);
   const remote = useMemo(() => new RemoteStore(), []);
+  const initial = useMemo(() => store.loadOrSeed(), [store]);
   // Seeding clears the dirty flag (see LocalStore.loadOrSeed), so a demo board
   // is never pushed over a board the server already has.
-  const [board, setBoard] = useState<Board>(() => store.loadOrSeed().board);
+  const [board, setBoardState] = useState<Board>(() => initial.board);
   // Browser ids stay on the local board; write acknowledgements supply the
   // canonical ids needed by server-side exclusion.
   const [canonicalTaskIDs, setCanonicalTaskIDs] = useState<
     ReadonlyMap<string, string>
-  >(() => new Map());
+  >(() => initial.canonicalTaskIDs);
   const [modal, setModal] = useState<ModalState | null>(null);
   const [ship, setShip] = useState<ShipPrompt | null>(null);
   const [streak, setStreak] = useState<number>(() => shippedToday(ns));
@@ -185,6 +289,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
   // Set when a server refresh had to drop something the user was in the
   // middle of; see adopt.
   const [notice, setNotice] = useState<string | null>(null);
+  const noticeRef = useRef<string | null>(null);
   // Pending in-app confirmation. Never window.confirm/window.alert: those
   // freeze the page, cannot be styled, and name the origin rather than kb.
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
@@ -198,33 +303,66 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
   const announce = useCallback((text: string) => {
     setSaid((s) => ({ text, seq: s.seq + 1 }));
   }, []);
+  const applyNotice = useCallback((event: NoticeEvent) => {
+    const transition = transitionNotice(noticeRef.current, event);
+    noticeRef.current = transition.notice;
+    setNotice(transition.notice);
+    if (transition.announcement) announce(transition.announcement);
+  }, [announce]);
+  const reportNotice = useCallback((message: string) => {
+    applyNotice({ type: 'report', message });
+  }, [applyNotice]);
+  const reportMergeConflicts = useCallback((conflicts: readonly string[]) => {
+    const message = mergeConflictNotice(conflicts);
+    if (!message) return;
+    reportNotice(message);
+  }, [reportNotice]);
+  const localPersistenceWarnedRef = useRef(false);
+  const dismissNotice = useCallback(() => {
+    localPersistenceWarnedRef.current = false;
+    applyNotice({ type: 'dismiss' });
+  }, [applyNotice]);
+  const reportPersistence = useCallback(
+    (ok: boolean) => {
+      if (ok) return;
+      reportNotice(LOCAL_PERSISTENCE_NOTICE);
+    },
+    [reportNotice],
+  );
+  const handleOutboxStatus = useCallback(
+    (status: OutboxStatus) => {
+      if (status.kind === 'idle') return;
+      if (status.kind === 'reauth') {
+        setSync('expired');
+        return;
+      }
+      const message =
+        status.kind === 'blocked'
+          ? `Metadata delivery is blocked: ${status.message}`
+          : `Metadata delivery will retry: ${status.message}`;
+      reportNotice(message);
+    },
+    [reportNotice],
+  );
+  const outbox = useMemo(
+    () => new MetadataOutbox(ns, { onStatus: handleOutboxStatus }),
+    [ns, handleOutboxStatus],
+  );
   const fileRef = useRef<HTMLInputElement>(null);
   const boardRef = useRef(board);
-  boardRef.current = board;
-  // Browser task ids never cross the markdown wire. Reasons wait here until
-  // the cancelling PUT acknowledges the corresponding SQLite task id.
-  const pendingTombstonesRef = useRef(new Map<string, string>());
-  const rememberTaskIDs = useCallback(
-    (taskIDs: ReadonlyMap<string, string>) => {
-      setCanonicalTaskIDs((current) => mergeTaskIDMaps(current, taskIDs));
-    },
-    [],
-  );
-  const drainTombstones = useCallback(
-    (pushed: Board, taskIDs: ReadonlyMap<string, string>) => {
-      for (const ready of acknowledgedTombstones(
-        pendingTombstonesRef.current,
-        pushed,
-        taskIDs,
-      )) {
-        // Best-effort means one POST attempt per acknowledged decision. Remove
-        // it first so a later unrelated board save cannot duplicate the call.
-        pendingTombstonesRef.current.delete(ready.clientTaskId);
-        void recordTombstone(identity, ready.serverTaskId, ready.reason);
-      }
-    },
-    [identity],
-  );
+  const canonicalTaskIDsRef = useRef(canonicalTaskIDs);
+  const durableSnapshotRef = useRef(initial);
+  const deletedCanonicalIDsRef = useRef(initial.deletedCanonicalIDs);
+  const liveRef = useRef<LiveBoardSnapshot>({
+    epoch: 0,
+    board: initial.board,
+    canonicalTaskIDs: initial.canonicalTaskIDs,
+    deletedCanonicalIDs: initial.deletedCanonicalIDs,
+    durableBase: initial,
+    needsLocalPersistence: false,
+    remoteClean: !loadDirty(ns),
+  });
+  const recoveryContinuationRef = useRef<(() => void) | null>(null);
   // Whether the user has work in progress a board refresh would discard.
   const openWorkRef = useRef(false);
   openWorkRef.current = modal !== null || ship !== null;
@@ -241,6 +379,61 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
   // destroy B.
   const editGenRef = useRef(0);
 
+  const publishCommitted = useCallback((
+    snapshot: DurableSnapshot,
+    remoteClean: boolean,
+  ) => {
+    const current = liveRef.current;
+    const next: LiveBoardSnapshot = {
+      epoch: current.epoch,
+      board: snapshot.board,
+      canonicalTaskIDs: snapshot.canonicalTaskIDs,
+      deletedCanonicalIDs: snapshot.deletedCanonicalIDs,
+      durableBase: snapshot,
+      needsLocalPersistence: false,
+      remoteClean,
+    };
+    liveRef.current = next;
+    boardRef.current = next.board;
+    canonicalTaskIDsRef.current = next.canonicalTaskIDs;
+    deletedCanonicalIDsRef.current = next.deletedCanonicalIDs;
+    durableSnapshotRef.current = snapshot;
+    setCanonicalTaskIDs(next.canonicalTaskIDs);
+    setBoardState(next.board);
+  }, []);
+
+  const publishUserEdit = useCallback((
+    update: Board | ((current: Board) => Board),
+  ) => {
+    const current = liveRef.current;
+    const nextBoard = typeof update === 'function' ? update(current.board) : update;
+    if (nextBoard === current.board) return;
+    const liveIDs = new Set(nextBoard.tasks.map((task) => task.id));
+    const canonicalTaskIDs = new Map(
+      [...current.canonicalTaskIDs].filter(([clientID]) => liveIDs.has(clientID)),
+    );
+    const deletedCanonicalIDs = new Set(current.deletedCanonicalIDs);
+    for (const [clientID, canonicalID] of current.canonicalTaskIDs) {
+      if (!liveIDs.has(clientID)) deletedCanonicalIDs.add(canonicalID);
+    }
+    const next: LiveBoardSnapshot = {
+      ...current,
+      epoch: current.epoch + 1,
+      board: nextBoard,
+      canonicalTaskIDs,
+      deletedCanonicalIDs,
+      needsLocalPersistence: true,
+      remoteClean: false,
+    };
+    liveRef.current = next;
+    boardRef.current = next.board;
+    canonicalTaskIDsRef.current = next.canonicalTaskIDs;
+    deletedCanonicalIDsRef.current = next.deletedCanonicalIDs;
+    editGenRef.current = next.epoch;
+    setCanonicalTaskIDs(next.canonicalTaskIDs);
+    setBoardState(next.board);
+  }, []);
+
   const onSaveError = useCallback((err: unknown) => {
     setSync(err instanceof ReauthRequiredError ? 'expired' : 'error');
   }, []);
@@ -255,13 +448,13 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
    * discards whatever the user had typed, which happens without warning at
    * moments they cannot see coming — so say so rather than vanishing.
    */
-  const adopt = useCallback((next: Board) => {
-    cleanBoardRef.current = next;
-    if (openWorkRef.current) setNotice(REFRESH_NOTICE);
+  const adopt = useCallback((snapshot: DurableSnapshot) => {
+    cleanBoardRef.current = snapshot.board;
+    if (openWorkRef.current) reportNotice(REFRESH_NOTICE);
     setModal(null);
     setShip(null);
-    setBoard(next);
-  }, []);
+    publishCommitted(snapshot, true);
+  }, [publishCommitted, reportNotice]);
 
   /**
    * Fold the tasks a 409 merge carried over into the board we hold now.
@@ -273,63 +466,295 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
    * next PUT would carry a matching If-Match and delete them with no 409 and
    * no error shown.
    */
-  const carryMerged = useCallback(
-    (sent: Board, pushed: Board) => {
-      if (pushed === sent) return;
-      if (boardRef.current === sent) {
-        adopt(pushed);
-        return;
+  const acknowledgeRemote = useCallback(
+    async (
+      sent: Board,
+      sentIDs: ReadonlyMap<string, string>,
+      pushed: Board,
+      committedIDs: ReadonlyMap<string, string>,
+      operationID?: string,
+      isCurrent: () => boolean = () => true,
+      _expectedGeneration?: number,
+      _expectedVersion?: DurableVersion,
+      acknowledgementBase?: DurableSnapshot,
+    ): Promise<{
+      persisted: boolean;
+      conflict?: true;
+      generation?: number;
+      version?: DurableVersion;
+      snapshot?: DurableSnapshot;
+      conflicts: readonly string[];
+    }> => {
+      const current = liveRef.current;
+      const acknowledged = mergeAcknowledgedState(
+        current.board,
+        current.canonicalTaskIDs,
+        sent,
+        sentIDs,
+        pushed,
+        committedIDs,
+      );
+      // One localStorage write contains the merged board and the complete ID
+      // map. Nothing may clear dirty state or promote outbox work before it.
+      if (!acknowledgementBase) {
+        return { persisted: false, conflict: true, conflicts: acknowledged.conflicts };
       }
-      // The merge keeps our own tasks (ids and all) and appends the server's,
-      // which parse() gave fresh ids — so an unknown id is a carried-over task.
-      const ours = new Set(sent.tasks.map((t) => t.id));
-      const extra = pushed.tasks.filter((t) => !ours.has(t.id));
-      if (extra.length === 0) return;
-      setBoard((b) => ({ ...b, tasks: [...b.tasks, ...extra] }));
+      const sourceLive = { ...current, durableBase: acknowledgementBase };
+      const outcome = await commitLiveCandidate({
+        sourceLive,
+        candidate: {
+          board: acknowledged.board,
+          canonicalTaskIDs: acknowledged.canonicalTaskIDs,
+          deletedCanonicalIDs: recomputeDeletedCanonicalIDs(
+            acknowledgementBase.canonicalTaskIDs,
+            current.deletedCanonicalIDs,
+            acknowledged.canonicalTaskIDs,
+          ),
+        },
+        readLive: () => liveRef.current,
+        readDurable: () => store.loadSnapshot(),
+        persist: (candidate, version, guard) => store.saveAcknowledgement(
+          candidate.board,
+          candidate.canonicalTaskIDs,
+          candidate.deletedCanonicalIDs,
+          version,
+          operationID,
+          () => isCurrent() && guard(),
+        ),
+        repairPersist: (candidate, version, guard) => store.saveIfGeneration(
+          candidate.board,
+          candidate.canonicalTaskIDs,
+          candidate.deletedCanonicalIDs,
+          version,
+          () => isCurrent() && guard(),
+        ),
+        cancelled: () => !isCurrent(),
+      });
+      if (!outcome.persisted || !outcome.snapshot) {
+        return {
+          persisted: false,
+          conflicts: [...acknowledged.conflicts, ...outcome.conflicts],
+        };
+      }
+      publishCommitted(outcome.snapshot, true);
+      void reconcileAndDrain(
+        outbox,
+        identity,
+        outcome.snapshot.board,
+        outcome.snapshot.canonicalTaskIDs,
+        handleOutboxStatus,
+      );
+      return {
+        persisted: true,
+        generation: outcome.snapshot.generation,
+        version: outcome.snapshot.version,
+        snapshot: outcome.snapshot,
+        conflicts: [...acknowledged.conflicts, ...outcome.conflicts],
+      };
     },
-    [adopt],
+    [store, publishCommitted, outbox, identity, handleOutboxStatus],
   );
 
   useEffect(() => {
     let cancelled = false;
     // Local edits that never reached the server win over the remote copy:
     // push them instead of silently adopting (and destroying) newer local work.
-    const pushLocal = () => {
+    const pushLocal = (
+      snapshot: DurableSnapshot = durableSnapshotRef.current,
+      localBoard: Board = snapshot.board,
+      localTaskIDs: ReadonlyMap<string, string> = snapshot.canonicalTaskIDs,
+      liveEpoch: number = liveRef.current.epoch,
+    ) => {
       syncOnRef.current = true;
-      const gen = editGenRef.current;
-      const sent = boardRef.current;
+      const gen = liveEpoch;
+      const sent = localBoard;
       remote.saveRemote(
         identity,
         sent,
         (err) => {
           if (!cancelled) onSaveError(err);
         },
-        (pushed, taskIDs) => {
+        async (
+          pushed,
+          taskIDs,
+          conflicts = [],
+          operationID,
+          isCurrent,
+          ackGeneration,
+          ackVersion,
+          ackSnapshot,
+        ) => {
           // Only an ack for the newest edit may clear the dirty flag.
           const fresh = editGenRef.current === gen;
-          if (fresh) setDirty(ns, false);
           if (cancelled) return;
-          rememberTaskIDs(taskIDs);
-          drainTombstones(pushed, taskIDs);
-          // A 409 merge wrote a different board than we sent — that is now
-          // the server's state, so it becomes ours. Unconditionally: the
-          // merged-in tasks must survive a newer edit too, or the next save
-          // deletes them.
-          carryMerged(sent, pushed);
-          if (fresh) setSync('ok');
+          const acknowledged = await acknowledgeRemote(
+            sent,
+            localTaskIDs,
+            pushed,
+            taskIDs,
+            operationID,
+            isCurrent,
+            ackGeneration,
+            ackVersion,
+            ackSnapshot,
+          );
+          if (!isCurrent?.()) return;
+          if (acknowledged.conflict) return acknowledged;
+          if (fresh && acknowledged.persisted) setDirty(ns, false);
+          reportMergeConflicts([
+            ...conflicts,
+            ...acknowledged.conflicts,
+          ]);
+          if (fresh && acknowledged.persisted) setSync('ok');
+          return acknowledged;
+        },
+        {
+          canonicalTaskIDs: localTaskIDs,
+          pendingWriteStager: store,
+          durableVersion: snapshot.version,
+          durableSnapshot: snapshot,
+          isLiveCurrent: () => !cancelled && liveRef.current.epoch === gen,
         },
       );
+    };
+    const persistCandidate = (
+      sourceLive: LiveBoardSnapshot,
+      nextBoard: Board,
+      nextIDs: ReadonlyMap<string, string>,
+      nextDeleted: ReadonlySet<string>,
+      recovery = false,
+    ) => commitLiveCandidate({
+      sourceLive,
+      candidate: {
+        board: nextBoard,
+        canonicalTaskIDs: nextIDs,
+        deletedCanonicalIDs: nextDeleted,
+      },
+      readLive: () => liveRef.current,
+      readDurable: () => store.loadSnapshot(),
+      persist: (candidate, version, guard) => recovery
+        ? store.completeIdentityRecovery(
+          candidate.board,
+          candidate.canonicalTaskIDs,
+          candidate.deletedCanonicalIDs,
+          version,
+          () => !cancelled && guard(),
+        )
+        : store.saveIfGeneration(
+          candidate.board,
+          candidate.canonicalTaskIDs,
+          candidate.deletedCanonicalIDs,
+          version,
+          () => !cancelled && guard(),
+        ),
+      repairPersist: (candidate, version, guard) => store.saveIfGeneration(
+        candidate.board,
+        candidate.canonicalTaskIDs,
+        candidate.deletedCanonicalIDs,
+        version,
+        () => !cancelled && guard(),
+      ),
+      cancelled: () => cancelled,
+    });
+    const recoverPending: (pendingWrite: PendingBoardWrite) => Promise<void> = async (
+      pendingWrite,
+    ) => {
+      try {
+        const result = await reconcilePendingBoardWrite({
+          remote,
+          identity,
+          pendingWrite,
+          readLive: () => liveRef.current,
+          readSnapshot: () => store.loadSnapshot(),
+          persistAcknowledgement: (
+            nextBoard,
+            taskIDs,
+            deletedIDs,
+            expectedVersion,
+            operationID,
+            guard,
+          ) => store.saveAcknowledgement(
+            nextBoard,
+            taskIDs,
+            deletedIDs,
+            expectedVersion,
+            operationID,
+            () => !cancelled && guard(),
+          ),
+          repairPersist: (nextBoard, taskIDs, deletedIDs, version, guard) =>
+            store.saveIfGeneration(
+              nextBoard,
+              taskIDs,
+              deletedIDs,
+              version,
+              () => !cancelled && guard(),
+            ),
+          apply: (recovered, snapshot) => {
+            cleanBoardRef.current = snapshot.board;
+            publishCommitted(snapshot, !recovered.needsPush);
+          },
+          queuePush: pushLocal,
+          cancelled: () => cancelled,
+        });
+        recoveryContinuationRef.current = result.recoveryPending
+          ? () => { void recoverPending(pendingWrite); }
+          : null;
+        reportMergeConflicts(result.recovered.conflicts);
+        reportPersistence(result.persisted);
+        if (!result.persisted || result.recovered.needsPush) {
+          setDirty(ns, true);
+        } else {
+          setDirty(ns, false);
+          syncOnRef.current = true;
+          setSync('ok');
+        }
+      } catch (err) {
+        if (!cancelled) onSaveError(err);
+      }
     };
     void (async () => {
       const present = await remote.detect();
       if (cancelled || !present) return;
       setServerPresent(true);
+      const pendingWrite = liveRef.current.durableBase.pendingBoardWrite;
+      if (pendingWrite) {
+        await recoverPending(pendingWrite);
+        return;
+      }
       let remoteBoard: Board | null = null;
+      let remoteTaskIDs: ReadonlyMap<string, string> = new Map();
+      const cleanStartupLive = liveRef.current;
       if (!loadDirty(ns)) {
         try {
-          remoteBoard = await remote.loadRemote(identity, (taskIDs) => {
-            if (!cancelled) rememberTaskIDs(taskIDs);
+          const startup = await reconcileStartupBoardFetch({
+            remote,
+            identity,
+            readLive: () => liveRef.current,
+            readSnapshot: () => store.loadSnapshot(),
+            persist: (nextBoard, taskIDs, deletedIDs, expectedVersion, guard) =>
+              store.saveIfGeneration(
+                nextBoard,
+                taskIDs,
+                deletedIDs,
+                expectedVersion,
+                () => !cancelled && guard(),
+              ),
+            apply: (snapshot) => {
+              cleanBoardRef.current = snapshot.board;
+              publishCommitted(snapshot, false);
+              setDirty(ns, true);
+            },
+            push: pushLocal,
+            cancelled: () => cancelled,
           });
+          if (cancelled) return;
+          remoteBoard = startup.remoteBoard;
+          remoteTaskIDs = startup.remoteTaskIDs;
+          if (startup.merged) {
+            reportMergeConflicts(startup.merged.conflicts);
+            reportPersistence(startup.persisted === true);
+            return;
+          }
         } catch (err) {
           // Server present but board fetch failed — keep the local board,
           // report the failure, and do not enable autosave over broken auth.
@@ -338,19 +763,134 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
         }
       }
       if (cancelled) return;
+      if (
+        loadDirty(ns) &&
+        initial.migratedRaw &&
+        canonicalTaskIDsRef.current.size === 0
+      ) {
+        try {
+          const result = await reconcileLegacyBootstrap({
+            remote,
+            identity,
+            readLive: () => liveRef.current,
+            readSnapshot: () => store.loadSnapshot(),
+            persist: (nextBoard, taskIDs, deletedIDs, expectedVersion, guard) =>
+              store.completeIdentityRecovery(
+                nextBoard,
+                taskIDs,
+                deletedIDs,
+                expectedVersion,
+                () => !cancelled && guard(),
+              ),
+            repairPersist: (nextBoard, taskIDs, deletedIDs, version, guard) =>
+              store.saveIfGeneration(
+                nextBoard,
+                taskIDs,
+                deletedIDs,
+                version,
+                () => !cancelled && guard(),
+              ),
+            apply: (_recovered, needsPush, snapshot) => {
+              cleanBoardRef.current = snapshot.board;
+              publishCommitted(snapshot, !needsPush);
+              reportNotice(LEGACY_RECOVERY_NOTICE);
+              setDirty(ns, needsPush);
+              if (!needsPush) {
+                syncOnRef.current = true;
+                setSync('ok');
+              }
+            },
+            queuePush: pushLocal,
+            cancelled: () => cancelled,
+          });
+          reportMergeConflicts(result.recovered.conflicts);
+          reportPersistence(result.persisted);
+          if (!result.persisted) setDirty(ns, true);
+        } catch (err) {
+          if (!cancelled) onSaveError(err);
+        }
+        return;
+      }
+      if (loadDirty(ns)) {
+        try {
+          const dirtyLive = liveRef.current;
+          let prepared = await remote.prepareDirtyMapped(
+            identity,
+            dirtyLive.board,
+            dirtyLive.canonicalTaskIDs,
+            dirtyLive.deletedCanonicalIDs,
+          );
+          if (cancelled) return;
+          const persisted = await persistCandidate(
+            dirtyLive,
+            prepared.board,
+            prepared.taskIDs,
+            prepared.deletedCanonicalIDs,
+          );
+          if (cancelled) return;
+          reportMergeConflicts(persisted.conflicts);
+          reportPersistence(persisted.persisted);
+          if (!persisted.persisted || !persisted.snapshot) {
+            setDirty(ns, true);
+            return;
+          }
+          cleanBoardRef.current = persisted.snapshot.board;
+          publishCommitted(persisted.snapshot, false);
+          pushLocal(persisted.snapshot);
+        } catch (err) {
+          if (!cancelled) onSaveError(err);
+        }
+        return;
+      }
       // Re-check dirtiness after the fetch: an edit may have landed while the
       // remote copy was in flight (boardRef catches commits whose save effect
       // has not flushed yet).
-      if (loadDirty(ns) || boardRef.current !== cleanBoardRef.current) {
-        pushLocal();
+      if (liveRef.current.needsLocalPersistence) {
         return;
       }
-      if (remoteBoard) adopt(remoteBoard);
+      if (remoteBoard) {
+        const current = liveRef.current;
+        if (current.epoch !== cleanStartupLive.epoch) return;
+        const unchanged = sameBoardSemantics({
+          board: current.board,
+          canonicalTaskIDs: current.canonicalTaskIDs,
+          deletedCanonicalIDs: current.deletedCanonicalIDs,
+          migratedRaw: current.durableBase.migratedRaw,
+          pendingBoardWrite: current.durableBase.pendingBoardWrite,
+        }, {
+          board: remoteBoard,
+          canonicalTaskIDs: remoteTaskIDs,
+          deletedCanonicalIDs: new Set(),
+          migratedRaw: false,
+          pendingBoardWrite: null,
+        });
+        if (unchanged) {
+          syncOnRef.current = true;
+          setSync('ok');
+          return;
+        }
+        const persisted = await persistCandidate(
+          current,
+          remoteBoard,
+          remoteTaskIDs,
+          new Set(),
+          initial.migratedRaw,
+        );
+        if (cancelled) return;
+        reportMergeConflicts(persisted.conflicts);
+        reportPersistence(persisted.persisted);
+        if (!persisted.persisted || !persisted.snapshot) {
+          setDirty(ns, true);
+          return;
+        }
+        adopt(persisted.snapshot);
+      }
       syncOnRef.current = true;
       setSync('ok');
     })();
     return () => {
       cancelled = true;
+      recoveryContinuationRef.current = null;
     };
   }, [
     identity,
@@ -358,38 +898,129 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
     ns,
     onSaveError,
     adopt,
-    carryMerged,
-    drainTombstones,
-    rememberTaskIDs,
+    acknowledgeRemote,
+    initial.migratedRaw,
+    store,
+    reportPersistence,
+    reportMergeConflicts,
+    reportNotice,
   ]);
 
   useEffect(() => {
-    store.save(board);
-    if (board === cleanBoardRef.current) return; // initial load / server adoption
-    editGenRef.current += 1;
-    const gen = editGenRef.current;
-    setDirty(ns, true);
-    if (!syncOnRef.current) return;
-    remote.saveRemoteDebounced(
-      identity,
-      board,
-      onSaveError,
-      (pushed, taskIDs) => {
-        rememberTaskIDs(taskIDs);
-        drainTombstones(pushed, taskIDs);
-        // After a 409 merge the board that reached the server carries tasks we
-        // have never seen; take them or the next save deletes them again. This
-        // happens even when the ack is stale, because RemoteStore has already
-        // committed to the merged version — the next PUT would carry a matching
-        // If-Match and drop those tasks with no conflict and no error.
-        carryMerged(board, pushed);
-        // A stale ack (a newer edit exists) must not clear the dirty flag the
-        // newer edit depends on for crash/offline safety.
-        if (editGenRef.current !== gen) return;
-        setDirty(ns, false);
-        setSync('ok');
-      },
-    );
+    const sourceLive = liveRef.current;
+    if (!sourceLive.needsLocalPersistence || sourceLive.board !== board) return;
+    let cancelled = false;
+    const gen = sourceLive.epoch;
+    void (async () => {
+      const outcome = await commitLiveCandidate({
+        sourceLive,
+        candidate: {
+          board: sourceLive.board,
+          canonicalTaskIDs: sourceLive.canonicalTaskIDs,
+          deletedCanonicalIDs: sourceLive.deletedCanonicalIDs,
+        },
+        readLive: () => liveRef.current,
+        readDurable: () => store.loadSnapshot(),
+        persist: (candidate, version, guard) => store.saveIfGeneration(
+          candidate.board,
+          candidate.canonicalTaskIDs,
+          candidate.deletedCanonicalIDs,
+          version,
+          () => !cancelled && guard(),
+        ),
+        repairPersist: (candidate, version, guard) => store.saveIfGeneration(
+          candidate.board,
+          candidate.canonicalTaskIDs,
+          candidate.deletedCanonicalIDs,
+          version,
+          () => !cancelled && guard(),
+        ),
+        cancelled: () => cancelled,
+      });
+      if (cancelled) return;
+      reportMergeConflicts(outcome.conflicts);
+      if (
+        (outcome.failure && !outcome.failure.ok && outcome.failure.conflict) ||
+        outcome.recoveryPending
+      ) {
+        setDirty(ns, true);
+        return;
+      }
+      const persistence = outcome.persisted && outcome.snapshot
+        ? {
+          ok: true as const,
+          generation: outcome.snapshot.generation,
+          snapshot: outcome.snapshot,
+        }
+        : outcome.failure ?? { ok: false as const, error: new Error('board persistence stopped') };
+      const persistedBoard = outcome.candidate.board;
+      const sentIDs = outcome.candidate.canonicalTaskIDs;
+      const remoteBase = outcome.snapshot ?? sourceLive.durableBase;
+      if (outcome.snapshot) publishCommitted(outcome.snapshot, false);
+      continueAfterLocalPersistence(persistence, localPersistenceWarnedRef, {
+        warn: () => {
+          reportNotice(LOCAL_PERSISTENCE_NOTICE);
+        },
+        markDirty: () => setDirty(ns, true),
+        scheduleRemote: () => {
+          if (cancelled) return;
+          const continuation = recoveryContinuationRef.current;
+          if (continuation) {
+            recoveryContinuationRef.current = null;
+            continuation();
+            return;
+          }
+          if (!syncOnRef.current) return;
+          remote.saveRemoteDebounced(
+            identity,
+            persistedBoard,
+            onSaveError,
+            async (
+              pushed,
+              taskIDs,
+              conflicts = [],
+              operationID,
+              isCurrent,
+              ackGeneration,
+              ackVersion,
+              ackSnapshot,
+            ) => {
+              const acknowledged = await acknowledgeRemote(
+                persistedBoard,
+                sentIDs,
+                pushed,
+                taskIDs,
+                operationID,
+                isCurrent,
+                ackGeneration,
+                ackVersion,
+                ackSnapshot,
+              );
+              if (!isCurrent?.()) return;
+              if (acknowledged.conflict) return acknowledged;
+              reportMergeConflicts([
+                ...conflicts,
+                ...acknowledged.conflicts,
+              ]);
+              if (editGenRef.current !== gen) return;
+              if (acknowledged.persisted) {
+                setDirty(ns, false);
+                setSync('ok');
+              }
+              return acknowledged;
+            },
+            {
+              canonicalTaskIDs: sentIDs,
+              pendingWriteStager: store,
+              durableVersion: remoteBase.version,
+              durableSnapshot: remoteBase,
+              isLiveCurrent: () => !cancelled && liveRef.current.epoch === gen,
+            },
+          );
+        },
+      });
+    })();
+    return () => { cancelled = true; };
   }, [
     board,
     store,
@@ -397,10 +1028,27 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
     identity,
     ns,
     onSaveError,
-    carryMerged,
-    drainTombstones,
-    rememberTaskIDs,
+    acknowledgeRemote,
+    reportPersistence,
+    reportMergeConflicts,
+    reportNotice,
   ]);
+
+  useEffect(() => {
+    outbox.surfaceStoredStatus();
+    void reconcileAndDrain(
+      outbox,
+      identity,
+      boardRef.current,
+      canonicalTaskIDsRef.current,
+      handleOutboxStatus,
+    );
+    const retry = () => {
+      void drainAndReport(outbox, identity, handleOutboxStatus);
+    };
+    window.addEventListener('online', retry);
+    return () => window.removeEventListener('online', retry);
+  }, [outbox, identity, handleOutboxStatus]);
 
   useEffect(() => {
     // Server-only extras: label suggestions and AI settings. Failures degrade
@@ -436,10 +1084,10 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
     window.addEventListener('pagehide', flush);
     return () => {
       window.removeEventListener('pagehide', flush);
-      pendingTombstonesRef.current.clear();
+      outbox.cancel();
       remote.cancel();
     };
-  }, [remote]);
+  }, [remote, outbox]);
 
   // A save that failed is the one thing the dot could never tell anyone who is
   // not looking at it. Recovery is announced too, so "it broke" is not the last
@@ -484,7 +1132,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
         (t) => t.status === to && t.id !== taskId,
       ).length;
       const slot = Math.max(0, Math.min(at, others));
-      setBoard((b) => {
+      publishUserEdit((b) => {
         const tasks = moveTask(b.tasks, taskId, to, at, movedAt);
         // A drop that changes nothing (same column, same slot) must not mint a
         // new board: that would mark the board dirty and push an identical PUT.
@@ -548,7 +1196,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
   /** Ship the held-back card, ticking every remaining item first. */
   const shipTickingAll = useCallback(() => {
     if (!ship) return;
-    setBoard((b) => ({
+    publishUserEdit((b) => ({
       ...b,
       tasks: b.tasks.map((t) =>
         t.id === ship.taskId
@@ -569,7 +1217,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
       const checks = task.checks.map((c, i) =>
         i === checkIdx ? { ...c, done: !c.done } : c,
       );
-      setBoard((b) => ({
+      publishUserEdit((b) => ({
         ...b,
         tasks: b.tasks.map((t) => (t.id === taskId ? { ...t, checks } : t)),
       }));
@@ -601,7 +1249,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
   }, []);
 
   const handleSave = useCallback((task: Task) => {
-    setBoard((b) => {
+    publishUserEdit((b) => {
       const exists = b.tasks.some((t) => t.id === task.id);
       return {
         ...b,
@@ -637,28 +1285,34 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
         secondaryLabel: 'Kill without a reason',
         onSecondary: kill,
         onConfirm: (reason) => {
-          // Move first: the board stays responsive and starts its PUT before
-          // the deliberately best-effort graveyard annotation is queued.
-          kill();
           const request = killReasonRequest(taskId, reason);
-          if (request) {
-            pendingTombstonesRef.current.set(
-              request.taskId,
-              request.reason,
-            );
-          }
+          if (!request) return kill();
+          void enqueueIntentBeforeMutation(
+            () => outbox.enqueueTombstone(request.taskId, request.reason),
+            kill,
+            () => handleOutboxStatus({
+              kind: 'blocked',
+              message: 'the cancellation reason could not be stored; the card remains active',
+            }),
+          );
         },
       });
     },
-    [applyMove],
+    [applyMove, outbox, handleOutboxStatus],
   );
 
   const handleRestore = useCallback(
     (taskId: string) => {
-      pendingTombstonesRef.current.delete(taskId);
-      applyMove(taskId, 'todo');
+      void removeIntentBeforeMutation(
+        () => outbox.removeTombstone(taskId),
+        () => applyMove(taskId, 'todo'),
+        () => handleOutboxStatus({
+          kind: 'blocked',
+          message: 'the cancellation intent could not be removed; the card remains cancelled',
+        }),
+      );
     },
-    [applyMove],
+    [applyMove, outbox, handleOutboxStatus],
   );
 
   /** The one path to a real row delete — so it keeps its confirmation. */
@@ -669,16 +1323,27 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
       confirmLabel: 'Delete permanently',
       destructive: true,
       onConfirm: () => {
-        pendingTombstonesRef.current.delete(taskId);
-        setBoard((b) => ({ ...b, tasks: b.tasks.filter((t) => t.id !== taskId) }));
-        setModal(null);
+        void removeIntentBeforeMutation(
+          () => outbox.removeTombstone(taskId),
+          () => {
+            publishUserEdit((b) => ({
+              ...b,
+              tasks: b.tasks.filter((t) => t.id !== taskId),
+            }));
+            setModal(null);
+          },
+          () => handleOutboxStatus({
+            kind: 'blocked',
+            message: 'the cancellation intent could not be removed; the card was not deleted',
+          }),
+        );
       },
     });
-  }, []);
+  }, [outbox, handleOutboxStatus]);
 
   const handleAddStories = useCallback((tasks: Task[]) => {
     if (tasks.length > 0) {
-      setBoard((b) => ({ ...b, tasks: [...b.tasks, ...tasks] }));
+      publishUserEdit((b) => ({ ...b, tasks: [...b.tasks, ...tasks] }));
     }
     setShowAdr(false);
     setShowImport(false);
@@ -686,9 +1351,15 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
 
   const handleCommitLinks = useCallback(
     (req: RecordImportLinksRequest) => {
-      void recordImportLinks(identity, req);
+      void outbox
+        .enqueueImportLinks(req)
+        .then(() => drainAndReport(outbox, identity, handleOutboxStatus))
+        .catch(() => handleOutboxStatus({
+          kind: 'blocked',
+          message: 'import provenance could not be stored locally',
+        }));
     },
-    [identity],
+    [identity, outbox, handleOutboxStatus],
   );
 
   const handleExport = () => {
@@ -718,7 +1389,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
         body: `“${next.title}” carries ${taskCount(next.tasks.length)}. Everything on the board now is discarded, and this cannot be undone.`,
         confirmLabel: 'Replace board',
         destructive: true,
-        onConfirm: () => setBoard(next),
+        onConfirm: () => publishUserEdit(next),
       });
     } catch {
       setConfirm({
@@ -861,7 +1532,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
         {notice && (
           <div className="notice" role="status">
             <span>{notice}</span>
-            <button type="button" aria-label="Dismiss" onClick={() => setNotice(null)}>
+            <button type="button" aria-label="Dismiss" onClick={dismissNotice}>
               ✕
             </button>
           </div>

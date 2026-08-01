@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -156,7 +157,11 @@ func newAEAD(secret []byte) (cipher.AEAD, error) {
 // seal encrypts plain, prepending the random nonce to the ciphertext.
 func (s *Store) seal(plain []byte) ([]byte, error) {
 	nonce := make([]byte, s.aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
+	randomRead := rand.Read
+	if s.randomRead != nil {
+		randomRead = s.randomRead
+	}
+	if _, err := randomRead(nonce); err != nil {
 		return nil, fmt.Errorf("store: nonce: %w", err)
 	}
 	return s.aead.Seal(nonce, nonce, plain, nil), nil
@@ -179,6 +184,29 @@ func (s *Store) openSealed(enc []byte) ([]byte, error) {
 // a existing one must have: the file is machine-written, so anything shorter
 // is truncation or a hand-made file, not a choice.
 const secretFileBytes = 32
+
+const secretTempPattern = ".secret-*"
+
+type secretTempFile interface {
+	Name() string
+	Write([]byte) (int, error)
+	Chmod(os.FileMode) error
+	Sync() error
+	Close() error
+}
+
+type secretDirectory interface {
+	Sync() error
+	Close() error
+}
+
+var (
+	createSecretTemp = func(dir, pattern string) (secretTempFile, error) { return os.CreateTemp(dir, pattern) }
+	removeSecretFile = os.Remove
+	linkSecretFile   = os.Link
+	readSecretFile   = os.ReadFile
+	openSecretDir    = func(path string) (secretDirectory, error) { return os.Open(path) }
+)
 
 // EnvSecretMinBytes is the shortest KB_SECRET worth trusting. It is only a
 // warning threshold here: kb (serve) refuses to start below it, but the CLI
@@ -228,12 +256,89 @@ func LoadOrCreateSecret(dataDir string) ([]byte, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("store: create data dir: %w", err)
 	}
-	b = make([]byte, secretFileBytes)
-	if _, err := rand.Read(b); err != nil {
+	return createSecret(dataDir, path, rand.Reader, nil)
+}
+
+func createSecret(dataDir, path string, random io.Reader, beforePublish func() error) ([]byte, error) {
+	b := make([]byte, secretFileBytes)
+	if _, err := io.ReadFull(random, b); err != nil {
 		return nil, fmt.Errorf("store: generate secret: %w", err)
 	}
-	if err := os.WriteFile(path, b, 0o600); err != nil {
-		return nil, fmt.Errorf("store: write secret: %w", err)
+
+	temp, err := createSecretTemp(dataDir, secretTempPattern)
+	if err != nil {
+		return nil, fmt.Errorf("store: create secret temp file: %w", err)
+	}
+	tempPath := temp.Name()
+	tempRemoved := false
+	defer func() {
+		if !tempRemoved {
+			_ = removeSecretFile(tempPath)
+		}
+	}()
+	removeTemp := func() error {
+		err := removeSecretFile(tempPath)
+		if err == nil || errors.Is(err, fs.ErrNotExist) {
+			tempRemoved = true
+			return nil
+		}
+		return err
+	}
+
+	if n, err := temp.Write(b); err != nil {
+		temp.Close()
+		return nil, fmt.Errorf("store: write secret temp file: %w", err)
+	} else if n != len(b) {
+		temp.Close()
+		return nil, fmt.Errorf("store: write secret temp file: %w", io.ErrShortWrite)
+	}
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return nil, fmt.Errorf("store: chmod secret temp file: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return nil, fmt.Errorf("store: sync secret temp file: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return nil, fmt.Errorf("store: close secret temp file: %w", err)
+	}
+
+	if beforePublish != nil {
+		if err := beforePublish(); err != nil {
+			return nil, fmt.Errorf("store: before secret publication: %w", err)
+		}
+	}
+	if err := linkSecretFile(tempPath, path); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			if removeErr := removeTemp(); removeErr != nil {
+				return nil, fmt.Errorf("store: remove secret temp file: %w", removeErr)
+			}
+			winner, readErr := readSecretFile(path)
+			if readErr != nil {
+				return nil, fmt.Errorf("store: read secret: %w", readErr)
+			}
+			if len(winner) < secretFileBytes {
+				return nil, fmt.Errorf("store: secret file %s is %d bytes, want at least %d: delete it to generate a new one (any stored AI keys become unreadable) or restore it from a backup",
+					path, len(winner), secretFileBytes)
+			}
+			return winner, nil
+		}
+		return nil, fmt.Errorf("store: publish secret: %w", err)
+	}
+	dir, err := openSecretDir(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("store: open data dir for sync: %w", err)
+	}
+	if err := dir.Sync(); err != nil {
+		dir.Close()
+		return nil, fmt.Errorf("store: sync data dir: %w", err)
+	}
+	if err := dir.Close(); err != nil {
+		return nil, fmt.Errorf("store: close data dir: %w", err)
+	}
+	if err := removeTemp(); err != nil {
+		return nil, fmt.Errorf("store: remove secret temp file: %w", err)
 	}
 	return b, nil
 }

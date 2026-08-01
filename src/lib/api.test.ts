@@ -309,8 +309,7 @@ describe('import API', () => {
     ).rejects.toThrow(detail.slice(0, 200));
   });
 
-  it('swallows both HTTP and fetch failures while recording links', async () => {
-    // Provenance is secondary: a journal outage must never undo added cards.
+  it('rejects HTTP and fetch failures so provenance can be retried durably', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(new Response('no', { status: 500 }))
@@ -328,8 +327,11 @@ describe('import API', () => {
       ],
     };
 
-    await expect(recordImportLinks(identity, request)).resolves.toBeUndefined();
-    await expect(recordImportLinks(identity, request)).resolves.toBeUndefined();
+    await expect(recordImportLinks(identity, request)).rejects.toMatchObject({
+      status: 500,
+      message: 'no',
+    });
+    await expect(recordImportLinks(identity, request)).rejects.toThrow('offline');
   });
 
   it('coerces every honest drift state without retaining extra fields', () => {
@@ -630,7 +632,7 @@ describe('tombstone API', () => {
     });
   });
 
-  it('swallows both HTTP and fetch failures while recording a reason', async () => {
+  it('rejects HTTP and fetch failures so tombstones can be retried durably', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(new Response('no', { status: 500 }))
@@ -639,10 +641,10 @@ describe('tombstone API', () => {
 
     await expect(
       recordTombstone(identity, 'task-1', 'superseded'),
-    ).resolves.toBeUndefined();
+    ).rejects.toMatchObject({ status: 500, message: 'no' });
     await expect(
       recordTombstone(identity, 'task-1', 'superseded'),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow('offline');
   });
 });
 

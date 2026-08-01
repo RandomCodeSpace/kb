@@ -1,10 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -17,6 +18,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/google/uuid"
 )
 
 // --- handlers ---
@@ -90,6 +93,10 @@ func (s *server) handleTombstone(w http.ResponseWriter, r *http.Request, user st
 		return
 	}
 	if err := s.store.RecordTombstone(user, req.TaskID, req.Reason); err != nil {
+		if errors.Is(err, store.ErrTombstoneTaskNotCancelled) {
+			http.Error(w, "tombstone target changed", http.StatusConflict)
+			return
+		}
 		log.Printf("record tombstone for %s: %v", logSafe(user), err)
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		return
@@ -133,11 +140,11 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
-// boardETag is the board's version token: a strong ETag over the serialized
-// wire form, so any write by any surface (SPA, CLI, MCP) changes it.
-func boardETag(md string) string {
-	sum := sha256.Sum256([]byte(md))
-	return `"` + hex.EncodeToString(sum[:16]) + `"`
+// boardETag makes the database revision opaque to HTTP clients. Revisions are
+// monotonic rather than contiguous because one board replacement touches
+// several trigger-observed rows.
+func boardETag(revision int64) string {
+	return `"r` + strconv.FormatInt(revision, 10) + `"`
 }
 
 // boardTaskIDs returns ids in the same status-first order Serialize writes.
@@ -156,40 +163,32 @@ func boardTaskIDs(b board.Board) []string {
 	return ids
 }
 
-// currentBoard returns one stored snapshot's wire form, version token, and
-// canonical task ids. A user with no board yet has the empty wire form, so a
-// client that has never seen a board and a client whose board was deleted
-// agree on the token.
-func (s *server) currentBoard(user string) (string, string, []string, error) {
-	has, err := s.store.HasBoard(user)
+// currentBoard returns one transactionally consistent snapshot and its HTTP
+// version token. Missing boards retain the last database revision so a delete
+// and a never-created board cannot be mistaken for the same write version.
+func (s *server) currentBoard(user string) (store.BoardSnapshot, string, error) {
+	snapshot, err := s.store.ReadBoardSnapshot(user)
 	if err != nil {
-		return "", "", nil, err
+		return store.BoardSnapshot{}, "", err
 	}
-	if !has {
-		return "", boardETag(""), nil, nil
-	}
-	b, err := s.store.Board(user)
-	if err != nil {
-		return "", "", nil, err
-	}
-	md := board.Serialize(b)
-	return md, boardETag(md), boardTaskIDs(b), nil
+	return snapshot, boardETag(snapshot.Revision), nil
 }
 
 func (s *server) handleGetBoard(w http.ResponseWriter, r *http.Request, user string) {
 	w.Header().Add("Vary", "Accept")
-	md, etag, taskIDs, err := s.currentBoard(user)
+	snapshot, etag, err := s.currentBoard(user)
 	if err != nil {
 		log.Printf("read board for %s: %s", logSafe(user), logSafe(err.Error()))
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		return
 	}
+	md := board.Serialize(snapshot.Board)
 	// The 404 carries the token too: it is the version of "no board", and a
 	// client that never got one would send no If-Match at all, making its
 	// first PUT unconditional — the very write most likely to land on a board
 	// the CLI or MCP created in the meantime.
 	w.Header().Set("ETag", etag)
-	if md == "" {
+	if !snapshot.Exists {
 		http.Error(w, "no board saved", http.StatusNotFound)
 		return
 	}
@@ -197,7 +196,7 @@ func (s *server) handleGetBoard(w http.ResponseWriter, r *http.Request, user str
 		writeJSON(w, struct {
 			Board   string   `json:"board"`
 			TaskIDs []string `json:"task_ids"`
-		}{Board: md, TaskIDs: taskIDs})
+		}{Board: md, TaskIDs: snapshot.TaskIDs})
 		return
 	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
@@ -209,64 +208,227 @@ func (s *server) handleGetBoard(w http.ResponseWriter, r *http.Request, user str
 // so a client that sends If-Match with the token from its GET is told 409
 // instead, and can refetch and merge. Clients that send no If-Match keep the
 // old last-writer-wins behavior.
-//
-// The token is content-derived rather than a store-side counter on purpose:
-// the CLI and MCP write to SQLite in their own processes, where no counter
-// this server keeps would ever be bumped. If the store later grows a
-// compare-and-swap ReplaceBoard, the lock and the re-read below are the two
-// places that would collapse into it.
 func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user string) {
 	body, ok := readBody(w, r)
 	if !ok {
 		return
 	}
-	// Held across the compare and the write, and the compare re-reads the
-	// store inside the lock: comparing against anything cached from the
-	// client's earlier GET would leave a window for a cross-process write.
-	mu := s.boardLocks.get(user)
-	mu.Lock()
-	defer mu.Unlock()
-	if want := strings.TrimSpace(r.Header.Get("If-Match")); want != "" {
-		_, etag, _, err := s.currentBoard(user)
-		if err != nil {
-			log.Printf("read board for %s: %s", logSafe(user), logSafe(err.Error()))
-			http.Error(w, "storage error", http.StatusInternalServerError)
-			return
-		}
-		if want != "*" && !etagMatches(want, etag) {
-			w.Header().Set("ETag", etag)
-			http.Error(w, "board changed since it was read", http.StatusConflict)
-			return
-		}
-	}
-	taskIDs, err := s.store.ReplaceBoardWithTaskIDs(user, board.Parse(string(body)))
-	if err != nil {
-		log.Printf("write board for %s: %s", logSafe(user), logSafe(err.Error()))
-		http.Error(w, "storage error", http.StatusInternalServerError)
+	operationValues := r.Header.Values("Idempotency-Key")
+	if len(operationValues) > 1 {
+		http.Error(w, "invalid board payload", http.StatusBadRequest)
 		return
 	}
-	_, etag, _, err := s.currentBoard(user)
+	operationID := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if operationID != "" {
+		parsed, err := uuid.Parse(operationID)
+		if err != nil || parsed.String() != strings.ToLower(operationID) {
+			http.Error(w, "invalid board payload", http.StatusBadRequest)
+			return
+		}
+	}
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	hashInput := append([]byte(mediaType+"\x00"), body...)
+	requestHash := fmt.Sprintf("%x", sha256.Sum256(hashInput))
+
+	snapshot, etag, err := s.currentBoard(user)
 	if err != nil {
 		log.Printf("read board for %s: %s", logSafe(user), logSafe(err.Error()))
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("ETag", etag)
-	if acceptsJSON(r) {
-		writeJSON(w, struct {
-			TaskIDs []string `json:"task_ids"`
-		}{TaskIDs: taskIDs})
+	want := strings.TrimSpace(strings.Join(r.Header.Values("If-Match"), ","))
+	if s.afterConditionalBoardSnapshot != nil && want != "" {
+		s.afterConditionalBoardSnapshot()
+	}
+
+	isJSON := mediaType == "application/json"
+	nextBoard := board.Parse(string(body))
+	var canonicalIDs []*string
+	if isJSON {
+		var parseErr error
+		nextBoard, canonicalIDs, parseErr = parseBoardJSONPut(body)
+		if parseErr != nil {
+			condition := boardWriteCondition(want)
+			if condition.Present {
+				_, conditionErr := s.store.CheckBoardWriteCondition(user, condition)
+				var conflict *store.RevisionConflictError
+				switch {
+				case errors.As(conditionErr, &conflict):
+					writeBoardConflict(w, boardETag(conflict.CurrentRevision))
+					return
+				case conditionErr != nil:
+					log.Printf("check board condition for %s: %s", logSafe(user), logSafe(conditionErr.Error()))
+					http.Error(w, "storage error", http.StatusInternalServerError)
+					return
+				}
+			}
+			http.Error(w, "invalid board payload", http.StatusBadRequest)
+			return
+		}
+	}
+	hasCreates := false
+	for _, id := range canonicalIDs {
+		if id == nil {
+			hasCreates = true
+			break
+		}
+	}
+	condition := boardWriteCondition(want)
+	if want == "" && isJSON {
+		condition = store.BoardWriteCondition{Present: true, Revisions: []int64{snapshot.Revision}}
+	}
+
+	var taskIDs []string
+	var revision int64
+	var replayed bool
+	switch {
+	case condition.Present || operationID != "":
+		taskIDs, revision, replayed, err = s.store.ReplaceBoardConditionalWithReceipt(
+			user, nextBoard, canonicalIDs, condition, operationID, requestHash, isJSON && hasCreates,
+		)
+	default:
+		taskIDs, revision, err = s.store.ReplaceBoardWithTaskIDsAndRevision(user, nextBoard)
+		if err == nil && s.afterUnconditionalBoardReplace != nil {
+			s.afterUnconditionalBoardReplace()
+		}
+	}
+	if err != nil {
+		var conflict *store.RevisionConflictError
+		switch {
+		case errors.As(err, &conflict):
+			writeBoardConflict(w, boardETag(conflict.CurrentRevision))
+		case errors.Is(err, store.ErrInvalidTaskIDs):
+			http.Error(w, "invalid board payload", http.StatusBadRequest)
+		default:
+			log.Printf("write board for %s: %s", logSafe(user), logSafe(err.Error()))
+			http.Error(w, "storage error", http.StatusInternalServerError)
+		}
 		return
 	}
+	if replayed || acceptsJSON(r) {
+		writeBoardAcknowledgement(w, taskIDs, revision, replayed)
+		return
+	}
+	etag = boardETag(revision)
+	w.Header().Set("ETag", etag)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func writeBoardAcknowledgement(w http.ResponseWriter, taskIDs []string, revision int64, replayed bool) {
+	w.Header().Set("ETag", boardETag(revision))
+	if replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+	}
+	writeJSON(w, struct {
+		TaskIDs []string `json:"task_ids"`
+	}{TaskIDs: taskIDs})
+}
+
+func parseBoardJSONPut(body []byte) (board.Board, []*string, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return board.Board{}, nil, errors.New("invalid JSON object")
+	}
+	var markdown string
+	var ids []*string
+	seen := make(map[string]bool, 2)
+	for decoder.More() {
+		fieldToken, err := decoder.Token()
+		if err != nil {
+			return board.Board{}, nil, err
+		}
+		field, ok := fieldToken.(string)
+		if !ok || seen[field] {
+			return board.Board{}, nil, errors.New("invalid or duplicate board payload field")
+		}
+		seen[field] = true
+		switch field {
+		case "board":
+			var decoded *string
+			if err := decoder.Decode(&decoded); err != nil {
+				return board.Board{}, nil, err
+			}
+			if decoded == nil {
+				return board.Board{}, nil, errors.New("board must be a string")
+			}
+			markdown = *decoded
+		case "task_ids":
+			var idsJSON json.RawMessage
+			if err := decoder.Decode(&idsJSON); err != nil {
+				return board.Board{}, nil, err
+			}
+			if bytes.Equal(bytes.TrimSpace(idsJSON), []byte("null")) {
+				return board.Board{}, nil, errors.New("task_ids must be an array")
+			}
+			if err := json.Unmarshal(idsJSON, &ids); err != nil {
+				return board.Board{}, nil, err
+			}
+		default:
+			return board.Board{}, nil, errors.New("unknown board payload field")
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return board.Board{}, nil, err
+	}
+	if !seen["board"] || !seen["task_ids"] {
+		return board.Board{}, nil, errors.New("missing board payload field")
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return board.Board{}, nil, err
+	}
+	return board.Parse(markdown), ids, nil
+}
+
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func writeBoardConflict(w http.ResponseWriter, etag string) {
+	w.Header().Set("ETag", etag)
+	http.Error(w, "board changed since it was read", http.StatusConflict)
+}
+
+func ifMatchContainsStar(ifMatch string) bool {
+	for _, tag := range strings.Split(ifMatch, ",") {
+		if strings.TrimSpace(tag) == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func boardWriteCondition(ifMatch string) store.BoardWriteCondition {
+	condition := store.BoardWriteCondition{Present: ifMatch != ""}
+	for _, tag := range strings.Split(ifMatch, ",") {
+		tag = strings.TrimSpace(tag)
+		if tag == "*" {
+			condition.Star = true
+			condition.Revisions = nil
+			return condition
+		}
+		if len(tag) < 4 || tag[0] != '"' || tag[1] != 'r' || tag[len(tag)-1] != '"' {
+			continue
+		}
+		revision, err := strconv.ParseInt(tag[2:len(tag)-1], 10, 64)
+		if err == nil && revision >= 0 {
+			condition.Revisions = append(condition.Revisions, revision)
+		}
+	}
+	return condition
+}
+
 // etagMatches reports whether any entry of an If-Match list equals etag. The
-// weak prefix is stripped so a proxy that weakened the tag still matches;
-// the token is content-derived either way.
 func etagMatches(ifMatch, etag string) bool {
 	for _, tag := range strings.Split(ifMatch, ",") {
-		if strings.TrimPrefix(strings.TrimSpace(tag), "W/") == etag {
+		if strings.TrimSpace(tag) == etag {
 			return true
 		}
 	}

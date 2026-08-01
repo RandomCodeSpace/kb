@@ -88,8 +88,18 @@ func guardedTransport(allowHosts map[string]bool, allowAll bool) *http.Transport
 }
 
 func sameHostRedirect(req *http.Request, via []*http.Request) error {
-	if req.URL.Host != via[0].URL.Host {
+	origin := via[0].URL
+	if origin.User != nil || req.URL.User != nil {
+		return errors.New("refusing redirect with URL credentials")
+	}
+	if !isHTTPURL(origin) || !isHTTPURL(req.URL) {
+		return errors.New("refusing redirect to non-HTTP(S) URL")
+	}
+	if normalizeGuardHost(req.URL.Hostname()) != normalizeGuardHost(origin.Hostname()) || req.URL.Port() != origin.Port() {
 		return errors.New("refusing cross-host redirect")
+	}
+	if strings.EqualFold(origin.Scheme, "https") && strings.EqualFold(req.URL.Scheme, "http") {
+		return errors.New("refusing HTTPS-to-HTTP redirect")
 	}
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")
@@ -97,11 +107,16 @@ func sameHostRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
+func isHTTPURL(u *url.URL) bool {
+	return strings.EqualFold(u.Scheme, "http") || strings.EqualFold(u.Scheme, "https")
+}
+
 // newAIClient builds the HTTP client used for user-configured AI endpoints.
 // Because the destination is user-controlled, the dialer rejects loopback,
 // link-local, private, and ULA addresses — checked on the resolved IP, so
 // DNS rebinding cannot bypass it — unless KB_AI_ALLOW_PRIVATE=1 opts in for
-// local model servers such as Ollama. Redirects may never change host.
+// local model servers such as Ollama. Redirects may never change host or
+// downgrade an HTTPS connection to HTTP.
 func newAIClient() *http.Client {
 	allowPrivate := os.Getenv("KB_AI_ALLOW_PRIVATE") == "1"
 	return &http.Client{
