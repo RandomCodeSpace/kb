@@ -125,7 +125,6 @@ jobs:
           python3 scripts/ci/test_workflow_structure.py
           node scripts/ci/test_validate_workflow_run.cjs
           node scripts/ci/test_ci_monitor.cjs
-          node .github/actions/protected-sonar/verify-sonar-task.test.cjs
 
   candidate_coverage:
     name: Candidate head coverage

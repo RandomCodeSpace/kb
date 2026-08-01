@@ -48,11 +48,12 @@ function githubPathIdentifier(value, label) {
 async function github(segments, query = {}) {
   if (!Array.isArray(segments) || !segments.length) throw new Error('GitHub API path is invalid');
   const apiUrl = new URL(process.env.GITHUB_API_URL || 'https://api.github.com');
-  if (!['http:', 'https:'].includes(apiUrl.protocol) || apiUrl.username || apiUrl.password || apiUrl.search || apiUrl.hash) {
+  if (!['http:', 'https:'].includes(apiUrl.protocol) || apiUrl.username || apiUrl.password || apiUrl.search || apiUrl.hash || apiUrl.pathname.includes('//')) {
     throw new Error('GITHUB_API_URL is invalid');
   }
   const path = segments.map((segment, index) => githubPathIdentifier(segment, `GitHub API path segment ${index + 1}`)).join('/');
-  apiUrl.pathname = `${apiUrl.pathname.replace(/\/+$/, '')}/${path}`;
+  const basePath = apiUrl.pathname === '/' ? '' : apiUrl.pathname.endsWith('/') ? apiUrl.pathname.slice(0, -1) : apiUrl.pathname;
+  apiUrl.pathname = `${basePath}/${path}`;
   for (const [key, value] of Object.entries(query)) apiUrl.searchParams.set(key, String(value));
   const response = await fetch(apiUrl, {
     headers: {

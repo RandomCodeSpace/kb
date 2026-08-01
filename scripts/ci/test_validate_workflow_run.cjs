@@ -107,6 +107,7 @@ async function runWorkflowTests() {
     [{ TRIGGER_RUN_ID: `${runId}/../admin` }, /TRIGGER_RUN_ID must be a positive integer/],
     [{ TRIGGER_RUN_ID: '9007199254740992' }, /TRIGGER_RUN_ID must be a positive safe integer/],
     [{ GITHUB_REPOSITORY: 'RandomCodeSpace/kb/../admin' }, /GITHUB_REPOSITORY is invalid/],
+    [{ GITHUB_API_URL: `http://127.0.0.1:${server.address().port}//` }, /GITHUB_API_URL is invalid/],
   ];
   for (const [envOverrides, expectedError] of hostileEnvironmentCases) {
     const hostile = await runValidator(envOverrides);
@@ -202,19 +203,15 @@ async function testSonarOriginPinning() {
   global.fetch = async (url) => {
     const parsed = new URL(url);
     seen.push(parsed.href);
-    const body = { task: {
-      status: 'SUCCESS',
-      analysisId: 'analysis-1',
-      branch: process.env.CANDIDATE_REF,
-      componentKey: process.env.SONAR_PROJECT_KEY,
-      scannerContext: `sonar.scm.revision=${head}\n`,
-    } };
+    const body = parsed.pathname === '/api/ce/task'
+      ? { task: { status: 'SUCCESS', analysisId: 'analysis-1', componentKey: process.env.SONAR_PROJECT_KEY } }
+      : { analyses: [{ key: 'analysis-1', revision: head }] };
     return { ok: true, json: async () => body };
   };
   const { main: verifySonarTask } = require('../../.github/actions/protected-sonar/verify-sonar-task.cjs');
   writeFileSync(reportPath, 'serverUrl=https://sonarcloud.io/untrusted/path\nceTaskId=task-1\n');
   await verifySonarTask();
-  assert.equal(seen.length, 1);
+  assert.equal(seen.length, 2);
   assert.ok(seen.every((url) => new URL(url).origin === 'https://sonarcloud.io'));
 
   const requestCount = seen.length;
