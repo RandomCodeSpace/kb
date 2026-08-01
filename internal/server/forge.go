@@ -301,40 +301,11 @@ func parseGitLabRef(source store.ForgeSource, path string) (forgeRef, error) {
 	}
 	n := len(parts)
 	if n >= 3 && parts[n-3] == "-" {
-		project := strings.Join(parts[:n-3], "/")
-		if project == "" {
-			return forgeRef{}, errors.New("invalid forge reference")
-		}
-		id, err := forgeRefID(parts[n-1])
-		if err != nil {
-			return forgeRef{}, err
-		}
-		ref := forgeRef{Source: source, Kind: source.Kind, Project: project}
-		switch parts[n-2] {
-		case "issues":
-			ref.Issue = id
-		case "milestones":
-			ref.Milestone = id
-		case "boards":
-			// Phase 1 resolves a board to its project; list and label filters are out of scope.
-		default:
-			return forgeRef{}, errors.New("invalid forge reference")
-		}
-		return ref, nil
+		return parseGitLabScopedRef(source, parts[:n-3], parts[n-2], parts[n-1])
 	}
 	if n >= 3 && (parts[n-2] == "issues" || parts[n-2] == "milestones") {
-		project := strings.Join(parts[:n-2], "/")
-		if project == "" {
-			return forgeRef{}, errors.New("invalid forge reference")
-		}
-		id, err := forgeRefID(parts[n-1])
+		ref, err := parseGitLabScopedRef(source, parts[:n-2], parts[n-2], parts[n-1])
 		if err == nil {
-			ref := forgeRef{Source: source, Kind: source.Kind, Project: project}
-			if parts[n-2] == "issues" {
-				ref.Issue = id
-			} else {
-				ref.Milestone = id
-			}
 			return ref, nil
 		}
 	}
@@ -344,6 +315,29 @@ func parseGitLabRef(source store.ForgeSource, path string) (forgeRef, error) {
 		}
 	}
 	return forgeRef{Source: source, Kind: source.Kind, Project: strings.Join(parts, "/")}, nil
+}
+
+func parseGitLabScopedRef(source store.ForgeSource, projectParts []string, resource, rawID string) (forgeRef, error) {
+	project := strings.Join(projectParts, "/")
+	if project == "" {
+		return forgeRef{}, errors.New("invalid forge reference")
+	}
+	id, err := forgeRefID(rawID)
+	if err != nil {
+		return forgeRef{}, err
+	}
+	ref := forgeRef{Source: source, Kind: source.Kind, Project: project}
+	switch resource {
+	case "issues":
+		ref.Issue = id
+	case "milestones":
+		ref.Milestone = id
+	case "boards":
+		// Phase 1 resolves a board to its project; list and label filters are out of scope.
+	default:
+		return forgeRef{}, errors.New("invalid forge reference")
+	}
+	return ref, nil
 }
 
 func parseGitHubRef(source store.ForgeSource, path string) (forgeRef, error) {
