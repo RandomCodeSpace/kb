@@ -291,9 +291,7 @@ function logicalKey(record: OutboxRecord): string {
 }
 
 function compareCodeUnits(left: string, right: string): number {
-  if (left < right) return -1;
-  if (left > right) return 1;
-  return 0;
+  return Number(left > right) - Number(left < right);
 }
 
 /** Durable, credential-free metadata journal for one immutable user namespace. */
