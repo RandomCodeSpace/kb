@@ -1279,11 +1279,13 @@ func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
 }
 
 func TestImportPreviewReturnsEmptyDraftsWithoutAIEgressWhenForgeIsEmpty(t *testing.T) {
+	var forgeCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.EscapedPath() != "/forge/api/v4/projects/group%2Fproject/issues" {
 			http.NotFound(w, r)
 			return
 		}
+		forgeCalls.Add(1)
 		_, _ = io.WriteString(w, `[]`)
 	}))
 	defer upstream.Close()
@@ -1311,17 +1313,22 @@ func TestImportPreviewReturnsEmptyDraftsWithoutAIEgressWhenForgeIsEmpty(t *testi
 	if response.Drafts == nil || len(response.Drafts) != 0 {
 		t.Fatalf("empty preview drafts = %#v, want initialized empty slice", response.Drafts)
 	}
+	if forgeCalls.Load() != 1 {
+		t.Fatalf("empty preview made %d forge calls, want 1", forgeCalls.Load())
+	}
 	if fakeAI.calls != 0 {
 		t.Fatalf("empty preview made %d AI calls, want 0", fakeAI.calls)
 	}
 }
 
 func TestImportPreviewReturnsEmptyDraftsWithoutProvenanceWhenAllGeneratedStoriesAreInvalid(t *testing.T) {
+	var forgeCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.EscapedPath() != "/forge/api/v4/projects/group%2Fproject/issues" {
 			http.NotFound(w, r)
 			return
 		}
+		forgeCalls.Add(1)
 		_, _ = io.WriteString(w, `[{"iid":42,"title":"Issue title","description":"body","web_url":"https://forge.example/issues/42"}]`)
 	}))
 	defer upstream.Close()
@@ -1348,6 +1355,15 @@ func TestImportPreviewReturnsEmptyDraftsWithoutProvenanceWhenAllGeneratedStories
 	}
 	if response.Drafts == nil || len(response.Drafts) != 0 {
 		t.Fatalf("all-invalid preview drafts = %#v, want initialized empty slice", response.Drafts)
+	}
+	if response.Fetched != 1 {
+		t.Fatalf("all-invalid preview fetched = %d, want 1", response.Fetched)
+	}
+	if forgeCalls.Load() != 1 {
+		t.Fatalf("all-invalid preview made %d forge calls, want 1", forgeCalls.Load())
+	}
+	if fakeAI.calls != 1 {
+		t.Fatalf("all-invalid preview made %d AI calls, want 1", fakeAI.calls)
 	}
 	host := strings.TrimPrefix(upstream.URL, "http://")
 	key := "gitlab:" + host + "/group/project#42"
