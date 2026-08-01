@@ -489,31 +489,9 @@ func (s *Store) ReplaceBoardConditionalWithReceipt(user string, b board.Board, c
 func (s *Store) CheckBoardWriteCondition(user string, condition BoardWriteCondition) (int64, error) {
 	var revision int64
 	err := s.withTx(func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`INSERT INTO board_revisions(user, revision) VALUES (?, 0) ON CONFLICT(user) DO NOTHING`, user); err != nil {
-			return fmt.Errorf("store: initialize board revision: %w", err)
-		}
-		if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); err != nil {
-			return fmt.Errorf("store: current board revision: %w", err)
-		}
-		if condition.Star {
-			var exists int
-			if err := tx.QueryRow(`SELECT CASE WHEN EXISTS(SELECT 1 FROM tasks WHERE user = ?) OR EXISTS(SELECT 1 FROM meta WHERE k = ?) THEN 1 ELSE 0 END`, user, titleKey(user)).Scan(&exists); err != nil {
-				return fmt.Errorf("store: inspect board existence: %w", err)
-			}
-			if exists == 0 {
-				return &RevisionConflictError{CurrentRevision: revision}
-			}
-			return nil
-		}
-		if condition.Present {
-			for _, allowed := range condition.Revisions {
-				if revision == allowed {
-					return nil
-				}
-			}
-			return &RevisionConflictError{CurrentRevision: revision}
-		}
-		return nil
+		var err error
+		revision, err = evaluateBoardWriteConditionTx(tx, user, condition, false)
+		return err
 	})
 	return revision, err
 }
@@ -547,95 +525,157 @@ func (s *Store) replaceBoardConditionalReceipt(user string, b board.Board, canon
 	var revision int64
 	var replayed bool
 	err := s.withTx(func(tx *sql.Tx) error {
-		if operationID != "" {
-			var storedHash, encoded string
-			err := tx.QueryRow(`SELECT request_hash, task_ids, revision FROM board_write_receipts WHERE user = ? AND operation_id = ?`, user, operationID).
-				Scan(&storedHash, &encoded, &revision)
-			switch {
-			case err == nil:
-				if storedHash != requestHash || json.Unmarshal([]byte(encoded), &taskIDs) != nil {
-					return ErrInvalidTaskIDs
-				}
-				replayed = true
-				return nil
-			case !errors.Is(err, sql.ErrNoRows):
-				return fmt.Errorf("store: read board write receipt: %w", err)
-			}
-		}
-		if _, err := tx.Exec(`INSERT INTO board_revisions(user, revision) VALUES (?, 0) ON CONFLICT(user) DO NOTHING`, user); err != nil {
-			return fmt.Errorf("store: initialize board revision: %w", err)
-		}
-		if condition.Star {
-			var exists int
-			if err := tx.QueryRow(`SELECT CASE WHEN EXISTS(SELECT 1 FROM tasks WHERE user = ?) OR EXISTS(SELECT 1 FROM meta WHERE k = ?) THEN 1 ELSE 0 END`, user, titleKey(user)).Scan(&exists); err != nil {
-				return fmt.Errorf("store: inspect board existence: %w", err)
-			}
-			if exists == 0 {
-				if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); err != nil {
-					return fmt.Errorf("store: current board revision: %w", err)
-				}
-				return &RevisionConflictError{CurrentRevision: revision}
-			}
-		} else if condition.Present {
-			var current int64
-			if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&current); err != nil {
-				return fmt.Errorf("store: current board revision: %w", err)
-			}
-			matched := false
-			for _, allowed := range condition.Revisions {
-				if current == allowed {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				revision = current
-				return &RevisionConflictError{CurrentRevision: revision}
-			}
-			result, err := tx.Exec(`UPDATE board_revisions SET revision = revision + 1 WHERE user = ? AND revision = ?`, user, current)
-			if err != nil {
-				return fmt.Errorf("store: claim board revision: %w", err)
-			}
-			n, err := result.RowsAffected()
-			if err != nil {
-				return fmt.Errorf("store: inspect board revision claim: %w", err)
-			}
-			if n != 1 {
-				if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); err != nil {
-					return fmt.Errorf("store: current board revision: %w", err)
-				}
-				return &RevisionConflictError{CurrentRevision: revision}
-			}
-		}
-		if operationID != "" && !allowNewReceipt {
-			return ErrInvalidTaskIDs
-		}
-		if allowNewReceipt && operationID == "" {
-			return ErrInvalidTaskIDs
-		}
 		var err error
-		taskIDs, err = s.replaceBoardTx(tx, user, b, canonicalIDs)
-		if err != nil {
-			return err
-		}
-		if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); err != nil {
-			return fmt.Errorf("store: committed board revision: %w", err)
-		}
-		if operationID != "" {
-			encoded, err := json.Marshal(taskIDs)
-			if err != nil {
-				return fmt.Errorf("store: encode board write receipt: %w", err)
-			}
-			if _, err := tx.Exec(`INSERT INTO board_write_receipts(user, operation_id, request_hash, task_ids, revision) VALUES (?, ?, ?, ?, ?)`, user, operationID, requestHash, string(encoded), revision); err != nil {
-				return fmt.Errorf("store: insert board write receipt: %w", err)
-			}
-		}
-		return nil
+		taskIDs, revision, replayed, err = s.replaceBoardConditionalReceiptTx(
+			tx, user, b, canonicalIDs, condition, operationID, requestHash, allowNewReceipt,
+		)
+		return err
 	})
 	if err != nil {
 		return nil, revision, false, err
 	}
 	return taskIDs, revision, replayed, nil
+}
+
+func (s *Store) replaceBoardConditionalReceiptTx(tx *sql.Tx, user string, b board.Board, canonicalIDs []*string, condition BoardWriteCondition, operationID, requestHash string, allowNewReceipt bool) ([]string, int64, bool, error) {
+	taskIDs, revision, replayed, err := loadBoardWriteReceiptTx(tx, user, operationID, requestHash)
+	if err != nil || replayed {
+		return taskIDs, revision, replayed, err
+	}
+	if revision, err = evaluateBoardWriteConditionTx(tx, user, condition, true); err != nil {
+		return nil, revision, false, err
+	}
+	if !validNewReceipt(operationID, allowNewReceipt) {
+		return nil, revision, false, ErrInvalidTaskIDs
+	}
+	taskIDs, err = s.replaceBoardTx(tx, user, b, canonicalIDs)
+	if err != nil {
+		return nil, revision, false, err
+	}
+	if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); err != nil {
+		return nil, 0, false, fmt.Errorf("store: committed board revision: %w", err)
+	}
+	if err := insertBoardWriteReceiptTx(tx, user, operationID, requestHash, taskIDs, revision); err != nil {
+		return nil, revision, false, err
+	}
+	return taskIDs, revision, false, nil
+}
+
+func loadBoardWriteReceiptTx(tx *sql.Tx, user, operationID, requestHash string) ([]string, int64, bool, error) {
+	if operationID == "" {
+		return nil, 0, false, nil
+	}
+	var storedHash, encoded string
+	var revision int64
+	err := tx.QueryRow(`SELECT request_hash, task_ids, revision FROM board_write_receipts WHERE user = ? AND operation_id = ?`, user, operationID).
+		Scan(&storedHash, &encoded, &revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, 0, false, nil
+	}
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("store: read board write receipt: %w", err)
+	}
+	var taskIDs []string
+	if storedHash != requestHash || json.Unmarshal([]byte(encoded), &taskIDs) != nil {
+		return nil, 0, false, ErrInvalidTaskIDs
+	}
+	return taskIDs, revision, true, nil
+}
+
+func evaluateBoardWriteConditionTx(tx *sql.Tx, user string, condition BoardWriteCondition, claim bool) (int64, error) {
+	if err := initializeBoardRevisionTx(tx, user); err != nil {
+		return 0, err
+	}
+	revision, err := currentBoardRevisionTx(tx, user)
+	if err != nil {
+		return 0, err
+	}
+	if condition.Star {
+		exists, err := boardExistsTx(tx, user)
+		if err != nil {
+			return 0, err
+		}
+		if !exists {
+			return revision, &RevisionConflictError{CurrentRevision: revision}
+		}
+		return revision, nil
+	}
+	if !condition.Present || revisionAllowed(revision, condition.Revisions) {
+		if condition.Present && claim {
+			return claimBoardRevisionTx(tx, user, revision)
+		}
+		return revision, nil
+	}
+	return revision, &RevisionConflictError{CurrentRevision: revision}
+}
+
+func initializeBoardRevisionTx(tx *sql.Tx, user string) error {
+	if _, err := tx.Exec(`INSERT INTO board_revisions(user, revision) VALUES (?, 0) ON CONFLICT(user) DO NOTHING`, user); err != nil {
+		return fmt.Errorf("store: initialize board revision: %w", err)
+	}
+	return nil
+}
+
+func currentBoardRevisionTx(tx *sql.Tx, user string) (int64, error) {
+	var revision int64
+	if err := tx.QueryRow(`SELECT revision FROM board_revisions WHERE user = ?`, user).Scan(&revision); err != nil {
+		return 0, fmt.Errorf("store: current board revision: %w", err)
+	}
+	return revision, nil
+}
+
+func boardExistsTx(tx *sql.Tx, user string) (bool, error) {
+	var exists int
+	if err := tx.QueryRow(`SELECT CASE WHEN EXISTS(SELECT 1 FROM tasks WHERE user = ?) OR EXISTS(SELECT 1 FROM meta WHERE k = ?) THEN 1 ELSE 0 END`, user, titleKey(user)).Scan(&exists); err != nil {
+		return false, fmt.Errorf("store: inspect board existence: %w", err)
+	}
+	return exists != 0, nil
+}
+
+func revisionAllowed(revision int64, allowed []int64) bool {
+	for _, candidate := range allowed {
+		if revision == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func claimBoardRevisionTx(tx *sql.Tx, user string, revision int64) (int64, error) {
+	result, err := tx.Exec(`UPDATE board_revisions SET revision = revision + 1 WHERE user = ? AND revision = ?`, user, revision)
+	if err != nil {
+		return revision, fmt.Errorf("store: claim board revision: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return revision, fmt.Errorf("store: inspect board revision claim: %w", err)
+	}
+	if n == 1 {
+		return revision, nil
+	}
+	current, err := currentBoardRevisionTx(tx, user)
+	if err != nil {
+		return 0, err
+	}
+	return current, &RevisionConflictError{CurrentRevision: current}
+}
+
+func validNewReceipt(operationID string, allowNewReceipt bool) bool {
+	return (operationID == "" && !allowNewReceipt) || (operationID != "" && allowNewReceipt)
+}
+
+func insertBoardWriteReceiptTx(tx *sql.Tx, user, operationID, requestHash string, taskIDs []string, revision int64) error {
+	if operationID == "" {
+		return nil
+	}
+	encoded, err := json.Marshal(taskIDs)
+	if err != nil {
+		return fmt.Errorf("store: encode board write receipt: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO board_write_receipts(user, operation_id, request_hash, task_ids, revision) VALUES (?, ?, ?, ?, ?)`, user, operationID, requestHash, string(encoded), revision); err != nil {
+		return fmt.Errorf("store: insert board write receipt: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) replaceBoardTx(tx *sql.Tx, user string, b board.Board, canonicalIDs []*string) ([]string, error) {
