@@ -10,6 +10,8 @@ const state = vi.hoisted(() => ({
   identity: null as Identity | null,
   resolveIdentity: null as Identity | null,
   resolveError: null as unknown,
+  resolveDeferred: null as Promise<Identity> | null,
+  resolveCalls: 0,
   board: null as Board | null,
   importBoard: null as Board | null,
   importError: false,
@@ -99,6 +101,8 @@ vi.mock('./lib/auth', () => {
       state.identity = null;
     },
     resolveAzureIdentity: async () => {
+      state.resolveCalls += 1;
+      if (state.resolveDeferred) return state.resolveDeferred;
       if (state.resolveError) throw state.resolveError;
       if (!state.resolveIdentity) throw new Error('no restored identity configured');
       return state.resolveIdentity;
@@ -422,7 +426,7 @@ vi.mock('./components/Board', () => ({
     const moving = tasks.find((item) => item.id === id);
     if (!moving) return tasks;
     const rest = tasks.filter((item) => item.id !== id);
-    const next = { ...moving, status, movedAt };
+    const next = moving.status === status ? moving : { ...moving, status, movedAt };
     const positions = rest.reduce<number[]>((all, item, i) => {
       if (item.status === status) all.push(i);
       return all;
@@ -440,7 +444,7 @@ vi.mock('./components/Board', () => ({
     onPurge,
   }: {
     board: Board;
-    onMove: (id: string, status: Task['status']) => void;
+    onMove: (id: string, status: Task['status'], index?: number) => void;
     onTick: (id: string, index: number, pos: { x: number; y: number }) => void;
     onEdit: (id: string) => void;
     onAdd: (status: Task['status']) => void;
@@ -458,6 +462,7 @@ vi.mock('./components/Board', () => ({
           <button onClick={() => onEdit(item.id)}>edit {item.id}</button>
           <button onClick={() => onMove(item.id, 'doing')}>move doing {item.id}</button>
           <button onClick={() => onMove(item.id, 'done')}>move done {item.id}</button>
+          <button onClick={() => onMove(item.id, item.status, 0)}>keep {item.id} in same slot</button>
           <button onClick={() => onTick(item.id, 0, { x: 2, y: 3 })}>tick {item.id}</button>
           <button onClick={() => onTick(item.id, 99, { x: 2, y: 3 })}>tick invalid {item.id}</button>
           <button onClick={() => onRestore(item.id)}>restore {item.id}</button>
@@ -552,6 +557,8 @@ beforeEach(() => {
   state.identity = manual;
   state.resolveIdentity = null;
   state.resolveError = null;
+  state.resolveDeferred = null;
+  state.resolveCalls = 0;
   state.board = board();
   state.importBoard = null;
   state.importError = false;
@@ -638,6 +645,24 @@ describe('App DOM orchestration', () => {
     );
   });
 
+  it('ignores resolved Azure identity after unmount', async () => {
+    const azureIdentity: Identity = { kind: 'azure', id: 'alice@example.com' };
+    const resolvedIdentity: Identity = {
+      ...azureIdentity,
+      name: 'Alice Azure',
+      homeAccountId: 'home-1',
+    };
+    let resolveIdentity!: (identity: Identity) => void;
+    state.identity = azureIdentity;
+    state.resolveDeferred = new Promise((resolve) => { resolveIdentity = resolve; });
+
+    const resolved = render(<App />);
+    expect(state.resolveCalls).toBe(1);
+    resolved.unmount();
+    await act(async () => { resolveIdentity(resolvedIdentity); });
+    expect(state.savedIdentities).toEqual([]);
+  });
+
   it('adds, edits, moves, checks, ships, cancels, restores, and purges cards', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -720,6 +745,16 @@ describe('App DOM orchestration', () => {
     await user.clear(screen.getByRole('textbox', { name: 'confirm input' }));
     await user.click(screen.getByRole('button', { name: 'confirm action' }));
     expect(await screen.findByText(/First task:cancelled:false,false/)).not.toBeNull();
+  });
+
+  it('does not persist an indexed same-slot move', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole('button', { name: 'keep task-1 in same slot' }));
+
+    expect(state.dirtyWrites).toEqual([]);
+    expect(screen.getByText(/First task:todo:false/)).not.toBeNull();
   });
 
   it('blocks restore when its durable tombstone cannot be removed', async () => {
