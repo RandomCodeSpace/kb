@@ -3,44 +3,73 @@ package mcpserv
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"modernc.org/sqlite"
 )
+
+const duplicateCheckUser = "tester"
 
 func TestDuplicateCheckFiltersWeakSimilarityAndKeepsRankedMatches(t *testing.T) {
 	_, st := connectWithStore(t)
-	weak, err := st.AddTask("tester", board.Task{Title: "Add SSO login for the admin portal"})
-	if err != nil {
-		t.Fatalf("seed weak candidate: %v", err)
+	const query = "dark mode toggle"
+	fixtures := []struct {
+		title    string
+		accepted bool
+	}{
+		{title: "dark mode toggle", accepted: true},
+		{title: "dark mode preferences", accepted: true},
+		{title: "dark account billing", accepted: false},
 	}
-	strong, err := st.AddTask("tester", board.Task{Title: "Add dark mode toggle"})
-	if err != nil {
-		t.Fatalf("seed strong candidate: %v", err)
+	ids := make([]string, len(fixtures))
+	for i, fixture := range fixtures {
+		score := store.Similarity(query, fixture.title)
+		if fixture.accepted != (score >= store.SimilarityFloor) {
+			t.Fatalf("fixture %q score=%v floor=%v accepted=%v", fixture.title, score, store.SimilarityFloor, fixture.accepted)
+		}
+		added, err := st.AddTask(duplicateCheckUser, board.Task{Title: fixture.title})
+		if err != nil {
+			t.Fatalf("seed candidate %q: %v", fixture.title, err)
+		}
+		ids[i] = added.ID
 	}
-	k := &kb{st: st, user: "tester"}
+	if high, low := store.Similarity(query, fixtures[0].title), store.Similarity(query, fixtures[1].title); high <= low {
+		t.Fatalf("accepted fixture scores high=%v low=%v, want distinct descending scores", high, low)
+	}
+	before, err := st.ReadBoardSnapshot(duplicateCheckUser)
+	if err != nil {
+		t.Fatalf("snapshot before: %v", err)
+	}
+	k := &kb{st: st, user: duplicateCheckUser}
 
-	_, out, err := k.duplicateCheck(context.Background(), nil, duplicateCheckInput{Title: "dark mode toggle"})
+	_, out, err := k.duplicateCheck(context.Background(), nil, duplicateCheckInput{Title: query})
 	if err != nil {
 		t.Fatalf("duplicateCheck: %v", err)
 	}
-	if len(out.Candidates) != 1 || out.Candidates[0].ID != strong.ID {
-		t.Fatalf("candidates = %+v, want ranked strong match %q only; weak=%q", out.Candidates, strong.ID, weak.ID)
+	if len(out.Candidates) != 2 || out.Candidates[0].ID != ids[0] || out.Candidates[1].ID != ids[1] {
+		t.Fatalf("candidates = %+v, want exact order [%q %q] and filtered %q", out.Candidates, ids[0], ids[1], ids[2])
+	}
+	if after, err := st.ReadBoardSnapshot(duplicateCheckUser); err != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("duplicate check mutated board: before=%+v after=%+v err=%v", before, after, err)
 	}
 }
 
 func TestDuplicateCheckEmptyInputReturnsEmptyCandidatesWithoutMutation(t *testing.T) {
 	_, st := connectWithStore(t)
-	if _, err := st.AddTask("tester", board.Task{Title: "Existing"}); err != nil {
+	if _, err := st.AddTask(duplicateCheckUser, board.Task{Title: "Existing"}); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	before, err := st.ReadBoardSnapshot("tester")
+	before, err := st.ReadBoardSnapshot(duplicateCheckUser)
 	if err != nil {
 		t.Fatalf("snapshot before: %v", err)
 	}
-	k := &kb{st: st, user: "tester"}
+	k := &kb{st: st, user: duplicateCheckUser}
 
 	_, out, err := k.duplicateCheck(context.Background(), nil, duplicateCheckInput{})
 	if err != nil {
@@ -49,11 +78,11 @@ func TestDuplicateCheckEmptyInputReturnsEmptyCandidatesWithoutMutation(t *testin
 	if out.Candidates == nil || len(out.Candidates) != 0 {
 		t.Fatalf("empty candidates = %#v, want non-nil empty slice", out.Candidates)
 	}
-	after, err := st.ReadBoardSnapshot("tester")
+	after, err := st.ReadBoardSnapshot(duplicateCheckUser)
 	if err != nil {
 		t.Fatalf("snapshot after: %v", err)
 	}
-	if after.Revision != before.Revision || len(after.Board.Tasks) != 1 || after.Board.Tasks[0].ID != before.Board.Tasks[0].ID {
+	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("duplicate check mutated board: before=%+v after=%+v", before, after)
 	}
 }
@@ -65,10 +94,10 @@ func TestDuplicateCheckSearchErrorReturnsNoPartialCandidatesOrMutation(t *testin
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	if _, err := st.AddTask("tester", board.Task{Title: "Exact candidate", Tags: []string{"link::issue#1"}}); err != nil {
+	if _, err := st.AddTask(duplicateCheckUser, board.Task{Title: "Exact candidate", Tags: []string{"link::issue#1"}}); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	before, err := st.ReadBoardSnapshot("tester")
+	before, err := st.ReadBoardSnapshot(duplicateCheckUser)
 	if err != nil {
 		t.Fatalf("snapshot before: %v", err)
 	}
@@ -83,7 +112,7 @@ func TestDuplicateCheckSearchErrorReturnsNoPartialCandidatesOrMutation(t *testin
 	if err := db.Close(); err != nil {
 		t.Fatalf("close fixture database: %v", err)
 	}
-	k := &kb{st: st, user: "tester"}
+	k := &kb{st: st, user: duplicateCheckUser}
 
 	_, out, err := k.duplicateCheck(context.Background(), nil, duplicateCheckInput{
 		Title: "Exact candidate",
@@ -92,14 +121,21 @@ func TestDuplicateCheckSearchErrorReturnsNoPartialCandidatesOrMutation(t *testin
 	if err == nil {
 		t.Fatal("duplicateCheck hid the similarity search error")
 	}
+	if !strings.Contains(err.Error(), "store: search tasks:") {
+		t.Fatalf("duplicateCheck error = %q, want search wrapper", err)
+	}
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) || sqliteErr.Code() != 1 {
+		t.Fatalf("duplicateCheck error = %v, want wrapped SQLite error code 1", err)
+	}
 	if out.Candidates != nil {
 		t.Fatalf("error returned partial candidates: %+v", out.Candidates)
 	}
-	after, snapshotErr := st.ReadBoardSnapshot("tester")
+	after, snapshotErr := st.ReadBoardSnapshot(duplicateCheckUser)
 	if snapshotErr != nil {
 		t.Fatalf("snapshot after: %v", snapshotErr)
 	}
-	if after.Revision != before.Revision || len(after.Board.Tasks) != 1 || after.Board.Tasks[0].ID != before.Board.Tasks[0].ID {
+	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("failed duplicate check mutated board: before=%+v after=%+v", before, after)
 	}
 }

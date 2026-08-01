@@ -1,10 +1,13 @@
 package cliapp
 
 import (
+	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -29,6 +32,23 @@ func readLocalSnapshot(t *testing.T, dir string) store.BoardSnapshot {
 	return snapshot
 }
 
+func decodeExactJSONList(t *testing.T, stdout string) []taskJSON {
+	t.Helper()
+	var tasks []taskJSON
+	if err := json.Unmarshal([]byte(stdout), &tasks); err != nil {
+		t.Fatalf("decode JSON list %q: %v", stdout, err)
+	}
+	want, err := json.MarshalIndent(tasks, "", "  ")
+	if err != nil {
+		t.Fatalf("encode expected JSON list: %v", err)
+	}
+	want = append(want, '\n')
+	if stdout != string(want) {
+		t.Fatalf("JSON list output = %q, want exact %q", stdout, want)
+	}
+	return tasks
+}
+
 func TestAddRejectsConflictingBlockedFlagsWithoutMutation(t *testing.T) {
 	dir := localEnv(t)
 	if _, stderr, code := runCmd(t, "add", "Existing", "--data", dir); code != 0 {
@@ -41,7 +61,7 @@ func TestAddRejectsConflictingBlockedFlagsWithoutMutation(t *testing.T) {
 		t.Fatalf("conflicting flags: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	after := readLocalSnapshot(t, dir)
-	if after.Revision != before.Revision || len(after.Board.Tasks) != 1 || after.Board.Tasks[0].Title != "Existing" {
+	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("rejected add mutated board: before=%+v after=%+v", before, after)
 	}
 }
@@ -58,9 +78,17 @@ func TestListStatusFilterTakesPrecedenceOverAll(t *testing.T) {
 		}
 	}
 
-	tasks := listJSON(t, "--all", "--status", "doing", "--data", dir)
+	before := readLocalSnapshot(t, dir)
+	stdout, stderr, code := runCmd(t, "list", "--json", "--all", "--status", "doing", "--data", dir)
+	if code != 0 || stderr != "" {
+		t.Fatalf("combined list filters: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	tasks := decodeExactJSONList(t, stdout)
 	if len(tasks) != 1 || tasks[0].Title != "Doing" {
 		t.Fatalf("combined filters returned %+v, want only Doing", tasks)
+	}
+	if after := readLocalSnapshot(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatalf("combined list filters mutated board: before=%+v after=%+v", before, after)
 	}
 }
 
@@ -77,7 +105,12 @@ func TestListAllPreservesColumnThenInsertionOrder(t *testing.T) {
 		}
 	}
 
-	tasks := listJSON(t, "--all", "--data", dir)
+	before := readLocalSnapshot(t, dir)
+	stdout, stderr, code := runCmd(t, "list", "--json", "--all", "--data", dir)
+	if code != 0 || stderr != "" {
+		t.Fatalf("ordered list: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	tasks := decodeExactJSONList(t, stdout)
 	got := make([]string, 0, len(tasks))
 	for _, task := range tasks {
 		got = append(got, task.Title)
@@ -85,6 +118,9 @@ func TestListAllPreservesColumnThenInsertionOrder(t *testing.T) {
 	want := []string{"Todo first", "Todo second", "Doing first", "Cancelled first"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("list order = %v, want %v", got, want)
+	}
+	if after := readLocalSnapshot(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatalf("ordered list mutated board: before=%+v after=%+v", before, after)
 	}
 }
 
@@ -101,12 +137,15 @@ func TestUpdateClearsScalarFieldsWithoutChangingIdentity(t *testing.T) {
 		t.Fatalf("clear update: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	after := readLocalSnapshot(t, dir)
-	got := after.Board.Tasks[0]
-	if got.ID != id || got.Desc != "" || got.Due != "" || got.Effort != "" || got.Emoji != "" {
-		t.Fatalf("cleared task = %+v, want same identity and empty scalar fields", got)
-	}
-	if after.Revision != before.Revision+1 {
-		t.Fatalf("clear update revision = %d, want %d", after.Revision, before.Revision+1)
+	want := before
+	want.Board.Tasks = append([]board.Task(nil), before.Board.Tasks...)
+	want.Board.Tasks[0].Desc = ""
+	want.Board.Tasks[0].Due = ""
+	want.Board.Tasks[0].Effort = ""
+	want.Board.Tasks[0].Emoji = ""
+	want.Revision++
+	if !reflect.DeepEqual(after, want) {
+		t.Fatalf("cleared snapshot = %+v, want %+v", after, want)
 	}
 }
 
@@ -119,12 +158,12 @@ func TestUpdateCompletionRefusalLeavesRevisionUnchanged(t *testing.T) {
 	id := before.Board.Tasks[0].ID
 
 	stdout, stderr, code := runCmd(t, "update", id[:8], "--status", "done", "--title", "Should not persist", "--data", dir)
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "1 of 1 checklist items are still open") {
+	wantError := "kb: 1 of 1 checklist items are still open on " + id[:8] + " \"Should not persist\"; re-run with --force to finish it anyway\n"
+	if code != 1 || stdout != "" || stderr != wantError {
 		t.Fatalf("guarded update: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	after := readLocalSnapshot(t, dir)
-	got := after.Board.Tasks[0]
-	if after.Revision != before.Revision || got.ID != id || got.Title != "Guarded" || got.Status != "todo" {
+	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("refused update mutated board: before=%+v after=%+v", before, after)
 	}
 }
