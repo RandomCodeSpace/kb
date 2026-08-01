@@ -301,43 +301,13 @@ func createSecret(dataDir, path string, random io.Reader, beforePublish func() e
 		return nil, fmt.Errorf("store: generate secret: %w", err)
 	}
 
-	temp, err := createSecretTemp(dataDir, secretTempPattern)
+	candidate, err := newSecretCandidate(dataDir)
 	if err != nil {
-		return nil, fmt.Errorf("store: create secret temp file: %w", err)
+		return nil, err
 	}
-	tempPath := temp.Name()
-	tempRemoved := false
-	defer func() {
-		if !tempRemoved {
-			_ = removeSecretFile(tempPath)
-		}
-	}()
-	removeTemp := func() error {
-		err := removeSecretFile(tempPath)
-		if err == nil || errors.Is(err, fs.ErrNotExist) {
-			tempRemoved = true
-			return nil
-		}
-		return err
-	}
-
-	if n, err := temp.Write(b); err != nil {
-		temp.Close()
-		return nil, fmt.Errorf("store: write secret temp file: %w", err)
-	} else if n != len(b) {
-		temp.Close()
-		return nil, fmt.Errorf("store: write secret temp file: %w", io.ErrShortWrite)
-	}
-	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
-		return nil, fmt.Errorf("store: chmod secret temp file: %w", err)
-	}
-	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return nil, fmt.Errorf("store: sync secret temp file: %w", err)
-	}
-	if err := temp.Close(); err != nil {
-		return nil, fmt.Errorf("store: close secret temp file: %w", err)
+	defer candidate.cleanup()
+	if err := candidate.prepare(b); err != nil {
+		return nil, err
 	}
 
 	if beforePublish != nil {
@@ -345,36 +315,98 @@ func createSecret(dataDir, path string, random io.Reader, beforePublish func() e
 			return nil, fmt.Errorf("store: before secret publication: %w", err)
 		}
 	}
-	if err := linkSecretFile(tempPath, path); err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			if removeErr := removeTemp(); removeErr != nil {
-				return nil, fmt.Errorf("store: remove secret temp file: %w", removeErr)
-			}
-			winner, readErr := readSecretFile(path)
-			if readErr != nil {
-				return nil, fmt.Errorf("store: read secret: %w", readErr)
-			}
-			if len(winner) < secretFileBytes {
-				return nil, fmt.Errorf("store: secret file %s is %d bytes, want at least %d: delete it to generate a new one (any stored AI keys become unreadable) or restore it from a backup",
-					path, len(winner), secretFileBytes)
-			}
-			return winner, nil
-		}
-		return nil, fmt.Errorf("store: publish secret: %w", err)
+	if err := linkSecretFile(candidate.path, path); err != nil {
+		return candidate.adoptWinner(path, err)
 	}
-	dir, err := openSecretDir(dataDir)
-	if err != nil {
-		return nil, fmt.Errorf("store: open data dir for sync: %w", err)
+	if err := syncSecretDirectory(dataDir); err != nil {
+		return nil, err
 	}
-	if err := dir.Sync(); err != nil {
-		dir.Close()
-		return nil, fmt.Errorf("store: sync data dir: %w", err)
-	}
-	if err := dir.Close(); err != nil {
-		return nil, fmt.Errorf("store: close data dir: %w", err)
-	}
-	if err := removeTemp(); err != nil {
+	if err := candidate.remove(); err != nil {
 		return nil, fmt.Errorf("store: remove secret temp file: %w", err)
 	}
 	return b, nil
+}
+
+type secretCandidate struct {
+	file    secretTempFile
+	path    string
+	removed bool
+}
+
+func newSecretCandidate(dataDir string) (*secretCandidate, error) {
+	file, err := createSecretTemp(dataDir, secretTempPattern)
+	if err != nil {
+		return nil, fmt.Errorf("store: create secret temp file: %w", err)
+	}
+	return &secretCandidate{file: file, path: file.Name()}, nil
+}
+
+func (candidate *secretCandidate) prepare(secret []byte) error {
+	if n, err := candidate.file.Write(secret); err != nil {
+		candidate.file.Close()
+		return fmt.Errorf("store: write secret temp file: %w", err)
+	} else if n != len(secret) {
+		candidate.file.Close()
+		return fmt.Errorf("store: write secret temp file: %w", io.ErrShortWrite)
+	}
+	if err := candidate.file.Chmod(0o600); err != nil {
+		candidate.file.Close()
+		return fmt.Errorf("store: chmod secret temp file: %w", err)
+	}
+	if err := candidate.file.Sync(); err != nil {
+		candidate.file.Close()
+		return fmt.Errorf("store: sync secret temp file: %w", err)
+	}
+	if err := candidate.file.Close(); err != nil {
+		return fmt.Errorf("store: close secret temp file: %w", err)
+	}
+	return nil
+}
+
+func (candidate *secretCandidate) cleanup() {
+	if !candidate.removed {
+		_ = removeSecretFile(candidate.path)
+	}
+}
+
+func (candidate *secretCandidate) remove() error {
+	err := removeSecretFile(candidate.path)
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		candidate.removed = true
+		return nil
+	}
+	return err
+}
+
+func (candidate *secretCandidate) adoptWinner(path string, publishErr error) ([]byte, error) {
+	if !errors.Is(publishErr, fs.ErrExist) {
+		return nil, fmt.Errorf("store: publish secret: %w", publishErr)
+	}
+	if err := candidate.remove(); err != nil {
+		return nil, fmt.Errorf("store: remove secret temp file: %w", err)
+	}
+	winner, err := readSecretFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("store: read secret: %w", err)
+	}
+	if len(winner) < secretFileBytes {
+		return nil, fmt.Errorf("store: secret file %s is %d bytes, want at least %d: delete it to generate a new one (any stored AI keys become unreadable) or restore it from a backup",
+			path, len(winner), secretFileBytes)
+	}
+	return winner, nil
+}
+
+func syncSecretDirectory(dataDir string) error {
+	dir, err := openSecretDir(dataDir)
+	if err != nil {
+		return fmt.Errorf("store: open data dir for sync: %w", err)
+	}
+	if err := dir.Sync(); err != nil {
+		dir.Close()
+		return fmt.Errorf("store: sync data dir: %w", err)
+	}
+	if err := dir.Close(); err != nil {
+		return fmt.Errorf("store: close data dir: %w", err)
+	}
+	return nil
 }
