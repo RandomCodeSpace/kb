@@ -375,7 +375,7 @@ export class MetadataOutbox {
       const key = this.storage.key(i);
       if (key && namespaceStorageSuffix(PREFIX, this.ns, key) !== null) keys.push(key);
     }
-    return keys.sort();
+    return keys.sort((left, right) => left.localeCompare(right));
   }
 
   private async locked<T>(fn: () => T | Promise<T>): Promise<T | undefined> {

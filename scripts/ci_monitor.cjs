@@ -5,7 +5,7 @@
 
 const { execFileSync, spawnSync } = require('node:child_process');
 const { existsSync, readFileSync, readdirSync } = require('node:fs');
-const { join } = require('node:path');
+const { isAbsolute, join } = require('node:path');
 
 const HELP = `usage: node scripts/ci_monitor.cjs <command> [arguments]
 
@@ -28,6 +28,12 @@ function die(message) {
   process.exit(2);
 }
 
+function executable(envName, fallback) {
+  const value = process.env[envName] || fallback;
+  if (!isAbsolute(value)) die(`${envName} must be an absolute path`);
+  return value;
+}
+
 function extractOption(args, name, fallback) {
   const index = args.indexOf(name);
   if (index < 0) return fallback;
@@ -45,7 +51,11 @@ function repository(args) {
   }
   let remote;
   try {
-    remote = execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim();
+    remote = execFileSync(
+      executable('CI_MONITOR_GIT', '/usr/bin/git'),
+      ['remote', 'get-url', 'origin'],
+      { encoding: 'utf8' },
+    ).trim();
   } catch {
     die('cannot detect repository; pass --repo OWNER/REPO');
   }
@@ -55,8 +65,7 @@ function repository(args) {
 }
 
 function gh(repo, args, capture = false) {
-  const executable = process.env.CI_MONITOR_GH || 'gh';
-  const result = spawnSync(executable, [...args, '-R', repo], {
+  const result = spawnSync(executable('CI_MONITOR_GH', '/usr/bin/gh'), [...args, '-R', repo], {
     encoding: 'utf8',
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
   });
