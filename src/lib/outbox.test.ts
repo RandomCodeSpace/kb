@@ -228,6 +228,134 @@ describe('MetadataOutbox', () => {
     expect(JSON.stringify([...storage.values])).not.toContain('secret');
   });
 
+  it('serializes only validated import fields and never invokes caller serialization hooks', async () => {
+    const toJSON = vi.fn(() => ({ poisoned: true }));
+    const item = {
+      ...importRequest.items[0],
+      ignored: 'attacker-controlled extra field',
+      toJSON,
+    };
+    const outbox = new MetadataOutbox('alice', {
+      storage, locks: locks as unknown as LockManager, generation: generations(),
+    });
+
+    await outbox.enqueueImportLinks({ source: importRequest.source, items: [item] });
+
+    expect(toJSON).not.toHaveBeenCalled();
+    expect(outbox.records()).toEqual([{
+      version: 1,
+      generation: 'generation-1',
+      kind: 'import',
+      state: 'queued',
+      source: importRequest.source,
+      item: importRequest.items[0],
+    }]);
+    expect(JSON.stringify([...storage.values])).not.toContain('ignored');
+    expect(JSON.stringify([...storage.values])).not.toContain('poisoned');
+  });
+
+  it.each([
+    ['non-object request', null],
+    ['blank source', { ...importRequest, source: '   ' }],
+    ['non-array items', { ...importRequest, items: {} }],
+    ['too many items', { ...importRequest, items: Array(101).fill(importRequest.items[0]) }],
+    ['non-object item', { ...importRequest, items: [null] }],
+    ['blank field', {
+      ...importRequest,
+      items: [{ ...importRequest.items[0], link: ' ' }],
+    }],
+    ['line break', {
+      ...importRequest,
+      items: [{ ...importRequest.items[0], title: 'forged\nmetadata' }],
+    }],
+    ['carriage return', {
+      ...importRequest,
+      items: [{ ...importRequest.items[0], link: 'forged\rmetadata' }],
+    }],
+    ['oversized external key', {
+      ...importRequest,
+      items: [{ ...importRequest.items[0], external_key: 'é'.repeat(1025) }],
+    }],
+    ['oversized URL', {
+      ...importRequest,
+      items: [{ ...importRequest.items[0], url: 'é'.repeat(1025) }],
+    }],
+    ['oversized title', {
+      ...importRequest,
+      items: [{ ...importRequest.items[0], title: 'é'.repeat(251) }],
+    }],
+    ['non-string field', {
+      ...importRequest,
+      items: [{ ...importRequest.items[0], url: 7 }],
+    }],
+  ])('rejects invalid import metadata atomically: %s', async (_label, request) => {
+    const outbox = new MetadataOutbox('alice', {
+      storage, locks: locks as unknown as LockManager, generation: generations(),
+    });
+
+    await expect(outbox.enqueueImportLinks(
+      request as unknown as Parameters<MetadataOutbox['enqueueImportLinks']>[0],
+    )).rejects.toThrow('invalid outbox');
+    expect(storage.values.size).toBe(0);
+  });
+
+  it('sanitizes server-controlled error metadata before persisting it', async () => {
+    const malicious = `invalid\r\n${'x'.repeat(300)}`;
+    const statuses = vi.fn();
+    const outbox = new MetadataOutbox('alice', {
+      storage,
+      locks: locks as unknown as LockManager,
+      generation: generations(),
+      sendImport: () => Promise.reject(Object.assign(new Error(malicious), { status: 400 })),
+      onStatus: statuses,
+    });
+
+    await outbox.enqueueImportLinks(importRequest);
+    await outbox.drain(identity);
+
+    expect(outbox.records()[0]).toMatchObject({
+      state: 'blocked',
+      error: expect.not.stringContaining('\n'),
+    });
+    expect(outbox.records()[0]?.error).toHaveLength(200);
+    expect(statuses).toHaveBeenCalledWith({ kind: 'blocked', message: malicious });
+  });
+
+  it('omits empty or non-string error metadata from durable records', async () => {
+    const emptyError = new MetadataOutbox('alice', {
+      storage,
+      locks: locks as unknown as LockManager,
+      generation: generations(),
+      sendImport: () => Promise.reject(Object.assign(new Error(''), { status: 400 })),
+    });
+    await emptyError.enqueueImportLinks(importRequest);
+    await emptyError.drain(identity);
+    expect(emptyError.records()[0]).not.toHaveProperty('error');
+
+    const key = [...storage.values.keys()][0]!;
+    storage.setItem(key, JSON.stringify({
+      ...JSON.parse(storage.getItem(key)!),
+      state: 'sending',
+      error: 7,
+    }));
+    await emptyError.reconcile(cancelled, new Map());
+    expect(emptyError.records()[0]).toMatchObject({ state: 'retry' });
+    expect(emptyError.records()[0]).not.toHaveProperty('error');
+  });
+
+  it.each([
+    ['blank task id', ' ', 'valid reason'],
+    ['line break in reason', 'client-1', 'forged\nmetadata'],
+    ['oversized reason', 'client-1', 'é'.repeat(1001)],
+  ])('rejects invalid tombstone metadata before storage: %s', async (_label, taskId, reason) => {
+    const outbox = new MetadataOutbox('alice', {
+      storage, locks: locks as unknown as LockManager, generation: generations(),
+    });
+
+    await expect(outbox.enqueueTombstone(taskId, reason)).rejects.toThrow('invalid outbox');
+    expect(storage.values.size).toBe(0);
+  });
+
   it.each([
     ['2xx', undefined],
     ['network', new TypeError('offline')],
@@ -364,6 +492,88 @@ describe('MetadataOutbox', () => {
     expect([...storage.values.keys()]).toContain(
       `kb.outbox.v1.alice.work.${encodeURIComponent('tombstone:work-task')}`,
     );
+  });
+
+  it('canonicalizes legacy records instead of copying attacker-controlled fields', () => {
+    const logicalKey = `import:${importRequest.items[0]!.external_key}`;
+    const legacyKey = `kb.outbox.v1.alice.${encodeURIComponent(logicalKey)}`;
+    storage.values.set(legacyKey, JSON.stringify({
+      version: 1,
+      generation: 'legacy-generation',
+      kind: 'import',
+      state: 'queued',
+      source: importRequest.source,
+      item: {
+        ...importRequest.items[0],
+        ignored: 'attacker-controlled extra field',
+        toJSON: { poisoned: true },
+      },
+      ignored: 'attacker-controlled record field',
+    }));
+
+    const outbox = new MetadataOutbox('alice', {
+      storage, locks: locks as unknown as LockManager, generation: generations(),
+    });
+
+    expect(outbox.records()).toEqual([{
+      version: 1,
+      generation: 'legacy-generation',
+      kind: 'import',
+      state: 'queued',
+      source: importRequest.source,
+      item: importRequest.items[0],
+    }]);
+    const migrated = [...storage.values.entries()].find(([key]) => key !== legacyKey);
+    expect(migrated).toBeDefined();
+    expect(migrated![1]).not.toContain('ignored');
+    expect(migrated![1]).not.toContain('toJSON');
+    expect(migrated![1]).not.toContain('poisoned');
+  });
+
+  it.each([
+    ['line break', { ...importRequest.items[0], title: 'forged\nmetadata' }],
+    ['oversized URL', { ...importRequest.items[0], url: 'é'.repeat(1025) }],
+  ])('retains but does not migrate invalid legacy metadata: %s', (_label, item) => {
+    const logicalKey = `import:${item.external_key}`;
+    const legacyKey = `kb.outbox.v1.alice.${encodeURIComponent(logicalKey)}`;
+    const raw = JSON.stringify({
+      version: 1,
+      generation: 'legacy-generation',
+      kind: 'import',
+      state: 'queued',
+      source: importRequest.source,
+      item,
+    });
+    storage.values.set(legacyKey, raw);
+
+    const outbox = new MetadataOutbox('alice', {
+      storage, locks: locks as unknown as LockManager, generation: generations(),
+    });
+
+    expect(outbox.records()).toEqual([]);
+    expect(storage.values).toEqual(new Map([[legacyKey, raw]]));
+  });
+
+  it('retains a valid legacy record when canonical migration storage fails', () => {
+    const logicalKey = `import:${importRequest.items[0]!.external_key}`;
+    const legacyKey = `kb.outbox.v1.alice.${encodeURIComponent(logicalKey)}`;
+    const raw = JSON.stringify({
+      version: 1,
+      generation: 'legacy-generation',
+      kind: 'import',
+      state: 'queued',
+      source: importRequest.source,
+      item: importRequest.items[0],
+    });
+    storage.values.set(legacyKey, raw);
+    storage.failSet = true;
+
+    const outbox = new MetadataOutbox('alice', {
+      storage, locks: locks as unknown as LockManager, generation: generations(),
+    });
+
+    expect(outbox.records()).toEqual([]);
+    expect(storage.values).toEqual(new Map([[legacyKey, raw]]));
   });
 
   it('does not lose interleaved two-instance additions and removals', async () => {

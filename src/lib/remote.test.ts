@@ -2463,6 +2463,31 @@ describe('RemoteStore concurrency', () => {
     })).toBe(false);
   });
 
+  it.each([
+    ['mixed-case', ['server-A', 'server-a', 'Server-b']],
+    ['numeric-like', ['server-2', 'server-10', 'server-01']],
+    ['non-ASCII', ['server-ä', 'server-Ω', 'server-😀']],
+  ])('compares %s deleted canonical IDs independently of insertion order', (_kind, ids) => {
+    const value = board('unchanged');
+    const canonicalTaskIDs = new Map([[value.tasks[0]!.id, 'server-live']]);
+    const base = {
+      board: value,
+      canonicalTaskIDs,
+      deletedCanonicalIDs: new Set(ids),
+      migratedRaw: false,
+      pendingBoardWrite: null,
+    };
+
+    expect(sameBoardSemantics(base, {
+      ...base,
+      deletedCanonicalIDs: new Set([...ids].reverse()),
+    })).toBe(true);
+    expect(sameBoardSemantics(base, {
+      ...base,
+      deletedCanonicalIDs: new Set([...ids.slice(0, -1), `${ids.at(-1)}-different`]),
+    })).toBe(false);
+  });
+
   it('exposes a current-epoch guard across an awaited success callback', async () => {
     const store = new RemoteStore();
     const release = deferred<void>();

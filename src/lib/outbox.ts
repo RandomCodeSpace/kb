@@ -11,6 +11,11 @@ import {
 
 const PREFIX = 'kb.outbox.v1';
 const LOCK_PREFIX = 'kb:outbox:';
+const MAX_IMPORT_ITEMS = 100;
+const MAX_EXTERNAL_KEY_BYTES = 2048;
+const MAX_URL_BYTES = 2048;
+const MAX_TITLE_BYTES = 500;
+const MAX_REASON_BYTES = 2000;
 
 type OutboxState = 'awaiting_canonical' | 'queued' | 'sending' | 'retry' | 'blocked';
 
@@ -152,6 +157,91 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function validatedText(
+  value: unknown,
+  field: string,
+  maxBytes?: number,
+): string {
+  if (
+    typeof value !== 'string' ||
+    value.trim() === '' ||
+    value.includes('\r') ||
+    value.includes('\n') ||
+    (maxBytes !== undefined && new TextEncoder().encode(value).byteLength > maxBytes)
+  ) {
+    throw new TypeError(`invalid outbox ${field}`);
+  }
+  return value;
+}
+
+function validatedImportRequest(req: RecordImportLinksRequest): RecordImportLinksRequest {
+  if (!isRecord(req)) throw new TypeError('invalid outbox import request');
+  const source = validatedText(req.source, 'import source');
+  if (!Array.isArray(req.items) || req.items.length > MAX_IMPORT_ITEMS) {
+    throw new TypeError('invalid outbox import items');
+  }
+  const items = req.items.map((item) => {
+    if (!isRecord(item)) throw new TypeError('invalid outbox import item');
+    return {
+      external_key: validatedText(
+        item.external_key,
+        'import external key',
+        MAX_EXTERNAL_KEY_BYTES,
+      ),
+      link: validatedText(item.link, 'import link'),
+      url: validatedText(item.url, 'import URL', MAX_URL_BYTES),
+      title: validatedText(item.title, 'import title', MAX_TITLE_BYTES),
+    };
+  });
+  return { source, items };
+}
+
+function storedError(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const safe = value.replace(/[\r\n]+/g, ' ').slice(0, 200);
+  return safe === '' ? undefined : safe;
+}
+
+function validatedStorageRecord(record: OutboxRecord): OutboxRecord {
+  const generation = validatedText(record.generation, 'generation');
+  const error = storedError(record.error);
+  if (record.kind === 'import') {
+    const validated = validatedImportRequest({ source: record.source, items: [record.item] });
+    return {
+      version: 1,
+      generation,
+      kind: 'import',
+      state: record.state,
+      source: validated.source,
+      item: validated.items[0]!,
+      ...(error === undefined ? {} : { error }),
+    };
+  }
+  const clientTaskId = validatedText(record.clientTaskId, 'tombstone task ID');
+  const reason = validatedText(record.reason, 'tombstone reason', MAX_REASON_BYTES);
+  if (record.state === 'awaiting_canonical') {
+    return {
+      version: 1,
+      generation,
+      kind: 'tombstone',
+      state: 'awaiting_canonical',
+      clientTaskId,
+      reason,
+      ...(error === undefined ? {} : { error }),
+    };
+  }
+  return {
+    version: 1,
+    generation,
+    kind: 'tombstone',
+    state: record.state,
+    clientTaskId,
+    canonicalTaskId: validatedText(record.canonicalTaskId, 'canonical task ID'),
+    reason,
+    ...(error === undefined ? {} : { error }),
+  };
+}
+
 function parseRecord(raw: string | null): OutboxRecord | null {
   if (raw === null) return null;
   try {
@@ -244,8 +334,12 @@ export class MetadataOutbox {
         if (key !== expected) continue;
         const target = recordKey(this.ns, logicalKey(record));
         if (this.storage.getItem(target) === null) {
-          const raw = this.storage.getItem(key);
-          if (raw !== null) this.storage.setItem(target, raw);
+          try {
+            this.write(target, record);
+          } catch (error) {
+            if (error instanceof TypeError) continue;
+            throw error;
+          }
         }
       }
     } catch {
@@ -296,7 +390,7 @@ export class MetadataOutbox {
   }
 
   private write(key: string, record: OutboxRecord): void {
-    this.storage.setItem(key, JSON.stringify(record));
+    this.storage.setItem(key, JSON.stringify(validatedStorageRecord(record)));
   }
 
   private fresh(record: NewOutboxRecord): OutboxRecord {
@@ -309,12 +403,14 @@ export class MetadataOutbox {
 
   /** Persist the user's reason before the board PUT can acknowledge an ID. */
   async enqueueTombstone(clientTaskId: string, reason: string): Promise<boolean> {
-    const key = recordKey(this.ns, tombstoneLogicalKey(clientTaskId));
+    const safeClientTaskId = validatedText(clientTaskId, 'tombstone task ID');
+    const safeReason = validatedText(reason, 'tombstone reason', MAX_REASON_BYTES);
+    const key = recordKey(this.ns, tombstoneLogicalKey(safeClientTaskId));
     const record = this.fresh({
       kind: 'tombstone',
       state: 'awaiting_canonical',
-      clientTaskId,
-      reason,
+      clientTaskId: safeClientTaskId,
+      reason: safeReason,
     });
     const written = await this.locked(() => this.write(key, record));
     if (written === undefined && !this.locks?.request) {
@@ -326,10 +422,13 @@ export class MetadataOutbox {
   }
 
   async enqueueImportLinks(req: RecordImportLinksRequest): Promise<boolean> {
+    const validated = validatedImportRequest(req);
     const writeAll = () => {
-      for (const item of req.items) {
+      for (const item of validated.items) {
         const key = recordKey(this.ns, importLogicalKey(item.external_key));
-        this.write(key, this.fresh({ kind: 'import', state: 'queued', source: req.source, item }));
+        this.write(key, this.fresh({
+          kind: 'import', state: 'queued', source: validated.source, item,
+        }));
       }
     };
     const written = await this.locked(writeAll);
