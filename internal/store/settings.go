@@ -63,45 +63,81 @@ func (s *Store) SetAISettings(user string, baseURL, model *string, apiKey *strin
 		}
 	}
 	err = s.withTx(func(tx *sql.Tx) error {
-		var base, mdl string
-		var enc []byte
-		switch err := tx.QueryRow(`SELECT ai_base_url, ai_model, ai_key_enc FROM settings WHERE user = ?`, user).Scan(&base, &mdl, &enc); {
-		case errors.Is(err, sql.ErrNoRows):
-		case err != nil:
-			return fmt.Errorf("store: read ai settings: %w", err)
+		settings, err := readAISettingsForUpdate(tx, user)
+		if err != nil {
+			return err
 		}
-		if baseURL != nil {
-			if apiKey == nil && len(enc) > 0 && !SameAIOrigin(base, *baseURL) {
-				enc = nil
-				keyCleared = true
-			}
-			base = *baseURL
+		keyCleared, err = settings.applyPatch(s, baseURL, model, apiKey)
+		if err != nil {
+			return err
 		}
-		if model != nil {
-			mdl = *model
-		}
-		if apiKey != nil {
-			if *apiKey == "" {
-				enc = nil
-			} else {
-				sealed, err := s.seal([]byte(*apiKey))
-				if err != nil {
-					return err
-				}
-				enc = sealed
-			}
-		}
-		if _, err := tx.Exec(`INSERT INTO settings (user, ai_base_url, ai_model, ai_key_enc) VALUES (?, ?, ?, ?)
-			ON CONFLICT(user) DO UPDATE SET ai_base_url = excluded.ai_base_url, ai_model = excluded.ai_model, ai_key_enc = excluded.ai_key_enc`,
-			user, base, mdl, enc); err != nil {
-			return fmt.Errorf("store: write ai settings: %w", err)
-		}
-		return nil
+		return writeAISettings(tx, user, settings)
 	})
 	if err != nil {
 		return false, err
 	}
 	return keyCleared, nil
+}
+
+type storedAISettings struct {
+	baseURL      string
+	model        string
+	encryptedKey []byte
+}
+
+func readAISettingsForUpdate(tx *sql.Tx, user string) (storedAISettings, error) {
+	var settings storedAISettings
+	err := tx.QueryRow(`SELECT ai_base_url, ai_model, ai_key_enc FROM settings WHERE user = ?`, user).
+		Scan(&settings.baseURL, &settings.model, &settings.encryptedKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return settings, nil
+	}
+	if err != nil {
+		return storedAISettings{}, fmt.Errorf("store: read ai settings: %w", err)
+	}
+	return settings, nil
+}
+
+func (settings *storedAISettings) applyPatch(s *Store, baseURL, model, apiKey *string) (bool, error) {
+	keyCleared := settings.applyBaseURLPatch(baseURL, apiKey)
+	if model != nil {
+		settings.model = *model
+	}
+	if apiKey == nil {
+		return keyCleared, nil
+	}
+	if *apiKey == "" {
+		settings.encryptedKey = nil
+		return keyCleared, nil
+	}
+	sealed, err := s.seal([]byte(*apiKey))
+	if err != nil {
+		return false, err
+	}
+	settings.encryptedKey = sealed
+	return keyCleared, nil
+}
+
+func (settings *storedAISettings) applyBaseURLPatch(baseURL, apiKey *string) bool {
+	if baseURL == nil {
+		return false
+	}
+	keyCleared := apiKey == nil && len(settings.encryptedKey) > 0 && !SameAIOrigin(settings.baseURL, *baseURL)
+	if keyCleared {
+		settings.encryptedKey = nil
+	}
+	settings.baseURL = *baseURL
+	return keyCleared
+}
+
+func writeAISettings(tx *sql.Tx, user string, settings storedAISettings) error {
+	_, err := tx.Exec(`INSERT INTO settings (user, ai_base_url, ai_model, ai_key_enc) VALUES (?, ?, ?, ?)
+		ON CONFLICT(user) DO UPDATE SET ai_base_url = excluded.ai_base_url, ai_model = excluded.ai_model, ai_key_enc = excluded.ai_key_enc`,
+		user, settings.baseURL, settings.model, settings.encryptedKey)
+	if err != nil {
+		return fmt.Errorf("store: write ai settings: %w", err)
+	}
+	return nil
 }
 
 // SameAIOrigin reports whether two base URLs share scheme and host (incl.
