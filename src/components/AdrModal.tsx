@@ -105,7 +105,12 @@ export interface AdrModalProps {
  * Nothing reaches the board until "Add selected" — the review step is the
  * whole point of the feature.
  */
-export function AdrModal({ sources, onSplit, onAdd, onClose }: AdrModalProps) {
+export function AdrModal({
+  sources,
+  onSplit,
+  onAdd,
+  onClose,
+}: Readonly<AdrModalProps>) {
   const [adr, setAdr] = useState('');
   const [url, setURL] = useState('');
   const [source, setSource] = useState(sources[0]?.name ?? '');

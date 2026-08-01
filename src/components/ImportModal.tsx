@@ -91,7 +91,7 @@ export function ImportModal({
   onAdd,
   onCommitLinks,
   onClose,
-}: ImportModalProps) {
+}: Readonly<ImportModalProps>) {
   const [source, setSource] = useState(sources[0]?.name ?? '');
   const [reference, setReference] = useState('');
   const [max, setMax] = useState(MAX_DEFAULT);

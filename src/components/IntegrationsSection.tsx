@@ -153,7 +153,7 @@ const busyMessage: Record<IntegrationAction, string> = {
 export function IntegrationsSection({
   identity,
   serverPresent,
-}: IntegrationsSectionProps) {
+}: Readonly<IntegrationsSectionProps>) {
   const [rows, setRows] = useState<IntegrationRow[]>([]);
   const [loading, setLoading] = useState(serverPresent);
   const [loadError, setLoadError] = useState<string | null>(null);

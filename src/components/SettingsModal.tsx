@@ -108,7 +108,7 @@ export function SettingsModal({
   onDebugChange,
   onClose,
   onSaved,
-}: SettingsModalProps) {
+}: Readonly<SettingsModalProps>) {
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [baseUrl, setBaseUrl] = useState('');

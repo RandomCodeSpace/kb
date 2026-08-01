@@ -7,7 +7,7 @@ import { tagColor } from '../lib/labels';
 import type { InlineTok } from '../lib/inlineMd';
 import { parseDesc, tokenizeInline } from '../lib/inlineMd';
 
-function InlineText({ toks }: { toks: InlineTok[] }) {
+function InlineText({ toks }: Readonly<{ toks: InlineTok[] }>) {
   return (
     <>
       {toks.map((t, i) => {
@@ -38,7 +38,7 @@ function InlineText({ toks }: { toks: InlineTok[] }) {
   );
 }
 
-function Desc({ text }: { text: string }) {
+function Desc({ text }: Readonly<{ text: string }>) {
   return (
     <div className="desc">
       {parseDesc(text).map((l, i) => (

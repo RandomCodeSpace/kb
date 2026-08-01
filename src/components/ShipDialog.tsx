@@ -53,7 +53,7 @@ export function ShipDialog({
   onShip,
   onTickAll,
   onCancel,
-}: ShipDialogProps) {
+}: Readonly<ShipDialogProps>) {
   const boxRef = useRef<HTMLDivElement>(null);
   const onDialogKeyDown = useDialogFocus(boxRef);
   const titleId = useId();

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { FormEvent } from 'react';
+import type { SubmitEvent } from 'react';
 import type { Identity } from '../lib/auth';
 import { azureAvailable, signInAzure } from '../lib/auth';
 
@@ -10,7 +10,7 @@ export interface IdentityGateProps {
 /** The gate renders once, so a constant id is enough to point the field at. */
 const ERROR_ID = 'g-error';
 
-export function IdentityGate({ onIdentity }: IdentityGateProps) {
+export function IdentityGate({ onIdentity }: Readonly<IdentityGateProps>) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [id, setId] = useState('');
@@ -47,7 +47,7 @@ export function IdentityGate({ onIdentity }: IdentityGateProps) {
     }
   };
 
-  const handleManual = (e: FormEvent) => {
+  const handleManual = (e: SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
     const trimmed = id.trim();
     if (!trimmed) return;

@@ -129,7 +129,7 @@ export function CardModal({
   onSave,
   onDelete,
   onClose,
-}: CardModalProps) {
+}: Readonly<CardModalProps>) {
   const excludeId = state.mode === 'edit' ? canonicalTaskId : undefined;
   const [title, setTitle] = useState(state.mode === 'edit' ? state.task.title : '');
   const [aiBusy, setAiBusy] = useState(false);

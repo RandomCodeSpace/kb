@@ -21,7 +21,7 @@ export function LabelsCombobox({
   value,
   suggestions,
   onChange,
-}: LabelsComboboxProps) {
+}: Readonly<LabelsComboboxProps>) {
   const [text, setText] = useState('');
   const [open, setOpen] = useState(false);
   const [hi, setHi] = useState(0);

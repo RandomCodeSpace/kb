@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import type { MutableRefObject } from 'react';
+import type { RefObject } from 'react';
 import type { AIStoryRequest, StoryDraft } from '../lib/api';
 import { isAbortError } from '../lib/api';
 import type { Check, Effort, Prio } from '../lib/model';
@@ -17,7 +17,7 @@ export interface CardAIDraftProps {
   checks: Check[];
   onApply: (draft: StoryDraft) => void;
   onBusyChange: (busy: boolean) => void;
-  cancelRef: MutableRefObject<(() => void) | null>;
+  cancelRef: RefObject<(() => void) | null>;
 }
 
 export function CardAIDraft({
@@ -33,7 +33,7 @@ export function CardAIDraft({
   onApply,
   onBusyChange,
   cancelRef,
-}: CardAIDraftProps) {
+}: Readonly<CardAIDraftProps>) {
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
