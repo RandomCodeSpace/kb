@@ -22,6 +22,9 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
+const noBlockedFlagName = "no-blocked"
+const forceFlagUsage = "finish a task with open checklist items or a blocked flag"
+
 const usageText = `usage: kb <command> [flags]
 
 commands:
@@ -242,7 +245,7 @@ func registerCardFlags(fs *flag.FlagSet, c *cardFlags, withTitle bool) {
 	fs.StringVar(&c.effort, "effort", "", "effort S|M|L")
 	fs.StringVar(&c.emoji, "emoji", "", "leading emoji")
 	fs.BoolVar(&c.blocked, "blocked", false, "flag the task as blocked")
-	fs.BoolVar(&c.noBlocked, "no-blocked", false, "clear the blocked flag")
+	fs.BoolVar(&c.noBlocked, noBlockedFlagName, false, "clear the blocked flag")
 	fs.Var(&c.tags, "tag", "tag (repeatable)")
 	fs.Var(&c.checks, "check", "checklist item (repeatable)")
 }
@@ -251,12 +254,12 @@ func registerCardFlags(fs *flag.FlagSet, c *cardFlags, withTitle bool) {
 // nil when neither flag was given, so update leaves the field alone.
 func resolveBlocked(set map[string]bool, c *cardFlags) (*bool, error) {
 	switch {
-	case set["blocked"] && set["no-blocked"]:
+	case set["blocked"] && set[noBlockedFlagName]:
 		return nil, errors.New("--blocked and --no-blocked cannot be combined")
 	case set["blocked"]:
 		v := c.blocked
 		return &v, nil
-	case set["no-blocked"]:
+	case set[noBlockedFlagName]:
 		v := !c.noBlocked
 		return &v, nil
 	}
@@ -490,7 +493,7 @@ func (a *app) cmdUpdate(args []string) int {
 	fs, user, data := a.newFlagSet("update")
 	var cf cardFlags
 	registerCardFlags(fs, &cf, true)
-	force := fs.Bool("force", false, "finish a task with open checklist items or a blocked flag")
+	force := fs.Bool("force", false, forceFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -571,7 +574,7 @@ func (a *app) cmdUpdate(args []string) int {
 
 func (a *app) cmdMove(args []string) int {
 	fs, user, data := a.newFlagSet("move")
-	force := fs.Bool("force", false, "finish a task with open checklist items or a blocked flag")
+	force := fs.Bool("force", false, forceFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -588,7 +591,7 @@ func (a *app) cmdMove(args []string) int {
 
 func (a *app) cmdDone(args []string) int {
 	fs, user, data := a.newFlagSet("done")
-	force := fs.Bool("force", false, "finish a task with open checklist items or a blocked flag")
+	force := fs.Bool("force", false, forceFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
