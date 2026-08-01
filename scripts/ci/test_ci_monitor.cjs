@@ -30,6 +30,14 @@ result = run(['runs', '--repo', 'RandomCodeSpace/kb', '--branch', 'main', '--lim
 assert.equal(result.status, 0, result.stderr);
 assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), ['run', 'list', '--limit', '5', '--branch', 'main', '-R', 'RandomCodeSpace/kb']);
 
+result = run(['runs', '--repo', 'RandomCodeSpace/kb'], { CI_MONITOR_GH: 'gh' });
+assert.equal(result.status, 2);
+assert.match(result.stderr, /CI_MONITOR_GH must be an absolute path/);
+
+result = run(['runs'], { CI_MONITOR_GIT: 'git', GITHUB_REPOSITORY: '' });
+assert.equal(result.status, 2);
+assert.match(result.stderr, /CI_MONITOR_GIT must be an absolute path/);
+
 result = run(['check-actions']);
 assert.equal(result.status, 0, result.stderr);
 assert.match(result.stdout, /immutable SHAs/);
