@@ -34,10 +34,10 @@ export default defineConfig({
         'src/test/**',
       ],
       thresholds: {
-        branches: 95,
-        functions: 95,
-        lines: 95,
-        statements: 95,
+        branches: 95.07,
+        functions: 98.71,
+        lines: 99.42,
+        statements: 98.20,
       },
     },
     // Vitest replaces CSS modules with an empty string by default, which also
