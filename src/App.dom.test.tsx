@@ -10,6 +10,10 @@ const state = vi.hoisted(() => ({
   identity: null as Identity | null,
   resolveIdentity: null as Identity | null,
   resolveError: null as unknown,
+  resolveDeferred: false,
+  resolveSettler: null as null | {
+    resolve: (identity: Identity) => void;
+  },
   board: null as Board | null,
   importBoard: null as Board | null,
   importError: false,
@@ -17,6 +21,9 @@ const state = vi.hoisted(() => ({
   detect: false,
   detectDeferred: false,
   detectResolve: null as null | ((value: boolean) => void),
+  startupDeferred: false,
+  startupResolve: null as null | (() => void),
+  startupCalls: 0,
   remoteBoard: null as Board | null,
   migratedRaw: false,
   pendingWrite: null as null | Record<string, unknown>,
@@ -31,7 +38,14 @@ const state = vi.hoisted(() => ({
   persistenceFails: false,
   persistenceConflicts: [] as string[],
   remoteSaveError: null as Error | null,
+  remoteSaveCalls: 0,
   prepareError: null as Error | null,
+  prepareDeferred: false,
+  prepareResolve: null as null | (() => void),
+  commitDeferred: false,
+  commitDeferredPersisted: true,
+  commitResolve: null as null | (() => void),
+  commitCalls: 0,
   remoteSaveConflicts: [] as string[],
   labels: [] as string[],
   settings: { has_key: false, ai_base_url: '' },
@@ -98,10 +112,15 @@ vi.mock('./lib/auth', () => {
       state.clearedIdentity += 1;
       state.identity = null;
     },
-    resolveAzureIdentity: async () => {
-      if (state.resolveError) throw state.resolveError;
-      if (!state.resolveIdentity) throw new Error('no restored identity configured');
-      return state.resolveIdentity;
+    resolveAzureIdentity: () => {
+      if (state.resolveDeferred) {
+        return new Promise<Identity>((resolve) => {
+          state.resolveSettler = { resolve };
+        });
+      }
+      if (state.resolveError) return Promise.reject(state.resolveError);
+      if (!state.resolveIdentity) return Promise.reject(new Error('no restored identity configured'));
+      return Promise.resolve(state.resolveIdentity);
     },
     identityNamespace: (identity: Identity) =>
       identity.kind === 'azure' ? `azure.${identity.homeAccountId ?? 'pending'}` : identity.id,
@@ -188,6 +207,19 @@ vi.mock('./lib/remote', () => {
       deleted: ReadonlySet<string>,
     ) => {
       if (state.prepareError) throw state.prepareError;
+      if (state.prepareDeferred) {
+        return new Promise<{
+          board: Board;
+          taskIDs: ReadonlyMap<string, string>;
+          deletedCanonicalIDs: ReadonlySet<string>;
+        }>((resolve) => {
+          state.prepareResolve = () => resolve({
+            board: nextBoard,
+            taskIDs: ids,
+            deletedCanonicalIDs: deleted,
+          });
+        });
+      }
       return { board: nextBoard, taskIDs: ids, deletedCanonicalIDs: deleted };
     });
     saveRemote = vi.fn((
@@ -200,6 +232,7 @@ vi.mock('./lib/remote', () => {
         isLiveCurrent?: () => boolean;
       } = {},
     ) => {
+      state.remoteSaveCalls += 1;
       options.isLiveCurrent?.();
       if (state.remoteSaveError) return onError(state.remoteSaveError);
       const ids = new Map(nextBoard.tasks.map((item) => [item.id, `canonical-${item.id}`]));
@@ -237,9 +270,24 @@ vi.mock('./lib/remote', () => {
       readDurable?: () => unknown;
       cancelled?: () => boolean;
     }) => {
+      state.commitCalls += 1;
       options.readLive?.();
       options.readDurable?.();
       options.cancelled?.();
+      if (state.commitDeferred) {
+        return new Promise((resolve) => {
+          state.commitResolve = () => resolve({
+            candidate: options.candidate,
+            conflicts: [],
+            persisted: state.commitDeferredPersisted,
+            snapshot: state.commitDeferredPersisted
+              ? snapshot(options.candidate.board, 1)
+              : undefined,
+            recoveryPending: false,
+            writes: 1,
+          });
+        });
+      }
       if (state.commitMode === 'recovery') {
         return {
           candidate: options.candidate, conflicts: ['live board'], persisted: false,
@@ -279,9 +327,25 @@ vi.mock('./lib/remote', () => {
       };
     },
     reconcileStartupBoardFetch: async (options: Record<string, (...args: unknown[]) => unknown>) => {
+      state.startupCalls += 1;
       if (state.startupMode === 'throw') throw new Error('startup fetch failed');
       const remoteBoard = state.remoteBoard;
       const ids = new Map((remoteBoard?.tasks ?? []).map((item) => [item.id, `canonical-${item.id}`]));
+      if (state.startupDeferred) {
+        return new Promise<{
+          remoteBoard: Board | null;
+          remoteTaskIDs: ReadonlyMap<string, string>;
+          merged: null;
+          persisted: false;
+        }>((resolve) => {
+          state.startupResolve = () => resolve({
+            remoteBoard,
+            remoteTaskIDs: ids,
+            merged: null,
+            persisted: false,
+          });
+        });
+      }
       if (state.startupMode === 'callbacks' && remoteBoard) {
         options.readLive();
         options.readSnapshot();
@@ -552,6 +616,8 @@ beforeEach(() => {
   state.identity = manual;
   state.resolveIdentity = null;
   state.resolveError = null;
+  state.resolveDeferred = false;
+  state.resolveSettler = null;
   state.board = board();
   state.importBoard = null;
   state.importError = false;
@@ -559,6 +625,9 @@ beforeEach(() => {
   state.detect = false;
   state.detectDeferred = false;
   state.detectResolve = null;
+  state.startupDeferred = false;
+  state.startupResolve = null;
+  state.startupCalls = 0;
   state.remoteBoard = null;
   state.migratedRaw = false;
   state.pendingWrite = null;
@@ -573,7 +642,14 @@ beforeEach(() => {
   state.persistenceFails = false;
   state.persistenceConflicts = [];
   state.remoteSaveError = null;
+  state.remoteSaveCalls = 0;
   state.prepareError = null;
+  state.prepareDeferred = false;
+  state.prepareResolve = null;
+  state.commitDeferred = false;
+  state.commitDeferredPersisted = true;
+  state.commitResolve = null;
+  state.commitCalls = 0;
   state.remoteSaveConflicts = [];
   state.labels = [];
   state.settings = { has_key: false, ai_base_url: '' };
@@ -636,6 +712,69 @@ describe('App DOM orchestration', () => {
     expect((await screen.findByRole('alert')).textContent).toContain(
       'session expired — sign in again',
     );
+  });
+
+  it('ignores Azure restoration completion after unmount', async () => {
+    state.identity = { kind: 'azure', id: 'alice@example.com' };
+    state.resolveDeferred = true;
+    const restored: Identity = {
+      kind: 'azure', id: 'alice@example.com', name: 'Alice Azure', homeAccountId: 'home-1',
+    };
+    const resolved = render(<App />);
+    await waitFor(() => expect(state.resolveSettler).not.toBeNull());
+    const resolve = state.resolveSettler!.resolve;
+    resolved.unmount();
+    await act(async () => resolve(restored));
+    expect(state.savedIdentities).toEqual([]);
+  });
+
+  it('stops remote startup work when detection or fetch settles after unmount', async () => {
+    state.detectDeferred = true;
+    const detecting = render(<App />);
+    await waitFor(() => expect(state.detectResolve).not.toBeNull());
+    detecting.unmount();
+    await act(async () => state.detectResolve!(true));
+    expect(state.startupCalls).toBe(0);
+
+    state.detectDeferred = false;
+    state.detect = true;
+    state.startupDeferred = true;
+    state.remoteBoard = board([task({ id: 'late-fetch', title: 'Late fetch' })]);
+    const fetching = render(<App />);
+    await waitFor(() => expect(state.startupResolve).not.toBeNull());
+    fetching.unmount();
+    await act(async () => state.startupResolve!());
+    expect(state.commitCalls).toBe(0);
+  });
+
+  it('stops dirty-board preparation and persistence after unmount', async () => {
+    state.detect = true;
+    state.dirty = true;
+    state.prepareDeferred = true;
+    const preparing = render(<App />);
+    await waitFor(() => expect(state.prepareResolve).not.toBeNull());
+    preparing.unmount();
+    await act(async () => state.prepareResolve!());
+    expect(state.commitCalls).toBe(0);
+
+    state.prepareDeferred = false;
+    state.commitDeferred = true;
+    const persisting = render(<App />);
+    await waitFor(() => expect(state.commitResolve).not.toBeNull());
+    persisting.unmount();
+    await act(async () => state.commitResolve!());
+    expect(state.remoteSaveCalls).toBe(0);
+
+    state.dirty = false;
+    state.remoteBoard = board([task({ id: 'late-remote', title: 'Late remote' })]);
+    state.commitDeferredPersisted = false;
+    state.commitResolve = null;
+    const dirtyWrites = state.dirtyWrites.length;
+    const adopting = render(<App />);
+    await waitFor(() => expect(state.commitResolve).not.toBeNull());
+    adopting.unmount();
+    await act(async () => state.commitResolve!());
+    expect(state.dirtyWrites).toHaveLength(dirtyWrites);
   });
 
   it('adds, edits, moves, checks, ships, cancels, restores, and purges cards', async () => {

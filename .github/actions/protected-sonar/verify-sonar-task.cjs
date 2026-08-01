@@ -2,6 +2,8 @@
 
 const { readFileSync } = require('node:fs');
 
+const SONAR_ORIGIN = 'https://sonarcloud.io';
+
 function required(name) {
   const value = process.env[name];
   if (!value) throw new Error(`missing required environment variable ${name}`);
@@ -33,12 +35,12 @@ async function main() {
   if (!/^[0-9a-f]{40}$/.test(candidateSha)) throw new Error('candidate SHA is invalid');
   const report = properties(`${required('PROJECT_BASE_DIR')}/.scannerwork/report-task.txt`);
   const serverUrl = new URL(report.get('serverUrl'));
-  if (serverUrl.protocol !== 'https:' || serverUrl.hostname !== 'sonarcloud.io' || serverUrl.username || serverUrl.password) {
+  if (serverUrl.origin !== SONAR_ORIGIN || serverUrl.username || serverUrl.password) {
     throw new Error('unexpected Sonar server URL');
   }
   const ceTaskId = report.get('ceTaskId');
   if (!/^[A-Za-z0-9_-]+$/.test(ceTaskId || '')) throw new Error('invalid compute-engine task id');
-  const task = await sonar(new URL(`/api/ce/task?id=${encodeURIComponent(ceTaskId)}`, serverUrl));
+  const task = await sonar(new URL(`/api/ce/task?id=${encodeURIComponent(ceTaskId)}`, SONAR_ORIGIN));
   if (task.task?.status !== 'SUCCESS' || !task.task.analysisId) {
     throw new Error(`compute-engine task is not successful: ${task.task?.status || 'missing'}`);
   }
@@ -46,7 +48,7 @@ async function main() {
     throw new Error(`compute-engine component ${task.task.componentKey} != ${required('SONAR_PROJECT_KEY')}`);
   }
 
-  const query = new URL('/api/project_analyses/search', serverUrl);
+  const query = new URL('/api/project_analyses/search', SONAR_ORIGIN);
   query.searchParams.set('project', required('SONAR_PROJECT_KEY'));
   query.searchParams.set('pageSize', '100');
   if (required('ANALYSIS_MODE') === 'pull_request') query.searchParams.set('pullRequest', required('PULL_REQUEST'));
@@ -58,7 +60,11 @@ async function main() {
   console.log(`verified Sonar task ${ceTaskId}, analysis ${analysis.key}, revision ${analysis.revision}`);
 }
 
-main().catch((error) => {
-  console.error(`verify-sonar-task: ${error.message}`);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(`verify-sonar-task: ${error.message}`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { main };

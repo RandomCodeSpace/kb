@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const { createHash } = require('node:crypto');
-const { lstatSync, readFileSync, writeFileSync } = require('node:fs');
+const { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, writeFileSync } = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { posix: pathPosix } = require('node:path');
 
@@ -14,10 +14,6 @@ function required(name) {
   const value = process.env[name];
   if (!value) throw new Error(`missing required environment variable ${name}`);
   return value;
-}
-
-function sha256(path) {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
 function validateRelativeSource(path, label) {
@@ -35,14 +31,29 @@ function validateRelativeSource(path, label) {
 }
 
 function validateReport(kind, path, limit) {
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new Error(`${path} must be a regular, non-symlink file`);
+  let descriptor;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    throw new Error(`${path} must be an openable regular, non-symlink file: ${error.message}`);
   }
-  if (stat.size === 0 || stat.size > limit) {
-    throw new Error(`${path} size ${stat.size} is outside 1..${limit} bytes`);
+  let stat;
+  let content;
+  try {
+    stat = fstatSync(descriptor);
+    if (!stat.isFile()) throw new Error(`${path} must be a regular, non-symlink file`);
+    if (stat.size === 0 || stat.size > limit) {
+      throw new Error(`${path} size ${stat.size} is outside 1..${limit} bytes`);
+    }
+    content = readFileSync(descriptor);
+    const finalStat = fstatSync(descriptor);
+    if (finalStat.size !== stat.size || content.length !== stat.size) {
+      throw new Error(`${path} changed size while being read`);
+    }
+  } finally {
+    closeSync(descriptor);
   }
-  const sample = readFileSync(path, 'utf8');
+  const sample = content.toString('utf8');
   if (sample.includes('\0') || sample.includes('\r')) throw new Error(`${path} contains forbidden control bytes`);
   if (kind === 'frontend') {
     const sources = sample.split('\n').filter((line) => line.startsWith('SF:')).map((line) => line.slice(3));
@@ -60,7 +71,7 @@ function validateReport(kind, path, limit) {
       validateRelativeSource(match[1].slice(modulePath.length + 1), path);
     }
   }
-  return { path, size: stat.size, sha256: sha256(path) };
+  return { path, size: stat.size, sha256: createHash('sha256').update(content).digest('hex') };
 }
 
 function git(...args) {
@@ -154,9 +165,13 @@ function main() {
   writeFileSync('coverage/manifest.json', `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' });
 }
 
-try {
-  main();
-} catch (error) {
-  console.error(`create-coverage-manifest: ${error.message}`);
-  process.exitCode = 1;
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    console.error(`create-coverage-manifest: ${error.message}`);
+    process.exitCode = 1;
+  }
 }
+
+module.exports = { validateReport };

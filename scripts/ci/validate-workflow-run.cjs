@@ -22,6 +22,12 @@ function safeInteger(value, label) {
   return value;
 }
 
+function environmentInteger(name) {
+  const value = required(name);
+  if (!/^[1-9][0-9]*$/.test(value)) throw new Error(`${name} must be a positive integer`);
+  return safeInteger(Number(value), name);
+}
+
 async function github(path) {
   const apiUrl = process.env.GITHUB_API_URL || 'https://api.github.com';
   const response = await fetch(`${apiUrl}${path}`, {
@@ -46,6 +52,12 @@ function output(values) {
 async function main() {
   const event = JSON.parse(readFileSync(required('GITHUB_EVENT_PATH'), 'utf8'));
   const repository = required('GITHUB_REPOSITORY');
+  const triggerRunId = environmentInteger('TRIGGER_RUN_ID');
+  const triggerWorkflowId = environmentInteger('TRIGGER_WORKFLOW_ID');
+  const triggerRunAttempt = environmentInteger('TRIGGER_RUN_ATTEMPT');
+  const triggerHeadRepositoryId = environmentInteger('TRIGGER_HEAD_REPOSITORY_ID');
+  const triggerHeadSha = required('TRIGGER_HEAD_SHA');
+  if (!/^[0-9a-f]{40}$/.test(triggerHeadSha)) throw new Error('TRIGGER_HEAD_SHA must be a lowercase 40-character Git SHA');
   const trigger = event.workflow_run;
   if (!trigger || typeof trigger !== 'object') throw new Error('missing workflow_run payload');
   equal(event.repository?.full_name, repository, 'trigger repository');
@@ -56,55 +68,56 @@ async function main() {
   equal(trigger.event === 'pull_request' || trigger.event === 'push' || trigger.event === 'workflow_dispatch', true, 'producer event allowlist');
   equal(trigger.status, 'completed', 'producer status');
   equal(trigger.conclusion, 'success', 'producer conclusion');
-  safeInteger(trigger.id, 'workflow run id');
-  safeInteger(trigger.workflow_id, 'workflow id');
-  safeInteger(trigger.run_attempt, 'workflow run attempt');
-  safeInteger(trigger.head_repository.id, 'head repository id');
+  equal(safeInteger(trigger.id, 'workflow run id'), triggerRunId, 'trusted workflow run id');
+  equal(safeInteger(trigger.workflow_id, 'workflow id'), triggerWorkflowId, 'trusted workflow id');
+  equal(safeInteger(trigger.run_attempt, 'workflow run attempt'), triggerRunAttempt, 'trusted workflow run attempt');
+  equal(safeInteger(trigger.head_repository.id, 'head repository id'), triggerHeadRepositoryId, 'trusted head repository id');
+  equal(trigger.head_sha, triggerHeadSha, 'trusted head SHA');
 
   const encodedRepo = repository.split('/').map(encodeURIComponent).join('/');
-  const run = await github(`/repos/${encodedRepo}/actions/runs/${trigger.id}`);
-  equal(run.id, trigger.id, 'API run id');
-  equal(run.workflow_id, trigger.workflow_id, 'API workflow id');
+  const run = await github(`/repos/${encodedRepo}/actions/runs/${triggerRunId}`);
+  equal(run.id, triggerRunId, 'API run id');
+  equal(run.workflow_id, triggerWorkflowId, 'API workflow id');
   equal(run.name, WORKFLOW_NAME, 'API workflow name');
   equal(run.path, WORKFLOW_PATH, 'API workflow path');
   equal(run.event, trigger.event, 'API event');
   equal(run.status, 'completed', 'API status');
   equal(run.conclusion, 'success', 'API conclusion');
   equal(run.head_repository?.full_name, repository, 'API head repository');
-  equal(run.head_sha, trigger.head_sha, 'API head SHA');
-  equal(run.run_attempt, trigger.run_attempt, 'API run attempt');
+  equal(run.head_sha, triggerHeadSha, 'API head SHA');
+  equal(run.run_attempt, triggerRunAttempt, 'API run attempt');
   const workflowFile = WORKFLOW_PATH.split('/').at(-1);
   const workflow = await github(`/repos/${encodedRepo}/actions/workflows/${encodeURIComponent(workflowFile)}`);
-  equal(workflow.id, trigger.workflow_id, 'workflow-by-path id');
+  equal(workflow.id, triggerWorkflowId, 'workflow-by-path id');
   equal(workflow.path, WORKFLOW_PATH, 'workflow-by-path path');
   equal(workflow.name, WORKFLOW_NAME, 'workflow-by-path name');
 
-  const jobs = await github(`/repos/${encodedRepo}/actions/runs/${trigger.id}/jobs?filter=latest&per_page=100`);
-  const jobMatches = jobs.jobs.filter((job) => job.name === JOB_NAME && job.run_attempt === trigger.run_attempt);
+  const jobs = await github(`/repos/${encodedRepo}/actions/runs/${triggerRunId}/jobs?filter=latest&per_page=100`);
+  const jobMatches = jobs.jobs.filter((job) => job.name === JOB_NAME && job.run_attempt === triggerRunAttempt);
   if (jobMatches.length !== 1) throw new Error(`expected exactly one ${JOB_NAME} job, found ${jobMatches.length}`);
   const job = jobMatches[0];
   safeInteger(job.id, 'producer job id');
-  equal(job.run_id, trigger.id, 'producer job run id');
+  equal(job.run_id, triggerRunId, 'producer job run id');
   equal(job.status, 'completed', 'producer job status');
   equal(job.conclusion, 'success', 'producer job conclusion');
-  equal(job.head_sha, trigger.head_sha, 'producer job head SHA');
+  equal(job.head_sha, triggerHeadSha, 'producer job head SHA');
 
-  const artifacts = await github(`/repos/${encodedRepo}/actions/runs/${trigger.id}/artifacts?per_page=100`);
+  const artifacts = await github(`/repos/${encodedRepo}/actions/runs/${triggerRunId}/artifacts?per_page=100`);
   equal(artifacts.total_count, 1, 'artifact count');
   equal(artifacts.artifacts.length, 1, 'returned artifact count');
   const artifact = artifacts.artifacts[0];
   safeInteger(artifact.id, 'artifact id');
-  equal(artifact.name, `candidate-head-coverage-${trigger.head_sha}`, 'artifact name');
+  equal(artifact.name, `candidate-head-coverage-${triggerHeadSha}`, 'artifact name');
   equal(artifact.expired, false, 'artifact expiration');
   if (!Number.isSafeInteger(artifact.size_in_bytes) || artifact.size_in_bytes < 1 || artifact.size_in_bytes > ARTIFACT_LIMIT) {
     throw new Error(`artifact size ${artifact.size_in_bytes} is outside 1..${ARTIFACT_LIMIT} bytes`);
   }
-  equal(artifact.workflow_run?.id, trigger.id, 'artifact workflow run id');
-  equal(artifact.workflow_run?.head_sha, trigger.head_sha, 'artifact head SHA');
-  equal(artifact.workflow_run?.head_repository_id, trigger.head_repository.id, 'artifact head repository id');
+  equal(artifact.workflow_run?.id, triggerRunId, 'artifact workflow run id');
+  equal(artifact.workflow_run?.head_sha, triggerHeadSha, 'artifact head SHA');
+  equal(artifact.workflow_run?.head_repository_id, triggerHeadRepositoryId, 'artifact head repository id');
 
-  const commit = await github(`/repos/${encodedRepo}/git/commits/${trigger.head_sha}`);
-  equal(commit.sha, trigger.head_sha, 'candidate commit SHA');
+  const commit = await github(`/repos/${encodedRepo}/git/commits/${triggerHeadSha}`);
+  equal(commit.sha, triggerHeadSha, 'candidate commit SHA');
   const candidateTree = commit.tree?.sha;
   if (!/^[0-9a-f]{40}$/.test(candidateTree || '')) throw new Error('candidate tree is invalid');
 
@@ -120,11 +133,11 @@ async function main() {
     if (pullRequests.length !== 1) throw new Error(`expected exactly one triggering pull request, found ${pullRequests.length}`);
     const pull = pullRequests[0];
     safeInteger(pull.number, 'pull request number');
-    equal(pull.head?.sha, trigger.head_sha, 'pull request head SHA');
+    equal(pull.head?.sha, triggerHeadSha, 'pull request head SHA');
     pullRequest = pull.number;
     mode = 'pull_request';
     const pullDetails = await github(`/repos/${encodedRepo}/pulls/${pull.number}`);
-    equal(pullDetails.head?.sha, trigger.head_sha, 'pull request API head SHA');
+    equal(pullDetails.head?.sha, triggerHeadSha, 'pull request API head SHA');
     equal(pullDetails.head?.repo?.full_name, repository, 'pull request API head repository');
     equal(pullDetails.base?.repo?.full_name, repository, 'pull request API base repository');
     baseSha = pullDetails.base?.sha;
@@ -134,11 +147,11 @@ async function main() {
     workflowSha = pullDetails.merge_commit_sha;
   } else {
     const parents = commit.parents || [];
-    baseSha = parents.length ? parents[0].sha : trigger.head_sha;
+    baseSha = parents.length ? parents[0].sha : triggerHeadSha;
     baseRef = event.repository?.default_branch;
     mode = trigger.head_branch === event.repository?.default_branch ? 'main' : 'branch';
     workflowRef = `${repository}/${WORKFLOW_PATH}@refs/heads/${trigger.head_branch}`;
-    workflowSha = trigger.head_sha;
+    workflowSha = triggerHeadSha;
   }
   if (!/^[0-9a-f]{40}$/.test(baseSha || '')) throw new Error('base SHA is invalid');
   for (const [label, value] of [['base ref', baseRef], ['candidate ref', candidateRef]]) {
@@ -149,13 +162,13 @@ async function main() {
   output({
     artifact_id: artifact.id,
     artifact_name: artifact.name,
-    run_id: trigger.id,
-    run_attempt: trigger.run_attempt,
+    run_id: triggerRunId,
+    run_attempt: triggerRunAttempt,
     job_id: job.id,
     event: trigger.event,
     mode,
     candidate_repository: repository,
-    candidate_sha: trigger.head_sha,
+    candidate_sha: triggerHeadSha,
     candidate_tree: candidateTree,
     candidate_ref: candidateRef,
     workflow_ref: workflowRef,

@@ -29,6 +29,16 @@ class WorkflowStructureTest(unittest.TestCase):
         self.assertIn("python3 trusted-main/scripts/ci/validate-coverage-artifact.py", SONAR)
         self.assertIn("uses: ./trusted-main/.github/actions/protected-sonar", SONAR)
 
+    def test_trigger_network_identifiers_are_passed_as_trusted_scalars(self):
+        for name, expression in (
+            ("TRIGGER_RUN_ID", "github.event.workflow_run.id"),
+            ("TRIGGER_WORKFLOW_ID", "github.event.workflow_run.workflow_id"),
+            ("TRIGGER_RUN_ATTEMPT", "github.event.workflow_run.run_attempt"),
+            ("TRIGGER_HEAD_REPOSITORY_ID", "github.event.workflow_run.head_repository.id"),
+            ("TRIGGER_HEAD_SHA", "github.event.workflow_run.head_sha"),
+        ):
+            self.assertIn(f"{name}: ${{{{ {expression} }}}}", SONAR)
+
     def test_control_plane_is_pinned_across_environment_approval(self):
         self.assertIn("ref: ${{ github.workflow_sha }}", SONAR)
         self.assertIn("control_plane_sha: ${{ steps.control-plane.outputs.sha }}", SONAR)
