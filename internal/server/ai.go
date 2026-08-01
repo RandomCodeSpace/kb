@@ -241,12 +241,12 @@ func (s *server) storedAIConfig(user string) (aiConfig, error) {
 	set, err := s.store.AISettings(user)
 	if err != nil {
 		log.Printf("ai: settings for %s: %v", user, err)
-		return aiConfig{}, &aiError{http.StatusInternalServerError, "storage error"}
+		return aiConfig{}, &aiError{http.StatusInternalServerError, storageErrorMessage}
 	}
 	key, err := s.store.AIKey(user)
 	if err != nil {
 		log.Printf("ai: key for %s: %v", user, err)
-		return aiConfig{}, &aiError{http.StatusInternalServerError, "storage error"}
+		return aiConfig{}, &aiError{http.StatusInternalServerError, storageErrorMessage}
 	}
 	return aiConfig{baseURL: set.BaseURL, model: set.Model, key: key}, nil
 }
@@ -286,7 +286,7 @@ func (s *server) chat(user string, cfg aiConfig, msgs []chatMessage, maxTokens i
 	if err != nil {
 		return "", &aiError{http.StatusBadRequest, "invalid AI endpoint"}
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(contentTypeHeader, jsonMediaType)
 	if cfg.key != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.key)
 	}
@@ -369,7 +369,7 @@ func (s *server) handleAITest(w http.ResponseWriter, r *http.Request, user strin
 	var req aiTestRequest
 	if len(bytes.TrimSpace(body)) > 0 {
 		if err := json.Unmarshal(body, &req); err != nil {
-			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 			return
 		}
 	}
@@ -378,7 +378,7 @@ func (s *server) handleAITest(w http.ResponseWriter, r *http.Request, user strin
 		var ae *aiError
 		if errors.As(err, &ae) && ae.code == http.StatusBadGateway {
 			log.Printf("ai: test for %s failed: %s", user, ae.msg)
-			msg = "connection failed"
+			msg = connectionFailedMessage
 		}
 		writeJSON(w, result{Error: msg})
 		return
@@ -420,7 +420,7 @@ func (s *server) handleAIStory(w http.ResponseWriter, r *http.Request, user stri
 		Task   json.RawMessage `json:"task"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	if req.Mode != "create" && req.Mode != "update" {
@@ -462,7 +462,7 @@ func (s *server) handleAIStory(w http.ResponseWriter, r *http.Request, user stri
 // goes to the server log only. Configuration errors (400: no or invalid base
 // URL) describe the caller's own settings and pass through.
 func writeAIError(w http.ResponseWriter, user, op string, err error) {
-	code, msg := http.StatusBadGateway, "connection failed"
+	code, msg := http.StatusBadGateway, connectionFailedMessage
 	var ae *aiError
 	if errors.As(err, &ae) {
 		code = ae.code
@@ -489,7 +489,7 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 		Max    int    `json:"max"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	hasADR := strings.TrimSpace(req.ADR) != ""
@@ -507,7 +507,7 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 		sources, err := s.store.ForgeSources(user)
 		if err != nil {
 			log.Printf("forge: list sources for stories for %s failed", user)
-			http.Error(w, "storage error", http.StatusInternalServerError)
+			http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 			return
 		}
 		ref, err := parseForgeRef(sources, req.Source, req.URL)
@@ -517,7 +517,7 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 		}
 		selected, found := forgeSourceByName(sources, req.Source)
 		if !found {
-			http.Error(w, "configured source unavailable", http.StatusBadRequest)
+			http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
 			return
 		}
 		if ref.Source.Name != selected.Name {
@@ -526,7 +526,7 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 		}
 		kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
 		if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
-			http.Error(w, "configured source unavailable", http.StatusBadRequest)
+			http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
 			return
 		}
 		ref.pat = pat
@@ -567,7 +567,7 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 	}
 	if link != "" {
 		for i := range stories {
-			stories[i].Tags = append(stripModelLinkTags(stories[i].Tags), "link::"+link)
+			stories[i].Tags = append(stripModelLinkTags(stories[i].Tags), linkTagPrefix+link)
 		}
 	}
 	writeJSON(w, struct {

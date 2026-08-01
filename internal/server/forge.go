@@ -21,14 +21,15 @@ import (
 )
 
 const (
-	forgeTimeout       = 20 * time.Second
-	maxForgeDrainBytes = 64 << 10
-	maxForgeBodyBytes  = 2 << 20
-	maxImportIssues    = 20
-	maxForgeComments   = 20
-	maxForgeCommentLen = 1 << 10
-	importFetchTimeout = 25 * time.Second
-	maxImportLinks     = 100
+	forgeTimeout                  = 20 * time.Second
+	maxForgeDrainBytes            = 64 << 10
+	maxForgeBodyBytes             = 2 << 20
+	maxImportIssues               = 20
+	maxForgeComments              = 20
+	maxForgeCommentLen            = 1 << 10
+	importFetchTimeout            = 25 * time.Second
+	maxImportLinks                = 100
+	invalidIntegrationNameMessage = "invalid integration name"
 )
 
 type forgeSourceResponse struct {
@@ -861,13 +862,13 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 	}
 	var req importPreviewRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	sources, err := s.store.ForgeSources(user)
 	if err != nil {
 		log.Printf("forge: list sources for %s failed", user)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	ref, err := parseForgeRef(sources, req.Source, req.Ref)
@@ -877,7 +878,7 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 	}
 	selected, found := forgeSourceByName(sources, req.Source)
 	if !found {
-		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
 		return
 	}
 	if ref.Source.Name != selected.Name {
@@ -886,7 +887,7 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 	}
 	kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
 	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
-		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
 		return
 	}
 	ref.pat = pat
@@ -901,7 +902,7 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 	duplicates, err := s.importDuplicates(user, issues)
 	if err != nil {
 		log.Printf("forge: duplicate lookup for %s failed", user)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	fetched := len(issues)
@@ -938,7 +939,7 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 		if draft.Source > 0 && draft.Source <= sourceCount {
 			issue := issues[draft.Source-1]
 			link, externalKey := importIssueProvenance(ref, issue)
-			preview.Tags = append(preview.Tags, "link::"+link)
+			preview.Tags = append(preview.Tags, linkTagPrefix+link)
 			preview.Link = link
 			preview.ExternalKey = externalKey
 			preview.URL = issue.URL
@@ -959,7 +960,7 @@ func (s *server) handleImportLinks(w http.ResponseWriter, r *http.Request, user 
 	}
 	var req importLinksRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	if len(req.Items) > maxImportLinks {
@@ -980,12 +981,12 @@ func (s *server) handleImportLinks(w http.ResponseWriter, r *http.Request, user 
 	sources, err := s.store.ForgeSources(user)
 	if err != nil {
 		log.Printf("forge: list import sources for %s failed: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	source, found := forgeSourceByName(sources, req.Source)
 	if !found {
-		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
 		return
 	}
 	links := make([]store.ImportLink, len(req.Items))
@@ -1001,7 +1002,7 @@ func (s *server) handleImportLinks(w http.ResponseWriter, r *http.Request, user 
 			return
 		}
 		log.Printf("forge: record import links for %s failed: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1017,7 +1018,7 @@ func (s *server) handleImportProvenance(w http.ResponseWriter, r *http.Request, 
 	}
 	var req importProvenanceRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	link := strings.TrimSpace(req.Link)
@@ -1028,7 +1029,7 @@ func (s *server) handleImportProvenance(w http.ResponseWriter, r *http.Request, 
 	links, err := s.store.ImportLinksByLink(user, link)
 	if err != nil {
 		log.Print("forge: import provenance lookup failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	if len(links) == 0 {
@@ -1054,7 +1055,7 @@ func (s *server) handleImportDrift(w http.ResponseWriter, r *http.Request, user 
 	}
 	var req importDriftRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 
@@ -1076,7 +1077,7 @@ func (s *server) handleImportDrift(w http.ResponseWriter, r *http.Request, user 
 	baseline, present, err := s.importDriftBaseline(user, req.ExternalKey, current)
 	if err != nil {
 		log.Print("forge: import drift baseline resolution failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	response := importDriftResponse{
@@ -1118,7 +1119,7 @@ func (s *server) handleImportDriftAccept(w http.ResponseWriter, r *http.Request,
 	}
 	var req importDriftAcceptRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	if !validImportDriftRevision(req.Revision) {
@@ -1138,7 +1139,7 @@ func (s *server) handleImportDriftAccept(w http.ResponseWriter, r *http.Request,
 	baseline, present, err := s.store.ImportBaseline(user, req.ExternalKey)
 	if err != nil {
 		log.Print("forge: import drift accept baseline lookup failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	if !present {
@@ -1164,7 +1165,7 @@ func (s *server) handleImportDriftAccept(w http.ResponseWriter, r *http.Request,
 	}
 	if err := s.store.SetImportBaseline(user, req.ExternalKey, current); err != nil {
 		log.Print("forge: import drift accept baseline update failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, importDriftAcceptResponse{BaselineAt: current.At})
@@ -1176,7 +1177,7 @@ func (s *server) authorizeImportDriftTarget(w http.ResponseWriter, user, source,
 	imported, err := s.store.ImportedAs(user, []string{externalKey})
 	if err != nil {
 		log.Print("forge: import drift provenance lookup failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return store.ImportLink{}, forgeRef{}, false
 	}
 	provenance, found := imported[externalKey]
@@ -1194,7 +1195,7 @@ func (s *server) authorizeImportDriftTarget(w http.ResponseWriter, user, source,
 	sources, err := s.store.ForgeSources(user)
 	if err != nil {
 		log.Print("forge: import drift source lookup failed")
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return store.ImportLink{}, forgeRef{}, false
 	}
 	ref, err := parseForgeRef(sources, source, provenance.URL)
@@ -1204,7 +1205,7 @@ func (s *server) authorizeImportDriftTarget(w http.ResponseWriter, user, source,
 	}
 	selected, found := forgeSourceByName(sources, source)
 	if !found {
-		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
 		return store.ImportLink{}, forgeRef{}, false
 	}
 	if ref.Source.Name != selected.Name {
@@ -1221,7 +1222,7 @@ func (s *server) authorizeImportDriftTarget(w http.ResponseWriter, user, source,
 	}
 	kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
 	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
-		http.Error(w, "configured source unavailable", http.StatusBadRequest)
+		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
 		return store.ImportLink{}, forgeRef{}, false
 	}
 	ref.pat = pat
@@ -1286,7 +1287,7 @@ func (s *server) importDriftSummary(user string, baseline, current store.ImportB
 func (s *server) importDuplicates(scope string, issues []forgeIssue) ([]*importDuplicate, error) {
 	duplicates := make([]*importDuplicate, len(issues))
 	for i, issue := range issues {
-		links, err := s.store.TasksByLink(scope, "link::"+issue.Ref)
+		links, err := s.store.TasksByLink(scope, linkTagPrefix+issue.Ref)
 		if err != nil {
 			return nil, err
 		}
@@ -1318,7 +1319,7 @@ func importRefKind(ref forgeRef) string {
 func stripModelLinkTags(tags []string) []string {
 	filtered := make([]string, 0, len(tags))
 	for _, tag := range tags {
-		if !strings.HasPrefix(tag, "link::") {
+		if !strings.HasPrefix(tag, linkTagPrefix) {
 			filtered = append(filtered, tag)
 		}
 	}
@@ -1340,7 +1341,7 @@ func (s *server) handleGetIntegrations(w http.ResponseWriter, _ *http.Request, u
 	sources, err := s.store.ForgeSources(user)
 	if err != nil {
 		log.Printf("forge: list integrations for %s failed: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	response := forgeSourcesResponse{Sources: make([]forgeSourceResponse, 0, len(sources))}
@@ -1358,7 +1359,7 @@ func (s *server) handleGetIntegrations(w http.ResponseWriter, _ *http.Request, u
 func (s *server) handlePutIntegration(w http.ResponseWriter, r *http.Request, user string) {
 	name := r.PathValue("name")
 	if !validForgeSourceName(name) {
-		http.Error(w, "invalid integration name", http.StatusBadRequest)
+		http.Error(w, invalidIntegrationNameMessage, http.StatusBadRequest)
 		return
 	}
 
@@ -1372,7 +1373,7 @@ func (s *server) handlePutIntegration(w http.ResponseWriter, r *http.Request, us
 		PAT     *string `json:"pat"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	if req.Kind != "gitlab" && req.Kind != "github" {
@@ -1397,7 +1398,7 @@ func (s *server) handlePutIntegration(w http.ResponseWriter, r *http.Request, us
 			return
 		}
 		log.Printf("forge: save integration for %s failed: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	if tokenCleared {
@@ -1410,12 +1411,12 @@ func (s *server) handlePutIntegration(w http.ResponseWriter, r *http.Request, us
 func (s *server) handleDeleteIntegration(w http.ResponseWriter, r *http.Request, user string) {
 	name := r.PathValue("name")
 	if !validForgeSourceName(name) {
-		http.Error(w, "invalid integration name", http.StatusBadRequest)
+		http.Error(w, invalidIntegrationNameMessage, http.StatusBadRequest)
 		return
 	}
 	if err := s.store.DeleteForgeSource(user, name); err != nil {
 		log.Printf("forge: delete integration for %s failed: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1424,7 +1425,7 @@ func (s *server) handleDeleteIntegration(w http.ResponseWriter, r *http.Request,
 func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, user string) {
 	name := r.PathValue("name")
 	if !validForgeSourceName(name) {
-		http.Error(w, "invalid integration name", http.StatusBadRequest)
+		http.Error(w, invalidIntegrationNameMessage, http.StatusBadRequest)
 		return
 	}
 
@@ -1438,7 +1439,7 @@ func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, u
 	}
 	if len(bytes.TrimSpace(body)) > 0 {
 		if err := json.Unmarshal(body, &probe); err != nil {
-			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 			return
 		}
 	}
@@ -1514,18 +1515,18 @@ func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, u
 	response, err := s.forgeClient.Do(request)
 	if err != nil {
 		log.Printf("forge: connection test for %s failed: %v", user, err)
-		writeJSON(w, forgeTestResponse{Error: "connection failed"})
+		writeJSON(w, forgeTestResponse{Error: connectionFailedMessage})
 		return
 	}
 	drainErr := drainForgeResponse(response)
 	if drainErr != nil {
 		log.Printf("forge: connection test for %s failed while closing response: %v", user, drainErr)
-		writeJSON(w, forgeTestResponse{Error: "connection failed"})
+		writeJSON(w, forgeTestResponse{Error: connectionFailedMessage})
 		return
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		log.Printf("forge: connection test for %s failed: upstream status %d", user, response.StatusCode)
-		writeJSON(w, forgeTestResponse{Error: "connection failed"})
+		writeJSON(w, forgeTestResponse{Error: connectionFailedMessage})
 		return
 	}
 	writeJSON(w, forgeTestResponse{OK: true})

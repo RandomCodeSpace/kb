@@ -38,7 +38,17 @@ type similarResponse struct {
 	Items []similarItem `json:"items"`
 }
 
-const maxSimilarExcludeLinks = 100
+const (
+	maxSimilarExcludeLinks             = 100
+	contentTypeHeader                  = "Content-Type"
+	jsonMediaType                      = "application/json"
+	storageErrorMessage                = "storage error"
+	invalidJSONBodyMessage             = "invalid JSON body"
+	invalidBoardPayloadMessage         = "invalid board payload"
+	configuredSourceUnavailableMessage = "configured source unavailable"
+	linkTagPrefix                      = "link::"
+	connectionFailedMessage            = "connection failed"
+)
 
 func (s *server) handleSimilar(w http.ResponseWriter, r *http.Request, user string) {
 	params := r.URL.Query()
@@ -55,7 +65,7 @@ func (s *server) handleSimilar(w http.ResponseWriter, r *http.Request, user stri
 	hits, err := s.store.SearchSimilar(user, query, params.Get("exclude"), excludeLinks, 3)
 	if err != nil {
 		log.Printf("search similar for %s: %s", logSafe(user), logSafe(err.Error()))
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	for _, hit := range hits {
@@ -79,7 +89,7 @@ func (s *server) handleTombstone(w http.ResponseWriter, r *http.Request, user st
 	}
 	var req tombstoneRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	if strings.TrimSpace(req.TaskID) == "" {
@@ -98,7 +108,7 @@ func (s *server) handleTombstone(w http.ResponseWriter, r *http.Request, user st
 			return
 		}
 		log.Printf("record tombstone for %s: %v", logSafe(user), err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -107,7 +117,7 @@ func (s *server) handleTombstone(w http.ResponseWriter, r *http.Request, user st
 // writeJSON encodes v with the JSON content type; encode errors after the
 // header is out can only be logged.
 func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, jsonMediaType)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("write json: %v", err)
 	}
@@ -120,7 +130,7 @@ func acceptsJSON(r *http.Request) bool {
 	for _, header := range r.Header.Values("Accept") {
 		for _, value := range strings.Split(header, ",") {
 			mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(value))
-			if err != nil || mediaType != "application/json" {
+			if err != nil || mediaType != jsonMediaType {
 				continue
 			}
 			if q, ok := params["q"]; ok {
@@ -136,7 +146,7 @@ func acceptsJSON(r *http.Request) bool {
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, jsonMediaType)
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
@@ -179,7 +189,7 @@ func (s *server) handleGetBoard(w http.ResponseWriter, r *http.Request, user str
 	snapshot, etag, err := s.currentBoard(user)
 	if err != nil {
 		log.Printf("read board for %s: %s", logSafe(user), logSafe(err.Error()))
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	md := board.Serialize(snapshot.Board)
@@ -199,7 +209,7 @@ func (s *server) handleGetBoard(w http.ResponseWriter, r *http.Request, user str
 		}{Board: md, TaskIDs: snapshot.TaskIDs})
 		return
 	}
-	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set(contentTypeHeader, "text/markdown; charset=utf-8")
 	_, _ = io.WriteString(w, md)
 }
 
@@ -219,26 +229,26 @@ func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user str
 	}
 	operationValues := r.Header.Values("Idempotency-Key")
 	if len(operationValues) > 1 {
-		http.Error(w, "invalid board payload", http.StatusBadRequest)
+		http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
 		return
 	}
 	operationID := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if operationID != "" {
 		parsed, err := uuid.Parse(operationID)
 		if err != nil || parsed.String() != strings.ToLower(operationID) {
-			http.Error(w, "invalid board payload", http.StatusBadRequest)
+			http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
 			return
 		}
 	}
-	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	isJSON := mediaType == "application/json"
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get(contentTypeHeader))
+	isJSON := mediaType == jsonMediaType
 	hashInput := append([]byte(mediaType+"\x00"), body...)
 	requestHash := fmt.Sprintf("%x", sha256.Sum256(hashInput))
 
 	snapshot, etag, err := s.currentBoard(user)
 	if err != nil {
 		log.Printf("read board for %s: %s", logSafe(user), logSafe(err.Error()))
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	want := strings.TrimSpace(strings.Join(r.Header.Values("If-Match"), ","))
@@ -262,11 +272,11 @@ func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user str
 					return
 				case conditionErr != nil:
 					log.Printf("check board condition for %s: %s", logSafe(user), logSafe(conditionErr.Error()))
-					http.Error(w, "storage error", http.StatusInternalServerError)
+					http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 					return
 				}
 			}
-			http.Error(w, "invalid board payload", http.StatusBadRequest)
+			http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
 			return
 		}
 	}
@@ -302,10 +312,10 @@ func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user str
 		case errors.As(err, &conflict):
 			writeBoardConflict(w, boardETag(conflict.CurrentRevision))
 		case errors.Is(err, store.ErrInvalidTaskIDs):
-			http.Error(w, "invalid board payload", http.StatusBadRequest)
+			http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
 		default:
 			log.Printf("write board for %s: %s", logSafe(user), logSafe(err.Error()))
-			http.Error(w, "storage error", http.StatusInternalServerError)
+			http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		}
 		return
 	}
@@ -460,7 +470,7 @@ func (s *server) handleLabels(w http.ResponseWriter, _ *http.Request, user strin
 	labels, err := s.store.Labels(user)
 	if err != nil {
 		log.Printf("labels for %s: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	if labels == nil {
@@ -481,7 +491,7 @@ func (s *server) handleGetSettings(w http.ResponseWriter, _ *http.Request, user 
 	set, err := s.store.AISettings(user)
 	if err != nil {
 		log.Printf("settings for %s: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, settingsResponse{BaseURL: set.BaseURL, Model: set.Model, HasKey: set.HasKey})
@@ -495,7 +505,7 @@ func (s *server) handlePutSettings(w http.ResponseWriter, r *http.Request, user 
 		Key     *string `json:"ai_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
 		return
 	}
 	if req.BaseURL != nil && strings.TrimSpace(*req.BaseURL) != "" {
@@ -507,7 +517,7 @@ func (s *server) handlePutSettings(w http.ResponseWriter, r *http.Request, user 
 	keyCleared, err := s.store.SetAISettings(user, req.BaseURL, req.Model, req.Key)
 	if err != nil {
 		log.Printf("save settings for %s: %v", user, err)
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	if keyCleared {
