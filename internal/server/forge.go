@@ -981,10 +981,16 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	response.Drafts = buildImportPreviewDrafts(ref, drafts, issues, duplicates)
+	writeJSON(w, response)
+}
+
+func buildImportPreviewDrafts(ref forgeRef, drafts []storyDraft, issues []forgeIssue, duplicates []*importDuplicate) []importPreviewDraft {
+	previews := make([]importPreviewDraft, 0, len(drafts))
 	for _, draft := range drafts {
 		preview := importPreviewDraft{storyDraft: draft}
 		preview.Tags = stripModelLinkTags(preview.Tags)
-		if draft.Source > 0 && draft.Source <= sourceCount {
+		if draft.Source > 0 && draft.Source <= len(issues) {
 			issue := issues[draft.Source-1]
 			link, externalKey := importIssueProvenance(ref, issue)
 			preview.Tags = append(preview.Tags, linkTagPrefix+link)
@@ -993,9 +999,9 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 			preview.URL = issue.URL
 			preview.DuplicateOf = duplicates[draft.Source-1]
 		}
-		response.Drafts = append(response.Drafts, preview)
+		previews = append(previews, preview)
 	}
-	writeJSON(w, response)
+	return previews
 }
 
 // handleImportLinks records client-selected import provenance without loading
