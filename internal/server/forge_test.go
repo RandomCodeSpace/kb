@@ -478,6 +478,55 @@ func TestIntegrationsConnectionTestProtectsStoredPAT(t *testing.T) {
 	}
 }
 
+func TestIntegrationsConnectionTestUsesOnlySuppliedPATForDifferentOrigin(t *testing.T) {
+	var storedHits atomic.Int32
+	stored := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		storedHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer stored.Close()
+
+	const replacementPAT = "replacement-token"
+	requests := make(chan []string, 1)
+	different := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.Header.Values("PRIVATE-TOKEN")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer different.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	h, st := newIntegrationsHandler(t)
+	baseURL, storedPAT := stored.URL, "stored-token"
+	if _, err := st.SetForgeSource("default", "protected", "gitlab", &baseURL, &storedPAT); err != nil {
+		t.Fatalf("seed protected source: %v", err)
+	}
+	body, err := json.Marshal(map[string]string{"base_url": different.URL, "pat": replacementPAT})
+	if err != nil {
+		t.Fatalf("marshal probe: %v", err)
+	}
+
+	w := doReq(t, h, http.MethodPost, "/api/integrations/protected/test", string(body), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("different-origin test: got %d, want 200 (body bytes=%d)", w.Code, w.Body.Len())
+	}
+	var result integrationTestResponse
+	decodeForgeJSON(t, w, &result)
+	if !result.OK || result.Error != "" {
+		t.Fatalf("different-origin result = %+v, want ok=true without error", result)
+	}
+	if storedHits.Load() != 0 {
+		t.Fatalf("stored origin was hit %d times", storedHits.Load())
+	}
+	select {
+	case tokens := <-requests:
+		if len(tokens) != 1 || tokens[0] != replacementPAT {
+			t.Fatalf("PRIVATE-TOKEN values = %q, want only supplied replacement PAT", tokens)
+		}
+	default:
+		t.Fatal("different origin did not receive the connection-test request")
+	}
+}
+
 func TestIntegrationProbeRejectsCredentialURLWithoutEgress(t *testing.T) {
 	var hits atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1226,6 +1275,84 @@ func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
 	}
 	if unlinked.Link != "" || unlinked.ExternalKey != "" || unlinked.URL != "" || unlinked.DuplicateOf != nil || strings.Join(unlinked.Tags, ",") != "team::ops" {
 		t.Fatalf("unlinked draft = %+v", unlinked)
+	}
+}
+
+func TestImportPreviewReturnsEmptyDraftsWithoutAIEgressWhenForgeIsEmpty(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/forge/api/v4/projects/group%2Fproject/issues" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	defer upstream.Close()
+	fakeAI := &fakeOpenAI{content: `{"stories":[{"title":"unexpected"}]}`}
+	aiUpstream := httptest.NewServer(fakeAI.handler())
+	defer aiUpstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, st := newTestServer(t, Config{})
+	configureAI(t, h, aiUpstream.URL, "test-model", "sk-import")
+	baseURL := upstream.URL + "/forge"
+	if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, nil); err != nil {
+		t.Fatalf("seed forge source: %v", err)
+	}
+
+	w := doReq(t, h, http.MethodPost, "/api/import/preview", fmt.Sprintf(`{"source":"gitlab-main","ref":%q}`, upstream.URL+"/forge/group/project"), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("empty preview = %d body=%q, want 200", w.Code, w.Body.String())
+	}
+	var response importPreviewResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode empty preview: %v", err)
+	}
+	if response.Drafts == nil || len(response.Drafts) != 0 {
+		t.Fatalf("empty preview drafts = %#v, want initialized empty slice", response.Drafts)
+	}
+	if fakeAI.calls != 0 {
+		t.Fatalf("empty preview made %d AI calls, want 0", fakeAI.calls)
+	}
+}
+
+func TestImportPreviewReturnsEmptyDraftsWithoutProvenanceWhenAllGeneratedStoriesAreInvalid(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/forge/api/v4/projects/group%2Fproject/issues" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `[{"iid":42,"title":"Issue title","description":"body","web_url":"https://forge.example/issues/42"}]`)
+	}))
+	defer upstream.Close()
+	fakeAI := &fakeOpenAI{content: `{"stories":[{"title":"   "},"not an object"]}`}
+	aiUpstream := httptest.NewServer(fakeAI.handler())
+	defer aiUpstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, st := newTestServer(t, Config{})
+	configureAI(t, h, aiUpstream.URL, "test-model", "sk-import")
+	baseURL, pat := upstream.URL+"/forge", "glpat-import"
+	if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, &pat); err != nil {
+		t.Fatalf("seed forge source: %v", err)
+	}
+
+	w := doReq(t, h, http.MethodPost, "/api/import/preview", fmt.Sprintf(`{"source":"gitlab-main","ref":%q}`, upstream.URL+"/forge/group/project"), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("all-invalid preview = %d body=%q, want 200", w.Code, w.Body.String())
+	}
+	var response importPreviewResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode all-invalid preview: %v", err)
+	}
+	if response.Drafts == nil || len(response.Drafts) != 0 {
+		t.Fatalf("all-invalid preview drafts = %#v, want initialized empty slice", response.Drafts)
+	}
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	key := "gitlab:" + host + "/group/project#42"
+	if found, err := st.ImportedAs("default", []string{key}); err != nil || len(found) != 0 {
+		t.Fatalf("all-invalid preview persisted provenance: %+v, %v", found, err)
 	}
 }
 
