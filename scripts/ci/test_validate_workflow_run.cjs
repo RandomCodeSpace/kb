@@ -68,7 +68,7 @@ const server = createServer((request, response) => {
   response.end(JSON.stringify(fixture || { message: 'not found' }));
 });
 
-server.listen(0, '127.0.0.1', () => {
+function runValidator(envOverrides = {}) {
   const child = spawn(process.execPath, [join(__dirname, 'validate-workflow-run.cjs')], {
     env: {
       ...process.env,
@@ -82,50 +82,65 @@ server.listen(0, '127.0.0.1', () => {
       TRIGGER_RUN_ATTEMPT: '1',
       TRIGGER_HEAD_REPOSITORY_ID: '99',
       TRIGGER_HEAD_SHA: head,
+      ...envOverrides,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stderr = '';
   child.stderr.on('data', (chunk) => { stderr += chunk; });
-  child.on('close', (code) => {
-    assert.equal(code, 0, stderr);
-    const output = readFileSync(outputPath, 'utf8');
-    assert.match(output, new RegExp(`candidate_sha=${head}`));
-    assert.match(output, /workflow_ref=RandomCodeSpace\/kb\/\.github\/workflows\/quality\.yml@refs\/pull\/7\/merge/);
-    assert.match(output, new RegExp(`workflow_sha=${merge}`));
-    assert.match(output, /pull_request=7/);
-    assert.match(output, new RegExp(`base_sha=${base}`));
-    assert.match(output, /candidate_repository=ExampleContributor\/kb/);
-    const requestCount = requests.length;
-    event.workflow_run.id = runId + 1;
-    writeFileSync(eventPath, JSON.stringify(event));
-    const hostile = spawn(process.execPath, [join(__dirname, 'validate-workflow-run.cjs')], {
-      env: {
-        ...process.env,
-        GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
-        GITHUB_EVENT_PATH: eventPath,
-        GITHUB_OUTPUT: outputPath,
-        GITHUB_REPOSITORY: repository,
-        GITHUB_TOKEN: 'test-token',
-        TRIGGER_RUN_ID: String(runId),
-        TRIGGER_WORKFLOW_ID: '5',
-        TRIGGER_RUN_ATTEMPT: '1',
-        TRIGGER_HEAD_REPOSITORY_ID: '99',
-        TRIGGER_HEAD_SHA: head,
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let hostileStderr = '';
-    hostile.stderr.on('data', (chunk) => { hostileStderr += chunk; });
-    hostile.on('close', async (hostileCode) => {
-      assert.notEqual(hostileCode, 0);
-      assert.match(hostileStderr, /trusted workflow run id mismatch/);
-      assert.equal(requests.length, requestCount, 'mismatched event id must not reach the network');
-      await testManifestDescriptorReads();
-      await testSonarOriginPinning();
-      server.close(() => console.log('CI JavaScript hostile fixtures passed'));
-    });
-  });
+  return new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr })));
+}
+
+async function runWorkflowTests() {
+  const valid = await runValidator();
+  assert.equal(valid.code, 0, valid.stderr);
+  const output = readFileSync(outputPath, 'utf8');
+  assert.match(output, new RegExp(`candidate_sha=${head}`));
+  assert.match(output, /workflow_ref=RandomCodeSpace\/kb\/\.github\/workflows\/quality\.yml@refs\/pull\/7\/merge/);
+  assert.match(output, new RegExp(`workflow_sha=${merge}`));
+  assert.match(output, /pull_request=7/);
+  assert.match(output, new RegExp(`base_sha=${base}`));
+  assert.match(output, /candidate_repository=ExampleContributor\/kb/);
+
+  const requestCount = requests.length;
+  const hostileEnvironmentCases = [
+    [{ TRIGGER_RUN_ID: `${runId}/../admin` }, /TRIGGER_RUN_ID must be a positive integer/],
+    [{ TRIGGER_RUN_ID: '9007199254740992' }, /TRIGGER_RUN_ID must be a positive safe integer/],
+    [{ GITHUB_REPOSITORY: 'RandomCodeSpace/kb/../admin' }, /GITHUB_REPOSITORY is invalid/],
+    [{ GITHUB_API_URL: `http://127.0.0.1:${server.address().port}//` }, /GITHUB_API_URL is invalid/],
+  ];
+  for (const [envOverrides, expectedError] of hostileEnvironmentCases) {
+    const hostile = await runValidator(envOverrides);
+    assert.notEqual(hostile.code, 0);
+    assert.match(hostile.stderr, expectedError);
+    assert.equal(requests.length, requestCount, 'invalid API path identifier must not reach the network');
+  }
+
+  event.workflow_run.head_repository.full_name = 'ExampleContributor/kb/../../admin';
+  writeFileSync(eventPath, JSON.stringify(event));
+  const injectedRepository = await runValidator();
+  assert.notEqual(injectedRepository.code, 0);
+  assert.match(injectedRepository.stderr, /candidate repository is invalid/);
+  assert.equal(requests.length, requestCount, 'injected repository path must not reach the network');
+
+  event.workflow_run.head_repository.full_name = candidateRepository;
+  event.workflow_run.id = runId + 1;
+  writeFileSync(eventPath, JSON.stringify(event));
+  const mismatchedRun = await runValidator();
+  assert.notEqual(mismatchedRun.code, 0);
+  assert.match(mismatchedRun.stderr, /trusted workflow run id mismatch/);
+  assert.equal(requests.length, requestCount, 'mismatched event id must not reach the network');
+}
+
+server.listen(0, '127.0.0.1', () => {
+  runWorkflowTests()
+    .then(testManifestDescriptorReads)
+    .then(testSonarOriginPinning)
+    .then(() => server.close(() => console.log('CI JavaScript hostile fixtures passed')))
+    .catch((error) => server.close(() => {
+      console.error(error);
+      process.exitCode = 1;
+    }));
 });
 
 async function testManifestDescriptorReads() {

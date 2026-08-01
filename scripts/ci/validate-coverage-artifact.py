@@ -255,14 +255,14 @@ def main() -> None:
     manifest_base = manifest["candidate"]["base_sha"]
     if manifest_base != empty_tree:
         base_exists = subprocess.run(
-            ["git", "-C", str(args.repository_root), "cat-file", "-e", f"{manifest_base}^{{commit}}"],
+            ["git", "-C", str(args.repository_root), "cat-file", "-e", "--end-of-options", f"{manifest_base}^{{commit}}"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
         )
         if base_exists.returncode != 0:
             fail("candidate event base is not an available commit")
         if args.event != "pull_request":
             ancestor = subprocess.run(
-                ["git", "-C", str(args.repository_root), "merge-base", "--is-ancestor", manifest_base, args.candidate_sha],
+                ["git", "-C", str(args.repository_root), "merge-base", "--is-ancestor", "--end-of-options", manifest_base, args.candidate_sha],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
             )
             if ancestor.returncode != 0:

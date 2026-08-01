@@ -37,9 +37,25 @@ function repositoryName(value, label) {
   return value;
 }
 
-async function github(path) {
-  const apiUrl = process.env.GITHUB_API_URL || 'https://api.github.com';
-  const response = await fetch(`${apiUrl}${path}`, {
+function githubPathIdentifier(value, label) {
+  if (typeof value === 'number') return String(safeInteger(value, label));
+  if (typeof value !== 'string' || !value || value.length > 100 || !/^[A-Za-z0-9_.-]+$/.test(value)) {
+    throw new Error(`${label} is invalid`);
+  }
+  return encodeURIComponent(value);
+}
+
+async function github(segments, query = {}) {
+  if (!Array.isArray(segments) || !segments.length) throw new Error('GitHub API path is invalid');
+  const apiUrl = new URL(process.env.GITHUB_API_URL || 'https://api.github.com');
+  if (!['http:', 'https:'].includes(apiUrl.protocol) || apiUrl.username || apiUrl.password || apiUrl.search || apiUrl.hash || apiUrl.pathname.includes('//')) {
+    throw new Error('GITHUB_API_URL is invalid');
+  }
+  const path = segments.map((segment, index) => githubPathIdentifier(segment, `GitHub API path segment ${index + 1}`)).join('/');
+  const basePath = apiUrl.pathname === '/' ? '' : apiUrl.pathname.endsWith('/') ? apiUrl.pathname.slice(0, -1) : apiUrl.pathname;
+  apiUrl.pathname = `${basePath}/${path}`;
+  for (const [key, value] of Object.entries(query)) apiUrl.searchParams.set(key, String(value));
+  const response = await fetch(apiUrl, {
     headers: {
       Accept: 'application/vnd.github+json',
       Authorization: `Bearer ${required('GITHUB_TOKEN')}`,
@@ -60,7 +76,7 @@ function output(values) {
 
 async function main() {
   const event = JSON.parse(readFileSync(required('GITHUB_EVENT_PATH'), 'utf8'));
-  const repository = required('GITHUB_REPOSITORY');
+  const repository = repositoryName(required('GITHUB_REPOSITORY'), 'GITHUB_REPOSITORY');
   const triggerRunId = environmentInteger('TRIGGER_RUN_ID');
   const triggerWorkflowId = environmentInteger('TRIGGER_WORKFLOW_ID');
   const triggerRunAttempt = environmentInteger('TRIGGER_RUN_ATTEMPT');
@@ -83,8 +99,8 @@ async function main() {
   equal(safeInteger(trigger.head_repository.id, 'head repository id'), triggerHeadRepositoryId, 'trusted head repository id');
   equal(trigger.head_sha, triggerHeadSha, 'trusted head SHA');
 
-  const encodedRepo = repository.split('/').map(encodeURIComponent).join('/');
-  const run = await github(`/repos/${encodedRepo}/actions/runs/${triggerRunId}`);
+  const repositorySegments = repository.split('/');
+  const run = await github(['repos', ...repositorySegments, 'actions', 'runs', triggerRunId]);
   equal(run.id, triggerRunId, 'API run id');
   equal(run.workflow_id, triggerWorkflowId, 'API workflow id');
   equal(run.name, WORKFLOW_NAME, 'API workflow name');
@@ -96,12 +112,12 @@ async function main() {
   equal(run.head_sha, triggerHeadSha, 'API head SHA');
   equal(run.run_attempt, triggerRunAttempt, 'API run attempt');
   const workflowFile = WORKFLOW_PATH.split('/').at(-1);
-  const workflow = await github(`/repos/${encodedRepo}/actions/workflows/${encodeURIComponent(workflowFile)}`);
+  const workflow = await github(['repos', ...repositorySegments, 'actions', 'workflows', workflowFile]);
   equal(workflow.id, triggerWorkflowId, 'workflow-by-path id');
   equal(workflow.path, WORKFLOW_PATH, 'workflow-by-path path');
   equal(workflow.name, WORKFLOW_NAME, 'workflow-by-path name');
 
-  const jobs = await github(`/repos/${encodedRepo}/actions/runs/${triggerRunId}/jobs?filter=latest&per_page=100`);
+  const jobs = await github(['repos', ...repositorySegments, 'actions', 'runs', triggerRunId, 'jobs'], { filter: 'latest', per_page: 100 });
   const jobMatches = jobs.jobs.filter((job) => job.name === JOB_NAME && job.run_attempt === triggerRunAttempt);
   if (jobMatches.length !== 1) throw new Error(`expected exactly one ${JOB_NAME} job, found ${jobMatches.length}`);
   const job = jobMatches[0];
@@ -111,7 +127,7 @@ async function main() {
   equal(job.conclusion, 'success', 'producer job conclusion');
   equal(job.head_sha, triggerHeadSha, 'producer job head SHA');
 
-  const artifacts = await github(`/repos/${encodedRepo}/actions/runs/${triggerRunId}/artifacts?per_page=100`);
+  const artifacts = await github(['repos', ...repositorySegments, 'actions', 'runs', triggerRunId, 'artifacts'], { per_page: 100 });
   equal(artifacts.total_count, 1, 'artifact count');
   equal(artifacts.artifacts.length, 1, 'returned artifact count');
   const artifact = artifacts.artifacts[0];
@@ -125,8 +141,7 @@ async function main() {
   equal(artifact.workflow_run?.head_sha, triggerHeadSha, 'artifact head SHA');
   equal(artifact.workflow_run?.head_repository_id, triggerHeadRepositoryId, 'artifact head repository id');
 
-  const encodedCandidateRepo = candidateRepository.split('/').map(encodeURIComponent).join('/');
-  const commit = await github(`/repos/${encodedCandidateRepo}/git/commits/${triggerHeadSha}`);
+  const commit = await github(['repos', ...candidateRepository.split('/'), 'git', 'commits', triggerHeadSha]);
   equal(commit.sha, triggerHeadSha, 'candidate commit SHA');
   const candidateTree = commit.tree?.sha;
   if (!/^[0-9a-f]{40}$/.test(candidateTree || '')) throw new Error('candidate tree is invalid');
@@ -149,7 +164,7 @@ async function main() {
     baseSha = pull.base?.sha;
     baseRef = pull.base?.ref;
     candidateRef = pull.head?.ref;
-    const pullDetails = await github(`/repos/${encodedRepo}/pulls/${pull.number}`);
+    const pullDetails = await github(['repos', ...repositorySegments, 'pulls', pull.number]);
     equal(pullDetails.head?.sha, triggerHeadSha, 'pull request API head SHA');
     equal(pullDetails.head?.repo?.full_name, candidateRepository, 'pull request API head repository');
     equal(pullDetails.base?.repo?.full_name, repository, 'pull request API base repository');
