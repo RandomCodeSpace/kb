@@ -35,11 +35,13 @@ runs:
         args: >-
           -Dsonar.organization=${{ inputs.organization }}
           -Dsonar.projectKey=${{ inputs.project-key }}
+          -Dsonar.projectVersion=0.1.0-sonar.1
           -Dsonar.scm.revision=${{ inputs.candidate-sha }}
           -Dsonar.sources=.
           -Dsonar.tests=.
-          -Dsonar.exclusions=coverage/**,dist/**,node_modules/**,.omx/**,package-lock.json,tsconfig.tsbuildinfo,**/*_test.go,src/**/*.test.ts,src/**/*.test.tsx,src/test/**
-          -Dsonar.test.inclusions=**/*_test.go,src/**/*.test.ts,src/**/*.test.tsx
+          -Dsonar.exclusions=coverage/**,dist/**,node_modules/**,.omx/**,package-lock.json,tsconfig.tsbuildinfo
+          -Dsonar.test.inclusions=**/*_test.go,src/**/*.test.ts,src/**/*.test.tsx,src/test/**,scripts/**/*.test.sh,scripts/**/test-*.sh,scripts/**/test_*.py,scripts/**/test_*.cjs
+          -Dsonar.coverage.exclusions=.github/**,scripts/**,vite.config.ts
           -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
           -Dsonar.go.coverage.reportPaths=coverage/go.out
           -Dsonar.qualitygate.wait=true

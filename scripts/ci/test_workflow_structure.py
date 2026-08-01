@@ -8,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 QUALITY = (ROOT / ".github/workflows/quality.yml").read_text()
 SONAR = (ROOT / ".github/workflows/sonar-exact-revision.yml").read_text()
+PROTECTED_SONAR = (ROOT / ".github/actions/protected-sonar/action.yml").read_text()
+SONAR_PROPERTIES = (ROOT / "sonar-project.properties").read_text()
 PACKAGE = json.loads((ROOT / "package.json").read_text())
 
 
@@ -99,6 +101,28 @@ class WorkflowStructureTest(unittest.TestCase):
             "--coverage.thresholds.functions=0 --coverage.thresholds.branches=0 "
             "--coverage.thresholds.statements=0",
         )
+
+    def test_sonar_scope_matches_enforced_application_coverage(self):
+        values = {
+            "sonar.projectVersion": "0.1.0-sonar.1",
+            "sonar.exclusions": (
+                "coverage/**,dist/**,node_modules/**,.omx/**,package-lock.json,"
+                "tsconfig.tsbuildinfo"
+            ),
+            "sonar.test.inclusions": (
+                "**/*_test.go,src/**/*.test.ts,src/**/*.test.tsx,src/test/**,"
+                "scripts/**/*.test.sh,scripts/**/test-*.sh,scripts/**/test_*.py,"
+                "scripts/**/test_*.cjs"
+            ),
+            "sonar.coverage.exclusions": ".github/**,scripts/**,vite.config.ts",
+        }
+
+        for key, value in values.items():
+            self.assertIn(f"{key}={value}\n", SONAR_PROPERTIES)
+            self.assertIn(f"-D{key}={value}\n", PROTECTED_SONAR)
+
+        self.assertNotIn("sonar.exclusions=.github/**", SONAR_PROPERTIES)
+        self.assertNotIn("-Dsonar.exclusions=.github/**", PROTECTED_SONAR)
 
     def test_candidate_tree_is_rejected_on_both_sides_of_approval(self):
         self.assertEqual(SONAR.count("trusted-main/scripts/ci/validate-candidate-tree.sh"), 2)
