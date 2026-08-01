@@ -83,19 +83,21 @@ jobs:
         env:
           BASE_SHA: ${{ steps.run.outputs.base_sha }}
           BASE_REF: ${{ steps.run.outputs.base_ref }}
+          BASE_REPOSITORY: ${{ github.repository }}
           CANDIDATE_SHA: ${{ steps.run.outputs.candidate_sha }}
           ANALYSIS_MODE: ${{ steps.run.outputs.mode }}
         working-directory: candidate
         run: |
           set -eu
           if [ "$ANALYSIS_MODE" = pull_request ]; then
-            bash ../trusted-main/scripts/ci/guard-control-plane.sh "$BASE_SHA" "$CANDIDATE_SHA" --classify >> "$GITHUB_OUTPUT"
-            echo "security_base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+            sh ../trusted-main/scripts/ci/fetch-verified-base.sh "$BASE_REPOSITORY" "$BASE_SHA"
+            guard_base=$(git merge-base "$CANDIDATE_SHA" "$BASE_SHA")
+            bash ../trusted-main/scripts/ci/guard-control-plane.sh "$guard_base" "$CANDIDATE_SHA" --classify >> "$GITHUB_OUTPUT"
+            echo "security_base_sha=$guard_base" >> "$GITHUB_OUTPUT"
           elif [ "$ANALYSIS_MODE" = branch ]; then
             git fetch --no-tags origin "$BASE_REF"
             guard_base=$(git merge-base "$CANDIDATE_SHA" "origin/$BASE_REF")
-            bash ../trusted-main/scripts/ci/guard-control-plane.sh "$guard_base" "$CANDIDATE_SHA"
-            echo 'maintenance=false' >> "$GITHUB_OUTPUT"
+            bash ../trusted-main/scripts/ci/guard-control-plane.sh "$guard_base" "$CANDIDATE_SHA" --classify >> "$GITHUB_OUTPUT"
             echo "security_base_sha=$guard_base" >> "$GITHUB_OUTPUT"
           else
             echo 'maintenance=false' >> "$GITHUB_OUTPUT"
@@ -205,6 +207,7 @@ jobs:
           PULL_REQUEST: ${{ needs.validate-candidate.outputs.pull_request }}
           BASE_SHA: ${{ needs.validate-candidate.outputs.base_sha }}
           BASE_REF: ${{ needs.validate-candidate.outputs.base_ref }}
+          BASE_REPOSITORY: ${{ github.repository }}
           MAINTENANCE: ${{ needs.validate-candidate.outputs.maintenance }}
           SECURITY_BASE_SHA: ${{ needs.validate-candidate.outputs.security_base_sha }}
         run: |
@@ -212,6 +215,10 @@ jobs:
           test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
           test "$(git -C candidate show -s --format=%T HEAD)" = "$CANDIDATE_TREE"
           test -z "$(git -C candidate status --porcelain=v1 --untracked-files=all)"
+          if [ "$PRODUCER_EVENT" = pull_request ]; then
+            (cd candidate && sh ../trusted-main/scripts/ci/fetch-verified-base.sh "$BASE_REPOSITORY" "$BASE_SHA")
+            test "$(git -C candidate merge-base "$CANDIDATE_SHA" "$BASE_SHA")" = "$SECURITY_BASE_SHA"
+          fi
           if [ "$MAINTENANCE" = true ]; then
             cp --remove-destination trusted-main/sonar-project.properties candidate/sonar-project.properties
             test "$(stat -c '%a' candidate/sonar-project.properties)" = "$(stat -c '%a' trusted-main/sonar-project.properties)"

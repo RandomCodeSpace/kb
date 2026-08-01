@@ -10,10 +10,12 @@ const { join } = require('node:path');
 const { spawn } = require('node:child_process');
 
 const repository = 'RandomCodeSpace/kb';
+const candidateRepository = 'ExampleContributor/kb';
 const head = '1'.repeat(40);
 const tree = '2'.repeat(40);
 const base = '3'.repeat(40);
 const merge = '4'.repeat(40);
+const currentBase = '5'.repeat(40);
 const runId = 10;
 const jobId = 20;
 const artifactId = 30;
@@ -28,7 +30,7 @@ const event = {
     id: runId, workflow_id: 5, run_attempt: 1, name: 'Regression and candidate coverage',
     path: '.github/workflows/quality.yml', event: 'pull_request', status: 'completed', conclusion: 'success',
     head_sha: head, head_branch: 'feature', repository: { full_name: repository },
-    head_repository: { id: 99, full_name: repository },
+    head_repository: { id: 99, full_name: candidateRepository },
   },
 };
 writeFileSync(eventPath, JSON.stringify(event));
@@ -40,8 +42,8 @@ const fixtures = new Map([
   [`/repos/RandomCodeSpace/kb/actions/runs/${runId}`, {
     id: runId, workflow_id: 5, run_attempt: 1, name: event.workflow_run.name, path: event.workflow_run.path,
     event: 'pull_request', status: 'completed', conclusion: 'success', head_sha: head,
-    head_repository: { full_name: repository },
-    pull_requests: [{ number: 7, head: { sha: head, ref: 'feature', repo: { full_name: repository } }, base: { sha: base, ref: 'main' } }],
+    head_repository: { full_name: candidateRepository },
+    pull_requests: [{ number: 7, head: { sha: head, ref: 'feature', repo: { full_name: candidateRepository } }, base: { sha: base, ref: 'main' } }],
   }],
   [`/repos/RandomCodeSpace/kb/actions/runs/${runId}/jobs?filter=latest&per_page=100`, {
     jobs: [{ id: jobId, run_id: runId, run_attempt: 1, name: 'Candidate head coverage', status: 'completed', conclusion: 'success', head_sha: head }],
@@ -51,10 +53,10 @@ const fixtures = new Map([
     artifacts: [{ id: artifactId, name: `candidate-head-coverage-${head}`, expired: false, size_in_bytes: 1000,
       workflow_run: { id: runId, head_sha: head, head_repository_id: 99 } }],
   }],
-  [`/repos/RandomCodeSpace/kb/git/commits/${head}`, { sha: head, tree: { sha: tree }, parents: [{ sha: base }] }],
+  [`/repos/ExampleContributor/kb/git/commits/${head}`, { sha: head, tree: { sha: tree }, parents: [{ sha: base }] }],
   ['/repos/RandomCodeSpace/kb/pulls/7', {
-    head: { sha: head, ref: 'feature', repo: { full_name: repository } },
-    base: { sha: base, ref: 'main', repo: { full_name: repository } },
+    head: { sha: head, ref: 'feature', repo: { full_name: candidateRepository } },
+    base: { sha: currentBase, ref: 'main', repo: { full_name: repository } },
     merge_commit_sha: merge,
   }],
 ]);
@@ -92,6 +94,8 @@ server.listen(0, '127.0.0.1', () => {
     assert.match(output, /workflow_ref=RandomCodeSpace\/kb\/\.github\/workflows\/quality\.yml@refs\/pull\/7\/merge/);
     assert.match(output, new RegExp(`workflow_sha=${merge}`));
     assert.match(output, /pull_request=7/);
+    assert.match(output, new RegExp(`base_sha=${base}`));
+    assert.match(output, /candidate_repository=ExampleContributor\/kb/);
     const requestCount = requests.length;
     event.workflow_run.id = runId + 1;
     writeFileSync(eventPath, JSON.stringify(event));

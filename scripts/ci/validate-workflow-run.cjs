@@ -28,6 +28,15 @@ function environmentInteger(name) {
   return safeInteger(Number(value), name);
 }
 
+function repositoryName(value, label) {
+  if (typeof value !== 'string') throw new Error(`${label} is invalid`);
+  const segments = value.split('/');
+  if (segments.length !== 2 || segments.some((segment) => !/^[A-Za-z0-9_.-]+$/.test(segment))) {
+    throw new Error(`${label} is invalid`);
+  }
+  return value;
+}
+
 async function github(path) {
   const apiUrl = process.env.GITHUB_API_URL || 'https://api.github.com';
   const response = await fetch(`${apiUrl}${path}`, {
@@ -62,7 +71,7 @@ async function main() {
   if (!trigger || typeof trigger !== 'object') throw new Error('missing workflow_run payload');
   equal(event.repository?.full_name, repository, 'trigger repository');
   equal(trigger.repository?.full_name, repository, 'workflow repository');
-  equal(trigger.head_repository?.full_name, repository, 'candidate repository');
+  const candidateRepository = repositoryName(trigger.head_repository?.full_name, 'candidate repository');
   equal(trigger.name, WORKFLOW_NAME, 'producer workflow name');
   equal(trigger.path, WORKFLOW_PATH, 'producer workflow path');
   equal(trigger.event === 'pull_request' || trigger.event === 'push' || trigger.event === 'workflow_dispatch', true, 'producer event allowlist');
@@ -83,7 +92,7 @@ async function main() {
   equal(run.event, trigger.event, 'API event');
   equal(run.status, 'completed', 'API status');
   equal(run.conclusion, 'success', 'API conclusion');
-  equal(run.head_repository?.full_name, repository, 'API head repository');
+  equal(run.head_repository?.full_name, candidateRepository, 'API head repository');
   equal(run.head_sha, triggerHeadSha, 'API head SHA');
   equal(run.run_attempt, triggerRunAttempt, 'API run attempt');
   const workflowFile = WORKFLOW_PATH.split('/').at(-1);
@@ -116,7 +125,8 @@ async function main() {
   equal(artifact.workflow_run?.head_sha, triggerHeadSha, 'artifact head SHA');
   equal(artifact.workflow_run?.head_repository_id, triggerHeadRepositoryId, 'artifact head repository id');
 
-  const commit = await github(`/repos/${encodedRepo}/git/commits/${triggerHeadSha}`);
+  const encodedCandidateRepo = candidateRepository.split('/').map(encodeURIComponent).join('/');
+  const commit = await github(`/repos/${encodedCandidateRepo}/git/commits/${triggerHeadSha}`);
   equal(commit.sha, triggerHeadSha, 'candidate commit SHA');
   const candidateTree = commit.tree?.sha;
   if (!/^[0-9a-f]{40}$/.test(candidateTree || '')) throw new Error('candidate tree is invalid');
@@ -136,16 +146,19 @@ async function main() {
     equal(pull.head?.sha, triggerHeadSha, 'pull request head SHA');
     pullRequest = pull.number;
     mode = 'pull_request';
+    baseSha = pull.base?.sha;
+    baseRef = pull.base?.ref;
+    candidateRef = pull.head?.ref;
     const pullDetails = await github(`/repos/${encodedRepo}/pulls/${pull.number}`);
     equal(pullDetails.head?.sha, triggerHeadSha, 'pull request API head SHA');
-    equal(pullDetails.head?.repo?.full_name, repository, 'pull request API head repository');
+    equal(pullDetails.head?.repo?.full_name, candidateRepository, 'pull request API head repository');
     equal(pullDetails.base?.repo?.full_name, repository, 'pull request API base repository');
-    baseSha = pullDetails.base?.sha;
-    baseRef = pullDetails.base?.ref;
-    candidateRef = pullDetails.head?.ref;
+    equal(pullDetails.head?.ref, candidateRef, 'pull request API head ref');
+    equal(pullDetails.base?.ref, baseRef, 'pull request API base ref');
     workflowRef = `${repository}/${WORKFLOW_PATH}@refs/pull/${pull.number}/merge`;
     workflowSha = pullDetails.merge_commit_sha;
   } else {
+    equal(candidateRepository, repository, 'non-pull-request candidate repository');
     const parents = commit.parents || [];
     baseSha = parents.length ? parents[0].sha : triggerHeadSha;
     baseRef = event.repository?.default_branch;
@@ -167,7 +180,7 @@ async function main() {
     job_id: job.id,
     event: trigger.event,
     mode,
-    candidate_repository: repository,
+    candidate_repository: candidateRepository,
     candidate_sha: triggerHeadSha,
     candidate_tree: candidateTree,
     candidate_ref: candidateRef,

@@ -89,7 +89,7 @@ function maintenanceState(baseSha, candidateSha) {
 }
 
 function securityBase(candidateSha, baseRef, pullRequest, eventBaseSha) {
-  if (pullRequest > 0) return eventBaseSha;
+  if (pullRequest > 0) return validateSha(git('merge-base', candidateSha, eventBaseSha), 'security base');
   try {
     return validateSha(git('merge-base', candidateSha, `origin/${baseRef}`), 'security base');
   } catch {
@@ -128,6 +128,7 @@ function main() {
   const workflowSha = validateSha(required('GITHUB_WORKFLOW_SHA'), 'GITHUB_WORKFLOW_SHA');
   const baseSha = validateSha(required('BASE_SHA'), 'BASE_SHA');
   const baseRef = validateText(required('BASE_REF'), 'BASE_REF');
+  const securityBaseSha = securityBase(candidateSha, baseRef, pullRequest, baseSha);
 
   const manifest = {
     schema_version: 1,
@@ -150,8 +151,8 @@ function main() {
       pull_request: pullRequest,
       base_sha: baseSha,
       base_ref: baseRef,
-      security_base_sha: securityBase(candidateSha, baseRef, pullRequest, baseSha),
-      maintenance: pullRequest > 0 ? maintenanceState(baseSha, candidateSha) : false,
+      security_base_sha: securityBaseSha,
+      maintenance: maintenanceState(securityBaseSha, candidateSha),
     },
     reports: Object.fromEntries(REPORTS.map(([kind, path, limit]) => [kind, validateReport(kind, path, limit)])),
     tools: {

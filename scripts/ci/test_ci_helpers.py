@@ -13,6 +13,7 @@ DIFF = ROOT / "scripts/ci/check-event-diff.sh"
 GUARD = ROOT / "scripts/ci/guard-control-plane.sh"
 MANIFEST = ROOT / "scripts/ci/create-coverage-manifest.cjs"
 TREE_GUARD = ROOT / "scripts/ci/validate-candidate-tree.sh"
+FETCH_BASE = ROOT / "scripts/ci/fetch-verified-base.sh"
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
@@ -114,6 +115,48 @@ class DiffAndGuardTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "maintenance=true")
+
+    def test_behind_base_fork_fetches_verified_base_and_uses_merge_base(self):
+        root = self.commit("root.txt", "root\n")
+        subprocess.run(["git", "-C", self.repo, "push", "-q", "origin", "main"], check=True)
+
+        fork_bare = self.dir / "fork.git"
+        subprocess.run(["git", "init", "-q", "--bare", fork_bare], check=True)
+        subprocess.run(
+            ["git", "-C", self.repo, "push", "-q", str(fork_bare), f"{root}:refs/heads/main"], check=True,
+        )
+        base = self.commit("base-only.txt", "base\n")
+        subprocess.run(["git", "-C", self.repo, "push", "-q", "origin", "main"], check=True)
+
+        fork = self.dir / "fork"
+        subprocess.run(["git", "clone", "-q", "--branch", "main", fork_bare, fork], check=True)
+        subprocess.run(["git", "-C", fork, "config", "user.email", "ci@example.invalid"], check=True)
+        subprocess.run(["git", "-C", fork, "config", "user.name", "CI"], check=True)
+        (fork / "feature.txt").write_text("feature\n")
+        subprocess.run(["git", "-C", fork, "add", "feature.txt"], check=True)
+        subprocess.run(["git", "-C", fork, "commit", "-qm", "feature"], check=True)
+        candidate = subprocess.check_output(["git", "-C", fork, "rev-parse", "HEAD"], text=True).strip()
+
+        missing = subprocess.run(
+            ["git", "-C", fork, "cat-file", "-e", f"{base}^{{commit}}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        env = os.environ | {"FETCH_BASE_URL": f"file://{self.bare}"}
+        fetched = subprocess.run(
+            ["sh", str(FETCH_BASE), "RandomCodeSpace/kb", base], cwd=fork, env=env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(fetched.returncode, 0, fetched.stderr)
+        merge_base = subprocess.check_output(
+            ["git", "-C", fork, "merge-base", candidate, base], text=True,
+        ).strip()
+        self.assertEqual(merge_base, root)
+        changed = subprocess.check_output(
+            ["git", "-C", fork, "diff", "--name-only", merge_base, candidate], text=True,
+        ).splitlines()
+        self.assertEqual(changed, ["feature.txt"])
 
     def test_ordinary_source_pr_classifies_non_maintenance(self):
         base = self.commit("base.txt", "base\n")
@@ -221,6 +264,9 @@ class DiffAndGuardTest(unittest.TestCase):
         self.assertEqual(manifest["candidate"]["sha"], sha)
         self.assertEqual(manifest["producer"]["workflow_sha"], sha)
         self.assertFalse(manifest["candidate"]["maintenance"])
+        subprocess.run(
+            ["git", "-C", self.repo, "push", "-q", "origin", f"{sha}:refs/heads/main"], check=True,
+        )
 
         (self.repo / "coverage/manifest.json").unlink()
         (self.repo / "src/a.ts").write_text("export const a = 2;\n")
@@ -244,15 +290,37 @@ class DiffAndGuardTest(unittest.TestCase):
         manifest = json.loads((self.repo / "coverage/manifest.json").read_text())
         self.assertTrue(manifest["candidate"]["maintenance"])
 
+        (self.repo / "coverage/manifest.json").unlink()
+        maintenance_push_env = maintenance_env | {
+            "PULL_REQUEST_NUMBER": "0",
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_WORKFLOW_REF": "RandomCodeSpace/kb/.github/workflows/quality.yml@refs/heads/maintenance",
+        }
+        result = subprocess.run(
+            ["node", str(MANIFEST)], cwd=self.repo, env=maintenance_push_env, text=True, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads((self.repo / "coverage/manifest.json").read_text())
+        self.assertEqual(manifest["candidate"]["security_base_sha"], sha)
+        self.assertTrue(manifest["candidate"]["maintenance"])
+
     def test_push_and_dispatch_manifest_preserve_event_base(self):
         (self.repo / "src").mkdir()
         (self.repo / "internal").mkdir()
         (self.repo / "coverage").mkdir()
+        (self.repo / "scripts/ci").mkdir(parents=True)
+        shutil.copy2(GUARD, self.repo / "scripts/ci/guard-control-plane.sh")
         (self.repo / ".gitignore").write_text("/coverage/\n")
         (self.repo / "go.mod").write_text("module github.com/RandomCodeSpace/kb\n\ngo 1.24\n")
         (self.repo / "src/a.ts").write_text("export const a = 1;\n")
         (self.repo / "internal/a.go").write_text("package internal\n")
-        subprocess.run(["git", "-C", self.repo, "add", ".gitignore", "go.mod", "src/a.ts", "internal/a.go"], check=True)
+        subprocess.run(
+            [
+                "git", "-C", self.repo, "add", ".gitignore", "go.mod", "src/a.ts", "internal/a.go",
+                "scripts/ci/guard-control-plane.sh",
+            ],
+            check=True,
+        )
         subprocess.run(["git", "-C", self.repo, "commit", "-qm", "base"], check=True)
         event_base = subprocess.check_output(["git", "-C", self.repo, "rev-parse", "HEAD"], text=True).strip()
         subprocess.run(["git", "-C", self.repo, "push", "-q", "origin", "HEAD:main"], check=True)

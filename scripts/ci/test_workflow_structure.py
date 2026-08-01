@@ -62,7 +62,19 @@ class WorkflowStructureTest(unittest.TestCase):
         self.assertNotIn("secrets.", job)
         self.assertNotIn("github.token", job)
         self.assertNotIn("GITHUB_TOKEN", job)
+        self.assertIn("repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}", job)
         self.assertIn("ref: ${{ github.event.pull_request.head.sha || github.sha }}", job)
+
+    def test_branch_and_pr_control_plane_classification_match(self):
+        branch = SONAR.split('elif [ "$ANALYSIS_MODE" = branch ]; then', 1)[1].split("else", 1)[0]
+        self.assertIn('guard-control-plane.sh "$guard_base" "$CANDIDATE_SHA" --classify', branch)
+        self.assertNotIn("echo 'maintenance=false'", branch)
+
+    def test_fork_base_is_fetched_and_security_diff_uses_merge_base(self):
+        self.assertIn('sh scripts/ci/fetch-verified-base.sh "$BASE_REPOSITORY" "$BASE_SHA"', QUALITY)
+        self.assertEqual(SONAR.count('trusted-main/scripts/ci/fetch-verified-base.sh "$BASE_REPOSITORY" "$BASE_SHA"'), 2)
+        self.assertIn('guard_base=$(git merge-base "$CANDIDATE_SHA" "$BASE_SHA")', SONAR)
+        self.assertIn('merge-base "$CANDIDATE_SHA" "$BASE_SHA")" = "$SECURITY_BASE_SHA"', SONAR)
 
     def test_frontend_coverage_gate_and_candidate_report_are_separate(self):
         regression, candidate = QUALITY.split("  candidate_coverage:\n", 1)

@@ -135,6 +135,7 @@ jobs:
       - name: Check out exact candidate head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
@@ -163,6 +164,13 @@ jobs:
           GO_TOTAL_COVERAGE_THRESHOLD: '96.4'
           GO_COVERAGE_PROFILE: coverage/go.out
         run: npm run coverage:go
+
+      - name: Fetch verified pull request base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ needs.regression.outputs.diff_base }}
+        run: sh scripts/ci/fetch-verified-base.sh "$BASE_REPOSITORY" "$BASE_SHA"
 
       - name: Create candidate-bound coverage manifest
         env:
