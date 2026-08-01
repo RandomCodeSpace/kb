@@ -167,14 +167,14 @@ func TestEqualTitleReorderLegacyKeepsPositionalIdentity(t *testing.T) {
 
 func TestEqualTitleReorderCanonicalIdentityFollowsTasks(t *testing.T) {
 	s := newStore(t)
-	seed, ids, revision := seedEqualTitleTasks(t, s)
+	seed, ids, _ := seedEqualTitleTasks(t, s)
 	firstCreated := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
 	firstMoved := time.Date(2024, time.February, 3, 4, 5, 6, 0, time.UTC)
 	secondCreated := time.Date(2025, time.March, 4, 5, 6, 7, 0, time.UTC)
 	secondMoved := time.Date(2025, time.April, 5, 6, 7, 8, 0, time.UTC)
 	setTaskIdentityTimes(t, s, ids[0], firstCreated, firstMoved)
 	setTaskIdentityTimes(t, s, ids[1], secondCreated, secondMoved)
-	revision = mustBoardSnapshot(t, s).Revision
+	revision := mustBoardSnapshot(t, s).Revision
 	mustRecordTombstone(t, s, ids[0], "first reason")
 	expected := map[string]taskIdentity{
 		"first":  {ID: ids[0], CreatedAt: firstCreated, MovedAt: firstMoved},
