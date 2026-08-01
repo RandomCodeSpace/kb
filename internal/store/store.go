@@ -680,106 +680,145 @@ func insertBoardWriteReceiptTx(tx *sql.Tx, user, operationID, requestHash string
 
 func (s *Store) replaceBoardTx(tx *sql.Tx, user string, b board.Board, canonicalIDs []*string) ([]string, error) {
 	now := time.Now().UTC()
-	matches := make([]*exTask, len(b.Tasks))
-	if canonicalIDs == nil {
-		byStatusTitle, byTitle, err := loadExisting(tx, user)
-		if err != nil {
-			return nil, err
-		}
-		for i, t := range b.Tasks {
-			for _, e := range byStatusTitle[string(t.Status)+"\x00"+t.Title] {
-				if !e.used {
-					e.used, matches[i] = true, e
-					break
-				}
-			}
-		}
-		for i, t := range b.Tasks {
-			if matches[i] != nil {
-				continue
-			}
-			for _, e := range byTitle[t.Title] {
-				if !e.used {
-					e.used, matches[i] = true, e
-					break
-				}
-			}
-		}
-	} else {
-		if len(canonicalIDs) != len(b.Tasks) {
-			return nil, ErrInvalidTaskIDs
-		}
-		existing, err := loadExistingByID(tx, user)
-		if err != nil {
-			return nil, err
-		}
-		seen := make(map[string]struct{}, len(canonicalIDs))
-		for i, id := range canonicalIDs {
-			if id == nil {
-				continue
-			}
-			if _, err := uuid.Parse(*id); err != nil {
-				return nil, ErrInvalidTaskIDs
-			}
-			if _, duplicate := seen[*id]; duplicate {
-				return nil, ErrInvalidTaskIDs
-			}
-			seen[*id] = struct{}{}
-			e, ok := existing[*id]
-			if !ok {
-				return nil, ErrInvalidTaskIDs
-			}
-			matches[i] = e
-		}
+	matches, err := matchReplacementTasksTx(tx, user, b.Tasks, canonicalIDs)
+	if err != nil {
+		return nil, err
 	}
 	if _, err := tx.Exec(`DELETE FROM tasks WHERE user = ?`, user); err != nil {
 		return nil, fmt.Errorf("store: clear board: %w", err)
 	}
-	taskIDs := make([]string, len(b.Tasks))
-	pos := map[board.Status]int{}
-	for i, t := range b.Tasks {
-		if !t.Status.Valid() {
-			return nil, fmt.Errorf("store: invalid status %q", t.Status)
-		}
-		if err := validateTaskLines(t); err != nil {
-			return nil, err
-		}
-		if t.Prio < 1 || t.Prio > 4 {
-			t.Prio = 3
-		}
-		t.Position = pos[t.Status]
-		pos[t.Status]++
-		if e := matches[i]; e != nil {
-			t.ID, t.CreatedAt = e.id, e.created
-			if e.status == t.Status {
-				t.MovedAt = e.moved
-			} else {
-				t.MovedAt = now
-			}
-		} else {
-			t.ID, t.CreatedAt, t.MovedAt = uuid.NewString(), now, now
-		}
-		if err := insertTask(tx, user, t); err != nil {
-			return nil, err
-		}
-		taskIDs[i] = t.ID
-		if err := s.upsertLabels(tx, user, t.Tags); err != nil {
-			return nil, err
-		}
+	taskIDs, err := s.writeReplacementTasksTx(tx, user, b.Tasks, matches, now)
+	if err != nil {
+		return nil, err
 	}
 	if err := setMeta(tx, titleKey(user), b.Title); err != nil {
 		return nil, err
 	}
-	// Full-board replacement is also the restore/purge transaction. Keep a
-	// reason only when its canonical task still exists and is still cancelled.
+	if err := reconcileBoardTombstonesTx(tx, user); err != nil {
+		return nil, err
+	}
+	return taskIDs, nil
+}
+
+func matchReplacementTasksTx(tx *sql.Tx, user string, tasks []board.Task, canonicalIDs []*string) ([]*exTask, error) {
+	if canonicalIDs == nil {
+		return matchLegacyReplacementTasksTx(tx, user, tasks)
+	}
+	return matchCanonicalReplacementTasksTx(tx, user, tasks, canonicalIDs)
+}
+
+func matchLegacyReplacementTasksTx(tx *sql.Tx, user string, tasks []board.Task) ([]*exTask, error) {
+	byStatusTitle, byTitle, err := loadExisting(tx, user)
+	if err != nil {
+		return nil, err
+	}
+	matches := make([]*exTask, len(tasks))
+	for i, task := range tasks {
+		matches[i] = takeUnusedExisting(byStatusTitle[string(task.Status)+"\x00"+task.Title])
+	}
+	for i, task := range tasks {
+		if matches[i] == nil {
+			matches[i] = takeUnusedExisting(byTitle[task.Title])
+		}
+	}
+	return matches, nil
+}
+
+func takeUnusedExisting(candidates []*exTask) *exTask {
+	for _, candidate := range candidates {
+		if !candidate.used {
+			candidate.used = true
+			return candidate
+		}
+	}
+	return nil
+}
+
+func matchCanonicalReplacementTasksTx(tx *sql.Tx, user string, tasks []board.Task, canonicalIDs []*string) ([]*exTask, error) {
+	if len(canonicalIDs) != len(tasks) {
+		return nil, ErrInvalidTaskIDs
+	}
+	existing, err := loadExistingByID(tx, user)
+	if err != nil {
+		return nil, err
+	}
+	matches := make([]*exTask, len(tasks))
+	seen := make(map[string]struct{}, len(canonicalIDs))
+	for i, id := range canonicalIDs {
+		if id == nil {
+			continue
+		}
+		if _, err := uuid.Parse(*id); err != nil {
+			return nil, ErrInvalidTaskIDs
+		}
+		if _, duplicate := seen[*id]; duplicate {
+			return nil, ErrInvalidTaskIDs
+		}
+		seen[*id] = struct{}{}
+		match, ok := existing[*id]
+		if !ok {
+			return nil, ErrInvalidTaskIDs
+		}
+		matches[i] = match
+	}
+	return matches, nil
+}
+
+func (s *Store) writeReplacementTasksTx(tx *sql.Tx, user string, tasks []board.Task, matches []*exTask, now time.Time) ([]string, error) {
+	taskIDs := make([]string, len(tasks))
+	positions := map[board.Status]int{}
+	for i, task := range tasks {
+		prepared, err := prepareReplacementTask(task, matches[i], positions, now)
+		if err != nil {
+			return nil, err
+		}
+		if err := insertTask(tx, user, prepared); err != nil {
+			return nil, err
+		}
+		if err := s.upsertLabels(tx, user, prepared.Tags); err != nil {
+			return nil, err
+		}
+		taskIDs[i] = prepared.ID
+	}
+	return taskIDs, nil
+}
+
+func prepareReplacementTask(task board.Task, match *exTask, positions map[board.Status]int, now time.Time) (board.Task, error) {
+	if !task.Status.Valid() {
+		return board.Task{}, fmt.Errorf("store: invalid status %q", task.Status)
+	}
+	if err := validateTaskLines(task); err != nil {
+		return board.Task{}, err
+	}
+	if task.Prio < 1 || task.Prio > 4 {
+		task.Prio = 3
+	}
+	task.Position = positions[task.Status]
+	positions[task.Status]++
+	if match == nil {
+		task.ID, task.CreatedAt, task.MovedAt = uuid.NewString(), now, now
+		return task, nil
+	}
+	task.ID, task.CreatedAt = match.id, match.created
+	if match.status == task.Status {
+		task.MovedAt = match.moved
+	} else {
+		task.MovedAt = now
+	}
+	return task, nil
+}
+
+// Full-board replacement is also the restore/purge transaction. Keep a
+// reason only when its canonical task still exists and is still cancelled.
+func reconcileBoardTombstonesTx(tx *sql.Tx, user string) error {
 	if _, err := tx.Exec(`
 		DELETE FROM tombstones
 		WHERE scope = ? AND task_id NOT IN (
 			SELECT id FROM tasks WHERE user = ? AND status = 'cancelled'
 		)`, user, user); err != nil {
-		return nil, fmt.Errorf("store: reconcile board tombstones: %w", err)
+		return fmt.Errorf("store: reconcile board tombstones: %w", err)
 	}
-	return taskIDs, nil
+	return nil
 }
 
 // exTask is the identity slice of an existing row used by ReplaceBoard
