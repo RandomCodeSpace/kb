@@ -449,6 +449,29 @@ func (a *app) cmdAdd(args []string) int {
 	})
 }
 
+func outputList(be backend, st board.Status, all, asJSON bool, stdout io.Writer) error {
+	items, err := be.list(st)
+	if err != nil {
+		return err
+	}
+	// Cancelled tasks are soft-deleted: they stay on the board but out of
+	// the way until asked for by --all or by name.
+	if st == "" && !all {
+		kept := make([]item, 0, len(items))
+		for _, it := range items {
+			if it.task.Status != board.StatusCancelled {
+				kept = append(kept, it)
+			}
+		}
+		items = kept
+	}
+	if asJSON {
+		return writeJSON(stdout, items)
+	}
+	writeTable(stdout, items)
+	return nil
+}
+
 func (a *app) cmdList(args []string) int {
 	fs, user, data := a.newFlagSet("list")
 	statusF := fs.String("status", "", "show one column only")
@@ -470,26 +493,7 @@ func (a *app) cmdList(args []string) int {
 		st = s
 	}
 	return a.withBackend(*user, *data, func(be backend) error {
-		items, err := be.list(st)
-		if err != nil {
-			return err
-		}
-		// Cancelled tasks are soft-deleted: they stay on the board but out of
-		// the way until asked for by --all or by name.
-		if st == "" && !*allF {
-			kept := make([]item, 0, len(items))
-			for _, it := range items {
-				if it.task.Status != board.StatusCancelled {
-					kept = append(kept, it)
-				}
-			}
-			items = kept
-		}
-		if *jsonF {
-			return writeJSON(a.stdout, items)
-		}
-		writeTable(a.stdout, items)
-		return nil
+		return outputList(be, st, *allF, *jsonF, a.stdout)
 	})
 }
 
