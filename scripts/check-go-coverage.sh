@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-threshold="${GO_COVERAGE_THRESHOLD:-95.0}"
+package_threshold="${GO_PACKAGE_COVERAGE_THRESHOLD:-95.0}"
+total_threshold="${GO_TOTAL_COVERAGE_THRESHOLD:-96.4}"
 cleanup_profile=0
 
 if [ -n "${GO_COVERAGE_PROFILE:-}" ]; then
@@ -19,31 +20,72 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-if ! awk -v required="$threshold" 'BEGIN {
-  exit !(required ~ /^[0-9]+([.][0-9]+)?$/ && required + 0 >= 95 && required + 0 <= 100)
-}'; then
-  echo "coverage: GO_COVERAGE_THRESHOLD must be a number from 95 through 100" >&2
-  exit 2
-fi
+validate_threshold() {
+  name="$1"
+  value="$2"
+  if ! awk -v required="$value" 'BEGIN {
+    exit !(required ~ /^[0-9]+([.][0-9]+)?$/ && required + 0 >= 95 && required + 0 <= 100)
+  }'; then
+    printf 'coverage: %s must be a number from 95 through 100\n' "$name" >&2
+    exit 2
+  fi
+}
+
+validate_threshold GO_PACKAGE_COVERAGE_THRESHOLD "$package_threshold"
+validate_threshold GO_TOTAL_COVERAGE_THRESHOLD "$total_threshold"
 
 : "${CGO_ENABLED:=0}"
 export CGO_ENABLED
 
-if ! test_output="$(go test ./... -count=1 -covermode=atomic -coverprofile="$profile")"; then
+if test_output="$(go test ./... -count=1 -covermode=atomic -coverprofile="$profile")"; then
+  :
+else
+  status=$?
   printf '%s\n' "$test_output"
-  exit 1
+  exit "$status"
 fi
 printf '%s\n' "$test_output"
 
-package_count="$(go list ./... | awk 'END { print NR }')"
-if ! printf '%s\n' "$test_output" | awk -v required="$threshold" -v expected="$package_count" '
-  /coverage: [0-9.]+% of statements/ {
-    seen++
+if package_list="$(go list ./...)"; then
+  :
+else
+  exit $?
+fi
+if ! printf '%s\n' "$test_output" | awk -v required="$package_threshold" -v expected_packages="$package_list" '
+  BEGIN {
+    expected_count = split(expected_packages, expected, "\n")
+    for (i = 1; i <= expected_count; i++) {
+      if (expected[i] != "") {
+        expected_set[expected[i]] = 1
+      }
+    }
+  }
+  /coverage:/ {
     package_name = $2
     for (i = 1; i <= NF; i++) {
       if ($i == "coverage:") {
-        value = $(i + 1)
+        raw_value = $(i + 1)
+        if (raw_value !~ /^[0-9]+([.][0-9]+)?%$/) {
+          printf "coverage: package %s has invalid coverage percentage %s\n", package_name, raw_value > "/dev/stderr"
+          failed = 1
+          next
+        }
+        value = raw_value
         sub(/%$/, "", value)
+        if (value + 0 < 0 || value + 0 > 100) {
+          printf "coverage: package %s has invalid coverage percentage %s\n", package_name, raw_value > "/dev/stderr"
+          failed = 1
+          next
+        }
+        if (!(package_name in expected_set)) {
+          printf "coverage: unexpected package result %s\n", package_name > "/dev/stderr"
+          failed = 1
+        }
+        seen[package_name]++
+        if (seen[package_name] > 1) {
+          printf "coverage: duplicate package result %s\n", package_name > "/dev/stderr"
+          failed = 1
+        }
         if (value + 0 < required + 0) {
           printf "coverage: package %s is %.1f%%, below %.1f%%\n", package_name, value, required > "/dev/stderr"
           failed = 1
@@ -52,9 +94,11 @@ if ! printf '%s\n' "$test_output" | awk -v required="$threshold" -v expected="$p
     }
   }
   END {
-    if (seen != expected) {
-      printf "coverage: read %d package results, expected %d\n", seen, expected > "/dev/stderr"
-      failed = 1
+    for (package_name in expected_set) {
+      if (!(package_name in seen)) {
+        printf "coverage: missing package result %s\n", package_name > "/dev/stderr"
+        failed = 1
+      }
     }
     exit failed
   }
@@ -62,12 +106,37 @@ if ! printf '%s\n' "$test_output" | awk -v required="$threshold" -v expected="$p
   exit 1
 fi
 
-total="$(go tool cover -func="$profile" | awk '/^total:/ { value=$NF; sub(/%$/, "", value); print value }')"
-
-if [ -z "$total" ]; then
-  echo "coverage: could not read the total Go statement coverage" >&2
+if cover_output="$(go tool cover -func="$profile")"; then
+  :
+else
+  exit $?
+fi
+if total="$(printf '%s\n' "$cover_output" | awk '
+  /^total:/ {
+    count++
+    raw_value = $NF
+    if (raw_value !~ /^[0-9]+([.][0-9]+)?%$/) {
+      invalid = 1
+    } else {
+      value = raw_value
+      sub(/%$/, "", value)
+      if (value + 0 < 0 || value + 0 > 100) {
+        invalid = 1
+      }
+    }
+  }
+  END {
+    if (count != 1 || invalid) {
+      exit 1
+    }
+    print value
+  }
+')"; then
+  :
+else
+  echo "coverage: expected exactly one numeric total Go statement coverage result" >&2
   exit 1
 fi
 
-printf 'Go statement coverage: %s%% (required: %s%%)\n' "$total" "$threshold"
-awk -v actual="$total" -v required="$threshold" 'BEGIN { exit !(actual + 0 >= required + 0) }'
+printf 'Go statement coverage: %s%% (required: %s%%)\n' "$total" "$total_threshold"
+awk -v actual="$total" -v required="$total_threshold" 'BEGIN { exit !(actual + 0 >= required + 0) }'
