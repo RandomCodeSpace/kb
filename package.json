@@ -13,7 +13,6 @@
     "test": "vitest run --coverage",
     "test:unit": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:coverage:report-only": "vitest run --coverage --coverage.thresholds.lines=0 --coverage.thresholds.functions=0 --coverage.thresholds.branches=0 --coverage.thresholds.statements=0",
     "coverage:go": "sh scripts/check-go-coverage.sh",
     "coverage": "npm test && npm run coverage:go"
   },
