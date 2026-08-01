@@ -3,11 +3,60 @@ package store
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 )
+
+type orderedSecretReader struct {
+	events *[]string
+}
+
+func (r orderedSecretReader) Read(p []byte) (int, error) {
+	*r.events = append(*r.events, "random")
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
+}
+
+type orderedSecretTemp struct {
+	events *[]string
+}
+
+func (f orderedSecretTemp) Name() string { return "temp" }
+func (f orderedSecretTemp) Write(p []byte) (int, error) {
+	*f.events = append(*f.events, "write")
+	return len(p), nil
+}
+func (f orderedSecretTemp) Chmod(mode os.FileMode) error {
+	*f.events = append(*f.events, "chmod:"+mode.String())
+	return nil
+}
+func (f orderedSecretTemp) Sync() error {
+	*f.events = append(*f.events, "file sync")
+	return nil
+}
+func (f orderedSecretTemp) Close() error {
+	*f.events = append(*f.events, "file close")
+	return nil
+}
+
+type orderedSecretDir struct {
+	events *[]string
+}
+
+func (d orderedSecretDir) Sync() error {
+	*d.events = append(*d.events, "dir sync")
+	return nil
+}
+func (d orderedSecretDir) Close() error {
+	*d.events = append(*d.events, "dir close")
+	return nil
+}
 
 func TestLoadOrCreateSecretEnvironmentBypassesFilesystem(t *testing.T) {
 	want := []byte("environment-secret-value")
@@ -141,6 +190,91 @@ func TestCreateSecretPrepublishFailureCleansTemp(t *testing.T) {
 	}
 	if len(temps) != 0 {
 		t.Errorf("secret temp files leaked after prepublication failure: %v", temps)
+	}
+}
+
+func TestCreateSecretPublicationOrder(t *testing.T) {
+	installCoverageSecretOps(t)
+	events := []string{}
+	createSecretTemp = func(dir, pattern string) (secretTempFile, error) {
+		events = append(events, "create temp:"+dir+":"+pattern)
+		return orderedSecretTemp{events: &events}, nil
+	}
+	linkSecretFile = func(oldname, newname string) error {
+		events = append(events, "link:"+oldname+":"+newname)
+		return nil
+	}
+	openSecretDir = func(path string) (secretDirectory, error) {
+		events = append(events, "open dir:"+path)
+		return orderedSecretDir{events: &events}, nil
+	}
+	removeSecretFile = func(path string) error {
+		events = append(events, "remove:"+path)
+		return nil
+	}
+
+	got, err := createSecret("data", "final", orderedSecretReader{events: &events}, func() error {
+		events = append(events, "before publish")
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("createSecret: %v", err)
+	}
+	if want := bytes.Repeat([]byte{'x'}, secretFileBytes); !bytes.Equal(got, want) {
+		t.Fatalf("createSecret = %x, want %x", got, want)
+	}
+	wantEvents := []string{
+		"random",
+		"create temp:data:" + secretTempPattern,
+		"write",
+		"chmod:-rw-------",
+		"file sync",
+		"file close",
+		"before publish",
+		"link:temp:final",
+		"open dir:data",
+		"dir sync",
+		"dir close",
+		"remove:temp",
+	}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("publication events = %v, want %v", events, wantEvents)
+	}
+}
+
+func TestCreateSecretLosingPublisherCleansBeforeAdoptingWinner(t *testing.T) {
+	installCoverageSecretOps(t)
+	events := []string{}
+	winner := bytes.Repeat([]byte{'w'}, secretFileBytes)
+	createSecretTemp = func(string, string) (secretTempFile, error) {
+		return orderedSecretTemp{events: &events}, nil
+	}
+	linkSecretFile = func(string, string) error {
+		events = append(events, "link")
+		return os.ErrExist
+	}
+	removeSecretFile = func(string) error {
+		events = append(events, "remove")
+		return nil
+	}
+	readSecretFile = func(string) ([]byte, error) {
+		events = append(events, "read winner")
+		return winner, nil
+	}
+
+	got, err := createSecret("data", "final", io.LimitReader(orderedSecretReader{events: &events}, secretFileBytes), func() error {
+		events = append(events, "before publish")
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("createSecret: %v", err)
+	}
+	if !bytes.Equal(got, winner) {
+		t.Fatalf("createSecret = %x, want winner %x", got, winner)
+	}
+	wantTail := []string{"before publish", "link", "remove", "read winner"}
+	if len(events) < len(wantTail) || !reflect.DeepEqual(events[len(events)-len(wantTail):], wantTail) {
+		t.Fatalf("losing publication events = %v, want tail %v", events, wantTail)
 	}
 }
 

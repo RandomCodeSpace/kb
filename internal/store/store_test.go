@@ -716,6 +716,32 @@ func TestBaseURLChangeClearsKey(t *testing.T) {
 	}
 }
 
+func TestBaseURLChangeKeyClearRollsBackWithWrite(t *testing.T) {
+	s := newStore(t)
+	const originalBase = "https://api.example.com/v1"
+	const originalKey = "sk-original"
+	if _, err := s.SetAISettings("u", sptr(originalBase), sptr("m"), sptr(originalKey)); err != nil {
+		t.Fatalf("seed SetAISettings: %v", err)
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER fail_settings_write BEFORE INSERT ON settings BEGIN SELECT RAISE(ABORT, 'settings failed'); END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+
+	cleared, err := s.SetAISettings("u", sptr("https://other.example"), nil, nil)
+	if err == nil {
+		t.Fatal("cross-origin settings write succeeded despite failure trigger")
+	}
+	if cleared {
+		t.Fatal("failed cross-origin settings write reported a committed key clear")
+	}
+	if got, err := s.AISettings("u"); err != nil || got.BaseURL != originalBase || !got.HasKey {
+		t.Fatalf("settings after rolled-back key clear = %+v, %v", got, err)
+	}
+	if got, err := s.AIKey("u"); err != nil || got != originalKey {
+		t.Fatalf("AIKey after rolled-back key clear = %q, %v, want %q", got, err, originalKey)
+	}
+}
+
 func TestTaskFieldValidation(t *testing.T) {
 	s := newStore(t)
 	bad := []board.Task{
