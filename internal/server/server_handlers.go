@@ -208,6 +208,10 @@ func (s *server) handleGetBoard(w http.ResponseWriter, r *http.Request, user str
 // so a client that sends If-Match with the token from its GET is told 409
 // instead, and can refetch and merge. Clients that send no If-Match keep the
 // old last-writer-wins behavior.
+func shouldInvokeBoardSnapshotHook(want string, isJSON bool) bool {
+	return want != "" || isJSON
+}
+
 func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user string) {
 	body, ok := readBody(w, r)
 	if !ok {
@@ -227,6 +231,7 @@ func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user str
 		}
 	}
 	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	isJSON := mediaType == "application/json"
 	hashInput := append([]byte(mediaType+"\x00"), body...)
 	requestHash := fmt.Sprintf("%x", sha256.Sum256(hashInput))
 
@@ -237,11 +242,10 @@ func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user str
 		return
 	}
 	want := strings.TrimSpace(strings.Join(r.Header.Values("If-Match"), ","))
-	if s.afterConditionalBoardSnapshot != nil && want != "" {
+	if s.afterConditionalBoardSnapshot != nil && shouldInvokeBoardSnapshotHook(want, isJSON) {
 		s.afterConditionalBoardSnapshot()
 	}
 
-	isJSON := mediaType == "application/json"
 	nextBoard := board.Parse(string(body))
 	var canonicalIDs []*string
 	if isJSON {

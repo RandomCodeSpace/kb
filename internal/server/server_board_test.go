@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
@@ -966,7 +965,8 @@ func TestJSONBoardPutWithoutIfMatchConflictsWithWriterAfterSnapshot(t *testing.T
 	}
 	defer st.Close()
 
-	h := New(Config{}, testStatic, st)
+	srv := newServer(Config{}, testStatic, st)
+	h := srv.handler()
 	seed := doReq(t, h, http.MethodPut, "/api/board", "# Seed\n\n## To Do\n\n- [ ] Keep\n", map[string]string{
 		"Accept": "application/json",
 	})
@@ -1001,6 +1001,12 @@ func TestJSONBoardPutWithoutIfMatchConflictsWithWriterAfterSnapshot(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	snapshotTaken := make(chan struct{})
+	continueWrite := make(chan struct{})
+	srv.afterConditionalBoardSnapshot = func() {
+		close(snapshotTaken)
+		<-continueWrite
+	}
 	result := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		result <- doReq(t, h, http.MethodPut, "/api/board", string(payload), map[string]string{
@@ -1009,14 +1015,11 @@ func TestJSONBoardPutWithoutIfMatchConflictsWithWriterAfterSnapshot(t *testing.T
 		})
 	}()
 
-	select {
-	case w := <-result:
-		t.Fatalf("JSON PUT completed behind uncommitted writer: %d %q", w.Code, w.Body)
-	case <-time.After(100 * time.Millisecond):
-	}
+	<-snapshotTaken
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
+	close(continueWrite)
 
 	w := <-result
 	if w.Code != http.StatusConflict {
