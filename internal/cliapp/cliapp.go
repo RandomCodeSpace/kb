@@ -22,6 +22,9 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
+const noBlockedFlagName = "no-blocked"
+const forceFlagUsage = "finish a task with open checklist items or a blocked flag"
+
 const usageText = `usage: kb <command> [flags]
 
 commands:
@@ -242,7 +245,7 @@ func registerCardFlags(fs *flag.FlagSet, c *cardFlags, withTitle bool) {
 	fs.StringVar(&c.effort, "effort", "", "effort S|M|L")
 	fs.StringVar(&c.emoji, "emoji", "", "leading emoji")
 	fs.BoolVar(&c.blocked, "blocked", false, "flag the task as blocked")
-	fs.BoolVar(&c.noBlocked, "no-blocked", false, "clear the blocked flag")
+	fs.BoolVar(&c.noBlocked, noBlockedFlagName, false, "clear the blocked flag")
 	fs.Var(&c.tags, "tag", "tag (repeatable)")
 	fs.Var(&c.checks, "check", "checklist item (repeatable)")
 }
@@ -251,12 +254,12 @@ func registerCardFlags(fs *flag.FlagSet, c *cardFlags, withTitle bool) {
 // nil when neither flag was given, so update leaves the field alone.
 func resolveBlocked(set map[string]bool, c *cardFlags) (*bool, error) {
 	switch {
-	case set["blocked"] && set["no-blocked"]:
+	case set["blocked"] && set[noBlockedFlagName]:
 		return nil, errors.New("--blocked and --no-blocked cannot be combined")
 	case set["blocked"]:
 		v := c.blocked
 		return &v, nil
-	case set["no-blocked"]:
+	case set[noBlockedFlagName]:
 		v := !c.noBlocked
 		return &v, nil
 	}
@@ -381,6 +384,42 @@ func parseEffort(s string) (string, error) {
 
 // --- commands ---
 
+func taskFromAddFlags(title string, cf cardFlags, set map[string]bool) (board.Task, error) {
+	t := board.Task{Title: title, Desc: cf.desc, Emoji: cf.emoji}
+	if cf.status != "" {
+		st, err := parseStatus(cf.status)
+		if err != nil {
+			return board.Task{}, err
+		}
+		t.Status = st
+	}
+	if set["prio"] {
+		if cf.prio < 1 || cf.prio > 4 {
+			return board.Task{}, fmt.Errorf("invalid prio %d (want 1-4)", cf.prio)
+		}
+		t.Prio = cf.prio
+	}
+	var err error
+	if t.Due, err = parseDue(cf.due); err != nil {
+		return board.Task{}, err
+	}
+	if t.Effort, err = parseEffort(cf.effort); err != nil {
+		return board.Task{}, err
+	}
+	blocked, err := resolveBlocked(set, &cf)
+	if err != nil {
+		return board.Task{}, err
+	}
+	if blocked != nil {
+		t.Blocked = *blocked
+	}
+	t.Tags = append([]string(nil), cf.tags...)
+	for _, c := range cf.checks {
+		t.Checks = append(t.Checks, parseCheckFlag(c))
+	}
+	return t, nil
+}
+
 func (a *app) cmdAdd(args []string) int {
 	fs, user, data := a.newFlagSet("add")
 	var cf cardFlags
@@ -396,41 +435,9 @@ func (a *app) cmdAdd(args []string) int {
 	if strings.TrimSpace(title) == "" {
 		return a.usageErr(errors.New("title must not be empty"))
 	}
-	set := setFlags(fs)
-	t := board.Task{Title: title, Desc: cf.desc, Emoji: cf.emoji}
-	if cf.status != "" {
-		st, err := parseStatus(cf.status)
-		if err != nil {
-			return a.usageErr(err)
-		}
-		t.Status = st
-	}
-	if set["prio"] {
-		if cf.prio < 1 || cf.prio > 4 {
-			return a.usageErr(fmt.Errorf("invalid prio %d (want 1-4)", cf.prio))
-		}
-		t.Prio = cf.prio
-	}
-	due, err := parseDue(cf.due)
+	t, err := taskFromAddFlags(title, cf, setFlags(fs))
 	if err != nil {
 		return a.usageErr(err)
-	}
-	t.Due = due
-	eff, err := parseEffort(cf.effort)
-	if err != nil {
-		return a.usageErr(err)
-	}
-	t.Effort = eff
-	blocked, err := resolveBlocked(set, &cf)
-	if err != nil {
-		return a.usageErr(err)
-	}
-	if blocked != nil {
-		t.Blocked = *blocked
-	}
-	t.Tags = append([]string(nil), cf.tags...)
-	for _, c := range cf.checks {
-		t.Checks = append(t.Checks, parseCheckFlag(c))
 	}
 	return a.withBackend(*user, *data, func(be backend) error {
 		it, err := be.add(t)
@@ -440,6 +447,29 @@ func (a *app) cmdAdd(args []string) int {
 		fmt.Fprintf(a.stdout, "added %s %s\n", displayRef(it.ref), it.task.Title)
 		return nil
 	})
+}
+
+func outputList(be backend, st board.Status, all, asJSON bool, stdout io.Writer) error {
+	items, err := be.list(st)
+	if err != nil {
+		return err
+	}
+	// Cancelled tasks are soft-deleted: they stay on the board but out of
+	// the way until asked for by --all or by name.
+	if st == "" && !all {
+		kept := make([]item, 0, len(items))
+		for _, it := range items {
+			if it.task.Status != board.StatusCancelled {
+				kept = append(kept, it)
+			}
+		}
+		items = kept
+	}
+	if asJSON {
+		return writeJSON(stdout, items)
+	}
+	writeTable(stdout, items)
+	return nil
 }
 
 func (a *app) cmdList(args []string) int {
@@ -463,46 +493,14 @@ func (a *app) cmdList(args []string) int {
 		st = s
 	}
 	return a.withBackend(*user, *data, func(be backend) error {
-		items, err := be.list(st)
-		if err != nil {
-			return err
-		}
-		// Cancelled tasks are soft-deleted: they stay on the board but out of
-		// the way until asked for by --all or by name.
-		if st == "" && !*allF {
-			kept := make([]item, 0, len(items))
-			for _, it := range items {
-				if it.task.Status != board.StatusCancelled {
-					kept = append(kept, it)
-				}
-			}
-			items = kept
-		}
-		if *jsonF {
-			return writeJSON(a.stdout, items)
-		}
-		writeTable(a.stdout, items)
-		return nil
+		return outputList(be, st, *allF, *jsonF, a.stdout)
 	})
 }
 
-func (a *app) cmdUpdate(args []string) int {
-	fs, user, data := a.newFlagSet("update")
-	var cf cardFlags
-	registerCardFlags(fs, &cf, true)
-	force := fs.Bool("force", false, "finish a task with open checklist items or a blocked flag")
-	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
-		return code
-	}
-	if len(pos) != 1 {
-		return a.usageErr(errors.New("update needs exactly one <id-prefix> argument"))
-	}
-	set := setFlags(fs)
-	var p store.TaskPatch
+func setUpdateTextFields(p *store.TaskPatch, cf *cardFlags, set map[string]bool) error {
 	if set["title"] {
 		if strings.TrimSpace(cf.title) == "" {
-			return a.usageErr(errors.New("title must not be empty"))
+			return errors.New("title must not be empty")
 		}
 		p.Title = &cf.title
 	}
@@ -514,27 +512,31 @@ func (a *app) cmdUpdate(args []string) int {
 	}
 	if set["prio"] {
 		if cf.prio < 1 || cf.prio > 4 {
-			return a.usageErr(fmt.Errorf("invalid prio %d (want 1-4)", cf.prio))
+			return fmt.Errorf("invalid prio %d (want 1-4)", cf.prio)
 		}
 		p.Prio = &cf.prio
 	}
+	return nil
+}
+
+func setUpdateMetadataFields(p *store.TaskPatch, cf *cardFlags, set map[string]bool) error {
 	if set["due"] {
 		d, err := parseDue(cf.due)
 		if err != nil {
-			return a.usageErr(err)
+			return err
 		}
 		p.Due = &d
 	}
 	if set["effort"] {
 		e, err := parseEffort(cf.effort)
 		if err != nil {
-			return a.usageErr(err)
+			return err
 		}
 		p.Effort = &e
 	}
-	blocked, err := resolveBlocked(set, &cf)
+	blocked, err := resolveBlocked(set, cf)
 	if err != nil {
-		return a.usageErr(err)
+		return err
 	}
 	p.Blocked = blocked
 	if set["tag"] {
@@ -548,16 +550,53 @@ func (a *app) cmdUpdate(args []string) int {
 		}
 		p.Checks = &checks
 	}
-	var moveTo *board.Status
-	if set["status"] {
-		st, err := parseStatus(cf.status)
-		if err != nil {
-			return a.usageErr(err)
-		}
-		moveTo = &st
+	return nil
+}
+
+func updateMoveTo(cf *cardFlags, set map[string]bool) (*board.Status, error) {
+	if !set["status"] {
+		return nil, nil
+	}
+	st, err := parseStatus(cf.status)
+	if err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+func updatePatch(cf *cardFlags, set map[string]bool) (store.TaskPatch, *board.Status, error) {
+	var p store.TaskPatch
+	if err := setUpdateTextFields(&p, cf, set); err != nil {
+		return store.TaskPatch{}, nil, err
+	}
+	if err := setUpdateMetadataFields(&p, cf, set); err != nil {
+		return store.TaskPatch{}, nil, err
+	}
+	moveTo, err := updateMoveTo(cf, set)
+	if err != nil {
+		return store.TaskPatch{}, nil, err
 	}
 	if p == (store.TaskPatch{}) && moveTo == nil {
-		return a.usageErr(errors.New("update needs at least one field flag"))
+		return store.TaskPatch{}, nil, errors.New("update needs at least one field flag")
+	}
+	return p, moveTo, nil
+}
+
+func (a *app) cmdUpdate(args []string) int {
+	fs, user, data := a.newFlagSet("update")
+	var cf cardFlags
+	registerCardFlags(fs, &cf, true)
+	force := fs.Bool("force", false, forceFlagUsage)
+	pos, err := parseInterleaved(fs, args)
+	if code, done := a.parseResult(err); done {
+		return code
+	}
+	if len(pos) != 1 {
+		return a.usageErr(errors.New("update needs exactly one <id-prefix> argument"))
+	}
+	p, moveTo, err := updatePatch(&cf, setFlags(fs))
+	if err != nil {
+		return a.usageErr(err)
 	}
 	return a.withBackend(*user, *data, func(be backend) error {
 		it, err := be.update(pos[0], p, moveTo, *force)
@@ -571,7 +610,7 @@ func (a *app) cmdUpdate(args []string) int {
 
 func (a *app) cmdMove(args []string) int {
 	fs, user, data := a.newFlagSet("move")
-	force := fs.Bool("force", false, "finish a task with open checklist items or a blocked flag")
+	force := fs.Bool("force", false, forceFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -588,7 +627,7 @@ func (a *app) cmdMove(args []string) int {
 
 func (a *app) cmdDone(args []string) int {
 	fs, user, data := a.newFlagSet("done")
-	force := fs.Bool("force", false, "finish a task with open checklist items or a blocked flag")
+	force := fs.Bool("force", false, forceFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
