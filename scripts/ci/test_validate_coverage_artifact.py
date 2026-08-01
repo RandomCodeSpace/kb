@@ -24,12 +24,13 @@ class ArtifactValidationTest(unittest.TestCase):
         (self.root / "src").mkdir()
         (self.root / "internal").mkdir()
         (self.root / "src/a.ts").write_text("export const a = 1;\n")
+        (self.root / "-tracked.ts").write_text("export const tracked = true;\n")
         (self.root / "internal/a.go").write_text("package internal\n")
         (self.root / "go.mod").write_text("module github.com/RandomCodeSpace/kb\n\ngo 1.24\n")
         subprocess.run(["git", "init", "-q", self.root], check=True)
         subprocess.run(["git", "-C", self.root, "config", "user.email", "ci@example.invalid"], check=True)
         subprocess.run(["git", "-C", self.root, "config", "user.name", "CI"], check=True)
-        subprocess.run(["git", "-C", self.root, "add", "src/a.ts", "internal/a.go", "go.mod"], check=True)
+        subprocess.run(["git", "-C", self.root, "add", "--", "src/a.ts", "-tracked.ts", "internal/a.go", "go.mod"], check=True)
         subprocess.run(["git", "-C", self.root, "commit", "-qm", "fixture"], check=True)
         self.base = subprocess.check_output(["git", "-C", self.root, "rev-parse", "HEAD"], text=True).strip()
         self.lcov = b"TN:\nSF:src/a.ts\nDA:1,1\nend_of_record\n"
@@ -84,23 +85,58 @@ class ArtifactValidationTest(unittest.TestCase):
             archive.writestr("manifest.json", manifest_bytes)
         return path
 
-    def run_validator(self, archive, output=None):
+    def run_validator(self, archive, output=None, *, candidate_sha=SHA, base_sha=None, event="pull_request", pull_request=7):
         output = output or self.root / f"out-{os.urandom(4).hex()}"
+        base_sha = self.base if base_sha is None else base_sha
         args = [
             "python3", str(SCRIPT), "--archive", str(archive), "--output", str(output),
             "--repository", "RandomCodeSpace/kb", "--workflow", "Regression and candidate coverage",
             "--workflow-ref", "RandomCodeSpace/kb/.github/workflows/quality.yml@refs/pull/7/merge", "--workflow-sha", WORKFLOW_SHA,
             "--test-revision-sha", WORKFLOW_SHA,
-            "--run-id", "10", "--run-attempt", "1", "--event", "pull_request",
-            "--candidate-repository", "RandomCodeSpace/kb", "--candidate-sha", SHA,
-            "--candidate-tree", TREE, "--candidate-ref", "feature", "--pull-request", "7",
-            "--base-sha", self.base, "--security-base-sha", self.base, "--base-ref", "main", "--repository-root", str(self.root),
+            "--run-id", "10", "--run-attempt", "1", "--event", event,
+            "--candidate-repository", "RandomCodeSpace/kb", f"--candidate-sha={candidate_sha}",
+            "--candidate-tree", TREE, "--candidate-ref", "feature", "--pull-request", str(pull_request),
+            f"--base-sha={base_sha}", "--security-base-sha", self.base, "--base-ref", "main", "--repository-root", str(self.root),
             "--maintenance", "false",
         ]
         return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def test_accepts_exact_bundle(self):
         self.assertEqual(self.run_validator(self.archive()).returncode, 0)
+
+    def test_accepts_tracked_source_with_option_like_name(self):
+        lcov = b"TN:\nSF:-tracked.ts\nDA:1,1\nend_of_record\n"
+        self.assertEqual(self.run_validator(self.archive(lcov=lcov)).returncode, 0)
+
+    def test_accepts_valid_push_revision_boundary(self):
+        manifest = self.manifest()
+        manifest["producer"]["event"] = "push"
+        manifest["candidate"]["sha"] = self.base
+        manifest["candidate"]["pull_request"] = 0
+        result = self.run_validator(
+            self.archive(manifest_bytes=json.dumps(manifest).encode()),
+            candidate_sha=self.base,
+            event="push",
+            pull_request=0,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_option_like_traversal_and_control_git_revisions(self):
+        for field, value in (
+            ("sha", "--help"),
+            ("base_sha", "../HEAD"),
+            ("sha", "1" * 39 + "\n"),
+        ):
+            with self.subTest(field=field, value=value):
+                manifest = self.manifest()
+                manifest["candidate"][field] = value
+                result = self.run_validator(
+                    self.archive(manifest_bytes=json.dumps(manifest).encode()),
+                    candidate_sha=value if field == "sha" else SHA,
+                    base_sha=value if field == "base_sha" else self.base,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("must be a lowercase 40-character Git SHA", result.stderr)
 
     def test_rejects_traversal_and_url_sources(self):
         for source in ("../src/a.ts", "/src/a.ts", "https://evil.invalid/a.ts", "src//a.ts"):
