@@ -290,6 +290,12 @@ function logicalKey(record: OutboxRecord): string {
     : importLogicalKey(record.item.external_key);
 }
 
+function compareCodeUnits(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
 /** Durable, credential-free metadata journal for one immutable user namespace. */
 export class MetadataOutbox {
   private readonly storage: Storage;
@@ -375,7 +381,7 @@ export class MetadataOutbox {
       const key = this.storage.key(i);
       if (key && namespaceStorageSuffix(PREFIX, this.ns, key) !== null) keys.push(key);
     }
-    return keys.sort((left, right) => left.localeCompare(right));
+    return keys.sort(compareCodeUnits);
   }
 
   private async locked<T>(fn: () => T | Promise<T>): Promise<T | undefined> {
