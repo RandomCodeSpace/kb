@@ -382,38 +382,20 @@ func parseBoardJSONPut(body []byte) (board.Board, []*string, error) {
 	var ids []*string
 	seen := make(map[string]bool, 2)
 	for decoder.More() {
-		fieldToken, err := decoder.Token()
+		field, err := nextBoardJSONField(decoder, seen)
 		if err != nil {
 			return board.Board{}, nil, err
 		}
-		field, ok := fieldToken.(string)
-		if !ok || seen[field] {
-			return board.Board{}, nil, errors.New("invalid or duplicate board payload field")
-		}
-		seen[field] = true
 		switch field {
 		case "board":
-			var decoded *string
-			if err := decoder.Decode(&decoded); err != nil {
-				return board.Board{}, nil, err
-			}
-			if decoded == nil {
-				return board.Board{}, nil, errors.New("board must be a string")
-			}
-			markdown = *decoded
+			markdown, err = decodeBoardJSONMarkdown(decoder)
 		case "task_ids":
-			var idsJSON json.RawMessage
-			if err := decoder.Decode(&idsJSON); err != nil {
-				return board.Board{}, nil, err
-			}
-			if bytes.Equal(bytes.TrimSpace(idsJSON), []byte("null")) {
-				return board.Board{}, nil, errors.New("task_ids must be an array")
-			}
-			if err := json.Unmarshal(idsJSON, &ids); err != nil {
-				return board.Board{}, nil, err
-			}
+			ids, err = decodeBoardJSONTaskIDs(decoder)
 		default:
 			return board.Board{}, nil, errors.New("unknown board payload field")
+		}
+		if err != nil {
+			return board.Board{}, nil, err
 		}
 	}
 	if _, err := decoder.Token(); err != nil {
@@ -426,6 +408,45 @@ func parseBoardJSONPut(body []byte) (board.Board, []*string, error) {
 		return board.Board{}, nil, err
 	}
 	return board.Parse(markdown), ids, nil
+}
+
+func nextBoardJSONField(decoder *json.Decoder, seen map[string]bool) (string, error) {
+	fieldToken, err := decoder.Token()
+	if err != nil {
+		return "", err
+	}
+	field, ok := fieldToken.(string)
+	if !ok || seen[field] {
+		return "", errors.New("invalid or duplicate board payload field")
+	}
+	seen[field] = true
+	return field, nil
+}
+
+func decodeBoardJSONMarkdown(decoder *json.Decoder) (string, error) {
+	var decoded *string
+	if err := decoder.Decode(&decoded); err != nil {
+		return "", err
+	}
+	if decoded == nil {
+		return "", errors.New("board must be a string")
+	}
+	return *decoded, nil
+}
+
+func decodeBoardJSONTaskIDs(decoder *json.Decoder) ([]*string, error) {
+	var idsJSON json.RawMessage
+	if err := decoder.Decode(&idsJSON); err != nil {
+		return nil, err
+	}
+	if bytes.Equal(bytes.TrimSpace(idsJSON), []byte("null")) {
+		return nil, errors.New("task_ids must be an array")
+	}
+	var ids []*string
+	if err := json.Unmarshal(idsJSON, &ids); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
