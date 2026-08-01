@@ -753,6 +753,16 @@ func validateDraft(d storyDraft) error {
 // "x\n- [x] forged !1" would otherwise serialize as an extra board line.
 func coerceDraftMap(m map[string]any) storyDraft {
 	d := storyDraft{Prio: 3, Tags: []string{}, Checks: []draftCheck{}}
+	coerceDraftTextFields(m, &d)
+	coerceDraftPrio(m, &d)
+	coerceDraftDue(m, &d)
+	coerceDraftEffort(m, &d)
+	coerceDraftTags(m, &d)
+	coerceDraftChecks(m, &d)
+	return d
+}
+
+func coerceDraftTextFields(m map[string]any, d *storyDraft) {
 	if v, ok := m["title"].(string); ok {
 		d.Title = strings.TrimSpace(stripControl(v))
 	}
@@ -764,6 +774,9 @@ func coerceDraftMap(m map[string]any) storyDraft {
 		// the wire; every other control character is still stripped.
 		d.Desc = stripControlKeepLines(v)
 	}
+}
+
+func coerceDraftPrio(m map[string]any, d *storyDraft) {
 	switch v := m["prio"].(type) {
 	case float64:
 		d.Prio = clampPrio(int(v))
@@ -772,6 +785,9 @@ func coerceDraftMap(m map[string]any) storyDraft {
 			d.Prio = clampPrio(n)
 		}
 	}
+}
+
+func coerceDraftDue(m map[string]any, d *storyDraft) {
 	if v, ok := m["due"].(string); ok {
 		due := strings.TrimSpace(v)
 		// Shape and calendar validity both: "2026-13-45" matches the pattern
@@ -782,12 +798,18 @@ func coerceDraftMap(m map[string]any) storyDraft {
 			}
 		}
 	}
+}
+
+func coerceDraftEffort(m map[string]any, d *storyDraft) {
 	if v, ok := m["effort"].(string); ok {
 		switch e := strings.ToUpper(strings.TrimSpace(v)); e {
 		case "S", "M", "L":
 			d.Effort = e
 		}
 	}
+}
+
+func coerceDraftTags(m map[string]any, d *storyDraft) {
 	if vs, ok := m["tags"].([]any); ok {
 		for _, v := range vs {
 			tag, ok := v.(string)
@@ -803,6 +825,9 @@ func coerceDraftMap(m map[string]any) storyDraft {
 			d.Tags = append(d.Tags, tag)
 		}
 	}
+}
+
+func coerceDraftChecks(m map[string]any, d *storyDraft) {
 	if vs, ok := m["checks"].([]any); ok {
 		for _, v := range vs {
 			cm, ok := v.(map[string]any)
@@ -817,7 +842,6 @@ func coerceDraftMap(m map[string]any) storyDraft {
 			d.Checks = append(d.Checks, draftCheck{Text: text, Done: done})
 		}
 	}
-	return d
 }
 
 // logSafe makes an untrusted value safe to interpolate into a log line. The
