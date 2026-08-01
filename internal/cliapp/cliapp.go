@@ -497,23 +497,10 @@ func (a *app) cmdList(args []string) int {
 	})
 }
 
-func (a *app) cmdUpdate(args []string) int {
-	fs, user, data := a.newFlagSet("update")
-	var cf cardFlags
-	registerCardFlags(fs, &cf, true)
-	force := fs.Bool("force", false, forceFlagUsage)
-	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
-		return code
-	}
-	if len(pos) != 1 {
-		return a.usageErr(errors.New("update needs exactly one <id-prefix> argument"))
-	}
-	set := setFlags(fs)
-	var p store.TaskPatch
+func setUpdateTextFields(p *store.TaskPatch, cf *cardFlags, set map[string]bool) error {
 	if set["title"] {
 		if strings.TrimSpace(cf.title) == "" {
-			return a.usageErr(errors.New("title must not be empty"))
+			return errors.New("title must not be empty")
 		}
 		p.Title = &cf.title
 	}
@@ -525,27 +512,31 @@ func (a *app) cmdUpdate(args []string) int {
 	}
 	if set["prio"] {
 		if cf.prio < 1 || cf.prio > 4 {
-			return a.usageErr(fmt.Errorf("invalid prio %d (want 1-4)", cf.prio))
+			return fmt.Errorf("invalid prio %d (want 1-4)", cf.prio)
 		}
 		p.Prio = &cf.prio
 	}
+	return nil
+}
+
+func setUpdateMetadataFields(p *store.TaskPatch, cf *cardFlags, set map[string]bool) error {
 	if set["due"] {
 		d, err := parseDue(cf.due)
 		if err != nil {
-			return a.usageErr(err)
+			return err
 		}
 		p.Due = &d
 	}
 	if set["effort"] {
 		e, err := parseEffort(cf.effort)
 		if err != nil {
-			return a.usageErr(err)
+			return err
 		}
 		p.Effort = &e
 	}
-	blocked, err := resolveBlocked(set, &cf)
+	blocked, err := resolveBlocked(set, cf)
 	if err != nil {
-		return a.usageErr(err)
+		return err
 	}
 	p.Blocked = blocked
 	if set["tag"] {
@@ -559,16 +550,53 @@ func (a *app) cmdUpdate(args []string) int {
 		}
 		p.Checks = &checks
 	}
-	var moveTo *board.Status
-	if set["status"] {
-		st, err := parseStatus(cf.status)
-		if err != nil {
-			return a.usageErr(err)
-		}
-		moveTo = &st
+	return nil
+}
+
+func updateMoveTo(cf *cardFlags, set map[string]bool) (*board.Status, error) {
+	if !set["status"] {
+		return nil, nil
+	}
+	st, err := parseStatus(cf.status)
+	if err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+func updatePatch(cf *cardFlags, set map[string]bool) (store.TaskPatch, *board.Status, error) {
+	var p store.TaskPatch
+	if err := setUpdateTextFields(&p, cf, set); err != nil {
+		return store.TaskPatch{}, nil, err
+	}
+	if err := setUpdateMetadataFields(&p, cf, set); err != nil {
+		return store.TaskPatch{}, nil, err
+	}
+	moveTo, err := updateMoveTo(cf, set)
+	if err != nil {
+		return store.TaskPatch{}, nil, err
 	}
 	if p == (store.TaskPatch{}) && moveTo == nil {
-		return a.usageErr(errors.New("update needs at least one field flag"))
+		return store.TaskPatch{}, nil, errors.New("update needs at least one field flag")
+	}
+	return p, moveTo, nil
+}
+
+func (a *app) cmdUpdate(args []string) int {
+	fs, user, data := a.newFlagSet("update")
+	var cf cardFlags
+	registerCardFlags(fs, &cf, true)
+	force := fs.Bool("force", false, forceFlagUsage)
+	pos, err := parseInterleaved(fs, args)
+	if code, done := a.parseResult(err); done {
+		return code
+	}
+	if len(pos) != 1 {
+		return a.usageErr(errors.New("update needs exactly one <id-prefix> argument"))
+	}
+	p, moveTo, err := updatePatch(&cf, setFlags(fs))
+	if err != nil {
+		return a.usageErr(err)
 	}
 	return a.withBackend(*user, *data, func(be backend) error {
 		it, err := be.update(pos[0], p, moveTo, *force)
