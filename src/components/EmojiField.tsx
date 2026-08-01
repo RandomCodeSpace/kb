@@ -85,7 +85,11 @@ export interface EmojiFieldProps {
  * typing, and everything typeable here is either already in the picker or is
  * something the wire format refuses.
  */
-export function EmojiField({ inputId, value, onChange }: EmojiFieldProps) {
+export function EmojiField({
+  inputId,
+  value,
+  onChange,
+}: Readonly<EmojiFieldProps>) {
   const [open, setOpen] = useState(false);
   const [picker, setPicker] = useState<PickerModule | null>(null);
   const [failed, setFailed] = useState(false);

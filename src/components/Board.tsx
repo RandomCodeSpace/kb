@@ -313,7 +313,7 @@ interface LiftState extends LiftPos {
 /** Id of the description that teaches the keyboard move model. */
 const KEYS_HINT_ID = 'kb-card-keys';
 
-export function BoardView(props: BoardProps) {
+export function BoardView(props: Readonly<BoardProps>) {
   const { board, onTick, onEdit, onAdd, showCancelled, onRestore, onPurge } = props;
   const rootRef = useRef<HTMLElement>(null);
   const cloneRef = useRef<HTMLDivElement>(null);
@@ -736,7 +736,7 @@ function Column({
   onCardKey,
   onRestore,
   onPurge,
-}: ColumnProps) {
+}: Readonly<ColumnProps>) {
   const slot =
     placeholder === null ? null : (
       <li className="slot" aria-hidden="true" style={{ height: placeholderHeight }} />

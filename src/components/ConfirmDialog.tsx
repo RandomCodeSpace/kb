@@ -65,7 +65,7 @@ export function ConfirmDialog({
   destructive = false,
   onConfirm,
   onClose,
-}: ConfirmDialogProps) {
+}: Readonly<ConfirmDialogProps>) {
   const boxRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);

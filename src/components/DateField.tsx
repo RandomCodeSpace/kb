@@ -117,7 +117,11 @@ export interface DateFieldProps {
  * Keyboard, in the popover: arrows move a day/week, PageUp/PageDown a month,
  * Enter or Space picks, Escape closes and returns to the trigger.
  */
-export function DateField({ inputId, value, onChange }: DateFieldProps) {
+export function DateField({
+  inputId,
+  value,
+  onChange,
+}: Readonly<DateFieldProps>) {
   const [open, setOpen] = useState(false);
   // The day the grid keys move; also decides the visible month.
   const [focusISO, setFocusISO] = useState(todayISO());

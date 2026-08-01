@@ -254,7 +254,7 @@ interface BoardAppProps {
   onSignOut: () => void;
 }
 
-function BoardApp({ identity, onIdentity, onSignOut }: BoardAppProps) {
+function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) {
   const ns = identityNamespace(identity);
   const store = useMemo(() => new LocalStore(ns), [ns]);
   const remote = useMemo(() => new RemoteStore(), []);

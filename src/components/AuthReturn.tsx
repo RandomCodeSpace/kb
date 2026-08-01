@@ -28,7 +28,7 @@ export interface AuthReturnProps {
 export function AuthReturn({
   search = typeof location === 'undefined' ? '' : location.search,
   hash = typeof location === 'undefined' ? '' : location.hash,
-}: AuthReturnProps) {
+}: Readonly<AuthReturnProps>) {
   const [stalled, setStalled] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
 

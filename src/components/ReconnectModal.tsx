@@ -1,5 +1,5 @@
 import { useId, useRef, useState } from 'react';
-import type { FormEvent } from 'react';
+import type { SubmitEvent } from 'react';
 import type { Identity } from '../lib/auth';
 import { ReauthRequiredError, signInAzure } from '../lib/auth';
 import { getLabels } from '../lib/api';
@@ -48,7 +48,7 @@ export function ReconnectModal({
   onIdentity,
   onSignOut,
   onClose,
-}: ReconnectModalProps) {
+}: Readonly<ReconnectModalProps>) {
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -76,7 +76,7 @@ export function ReconnectModal({
     }
   };
 
-  const handleToken = (e: FormEvent) => {
+  const handleToken = (e: SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
     const serverToken = token.trim();
     if (!serverToken) return;

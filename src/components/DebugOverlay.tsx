@@ -121,7 +121,10 @@ export function restingBox(
  * cap for the confetti loop. Mounted only when the flag is on, so a disabled
  * overlay costs nothing — no requestAnimationFrame runs.
  */
-export function DebugOverlay({ onClose, inert }: DebugOverlayProps) {
+export function DebugOverlay({
+  onClose,
+  inert,
+}: Readonly<DebugOverlayProps>) {
   const [fps, setFps] = useState<number | null>(null);
   const [target, setTarget] = useState<FrameTarget>('uncapped');
   // Moved to the opposite corner while it would otherwise cover the focused

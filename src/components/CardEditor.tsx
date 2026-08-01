@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { MutableRefObject, ReactNode } from 'react';
+import type { ReactNode, RefObject } from 'react';
 import type { AIStoryRequest, StoryDraft } from '../lib/api';
 import type { Check, Effort, Prio } from '../lib/model';
 import { newTask } from '../lib/model';
@@ -16,7 +16,7 @@ export interface CardEditorProps {
   title: string;
   onTitleChange: (title: string) => void;
   onBusyChange: (busy: boolean) => void;
-  cancelRef: MutableRefObject<(() => void) | null>;
+  cancelRef: RefObject<(() => void) | null>;
   titleExtras: ReactNode;
   onSave: (task: ReturnType<typeof newTask>) => void;
   onDelete: (taskId: string) => void;
@@ -51,7 +51,7 @@ export function CardEditor({
   onSave,
   onDelete,
   onClose,
-}: CardEditorProps) {
+}: Readonly<CardEditorProps>) {
   const base = state.mode === 'edit' ? state.task : null;
   const [emoji, setEmoji] = useState(() => firstEmoji(base?.emoji ?? ''));
   const [blocked, setBlocked] = useState(base?.blocked ?? false);
