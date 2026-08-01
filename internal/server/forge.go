@@ -48,6 +48,16 @@ type forgeTestResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+type forgeTestProbe struct {
+	BaseURL *string `json:"base_url"`
+	PAT     *string `json:"pat"`
+}
+
+type forgeTestTarget struct {
+	baseURL string
+	pat     string
+}
+
 type forgeRef struct {
 	Source    store.ForgeSource
 	Kind      string
@@ -1487,15 +1497,10 @@ func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, u
 	if !ok {
 		return
 	}
-	var probe struct {
-		BaseURL *string `json:"base_url"`
-		PAT     *string `json:"pat"`
-	}
-	if len(bytes.TrimSpace(body)) > 0 {
-		if err := json.Unmarshal(body, &probe); err != nil {
-			http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
-			return
-		}
+	probe, err := parseForgeTestProbe(body)
+	if err != nil {
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
+		return
 	}
 
 	kind, storedBase, storedPAT, err := s.store.ForgePAT(user, name)
@@ -1505,38 +1510,65 @@ func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 
-	baseURL := storedBase
-	suppliedBase := ""
-	if probe.BaseURL != nil {
-		suppliedBase = strings.TrimSpace(*probe.BaseURL)
-	}
-	if suppliedBase != "" {
-		normalized, err := normalizeForgeProbeBase(suppliedBase)
-		if err != nil {
-			writeJSON(w, forgeTestResponse{Error: err.Error()})
-			return
-		}
-		baseURL = normalized.String()
-	}
-
-	pat := storedPAT
-	suppliedPAT := ""
-	if probe.PAT != nil {
-		suppliedPAT = strings.TrimSpace(*probe.PAT)
-	}
-	if suppliedPAT != "" {
-		pat = suppliedPAT
-	}
-	if suppliedPAT == "" && suppliedBase != "" && storedPAT != "" &&
-		!store.SameAIOrigin(storedBase, baseURL) {
-		writeJSON(w, forgeTestResponse{Error: "enter the token to test a different endpoint"})
-		return
-	}
-
-	apiBase, err := forgeAPIBase(kind, baseURL)
+	target, err := resolveForgeTestTarget(storedBase, storedPAT, probe)
 	if err != nil {
 		writeJSON(w, forgeTestResponse{Error: err.Error()})
 		return
+	}
+
+	request, err := newForgeTestRequest(r.Context(), kind, target)
+	if err != nil {
+		writeJSON(w, forgeTestResponse{Error: err.Error()})
+		return
+	}
+	if !s.forgeConnectionOK(request, user) {
+		writeJSON(w, forgeTestResponse{Error: connectionFailedMessage})
+		return
+	}
+	writeJSON(w, forgeTestResponse{OK: true})
+}
+
+func parseForgeTestProbe(body []byte) (forgeTestProbe, error) {
+	var probe forgeTestProbe
+	if len(bytes.TrimSpace(body)) == 0 {
+		return probe, nil
+	}
+	err := json.Unmarshal(body, &probe)
+	return probe, err
+}
+
+func resolveForgeTestTarget(storedBase, storedPAT string, probe forgeTestProbe) (forgeTestTarget, error) {
+	target := forgeTestTarget{baseURL: storedBase, pat: storedPAT}
+	suppliedBase := trimmedForgeProbeValue(probe.BaseURL)
+	if suppliedBase != "" {
+		normalized, err := normalizeForgeProbeBase(suppliedBase)
+		if err != nil {
+			return forgeTestTarget{}, err
+		}
+		target.baseURL = normalized.String()
+	}
+	suppliedPAT := trimmedForgeProbeValue(probe.PAT)
+	if suppliedPAT != "" {
+		target.pat = suppliedPAT
+	}
+	if suppliedPAT == "" && suppliedBase != "" && storedPAT != "" &&
+		!store.SameAIOrigin(storedBase, target.baseURL) {
+		return forgeTestTarget{}, errors.New("enter the token to test a different endpoint")
+	}
+	return target, nil
+}
+
+func trimmedForgeProbeValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
+func newForgeTestRequest(ctx context.Context, kind string, target forgeTestTarget) (*http.Request, error) {
+	apiBase, err := forgeAPIBase(kind, target.baseURL)
+	if err != nil {
+		return nil, err
 	}
 	endpoint := apiBase
 	switch kind {
@@ -1545,45 +1577,44 @@ func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, u
 	case "github":
 		endpoint += "/user"
 	default:
-		writeJSON(w, forgeTestResponse{Error: "invalid forge kind"})
-		return
+		return nil, errors.New("invalid forge kind")
 	}
-
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		writeJSON(w, forgeTestResponse{Error: "invalid forge base URL"})
-		return
+		return nil, errors.New("invalid forge base URL")
 	}
-	switch kind {
-	case "gitlab":
-		if pat != "" {
-			request.Header.Set("PRIVATE-TOKEN", pat)
-		}
-	case "github":
+	setForgeTestHeaders(request, kind, target.pat)
+	return request, nil
+}
+
+func setForgeTestHeaders(request *http.Request, kind, pat string) {
+	if kind == "gitlab" && pat != "" {
+		request.Header.Set("PRIVATE-TOKEN", pat)
+	}
+	if kind == "github" {
 		if pat != "" {
 			request.Header.Set("Authorization", "Bearer "+pat)
 		}
 		request.Header.Set("Accept", "application/vnd.github+json")
 	}
+}
 
+func (s *server) forgeConnectionOK(request *http.Request, user string) bool {
 	response, err := s.forgeClient.Do(request)
 	if err != nil {
 		log.Printf("forge: connection test for %s failed: %v", user, err)
-		writeJSON(w, forgeTestResponse{Error: connectionFailedMessage})
-		return
+		return false
 	}
 	drainErr := drainForgeResponse(response)
 	if drainErr != nil {
 		log.Printf("forge: connection test for %s failed while closing response: %v", user, drainErr)
-		writeJSON(w, forgeTestResponse{Error: connectionFailedMessage})
-		return
+		return false
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		log.Printf("forge: connection test for %s failed: upstream status %d", user, response.StatusCode)
-		writeJSON(w, forgeTestResponse{Error: connectionFailedMessage})
-		return
+		return false
 	}
-	writeJSON(w, forgeTestResponse{OK: true})
+	return true
 }
 
 func drainForgeResponse(response *http.Response) error {
