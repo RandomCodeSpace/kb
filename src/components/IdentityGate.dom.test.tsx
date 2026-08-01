@@ -45,10 +45,11 @@ describe('IdentityGate DOM', () => {
   it('does not publish Azure availability after unmount', async () => {
     let resolve!: (value: boolean) => void;
     auth.azureAvailable.mockReturnValue(new Promise<boolean>((r) => { resolve = r; }));
-    const { unmount } = render(<IdentityGate onIdentity={vi.fn()} />);
+    const { container, unmount } = render(<IdentityGate onIdentity={vi.fn()} />);
     unmount();
     resolve(true);
     await Promise.resolve();
+    expect(container).toBeEmptyDOMElement();
   });
 
   it('handles availability rejection, provider Error, blank submit, invalid characters, and token omission', async () => {
