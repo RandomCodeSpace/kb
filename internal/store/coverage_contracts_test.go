@@ -1369,16 +1369,39 @@ func TestMarkdownImportReportsTransactionalWriteFailures(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newStore(t)
-			path := filepath.Join(t.TempDir(), "u.md")
-			if err := os.WriteFile(path, []byte(tt.markdown), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			mustExecCoverage(t, s, tt.trigger)
-			if _, err := s.importBoard(path, "u"); err == nil {
-				t.Fatal("importBoard returned nil error")
-			}
+			testMarkdownImportRollback(t, tt.trigger, tt.markdown)
 		})
+	}
+}
+
+func testMarkdownImportRollback(t *testing.T, trigger, markdown string) {
+	t.Helper()
+	s := newStore(t)
+	path := filepath.Join(t.TempDir(), "u.md")
+	if err := os.WriteFile(path, []byte(markdown), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustExecCoverage(t, s, trigger)
+	if _, err := s.importBoard(path, "u"); err == nil {
+		t.Fatal("importBoard returned nil error")
+	}
+	requireEmptyMarkdownImportState(t, s)
+}
+
+func requireEmptyMarkdownImportState(t *testing.T, s *Store) {
+	t.Helper()
+	var tasks, labels, metadata int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE user = 'u'`).Scan(&tasks); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM labels WHERE user = 'u'`).Scan(&labels); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM meta WHERE k IN ('board_title:u', 'imported:u')`).Scan(&metadata); err != nil {
+		t.Fatal(err)
+	}
+	if tasks != 0 || labels != 0 || metadata != 0 {
+		t.Fatalf("failed import left tasks=%d labels=%d metadata=%d", tasks, labels, metadata)
 	}
 }
 

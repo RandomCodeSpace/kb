@@ -22,6 +22,20 @@ type ForgeSource struct {
 	CreatedAt time.Time
 }
 
+type forgeSourceInput struct {
+	name    string
+	kind    string
+	baseURL *string
+	pat     *string
+}
+
+type forgeSourceState struct {
+	baseURL   string
+	patEnc    []byte
+	createdAt string
+	exists    bool
+}
+
 // ForgeSources returns the scope's configured forges ordered by canonical name.
 // It checks only whether ciphertext exists; listing never decrypts a PAT.
 func (s *Store) ForgeSources(scope string) ([]ForgeSource, error) {
@@ -78,69 +92,19 @@ ORDER BY name`, scope)
 // origin changes without a PAT in the same call, the old ciphertext is cleared
 // atomically and tokenCleared reports that the caller must request a new PAT.
 func (s *Store) SetForgeSource(scope, name, kind string, baseURL, pat *string) (tokenCleared bool, err error) {
-	name, err = normalizeForgeSourceName(name)
+	input, err := normalizeForgeSourceInput(name, kind, baseURL, pat)
 	if err != nil {
 		return false, err
 	}
-	if kind != "gitlab" && kind != "github" {
-		return false, errors.New("store: invalid forge kind")
-	}
-
-	var normalizedBaseURL *string
-	if baseURL != nil {
-		base, err := normalizeForgeBaseURL(*baseURL)
-		if err != nil {
-			return false, err
-		}
-		normalizedBaseURL = &base
-	}
 
 	err = s.withTx(func(tx *sql.Tx) error {
-		var base, createdAt string
-		var enc []byte
-		exists := true
-		switch err := tx.QueryRow(`
-SELECT base_url, pat_enc, created_at
-FROM forge_sources
-WHERE scope = ? AND name = ?`, scope, name).Scan(&base, &enc, &createdAt); {
-		case errors.Is(err, sql.ErrNoRows):
-			exists = false
-		case err != nil:
-			return fmt.Errorf("store: read forge source: %w", err)
+		state, err := loadForgeSourceState(tx, scope, input.name)
+		if err != nil {
+			return err
 		}
-		if exists {
-			clean := stripURLSuffix(base)
-			if clean != base {
-				if _, err := tx.Exec(`UPDATE forge_sources SET base_url = ? WHERE scope = ? AND name = ?`, clean, scope, name); err != nil {
-					return fmt.Errorf("store: repair forge source URL: %w", err)
-				}
-				base = clean
-			}
-		}
-
-		if !exists {
-			if normalizedBaseURL == nil {
-				return errors.New("store: forge base URL is required")
-			}
-			createdAt = time.Now().UTC().Format(time.RFC3339Nano)
-		}
-		if normalizedBaseURL != nil {
-			if pat == nil && len(enc) > 0 && !SameAIOrigin(base, *normalizedBaseURL) {
-				enc = nil
-				tokenCleared = true
-			}
-			base = *normalizedBaseURL
-		}
-		if pat != nil {
-			if *pat == "" {
-				enc = nil
-			} else {
-				sealed, err := s.seal([]byte(*pat))
-				if err != nil {
-					return err
-				}
-				enc = sealed
-			}
+		tokenCleared, err = s.patchForgeSourceState(&state, input)
+		if err != nil {
+			return err
 		}
 
 		if _, err := tx.Exec(`
@@ -150,7 +114,7 @@ ON CONFLICT(scope, name) DO UPDATE SET
 	kind = excluded.kind,
 	base_url = excluded.base_url,
 	pat_enc = excluded.pat_enc`,
-			scope, name, kind, base, enc, createdAt); err != nil {
+			scope, input.name, input.kind, state.baseURL, state.patEnc, state.createdAt); err != nil {
 			return fmt.Errorf("store: write forge source: %w", err)
 		}
 		return nil
@@ -159,6 +123,90 @@ ON CONFLICT(scope, name) DO UPDATE SET
 		return false, err
 	}
 	return tokenCleared, nil
+}
+
+func normalizeForgeSourceInput(name, kind string, baseURL, pat *string) (forgeSourceInput, error) {
+	name, err := normalizeForgeSourceName(name)
+	if err != nil {
+		return forgeSourceInput{}, err
+	}
+	if kind != "gitlab" && kind != "github" {
+		return forgeSourceInput{}, errors.New("store: invalid forge kind")
+	}
+	if baseURL == nil {
+		return forgeSourceInput{name: name, kind: kind, pat: pat}, nil
+	}
+	base, err := normalizeForgeBaseURL(*baseURL)
+	if err != nil {
+		return forgeSourceInput{}, err
+	}
+	return forgeSourceInput{name: name, kind: kind, baseURL: &base, pat: pat}, nil
+}
+
+func loadForgeSourceState(tx *sql.Tx, scope, name string) (forgeSourceState, error) {
+	state := forgeSourceState{exists: true}
+	err := tx.QueryRow(`
+SELECT base_url, pat_enc, created_at
+FROM forge_sources
+WHERE scope = ? AND name = ?`, scope, name).Scan(&state.baseURL, &state.patEnc, &state.createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		state.exists = false
+		return state, nil
+	}
+	if err != nil {
+		return forgeSourceState{}, fmt.Errorf("store: read forge source: %w", err)
+	}
+	clean := stripURLSuffix(state.baseURL)
+	if clean == state.baseURL {
+		return state, nil
+	}
+	if _, err := tx.Exec(`UPDATE forge_sources SET base_url = ? WHERE scope = ? AND name = ?`, clean, scope, name); err != nil {
+		return forgeSourceState{}, fmt.Errorf("store: repair forge source URL: %w", err)
+	}
+	state.baseURL = clean
+	return state, nil
+}
+
+func (s *Store) patchForgeSourceState(state *forgeSourceState, input forgeSourceInput) (bool, error) {
+	if !state.exists {
+		if input.baseURL == nil {
+			return false, errors.New("store: forge base URL is required")
+		}
+		state.createdAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	tokenCleared := patchForgeBaseURL(state, input.baseURL, input.pat)
+	if err := s.patchForgePAT(state, input.pat); err != nil {
+		return false, err
+	}
+	return tokenCleared, nil
+}
+
+func patchForgeBaseURL(state *forgeSourceState, baseURL, pat *string) bool {
+	if baseURL == nil {
+		return false
+	}
+	tokenCleared := pat == nil && len(state.patEnc) > 0 && !SameAIOrigin(state.baseURL, *baseURL)
+	if tokenCleared {
+		state.patEnc = nil
+	}
+	state.baseURL = *baseURL
+	return tokenCleared
+}
+
+func (s *Store) patchForgePAT(state *forgeSourceState, pat *string) error {
+	if pat == nil {
+		return nil
+	}
+	if *pat == "" {
+		state.patEnc = nil
+		return nil
+	}
+	sealed, err := s.seal([]byte(*pat))
+	if err != nil {
+		return err
+	}
+	state.patEnc = sealed
+	return nil
 }
 
 // DeleteForgeSource deletes one scoped source. Deleting a missing source is a
