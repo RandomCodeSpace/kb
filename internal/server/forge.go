@@ -464,10 +464,21 @@ func (s *server) fetchIssues(ctx context.Context, ref forgeRef, max int) (issues
 	if err != nil {
 		return nil, 0, false, "", err
 	}
+	return s.fetchIssuePages(ctx, ref, apiBase, listPath, query, max)
+}
 
+type forgeIssuePageState struct {
+	issues         []forgeIssue
+	totalHint      int
+	fallbackTotal  int
+	hasGitLabTotal bool
+	truncated      bool
+	note           string
+}
+
+func (s *server) fetchIssuePages(ctx context.Context, ref forgeRef, apiBase, listPath string, query url.Values, max int) ([]forgeIssue, int, bool, string, error) {
+	state := forgeIssuePageState{}
 	page := 1
-	fallbackTotal := 0
-	hasGitLabTotal := false
 	for {
 		if page > 1 {
 			query.Set("page", strconv.Itoa(page))
@@ -476,18 +487,10 @@ func (s *server) fetchIssues(ctx context.Context, ref forgeRef, max int) (issues
 		if err != nil {
 			return nil, 0, false, "", err
 		}
-		if ref.Kind == "gitlab" {
-			if total := forgeTotalHint(response.header); total >= 0 {
-				totalHint = total
-				hasGitLabTotal = true
-			}
-		}
+		state.observeTotal(ref.Kind, response.header)
 		if forgeRateLimited(ref.Kind, response) {
-			if !hasGitLabTotal {
-				totalHint = fallbackTotal
-			}
-			note = fmt.Sprintf("rate limited — partial results (%d of %d)", len(issues), totalHint)
-			return issues, totalHint, true, note, nil
+			state.markRateLimited()
+			return state.result()
 		}
 		if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
 			return nil, 0, false, "", forgeRequestError(ref, listPath)
@@ -497,50 +500,67 @@ func (s *server) fetchIssues(ctx context.Context, ref forgeRef, max int) (issues
 		if err != nil {
 			return nil, 0, false, "", forgeRequestError(ref, listPath)
 		}
-		fallbackTotal += len(batch)
-		remaining := max - len(issues)
-		if len(batch) > remaining {
-			issues = append(issues, batch[:remaining]...)
-			truncated = true
-			break
-		}
-		issues = append(issues, batch...)
-		hasNext := forgeHasNextPage(ref.Kind, response.header)
-		if len(issues) >= max {
-			truncated = hasNext
-			break
-		}
-		if !hasNext {
+		if state.appendBatch(batch, max, forgeHasNextPage(ref.Kind, response.header)) {
 			break
 		}
 		page++
 	}
-	if !hasGitLabTotal {
-		totalHint = fallbackTotal
+	return state.result()
+}
+
+func (state *forgeIssuePageState) observeTotal(kind string, header http.Header) {
+	if kind != "gitlab" {
+		return
 	}
-	if totalHint > len(issues) {
-		truncated = true
+	total := forgeTotalHint(header)
+	if total >= 0 {
+		state.totalHint = total
+		state.hasGitLabTotal = true
 	}
-	return issues, totalHint, truncated, "", nil
+}
+
+func (state *forgeIssuePageState) markRateLimited() {
+	if !state.hasGitLabTotal {
+		state.totalHint = state.fallbackTotal
+	}
+	state.truncated = true
+	state.note = fmt.Sprintf("rate limited — partial results (%d of %d)", len(state.issues), state.totalHint)
+}
+
+func (state *forgeIssuePageState) appendBatch(batch []forgeIssue, max int, hasNext bool) bool {
+	state.fallbackTotal += len(batch)
+	remaining := max - len(state.issues)
+	if len(batch) > remaining {
+		state.issues = append(state.issues, batch[:remaining]...)
+		state.truncated = true
+		return true
+	}
+	state.issues = append(state.issues, batch...)
+	if len(state.issues) >= max {
+		state.truncated = hasNext
+		return true
+	}
+	return !hasNext
+}
+
+func (state *forgeIssuePageState) result() ([]forgeIssue, int, bool, string, error) {
+	if !state.hasGitLabTotal {
+		state.totalHint = state.fallbackTotal
+	}
+	if state.totalHint > len(state.issues) {
+		state.truncated = true
+	}
+	return state.issues, state.totalHint, state.truncated, state.note, nil
 }
 
 func (s *server) forgeIssuesList(ctx context.Context, ref forgeRef, apiBase string) (string, url.Values, error) {
-	listPath, err := forgeProjectIssuesPath(ref)
+	listPath, query, err := forgeIssueListRequest(ref)
 	if err != nil {
-		return "", nil, forgeRequestError(ref, "")
-	}
-	query := url.Values{"per_page": {"50"}}
-	if ref.Kind == "gitlab" {
-		query.Set("state", "opened")
-	} else if ref.Kind == "github" {
-		query.Set("state", "open")
-	} else {
 		return "", nil, forgeRequestError(ref, listPath)
 	}
 	if ref.Milestone == 0 {
 		return listPath, query, nil
 	}
-
 	milestonePath, err := forgeMilestonePath(ref)
 	if err != nil {
 		return "", nil, forgeRequestError(ref, "")
@@ -552,25 +572,51 @@ func (s *server) forgeIssuesList(ctx context.Context, ref forgeRef, apiBase stri
 	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
 		return "", nil, forgeRequestError(ref, milestonePath)
 	}
+	if !setForgeMilestoneQuery(ref.Kind, query, response.body) {
+		return "", nil, forgeRequestError(ref, milestonePath)
+	}
+	return listPath, query, nil
+}
+
+func forgeIssueListRequest(ref forgeRef) (string, url.Values, error) {
+	listPath, err := forgeProjectIssuesPath(ref)
+	if err != nil {
+		return "", nil, err
+	}
+	query := url.Values{"per_page": {"50"}}
 	switch ref.Kind {
+	case "gitlab":
+		query.Set("state", "opened")
+	case "github":
+		query.Set("state", "open")
+	default:
+		return listPath, nil, errors.New("invalid forge kind")
+	}
+	return listPath, query, nil
+}
+
+func setForgeMilestoneQuery(kind string, query url.Values, body []byte) bool {
+	switch kind {
 	case "gitlab":
 		var milestone struct {
 			Title string `json:"title"`
 		}
-		if err := json.Unmarshal(response.body, &milestone); err != nil || milestone.Title == "" {
-			return "", nil, forgeRequestError(ref, milestonePath)
+		if err := json.Unmarshal(body, &milestone); err != nil || milestone.Title == "" {
+			return false
 		}
 		query.Set("milestone", milestone.Title)
 	case "github":
 		var milestone struct {
 			Number int `json:"number"`
 		}
-		if err := json.Unmarshal(response.body, &milestone); err != nil || milestone.Number <= 0 {
-			return "", nil, forgeRequestError(ref, milestonePath)
+		if err := json.Unmarshal(body, &milestone); err != nil || milestone.Number <= 0 {
+			return false
 		}
 		query.Set("milestone", strconv.Itoa(milestone.Number))
+	default:
+		return false
 	}
-	return listPath, query, nil
+	return true
 }
 
 func (s *server) fetchForgeComments(ctx context.Context, ref forgeRef, apiBase, issuePath string) ([]string, error) {
@@ -586,12 +632,20 @@ func (s *server) fetchForgeComments(ctx context.Context, ref forgeRef, apiBase, 
 		return nil, forgeRequestError(ref, commentsPath)
 	}
 
+	comments, err := parseForgeComments(ref.Kind, response.body)
+	if err != nil {
+		return nil, forgeRequestError(ref, commentsPath)
+	}
+	return comments, nil
+}
+
+func parseForgeComments(kind string, body []byte) ([]string, error) {
 	comments := make([]string, 0, maxForgeComments)
-	switch ref.Kind {
+	switch kind {
 	case "gitlab":
 		var notes []gitLabNote
-		if err := json.Unmarshal(response.body, &notes); err != nil {
-			return nil, forgeRequestError(ref, commentsPath)
+		if err := json.Unmarshal(body, &notes); err != nil {
+			return nil, err
 		}
 		for _, note := range notes {
 			if !note.System {
@@ -600,14 +654,14 @@ func (s *server) fetchForgeComments(ctx context.Context, ref forgeRef, apiBase, 
 		}
 	case "github":
 		var raw []gitHubComment
-		if err := json.Unmarshal(response.body, &raw); err != nil {
-			return nil, forgeRequestError(ref, commentsPath)
+		if err := json.Unmarshal(body, &raw); err != nil {
+			return nil, err
 		}
 		for _, comment := range raw {
 			comments = appendBoundedForgeComment(comments, comment.Body)
 		}
 	default:
-		return nil, forgeRequestError(ref, commentsPath)
+		return nil, errors.New("invalid forge kind")
 	}
 	return comments, nil
 }
