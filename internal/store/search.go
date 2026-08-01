@@ -124,80 +124,15 @@ func (s *Store) SearchSimilar(scope, query, excludeID string, excludeLinks []str
 		candidateLimit = 24
 	}
 	normalizedQuery := normalizedSimilarityText(query)
-	var candidates []scoredSimilarHit
-	keepCandidate := func(hit SimilarHit) {
-		score := Similarity(query, hit.Title)
-		exactPhrase := normalizedQuery != "" &&
-			strings.Contains(normalizedSimilarityText(hit.Title), normalizedQuery)
-		if score < SimilarityFloor && !exactPhrase {
-			return
-		}
-		candidates = append(candidates, scoredSimilarHit{hit: hit, score: score})
-	}
-
-	rows, err := s.db.Query(`
-		SELECT f.id, f.title, t.status,
-		       COALESCE(g.reason, ''), COALESCE(g.killed_at, '')
-	FROM tasks_fts f
-	JOIN tasks t ON t.id = f.id AND t.user = ?1
-		LEFT JOIN tombstones g ON g.scope = ?1 AND g.task_id = f.id
-		WHERE tasks_fts MATCH ?2 AND f.scope = ?1 AND f.id <> ?3
-		ORDER BY bm25(tasks_fts, 5.0, 1.0, 3.0) LIMIT ?4`,
-		scope, match, excludeID, candidateLimit)
+	taskCandidates, err := s.searchSimilarTasks(scope, match, excludeID, query, normalizedQuery, candidateLimit)
 	if err != nil {
-		return nil, fmt.Errorf("store: search tasks: %w", err)
+		return nil, err
 	}
-	for rows.Next() {
-		var hit SimilarHit
-		if err := rows.Scan(&hit.ID, &hit.Title, &hit.Status, &hit.Reason, &hit.KilledAt); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("store: scan task search: %w", err)
-		}
-		if hit.Status == "cancelled" && hit.Reason != "" {
-			hit.Via = "killed"
-		} else {
-			hit.Via = "card"
-			hit.Reason, hit.KilledAt = "", ""
-		}
-		keepCandidate(hit)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, fmt.Errorf("store: search tasks: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("store: close task search: %w", err)
-	}
-
-	rows, err = s.db.Query(`
-		SELECT f.title, l.link
-		FROM import_links_fts f
-		JOIN import_links l ON l.scope = f.scope AND l.external_key = f.external_key
-		WHERE import_links_fts MATCH ?2 AND f.scope = ?1
-		ORDER BY bm25(import_links_fts, 5.0) LIMIT ?3`,
-		scope, match, candidateLimit)
+	importCandidates, err := s.searchSimilarImports(scope, match, query, normalizedQuery, excludedLinks, candidateLimit)
 	if err != nil {
-		return nil, fmt.Errorf("store: search imports: %w", err)
+		return nil, err
 	}
-	for rows.Next() {
-		var hit SimilarHit
-		if err := rows.Scan(&hit.Title, &hit.Link); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("store: scan import search: %w", err)
-		}
-		hit.Via = "import"
-		if _, excluded := excludedLinks[hit.Link]; excluded {
-			continue
-		}
-		keepCandidate(hit)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, fmt.Errorf("store: search imports: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("store: close import search: %w", err)
-	}
+	candidates := append(taskCandidates, importCandidates...)
 
 	// Stable sorting preserves each FTS query's bm25 order, and card-first
 	// behavior across query branches, when similarity scores tie.
@@ -212,6 +147,92 @@ func (s *Store) SearchSimilar(scope, query, excludeID string, excludeLinks []str
 		hits = append(hits, candidate.hit)
 	}
 	return hits, nil
+}
+
+func (s *Store) searchSimilarTasks(scope, match, excludeID, query, normalizedQuery string, candidateLimit int) ([]scoredSimilarHit, error) {
+	rows, err := s.db.Query(`
+		SELECT f.id, f.title, t.status,
+		       COALESCE(g.reason, ''), COALESCE(g.killed_at, '')
+	FROM tasks_fts f
+	JOIN tasks t ON t.id = f.id AND t.user = ?1
+		LEFT JOIN tombstones g ON g.scope = ?1 AND g.task_id = f.id
+		WHERE tasks_fts MATCH ?2 AND f.scope = ?1 AND f.id <> ?3
+		ORDER BY bm25(tasks_fts, 5.0, 1.0, 3.0) LIMIT ?4`,
+		scope, match, excludeID, candidateLimit)
+	if err != nil {
+		return nil, fmt.Errorf("store: search tasks: %w", err)
+	}
+	var candidates []scoredSimilarHit
+	for rows.Next() {
+		var hit SimilarHit
+		if err := rows.Scan(&hit.ID, &hit.Title, &hit.Status, &hit.Reason, &hit.KilledAt); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("store: scan task search: %w", err)
+		}
+		if hit.Status == "cancelled" && hit.Reason != "" {
+			hit.Via = "killed"
+		} else {
+			hit.Via = "card"
+			hit.Reason, hit.KilledAt = "", ""
+		}
+		if candidate, ok := scoreSimilarHit(query, normalizedQuery, hit); ok {
+			candidates = append(candidates, candidate)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("store: search tasks: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("store: close task search: %w", err)
+	}
+	return candidates, nil
+}
+
+func (s *Store) searchSimilarImports(scope, match, query, normalizedQuery string, excludedLinks map[string]struct{}, candidateLimit int) ([]scoredSimilarHit, error) {
+	rows, err := s.db.Query(`
+		SELECT f.title, l.link
+		FROM import_links_fts f
+		JOIN import_links l ON l.scope = f.scope AND l.external_key = f.external_key
+		WHERE import_links_fts MATCH ?2 AND f.scope = ?1
+		ORDER BY bm25(import_links_fts, 5.0) LIMIT ?3`,
+		scope, match, candidateLimit)
+	if err != nil {
+		return nil, fmt.Errorf("store: search imports: %w", err)
+	}
+	var candidates []scoredSimilarHit
+	for rows.Next() {
+		var hit SimilarHit
+		if err := rows.Scan(&hit.Title, &hit.Link); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("store: scan import search: %w", err)
+		}
+		hit.Via = "import"
+		if _, excluded := excludedLinks[hit.Link]; excluded {
+			continue
+		}
+		if candidate, ok := scoreSimilarHit(query, normalizedQuery, hit); ok {
+			candidates = append(candidates, candidate)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("store: search imports: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("store: close import search: %w", err)
+	}
+	return candidates, nil
+}
+
+func scoreSimilarHit(query, normalizedQuery string, hit SimilarHit) (scoredSimilarHit, bool) {
+	score := Similarity(query, hit.Title)
+	exactPhrase := normalizedQuery != "" &&
+		strings.Contains(normalizedSimilarityText(hit.Title), normalizedQuery)
+	if score < SimilarityFloor && !exactPhrase {
+		return scoredSimilarHit{}, false
+	}
+	return scoredSimilarHit{hit: hit, score: score}, true
 }
 
 // RecordTombstone inserts or refreshes the reason a task was killed.
