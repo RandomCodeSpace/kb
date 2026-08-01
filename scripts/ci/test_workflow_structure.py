@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 QUALITY = (ROOT / ".github/workflows/quality.yml").read_text()
 SONAR = (ROOT / ".github/workflows/sonar-exact-revision.yml").read_text()
+PACKAGE = json.loads((ROOT / "package.json").read_text())
 
 
 class WorkflowStructureTest(unittest.TestCase):
@@ -61,6 +63,30 @@ class WorkflowStructureTest(unittest.TestCase):
         self.assertNotIn("github.token", job)
         self.assertNotIn("GITHUB_TOKEN", job)
         self.assertIn("ref: ${{ github.event.pull_request.head.sha || github.sha }}", job)
+
+    def test_frontend_coverage_gate_and_candidate_report_are_separate(self):
+        regression, candidate = QUALITY.split("  candidate_coverage:\n", 1)
+        self.assertEqual(len(re.findall(r"^        run: npm test$", regression, re.MULTILINE)), 1)
+        self.assertEqual(
+            len(
+                re.findall(
+                    r"^        run: npm run test:coverage:report-only$",
+                    candidate,
+                    re.MULTILINE,
+                )
+            ),
+            1,
+        )
+        self.assertEqual(len(re.findall(r"^        run: npm test$", candidate, re.MULTILINE)), 0)
+
+        scripts = PACKAGE["scripts"]
+        self.assertEqual(scripts["test"], "vitest run --coverage")
+        self.assertEqual(
+            scripts["test:coverage:report-only"],
+            "vitest run --coverage --coverage.thresholds.lines=0 "
+            "--coverage.thresholds.functions=0 --coverage.thresholds.branches=0 "
+            "--coverage.thresholds.statements=0",
+        )
 
     def test_candidate_tree_is_rejected_on_both_sides_of_approval(self):
         self.assertEqual(SONAR.count("trusted-main/scripts/ci/validate-candidate-tree.sh"), 2)

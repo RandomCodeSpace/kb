@@ -155,7 +155,7 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Generate frontend coverage
-        run: npm test
+        run: npm run test:coverage:report-only
 
       - name: Generate Go coverage
         env:
