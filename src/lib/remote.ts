@@ -195,10 +195,8 @@ export function sameBoardSemantics(
       canonicalSequence(current.board, current.canonicalTaskIDs),
       canonicalSequence(target.board, target.canonicalTaskIDs),
     ) &&
-    same(
-      [...current.deletedCanonicalIDs].sort(),
-      [...target.deletedCanonicalIDs].sort(),
-    ) &&
+    current.deletedCanonicalIDs.size === target.deletedCanonicalIDs.size &&
+    [...current.deletedCanonicalIDs].every((id) => target.deletedCanonicalIDs.has(id)) &&
     current.migratedRaw === target.migratedRaw &&
     same(current.pendingBoardWrite, target.pendingBoardWrite)
   );
