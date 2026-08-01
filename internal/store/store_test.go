@@ -844,6 +844,15 @@ func TestImportMarkdownDir(t *testing.T) {
 	if err != nil || len(bobTasks) != 1 || bobTasks[0].Title != "Bobs live task" {
 		t.Errorf("bob tasks = %v, %v, want only the live task", bobTasks, err)
 	}
+	if _, err := s.db.Exec(`DELETE FROM tasks WHERE user = 'bob'`); err != nil {
+		t.Fatalf("clear bob: %v", err)
+	}
+	if n, err := s.ImportMarkdownDir(dir); err != nil || n != 0 {
+		t.Errorf("import after clearing skipped user = %d, %v, want 0", n, err)
+	}
+	if bobTasks, err := s.ListTasks("bob", ""); err != nil || len(bobTasks) != 0 {
+		t.Errorf("bob tasks after permanent skip = %v, %v, want none", bobTasks, err)
+	}
 
 	// Second run imports nothing and duplicates nothing.
 	if n, err := s.ImportMarkdownDir(dir); err != nil || n != 0 {

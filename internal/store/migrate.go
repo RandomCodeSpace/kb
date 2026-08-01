@@ -57,47 +57,62 @@ func (s *Store) ImportMarkdownDir(dir string) (int, error) {
 func (s *Store) importBoard(path, user string) (bool, error) {
 	did := false
 	err := s.withTx(func(tx *sql.Tx) error {
-		var v string
-		switch err := tx.QueryRow(`SELECT v FROM meta WHERE k = ?`, importKey(user)).Scan(&v); {
-		case err == nil:
-			return nil // already handled once; never reimport
-		case !errors.Is(err, sql.ErrNoRows):
-			return fmt.Errorf("store: import flag: %w", err)
-		}
-		var n int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM tasks WHERE user = ?`, user).Scan(&n); err != nil {
-			return fmt.Errorf("store: count tasks: %w", err)
-		}
-		if n > 0 {
-			return setMeta(tx, importKey(user), "skipped")
+		eligible, err := importBoardEligible(tx, user)
+		if err != nil || !eligible {
+			return err
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("store: read %s: %w", path, err)
 		}
-		b := board.Parse(string(data))
-		now := time.Now().UTC()
-		pos := map[board.Status]int{}
-		for _, t := range b.Tasks {
-			t.ID = uuid.NewString()
-			t.CreatedAt, t.MovedAt = now, now
-			t.Position = pos[t.Status]
-			pos[t.Status]++
-			if err := insertTask(tx, user, t); err != nil {
-				return err
-			}
-			if err := s.upsertLabels(tx, user, t.Tags); err != nil {
-				return err
-			}
-		}
-		if err := setMeta(tx, titleKey(user), b.Title); err != nil {
-			return err
-		}
-		if err := setMeta(tx, importKey(user), "imported"); err != nil {
+		if err := s.insertImportedBoard(tx, user, board.Parse(string(data))); err != nil {
 			return err
 		}
 		did = true
 		return nil
 	})
 	return did, err
+}
+
+func importBoardEligible(tx *sql.Tx, user string) (bool, error) {
+	var value string
+	err := tx.QueryRow(`SELECT v FROM meta WHERE k = ?`, importKey(user)).Scan(&value)
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("store: import flag: %w", err)
+	}
+	var taskCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM tasks WHERE user = ?`, user).Scan(&taskCount); err != nil {
+		return false, fmt.Errorf("store: count tasks: %w", err)
+	}
+	if taskCount == 0 {
+		return true, nil
+	}
+	if err := setMeta(tx, importKey(user), "skipped"); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func (s *Store) insertImportedBoard(tx *sql.Tx, user string, imported board.Board) error {
+	now := time.Now().UTC()
+	positions := map[board.Status]int{}
+	for _, task := range imported.Tasks {
+		task.ID = uuid.NewString()
+		task.CreatedAt, task.MovedAt = now, now
+		task.Position = positions[task.Status]
+		positions[task.Status]++
+		if err := insertTask(tx, user, task); err != nil {
+			return err
+		}
+		if err := s.upsertLabels(tx, user, task.Tags); err != nil {
+			return err
+		}
+	}
+	if err := setMeta(tx, titleKey(user), imported.Title); err != nil {
+		return err
+	}
+	return setMeta(tx, importKey(user), "imported")
 }

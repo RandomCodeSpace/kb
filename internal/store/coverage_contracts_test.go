@@ -1378,6 +1378,19 @@ func TestMarkdownImportReportsTransactionalWriteFailures(t *testing.T) {
 			if _, err := s.importBoard(path, "u"); err == nil {
 				t.Fatal("importBoard returned nil error")
 			}
+			var tasks, labels, metadata int
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE user = 'u'`).Scan(&tasks); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM labels WHERE user = 'u'`).Scan(&labels); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM meta WHERE k IN ('board_title:u', 'imported:u')`).Scan(&metadata); err != nil {
+				t.Fatal(err)
+			}
+			if tasks != 0 || labels != 0 || metadata != 0 {
+				t.Fatalf("failed import left tasks=%d labels=%d metadata=%d", tasks, labels, metadata)
+			}
 		})
 	}
 }
