@@ -465,7 +465,7 @@ export function BoardView(props: Readonly<BoardProps>) {
 
     const onPointerMove = (e: PointerEvent) => {
       const d = dragRef.current;
-      if (!d || e.pointerId !== d.pointerId) return;
+      if (d?.pointerId !== e.pointerId) return;
       // A pointerup missed while unfocused leaves a stale drag; treat a
       // button-less mouse move as the release we never received.
       if (e.pointerType === 'mouse' && e.buttons === 0) {

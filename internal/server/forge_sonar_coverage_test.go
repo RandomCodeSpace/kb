@@ -57,8 +57,10 @@ func seedForgeCoverageSource(t *testing.T, st *store.Store, baseURL, pat string)
 
 func seedForgeCoverageDrift(t *testing.T, st *store.Store, baseURL, pat string) {
 	t.Helper()
-	seedImportDrift(t, st, forgeCoverageUser, forgeCoverageSource, "gitlab", baseURL, pat,
-		forgeCoverageKey, baseURL+"/group/project/-/issues/42")
+	seedImportDrift(t, st, importDriftSeed{
+		scope: forgeCoverageUser, source: forgeCoverageSource, kind: "gitlab", baseURL: baseURL,
+		pat: pat, externalKey: forgeCoverageKey, storedURL: baseURL + "/group/project/-/issues/42",
+	})
 }
 
 func requireForgeCoverageResponse(t *testing.T, response *httptest.ResponseRecorder, code int, body string) {

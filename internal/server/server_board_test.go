@@ -405,7 +405,7 @@ func TestBoardVersionToken(t *testing.T) {
 	if err := st.ReplaceBoard("default", board.Parse("# B\n\n## To Do\n\n- [ ] from the CLI\n")); err != nil {
 		t.Fatalf("out-of-band write: %v", err)
 	}
-	if again := doReq(t, h, "GET", "/api/board", "", nil).Header().Get("ETag"); again == current {
+	if doReq(t, h, "GET", "/api/board", "", nil).Header().Get("ETag") == current {
 		t.Error("token did not change after an out-of-band write")
 	}
 	if w := doReq(t, h, "PUT", "/api/board", "# B\n", map[string]string{"If-Match": current}); w.Code != http.StatusConflict {

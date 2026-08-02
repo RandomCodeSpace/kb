@@ -153,7 +153,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!identity || identity.kind !== 'azure' || identity.homeAccountId) return;
+    if (identity?.kind !== 'azure' || identity.homeAccountId) return;
     let cancelled = false;
     void resolveAzureIdentity(identity).then(
       (resolved) => {
@@ -252,6 +252,18 @@ interface BoardAppProps {
   /** A credential the server accepted — see ReconnectModal. */
   onIdentity: (identity: Identity) => void;
   onSignOut: () => void;
+}
+
+interface RemoteAcknowledgementInput {
+  sent: Board;
+  sentIDs: ReadonlyMap<string, string>;
+  pushed: Board;
+  committedIDs: ReadonlyMap<string, string>;
+  operationID?: string;
+  isCurrent?: () => boolean;
+  expectedGeneration?: number;
+  expectedVersion?: DurableVersion;
+  acknowledgementBase?: DurableSnapshot;
 }
 
 function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) {
@@ -467,17 +479,17 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
    * no error shown.
    */
   const acknowledgeRemote = useCallback(
-    async (
-      sent: Board,
-      sentIDs: ReadonlyMap<string, string>,
-      pushed: Board,
-      committedIDs: ReadonlyMap<string, string>,
-      operationID?: string,
-      isCurrent: () => boolean = () => true,
-      _expectedGeneration?: number,
-      _expectedVersion?: DurableVersion,
-      acknowledgementBase?: DurableSnapshot,
-    ): Promise<{
+    async ({
+      sent,
+      sentIDs,
+      pushed,
+      committedIDs,
+      operationID,
+      isCurrent = () => true,
+      expectedGeneration: _expectedGeneration,
+      expectedVersion: _expectedVersion,
+      acknowledgementBase,
+    }: Readonly<RemoteAcknowledgementInput>): Promise<{
       persisted: boolean;
       conflict?: true;
       generation?: number;
@@ -587,17 +599,17 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
           // Only an ack for the newest edit may clear the dirty flag.
           const fresh = editGenRef.current === gen;
           if (cancelled) return;
-          const acknowledged = await acknowledgeRemote(
+          const acknowledged = await acknowledgeRemote({
             sent,
-            localTaskIDs,
+            sentIDs: localTaskIDs,
             pushed,
-            taskIDs,
+            committedIDs: taskIDs,
             operationID,
             isCurrent,
-            ackGeneration,
-            ackVersion,
-            ackSnapshot,
-          );
+            expectedGeneration: ackGeneration,
+            expectedVersion: ackVersion,
+            acknowledgementBase: ackSnapshot,
+          });
           if (!isCurrent?.()) return;
           if (acknowledged.conflict) return acknowledged;
           if (fresh && acknowledged.persisted) setDirty(ns, false);
@@ -712,6 +724,198 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
         if (!cancelled) onSaveError(err);
       }
     };
+
+    const fetchCleanStartup = async (): Promise<{
+      remoteBoard: Board | null;
+      remoteTaskIDs: ReadonlyMap<string, string>;
+      stopped: boolean;
+    }> => {
+      if (loadDirty(ns)) {
+        return { remoteBoard: null, remoteTaskIDs: new Map(), stopped: false };
+      }
+      try {
+        const startup = await reconcileStartupBoardFetch({
+          remote,
+          identity,
+          readLive: () => liveRef.current,
+          readSnapshot: () => store.loadSnapshot(),
+          persist: (nextBoard, taskIDs, deletedIDs, expectedVersion, guard) =>
+            store.saveIfGeneration(
+              nextBoard,
+              taskIDs,
+              deletedIDs,
+              expectedVersion,
+              () => !cancelled && guard(),
+            ),
+          apply: (snapshot) => {
+            cleanBoardRef.current = snapshot.board;
+            publishCommitted(snapshot, false);
+            setDirty(ns, true);
+          },
+          push: pushLocal,
+          cancelled: () => cancelled,
+        });
+        if (cancelled) {
+          return { remoteBoard: null, remoteTaskIDs: new Map(), stopped: true };
+        }
+        if (startup.merged) {
+          reportMergeConflicts(startup.merged.conflicts);
+          reportPersistence(startup.persisted === true);
+          return { remoteBoard: null, remoteTaskIDs: new Map(), stopped: true };
+        }
+        return {
+          remoteBoard: startup.remoteBoard,
+          remoteTaskIDs: startup.remoteTaskIDs,
+          stopped: false,
+        };
+      } catch (err) {
+        // Server present but board fetch failed — keep the local board,
+        // report the failure, and do not enable autosave over broken auth.
+        if (!cancelled) onSaveError(err);
+        return { remoteBoard: null, remoteTaskIDs: new Map(), stopped: true };
+      }
+    };
+
+    const recoverLegacyStartup = async (): Promise<boolean> => {
+      if (
+        !loadDirty(ns) ||
+        !initial.migratedRaw ||
+        canonicalTaskIDsRef.current.size !== 0
+      ) {
+        return false;
+      }
+      try {
+        const result = await reconcileLegacyBootstrap({
+          remote,
+          identity,
+          readLive: () => liveRef.current,
+          readSnapshot: () => store.loadSnapshot(),
+          persist: (nextBoard, taskIDs, deletedIDs, expectedVersion, guard) =>
+            store.completeIdentityRecovery(
+              nextBoard,
+              taskIDs,
+              deletedIDs,
+              expectedVersion,
+              () => !cancelled && guard(),
+            ),
+          repairPersist: (nextBoard, taskIDs, deletedIDs, version, guard) =>
+            store.saveIfGeneration(
+              nextBoard,
+              taskIDs,
+              deletedIDs,
+              version,
+              () => !cancelled && guard(),
+            ),
+          apply: (_recovered, needsPush, snapshot) => {
+            cleanBoardRef.current = snapshot.board;
+            publishCommitted(snapshot, !needsPush);
+            reportNotice(LEGACY_RECOVERY_NOTICE);
+            setDirty(ns, needsPush);
+            if (!needsPush) {
+              syncOnRef.current = true;
+              setSync('ok');
+            }
+          },
+          queuePush: pushLocal,
+          cancelled: () => cancelled,
+        });
+        reportMergeConflicts(result.recovered.conflicts);
+        reportPersistence(result.persisted);
+        if (!result.persisted) setDirty(ns, true);
+      } catch (err) {
+        if (!cancelled) onSaveError(err);
+      }
+      return true;
+    };
+
+    const pushDirtyStartup = async (): Promise<boolean> => {
+      if (!loadDirty(ns)) return false;
+      try {
+        const dirtyLive = liveRef.current;
+        const prepared = await remote.prepareDirtyMapped(
+          identity,
+          dirtyLive.board,
+          dirtyLive.canonicalTaskIDs,
+          dirtyLive.deletedCanonicalIDs,
+        );
+        if (cancelled) return true;
+        const persisted = await persistCandidate(
+          dirtyLive,
+          prepared.board,
+          prepared.taskIDs,
+          prepared.deletedCanonicalIDs,
+        );
+        if (cancelled) return true;
+        reportMergeConflicts(persisted.conflicts);
+        reportPersistence(persisted.persisted);
+        if (!persisted.persisted || !persisted.snapshot) {
+          setDirty(ns, true);
+          return true;
+        }
+        cleanBoardRef.current = persisted.snapshot.board;
+        publishCommitted(persisted.snapshot, false);
+        pushLocal(persisted.snapshot);
+      } catch (err) {
+        if (!cancelled) onSaveError(err);
+      }
+      return true;
+    };
+
+    const markStartupSynced = () => {
+      syncOnRef.current = true;
+      setSync('ok');
+    };
+
+    const adoptCleanStartup = async (
+      remoteBoard: Board | null,
+      remoteTaskIDs: ReadonlyMap<string, string>,
+      cleanStartupLive: LiveBoardSnapshot,
+    ): Promise<void> => {
+      // Re-check dirtiness after the fetch: an edit may have landed while the
+      // remote copy was in flight (boardRef catches commits whose save effect
+      // has not flushed yet).
+      if (liveRef.current.needsLocalPersistence) return;
+      if (!remoteBoard) {
+        markStartupSynced();
+        return;
+      }
+      const current = liveRef.current;
+      if (current.epoch !== cleanStartupLive.epoch) return;
+      const unchanged = sameBoardSemantics({
+        board: current.board,
+        canonicalTaskIDs: current.canonicalTaskIDs,
+        deletedCanonicalIDs: current.deletedCanonicalIDs,
+        migratedRaw: current.durableBase.migratedRaw,
+        pendingBoardWrite: current.durableBase.pendingBoardWrite,
+      }, {
+        board: remoteBoard,
+        canonicalTaskIDs: remoteTaskIDs,
+        deletedCanonicalIDs: new Set(),
+        migratedRaw: false,
+        pendingBoardWrite: null,
+      });
+      if (unchanged) {
+        markStartupSynced();
+        return;
+      }
+      const persisted = await persistCandidate(
+        current,
+        remoteBoard,
+        remoteTaskIDs,
+        new Set(),
+        initial.migratedRaw,
+      );
+      if (cancelled) return;
+      reportMergeConflicts(persisted.conflicts);
+      reportPersistence(persisted.persisted);
+      if (!persisted.persisted || !persisted.snapshot) {
+        setDirty(ns, true);
+        return;
+      }
+      adopt(persisted.snapshot);
+      markStartupSynced();
+    };
+
     void (async () => {
       const present = await remote.detect();
       if (cancelled || !present) return;
@@ -721,172 +925,13 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
         await recoverPending(pendingWrite);
         return;
       }
-      let remoteBoard: Board | null = null;
-      let remoteTaskIDs: ReadonlyMap<string, string> = new Map();
       const cleanStartupLive = liveRef.current;
-      if (!loadDirty(ns)) {
-        try {
-          const startup = await reconcileStartupBoardFetch({
-            remote,
-            identity,
-            readLive: () => liveRef.current,
-            readSnapshot: () => store.loadSnapshot(),
-            persist: (nextBoard, taskIDs, deletedIDs, expectedVersion, guard) =>
-              store.saveIfGeneration(
-                nextBoard,
-                taskIDs,
-                deletedIDs,
-                expectedVersion,
-                () => !cancelled && guard(),
-              ),
-            apply: (snapshot) => {
-              cleanBoardRef.current = snapshot.board;
-              publishCommitted(snapshot, false);
-              setDirty(ns, true);
-            },
-            push: pushLocal,
-            cancelled: () => cancelled,
-          });
-          if (cancelled) return;
-          remoteBoard = startup.remoteBoard;
-          remoteTaskIDs = startup.remoteTaskIDs;
-          if (startup.merged) {
-            reportMergeConflicts(startup.merged.conflicts);
-            reportPersistence(startup.persisted === true);
-            return;
-          }
-        } catch (err) {
-          // Server present but board fetch failed — keep the local board,
-          // report the failure, and do not enable autosave over broken auth.
-          if (!cancelled) onSaveError(err);
-          return;
-        }
-      }
-      if (cancelled) return;
-      if (
-        loadDirty(ns) &&
-        initial.migratedRaw &&
-        canonicalTaskIDsRef.current.size === 0
-      ) {
-        try {
-          const result = await reconcileLegacyBootstrap({
-            remote,
-            identity,
-            readLive: () => liveRef.current,
-            readSnapshot: () => store.loadSnapshot(),
-            persist: (nextBoard, taskIDs, deletedIDs, expectedVersion, guard) =>
-              store.completeIdentityRecovery(
-                nextBoard,
-                taskIDs,
-                deletedIDs,
-                expectedVersion,
-                () => !cancelled && guard(),
-              ),
-            repairPersist: (nextBoard, taskIDs, deletedIDs, version, guard) =>
-              store.saveIfGeneration(
-                nextBoard,
-                taskIDs,
-                deletedIDs,
-                version,
-                () => !cancelled && guard(),
-              ),
-            apply: (_recovered, needsPush, snapshot) => {
-              cleanBoardRef.current = snapshot.board;
-              publishCommitted(snapshot, !needsPush);
-              reportNotice(LEGACY_RECOVERY_NOTICE);
-              setDirty(ns, needsPush);
-              if (!needsPush) {
-                syncOnRef.current = true;
-                setSync('ok');
-              }
-            },
-            queuePush: pushLocal,
-            cancelled: () => cancelled,
-          });
-          reportMergeConflicts(result.recovered.conflicts);
-          reportPersistence(result.persisted);
-          if (!result.persisted) setDirty(ns, true);
-        } catch (err) {
-          if (!cancelled) onSaveError(err);
-        }
-        return;
-      }
-      if (loadDirty(ns)) {
-        try {
-          const dirtyLive = liveRef.current;
-          let prepared = await remote.prepareDirtyMapped(
-            identity,
-            dirtyLive.board,
-            dirtyLive.canonicalTaskIDs,
-            dirtyLive.deletedCanonicalIDs,
-          );
-          if (cancelled) return;
-          const persisted = await persistCandidate(
-            dirtyLive,
-            prepared.board,
-            prepared.taskIDs,
-            prepared.deletedCanonicalIDs,
-          );
-          if (cancelled) return;
-          reportMergeConflicts(persisted.conflicts);
-          reportPersistence(persisted.persisted);
-          if (!persisted.persisted || !persisted.snapshot) {
-            setDirty(ns, true);
-            return;
-          }
-          cleanBoardRef.current = persisted.snapshot.board;
-          publishCommitted(persisted.snapshot, false);
-          pushLocal(persisted.snapshot);
-        } catch (err) {
-          if (!cancelled) onSaveError(err);
-        }
-        return;
-      }
-      // Re-check dirtiness after the fetch: an edit may have landed while the
-      // remote copy was in flight (boardRef catches commits whose save effect
-      // has not flushed yet).
-      if (liveRef.current.needsLocalPersistence) {
-        return;
-      }
-      if (remoteBoard) {
-        const current = liveRef.current;
-        if (current.epoch !== cleanStartupLive.epoch) return;
-        const unchanged = sameBoardSemantics({
-          board: current.board,
-          canonicalTaskIDs: current.canonicalTaskIDs,
-          deletedCanonicalIDs: current.deletedCanonicalIDs,
-          migratedRaw: current.durableBase.migratedRaw,
-          pendingBoardWrite: current.durableBase.pendingBoardWrite,
-        }, {
-          board: remoteBoard,
-          canonicalTaskIDs: remoteTaskIDs,
-          deletedCanonicalIDs: new Set(),
-          migratedRaw: false,
-          pendingBoardWrite: null,
-        });
-        if (unchanged) {
-          syncOnRef.current = true;
-          setSync('ok');
-          return;
-        }
-        const persisted = await persistCandidate(
-          current,
-          remoteBoard,
-          remoteTaskIDs,
-          new Set(),
-          initial.migratedRaw,
-        );
-        if (cancelled) return;
-        reportMergeConflicts(persisted.conflicts);
-        reportPersistence(persisted.persisted);
-        if (!persisted.persisted || !persisted.snapshot) {
-          setDirty(ns, true);
-          return;
-        }
-        adopt(persisted.snapshot);
-      }
-      syncOnRef.current = true;
-      setSync('ok');
+      const startup = await fetchCleanStartup();
+      if (startup.stopped || cancelled) return;
+      const { remoteBoard, remoteTaskIDs } = startup;
+      if (await recoverLegacyStartup()) return;
+      if (await pushDirtyStartup()) return;
+      await adoptCleanStartup(remoteBoard, remoteTaskIDs, cleanStartupLive);
     })();
     return () => {
       cancelled = true;
@@ -985,17 +1030,17 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
               durableVersion: ackVersion,
               durableSnapshot: ackSnapshot,
             }) => {
-              const acknowledged = await acknowledgeRemote(
-                persistedBoard,
+              const acknowledged = await acknowledgeRemote({
+                sent: persistedBoard,
                 sentIDs,
                 pushed,
-                taskIDs,
+                committedIDs: taskIDs,
                 operationID,
                 isCurrent,
-                ackGeneration,
-                ackVersion,
-                ackSnapshot,
-              );
+                expectedGeneration: ackGeneration,
+                expectedVersion: ackVersion,
+                acknowledgementBase: ackSnapshot,
+              });
               if (!isCurrent?.()) return;
               if (acknowledged.conflict) return acknowledged;
               reportMergeConflicts([
@@ -1315,6 +1360,14 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
     [applyMove, outbox, handleOutboxStatus],
   );
 
+  const purgeTask = useCallback((taskId: string) => {
+    publishUserEdit((board) => ({
+      ...board,
+      tasks: board.tasks.filter((task) => task.id !== taskId),
+    }));
+    setModal(null);
+  }, []);
+
   /** The one path to a real row delete — so it keeps its confirmation. */
   const handlePurge = useCallback((taskId: string) => {
     setConfirm({
@@ -1325,13 +1378,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
       onConfirm: () => {
         void removeIntentBeforeMutation(
           () => outbox.removeTombstone(taskId),
-          () => {
-            publishUserEdit((b) => ({
-              ...b,
-              tasks: b.tasks.filter((t) => t.id !== taskId),
-            }));
-            setModal(null);
-          },
+          () => purgeTask(taskId),
           () => handleOutboxStatus({
             kind: 'blocked',
             message: 'the cancellation intent could not be removed; the card was not deleted',
@@ -1339,7 +1386,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
         );
       },
     });
-  }, [outbox, handleOutboxStatus]);
+  }, [outbox, handleOutboxStatus, purgeTask]);
 
   const handleAddStories = useCallback((tasks: Task[]) => {
     if (tasks.length > 0) {

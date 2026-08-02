@@ -40,10 +40,10 @@ describe('restoreFocusTarget', () => {
     // Not every trigger carries an identity that survives a remount — a
     // button in a list that was rebuilt, for example. Focus then stays where
     // the browser put it rather than jumping somewhere arbitrary.
-    expect(restoreFocusTarget({ id: 'x' }, gone, none)).toBe(null);
+    expect(restoreFocusTarget({ id: 'x' }, gone, none)).toBeNull();
   });
 
   it('reports nothing to focus when there was no opener', () => {
-    expect(restoreFocusTarget(null, here, none)).toBe(null);
+    expect(restoreFocusTarget(null, here, none)).toBeNull();
   });
 });

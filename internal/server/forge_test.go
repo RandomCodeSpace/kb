@@ -1836,14 +1836,24 @@ func postImportDriftAccept(t *testing.T, h http.Handler, source, externalKey, re
 	return w, response
 }
 
-func seedImportDrift(t *testing.T, st *store.Store, scope, source, kind, baseURL, pat, externalKey, storedURL string) {
+type importDriftSeed struct {
+	scope       string
+	source      string
+	kind        string
+	baseURL     string
+	pat         string
+	externalKey string
+	storedURL   string
+}
+
+func seedImportDrift(t *testing.T, st *store.Store, seed importDriftSeed) {
 	t.Helper()
-	if _, err := st.SetForgeSource(scope, source, kind, &baseURL, &pat); err != nil {
+	if _, err := st.SetForgeSource(seed.scope, seed.source, seed.kind, &seed.baseURL, &seed.pat); err != nil {
 		t.Fatalf("seed drift forge source: %v", err)
 	}
-	if err := st.RecordImportLinks(scope, []store.ImportLink{{
-		Source: source, Kind: kind, ExternalKey: externalKey,
-		Link: kind + "#42", URL: storedURL, Title: "Imported title",
+	if err := st.RecordImportLinks(seed.scope, []store.ImportLink{{
+		Source: seed.source, Kind: seed.kind, ExternalKey: seed.externalKey,
+		Link: seed.kind + "#42", URL: seed.storedURL, Title: "Imported title",
 	}}); err != nil {
 		t.Fatalf("seed drift provenance: %v", err)
 	}
@@ -1878,7 +1888,10 @@ func TestImportDriftBaselineLifecycleAndCorrectPAT(t *testing.T) {
 	h, st := newIntegrationsHandler(t)
 	key := "gitlab:local/group/project#42"
 	storedURL := upstream.URL + "/group/project/-/issues/42"
-	seedImportDrift(t, st, "default", "Primary", "gitlab", upstream.URL, pat, key, storedURL)
+	seedImportDrift(t, st, importDriftSeed{
+		scope: "default", source: "Primary", kind: "gitlab", baseURL: upstream.URL,
+		pat: pat, externalKey: key, storedURL: storedURL,
+	})
 
 	first, recorded := postImportDrift(t, h, "PRIMARY", key, nil)
 	if first.Code != http.StatusOK || recorded.State != "baseline_recorded" || recorded.TitleChanged != nil ||
@@ -1962,7 +1975,10 @@ func TestImportDriftRevisionAndAccept(t *testing.T) {
 	})}
 	h := s.handler()
 	key := "gitlab:local/group/project#42"
-	seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, pat, key, upstream.URL+"/group/project/-/issues/42")
+	seedImportDrift(t, st, importDriftSeed{
+		scope: "default", source: "primary", kind: "gitlab", baseURL: upstream.URL,
+		pat: pat, externalKey: key, storedURL: upstream.URL + "/group/project/-/issues/42",
+	})
 
 	first, recorded := postImportDrift(t, h, "primary", key, nil)
 	if first.Code != http.StatusOK || recorded.State != "baseline_recorded" || recorded.Revision != "" || strings.Contains(first.Body.String(), `"revision"`) {
@@ -2027,13 +2043,22 @@ func TestImportDriftAcceptRejectsInvalidTargetsAndPreservesBaseline(t *testing.T
 	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
 	h, st := newIntegrationsHandler(t)
 	const key = "gitlab:local/group/project#42"
-	seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "secret", key, upstream.URL+"/group/project/-/issues/42")
+	seedImportDrift(t, st, importDriftSeed{
+		scope: "default", source: "primary", kind: "gitlab", baseURL: upstream.URL,
+		pat: "secret", externalKey: key, storedURL: upstream.URL + "/group/project/-/issues/42",
+	})
 	old := store.NewImportBaseline("Old", "Old body", "2026-07-29T10:00:00Z")
 	if err := st.SetImportBaseline("default", key, old); err != nil {
 		t.Fatalf("seed baseline: %v", err)
 	}
-	seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "secret", "no-baseline", upstream.URL+"/group/project/-/issues/42")
-	seedImportDrift(t, st, "alice", "primary", "gitlab", upstream.URL, "secret", "alice-key", upstream.URL+"/group/project/-/issues/42")
+	seedImportDrift(t, st, importDriftSeed{
+		scope: "default", source: "primary", kind: "gitlab", baseURL: upstream.URL,
+		pat: "secret", externalKey: "no-baseline", storedURL: upstream.URL + "/group/project/-/issues/42",
+	})
+	seedImportDrift(t, st, importDriftSeed{
+		scope: "alice", source: "primary", kind: "gitlab", baseURL: upstream.URL,
+		pat: "secret", externalKey: "alice-key", storedURL: upstream.URL + "/group/project/-/issues/42",
+	})
 	if err := st.RecordImportLinks("default", []store.ImportLink{
 		{Source: "primary", Kind: "github", ExternalKey: "kind-mismatch", Link: "github#42", URL: upstream.URL + "/group/project/-/issues/42", Title: "wrong kind"},
 		{Source: "primary", Kind: "gitlab", ExternalKey: "host-mismatch", Link: "gitlab#42", URL: "https://unconfigured.invalid/group/project/-/issues/42", Title: "wrong host"},
@@ -2085,7 +2110,10 @@ func TestImportDriftAcceptFailuresStayOpaque(t *testing.T) {
 		t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
 		h, st := newIntegrationsHandler(t)
 		key := "gitlab:local/group/project#42"
-		seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "", key, upstream.URL+"/group/project/-/issues/42")
+		seedImportDrift(t, st, importDriftSeed{
+			scope: "default", source: "primary", kind: "gitlab", baseURL: upstream.URL,
+			pat: "", externalKey: key, storedURL: upstream.URL + "/group/project/-/issues/42",
+		})
 		if err := st.SetImportBaseline("default", key, store.NewImportBaseline("Old", "Old", "2026-07-29T10:00:00Z")); err != nil {
 			t.Fatalf("seed baseline: %v", err)
 		}
@@ -2132,7 +2160,10 @@ func TestImportDriftAISummaryIsSingleBoundedSecretFreeCall(t *testing.T) {
 	h, st := newIntegrationsHandler(t)
 	key := "gitlab:local/group/project#42"
 	storedURL := upstream.URL + "/group/project/-/issues/42"
-	seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, pat, key, storedURL)
+	seedImportDrift(t, st, importDriftSeed{
+		scope: "default", source: "primary", kind: "gitlab", baseURL: upstream.URL,
+		pat: pat, externalKey: key, storedURL: storedURL,
+	})
 	if err := st.SetImportBaseline("default", key, store.NewImportBaseline("Old title", "Old body", "2026-07-29T10:00:00Z")); err != nil {
 		t.Fatalf("seed baseline: %v", err)
 	}
@@ -2197,7 +2228,10 @@ func TestImportDriftAIFailureDegradesAndUnconfiguredAICallsNothing(t *testing.T)
 			t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
 			h, st := newIntegrationsHandler(t)
 			key := "gitlab:local/group/project#42"
-			seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "", key, upstream.URL+"/group/project/-/issues/42")
+			seedImportDrift(t, st, importDriftSeed{
+				scope: "default", source: "primary", kind: "gitlab", baseURL: upstream.URL,
+				pat: "", externalKey: key, storedURL: upstream.URL + "/group/project/-/issues/42",
+			})
 			if err := st.SetImportBaseline("default", key, store.NewImportBaseline("old", "old body", "2026-07-29T10:00:00Z")); err != nil {
 				t.Fatalf("seed baseline: %v", err)
 			}
@@ -2223,8 +2257,14 @@ func TestImportDriftRejectsInvalidOrUnauthorizedChecksWithoutEgress(t *testing.T
 	defer upstream.Close()
 	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
 	h, st := newIntegrationsHandler(t)
-	seedImportDrift(t, st, "alice", "primary", "gitlab", upstream.URL, "secret", "alice-key", upstream.URL+"/group/project/-/issues/42")
-	seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "secret", "unconfigured-url", "https://unconfigured.invalid/group/project/-/issues/42")
+	seedImportDrift(t, st, importDriftSeed{
+		scope: "alice", source: "primary", kind: "gitlab", baseURL: upstream.URL,
+		pat: "secret", externalKey: "alice-key", storedURL: upstream.URL + "/group/project/-/issues/42",
+	})
+	seedImportDrift(t, st, importDriftSeed{
+		scope: "default", source: "primary", kind: "gitlab", baseURL: upstream.URL,
+		pat: "secret", externalKey: "unconfigured-url", storedURL: "https://unconfigured.invalid/group/project/-/issues/42",
+	})
 	if err := st.RecordImportLinks("default", []store.ImportLink{
 		{Source: "primary", Kind: "gitlab", ExternalKey: "project-only", Link: "gitlab", URL: upstream.URL + "/group/project", Title: "project"},
 		{Source: "different", Kind: "gitlab", ExternalKey: "source-mismatch", Link: "gitlab#42", URL: upstream.URL + "/group/project/-/issues/42", Title: "source"},
@@ -2266,7 +2306,10 @@ func TestImportDriftFailuresAreOpaque(t *testing.T) {
 		t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
 		h, st := newIntegrationsHandler(t)
 		key := "gitlab:local/group/project#42"
-		seedImportDrift(t, st, "default", "primary", "gitlab", upstream.URL, "", key, upstream.URL+"/group/project/-/issues/42")
+		seedImportDrift(t, st, importDriftSeed{
+			scope: "default", source: "primary", kind: "gitlab", baseURL: upstream.URL,
+			pat: "", externalKey: key, storedURL: upstream.URL + "/group/project/-/issues/42",
+		})
 		w, _ := postImportDrift(t, h, "primary", key, nil)
 		if w.Code != http.StatusBadGateway || strings.TrimSpace(w.Body.String()) != "connection failed" {
 			t.Fatalf("forge failure = %d %q, want opaque 502", w.Code, w.Body.String())

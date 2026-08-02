@@ -76,7 +76,7 @@ export function CardAIDraft({
 
   let statusNote = <span className="ai-note">fills the form below — review, then Save</span>;
   if (busy) {
-    statusNote = <span className="ai-note busy" role="status">Drafting the card…</span>;
+    statusNote = <output className="ai-note busy">Drafting the card…</output>;
   } else if (error) {
     statusNote = (
       <span key={error} className="ai-note flash err" id={errorId} role="alert" title={error}>

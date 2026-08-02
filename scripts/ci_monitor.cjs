@@ -76,7 +76,7 @@ function gh(repo, args, capture = false) {
 }
 
 function positiveInteger(value, label) {
-  if (!/^[1-9][0-9]*$/.test(value || '') || !Number.isSafeInteger(Number(value))) die(`${label} must be a positive safe integer`);
+  if (!/^[1-9]\d*$/.test(value || '') || !Number.isSafeInteger(Number(value))) die(`${label} must be a positive safe integer`);
   return value;
 }
 
@@ -111,6 +111,55 @@ function checkActions(files) {
   console.log(`checked ${selected.length} workflow file(s): all external actions use immutable SHAs`);
 }
 
+function listRuns(repo, args) {
+  const branch = extractOption(args, '--branch');
+  const limit = positiveInteger(extractOption(args, '--limit', '20'), '--limit');
+  if (args.length) die(`unexpected arguments: ${args.join(' ')}`);
+  gh(repo, ['run', 'list', '--limit', limit, ...(branch ? ['--branch', branch] : [])]);
+}
+
+function watchRun(repo, args) {
+  const runId = positiveInteger(args.shift(), 'run id');
+  if (args.length) die(`unexpected arguments: ${args.join(' ')}`);
+  gh(repo, ['run', 'watch', runId, '--exit-status']);
+}
+
+function viewRun(repo, args, options) {
+  const runId = positiveInteger(args.shift(), 'run id');
+  if (args.length) die(`unexpected arguments: ${args.join(' ')}`);
+  gh(repo, ['run', 'view', runId, ...options]);
+}
+
+function grepRun(repo, args) {
+  const runId = positiveInteger(args.shift(), 'run id');
+  const pattern = extractOption(args, '--pattern');
+  if (!pattern || args.length) die('grep requires RUN_ID --pattern REGEX');
+  let regex;
+  try {
+    regex = new RegExp(pattern);
+  } catch (error) {
+    die(`invalid regex: ${error.message}`);
+  }
+  const lines = gh(repo, ['run', 'view', runId, '--log'], true)
+    .split('\n')
+    .filter((line) => regex.test(line));
+  process.stdout.write(lines.length ? `${lines.join('\n')}\n` : '');
+  process.exitCode = lines.length ? 0 : 1;
+}
+
+function waitForLog(repo, args) {
+  const runId = positiveInteger(args.shift(), 'run id');
+  const job = args.shift();
+  const keyword = extractOption(args, '--keyword');
+  if (!job || !keyword || args.length) die('wait-for requires RUN_ID JOB --keyword TEXT');
+  const jobs = JSON.parse(gh(repo, ['run', 'view', runId, '--json', 'jobs'], true)).jobs;
+  const matches = jobs.filter((item) => item.name === job);
+  if (matches.length !== 1) die(`expected one job named ${job}, found ${matches.length}`);
+  const log = gh(repo, ['run', 'view', runId, '--job', String(matches[0].databaseId), '--log'], true);
+  if (!log.includes(keyword)) process.exit(1);
+  console.log(`found ${JSON.stringify(keyword)} in ${job}`);
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (!args.length || args.includes('--help') || args[0] === 'help') {
@@ -120,59 +169,28 @@ function main() {
   const repo = repository(args);
   const command = args.shift();
   switch (command) {
-    case 'runs': {
-      const branch = extractOption(args, '--branch');
-      const limit = positiveInteger(extractOption(args, '--limit', '20'), '--limit');
-      if (args.length) die(`unexpected arguments: ${args.join(' ')}`);
-      gh(repo, ['run', 'list', '--limit', limit, ...(branch ? ['--branch', branch] : [])]);
+    case 'runs':
+      listRuns(repo, args);
       break;
-    }
     case 'watch':
-    case 'fail-fast': {
-      const runId = positiveInteger(args.shift(), 'run id');
-      if (args.length) die(`unexpected arguments: ${args.join(' ')}`);
-      gh(repo, ['run', 'watch', runId, '--exit-status']);
+    case 'fail-fast':
+      watchRun(repo, args);
       break;
-    }
-    case 'log-failed': {
-      const runId = positiveInteger(args.shift(), 'run id');
-      if (args.length) die(`unexpected arguments: ${args.join(' ')}`);
-      gh(repo, ['run', 'view', runId, '--log-failed']);
+    case 'log-failed':
+      viewRun(repo, args, ['--log-failed']);
       break;
-    }
-    case 'test-summary': {
-      const runId = positiveInteger(args.shift(), 'run id');
-      if (args.length) die(`unexpected arguments: ${args.join(' ')}`);
-      gh(repo, ['run', 'view', runId, '--json', 'jobs', '--jq', '.jobs[] | [.name, .conclusion] | @tsv']);
+    case 'test-summary':
+      viewRun(repo, args, ['--json', 'jobs', '--jq', '.jobs[] | [.name, .conclusion] | @tsv']);
       break;
-    }
     case 'check-actions':
       checkActions(args);
       break;
-    case 'grep': {
-      const runId = positiveInteger(args.shift(), 'run id');
-      const pattern = extractOption(args, '--pattern');
-      if (!pattern || args.length) die('grep requires RUN_ID --pattern REGEX');
-      let regex;
-      try { regex = new RegExp(pattern); } catch (error) { die(`invalid regex: ${error.message}`); }
-      const lines = gh(repo, ['run', 'view', runId, '--log'], true).split('\n').filter((line) => regex.test(line));
-      process.stdout.write(lines.length ? `${lines.join('\n')}\n` : '');
-      process.exitCode = lines.length ? 0 : 1;
+    case 'grep':
+      grepRun(repo, args);
       break;
-    }
-    case 'wait-for': {
-      const runId = positiveInteger(args.shift(), 'run id');
-      const job = args.shift();
-      const keyword = extractOption(args, '--keyword');
-      if (!job || !keyword || args.length) die('wait-for requires RUN_ID JOB --keyword TEXT');
-      const jobs = JSON.parse(gh(repo, ['run', 'view', runId, '--json', 'jobs'], true)).jobs;
-      const matches = jobs.filter((item) => item.name === job);
-      if (matches.length !== 1) die(`expected one job named ${job}, found ${matches.length}`);
-      const log = gh(repo, ['run', 'view', runId, '--job', String(matches[0].databaseId), '--log'], true);
-      if (!log.includes(keyword)) process.exit(1);
-      console.log(`found ${JSON.stringify(keyword)} in ${job}`);
+    case 'wait-for':
+      waitForLog(repo, args);
       break;
-    }
     default:
       die(`unknown command ${command}`);
   }

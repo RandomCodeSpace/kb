@@ -177,9 +177,7 @@ describe('BoardView DOM behavior', () => {
     screen.getByRole('group', { name: /First task, To Do/ }).focus();
     await user.keyboard(' ');
     await user.keyboard('{ArrowRight}');
-    await waitFor(() => expect(
-      screen.getByRole('group', { name: /First task, Doing.*lifted/ }),
-    ).toBeTruthy());
+    await screen.findByRole('group', { name: /First task, Doing.*lifted/ });
     screen.getByRole('button', { name: 'Add task to To Do' }).focus();
     await waitFor(() => {
       expect(announce).toHaveBeenLastCalledWith(

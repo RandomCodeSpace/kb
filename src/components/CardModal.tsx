@@ -56,6 +56,7 @@ const DRIFT_DATE_FORMAT = new Intl.DateTimeFormat('en-US', {
   year: 'numeric',
   timeZone: 'UTC',
 });
+type DriftAction = 'check' | 'accept' | null;
 
 /**
  * Compact graveyard context for the advisory chip. Server validation already
@@ -120,6 +121,268 @@ export function visibleSimilarItems(
   return items.filter((item) => !removed.has(similarKey(item)));
 }
 
+function shownSimilarItems(
+  dismissed: boolean,
+  items: readonly SimilarItem[],
+): readonly SimilarItem[] {
+  if (dismissed) return [];
+  return items;
+}
+
+function similarViaText(item: SimilarItem, killedText: string | null): string {
+  if (killedText) return 'rejected';
+  if (item.via === 'card') return 'on board';
+  return 'imported';
+}
+
+function SimilarRow({
+  item,
+  onDismiss,
+}: Readonly<{ item: SimilarItem; onDismiss: (key: string) => void }>) {
+  const key = similarKey(item);
+  const killedText = item.via === 'killed' ? killedChipText(item, new Date()) : null;
+  const title = killedText ? `${killedText} \u00b7 ${item.title}` : undefined;
+  const text = killedText
+    ? `${killedText.slice(KILLED_PREFIX.length)} \u00b7 ${item.title}`
+    : item.title;
+  return (
+    <div className={`similar-row${killedText ? ' killed' : ''}`}>
+      <span className={`similar-via${killedText ? ' killed' : ''}`}>
+        {similarViaText(item, killedText)}
+      </span>
+      <span className="similar-title" title={title}>{text}</span>
+      <button
+        type="button"
+        aria-label={`Dismiss ${item.title}`}
+        onClick={() => onDismiss(key)}
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+function SimilarPanel({
+  items,
+  onDismiss,
+  onDismissAll,
+}: Readonly<{
+  items: readonly SimilarItem[];
+  onDismiss: (key: string) => void;
+  onDismissAll: () => void;
+}>) {
+  if (items.length === 0) return null;
+  return (
+    <div className="similar">
+      <output className="similar-head">
+        {items.length} similar {items.length === 1 ? 'item' : 'items'} — is this a duplicate?
+      </output>
+      <div className="similar-list">
+        {items.map((item) => (
+          <SimilarRow key={similarKey(item)} item={item} onDismiss={onDismiss} />
+        ))}
+      </div>
+      <button type="button" aria-label="Dismiss similar items" onClick={onDismissAll}>
+        ✕
+      </button>
+    </div>
+  );
+}
+
+function driftButtonLabel(
+  action: DriftAction,
+  multiple: boolean,
+): string {
+  if (action === 'check') return 'Checking…';
+  if (action === 'accept') return 'Updating…';
+  return multiple ? 'Check selected' : 'Check upstream';
+}
+
+function DriftStatus({
+  action,
+  error,
+  acceptedAt,
+  multiple,
+  result,
+}: Readonly<{
+  action: DriftAction;
+  error: string | null;
+  acceptedAt: string;
+  multiple: boolean;
+  result: DriftResult | null;
+}>) {
+  if (action === 'check') {
+    return <output className="flash busy">Checking upstream…</output>;
+  }
+  if (action === 'accept') {
+    return (
+      <output className="flash busy">
+        Updating the comparison baseline…
+      </output>
+    );
+  }
+  if (error) {
+    return (
+      <span key={error} className="flash err" role="alert" title={error}>
+        {error}
+      </span>
+    );
+  }
+  if (acceptedAt !== '') {
+    return (
+      <output className="flash ok">
+        Baseline updated {DRIFT_DATE_FORMAT.format(new Date(acceptedAt))}.
+      </output>
+    );
+  }
+  if (multiple && !result) {
+    return (
+      <output className="flash">
+        Choose the imported issue, then check it.
+      </output>
+    );
+  }
+  if (!result) return null;
+  return <output className="flash ok">{driftMessage(result)}</output>;
+}
+
+function DriftDetails({
+  result,
+  selected,
+  busy,
+  onAccept,
+}: Readonly<{
+  result: DriftResult | null;
+  selected: ImportProvenance | undefined;
+  busy: boolean;
+  onAccept: (candidate: ImportProvenance, revision: string) => void;
+}>) {
+  if (result?.state !== 'drifted') return null;
+  return (
+    <div className="drift-details">
+      {result.title_changed ? (
+        <p>
+          <strong>Title:</strong>{' '}
+          {result.baseline_title || '(untitled)'} →{' '}
+          {result.upstream_title || '(untitled)'}
+        </p>
+      ) : (
+        <p>The issue body changed; the title did not.</p>
+      )}
+      {result.summary !== '' && (
+        <p><strong>Summary:</strong> {result.summary}</p>
+      )}
+      {selected && result.revision && (
+        <div className="drift-accept">
+          <p>
+            This accepts the checked upstream version as the new comparison
+            baseline. Edit the card separately.
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onAccept(selected, result.revision!)}
+          >
+            Update card
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function driftNotice(result: DriftResult | null, acceptedAt: string): string {
+  if (result || acceptedAt !== '') {
+    return 'kb does not sync. This was a one-time check you asked for; nothing was written to the forge.';
+  }
+  return 'kb does not sync. Each check is a one-time read you ask for; nothing is written to the forge.';
+}
+
+interface DriftReviewProps {
+  importLinks: readonly string[];
+  linkId: string;
+  selectedLink: string;
+  provenanceId: string;
+  provenance: readonly ImportProvenance[];
+  selectedExternalKey: string;
+  selectedProvenance: ImportProvenance | undefined;
+  result: DriftResult | null;
+  error: string | null;
+  action: DriftAction;
+  acceptedAt: string;
+  busy: boolean;
+  onLinkChange: (link: string) => void;
+  onProvenanceChange: (externalKey: string) => void;
+  onCheck: (candidate?: ImportProvenance) => void;
+  onAccept: (candidate: ImportProvenance, revision: string) => void;
+}
+
+function DriftReview(props: Readonly<DriftReviewProps>) {
+  if (props.importLinks.length === 0) return null;
+  const multiple = props.provenance.length > 1;
+  return (
+    <section className="drift-review" aria-label="Upstream review">
+      {props.importLinks.length > 1 && (
+        <>
+          <label htmlFor={props.linkId}>Upstream link</label>
+          <select
+            id={props.linkId}
+            value={props.selectedLink}
+            disabled={props.busy}
+            onChange={(event) => props.onLinkChange(event.target.value)}
+          >
+            {props.importLinks.map((link) => (
+              <option key={link} value={link}>{link}</option>
+            ))}
+          </select>
+        </>
+      )}
+      {multiple && (
+        <>
+          <label htmlFor={props.provenanceId}>Imported issue</label>
+          <select
+            id={props.provenanceId}
+            value={props.selectedExternalKey}
+            disabled={props.busy}
+            onChange={(event) => props.onProvenanceChange(event.target.value)}
+          >
+            {props.provenance.map((item) => (
+              <option key={item.external_key} value={item.external_key}>
+                {item.title} — {item.external_key}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
+      <div className="drift-controls">
+        <button
+          type="button"
+          disabled={props.busy}
+          onClick={() => props.onCheck(multiple ? props.selectedProvenance : undefined)}
+        >
+          {driftButtonLabel(props.action, multiple)}
+        </button>
+        <span className="statusline">
+          <DriftStatus
+            action={props.action}
+            error={props.error}
+            acceptedAt={props.acceptedAt}
+            multiple={multiple}
+            result={props.result}
+          />
+        </span>
+      </div>
+      <DriftDetails
+        result={props.result}
+        selected={props.selectedProvenance}
+        busy={props.busy}
+        onAccept={props.onAccept}
+      />
+      <p className="drift-notice">{driftNotice(props.result, props.acceptedAt)}</p>
+    </section>
+  );
+}
+
 export function CardModal({
   state,
   identity,
@@ -148,9 +411,7 @@ export function CardModal({
   const [selectedExternalKey, setSelectedExternalKey] = useState('');
   const [driftResult, setDriftResult] = useState<DriftResult | null>(null);
   const [driftError, setDriftError] = useState<string | null>(null);
-  const [driftAction, setDriftAction] = useState<
-    'check' | 'accept' | null
-  >(null);
+  const [driftAction, setDriftAction] = useState<DriftAction>(null);
   const [acceptedAt, setAcceptedAt] = useState('');
   const driftBusy = driftAction !== null;
   const draftCancel = useRef<(() => void) | null>(null);
@@ -223,6 +484,38 @@ export function CardModal({
     (item) => item.external_key === selectedExternalKey,
   );
   const visibleItems = visibleSimilarItems(items, removedSimilar);
+  const shownItems = shownSimilarItems(dismissed, visibleItems);
+
+  const dismissSimilar = (key: string) => {
+    setRemovedSimilar((current) => {
+      const next = new Set(current);
+      next.add(key);
+      return next;
+    });
+  };
+
+  const selectProvenance = (externalKey: string) => {
+    setSelectedExternalKey(externalKey);
+    setDriftResult(null);
+    setDriftError(null);
+    setAcceptedAt('');
+  };
+
+  const findDriftCandidate = async (
+    ctrl: AbortController,
+  ): Promise<ImportProvenance | null> => {
+    const candidates = await getImportProvenance(
+      identity,
+      selectedLink,
+      ctrl.signal,
+    );
+    if (ctrl.signal.aborted) return null;
+    if (candidates.length === 0) throw new Error('import link not found');
+    setProvenance(candidates);
+    setSelectedExternalKey(candidates[0]!.external_key);
+    if (candidates.length > 1) return null;
+    return candidates[0]!;
+  };
 
   const runDrift = async (candidate?: ImportProvenance) => {
     driftCancel.current?.abort();
@@ -233,22 +526,8 @@ export function CardModal({
     setDriftResult(null);
     setAcceptedAt('');
     try {
-      let chosen = candidate;
-      if (!chosen) {
-        const candidates = await getImportProvenance(
-          identity,
-          selectedLink,
-          ctrl.signal,
-        );
-        if (ctrl.signal.aborted) return;
-        if (candidates.length === 0) {
-          throw new Error('import link not found');
-        }
-        setProvenance(candidates);
-        setSelectedExternalKey(candidates[0]!.external_key);
-        if (candidates.length > 1) return;
-        chosen = candidates[0];
-      }
+      const chosen = candidate ?? await findDriftCandidate(ctrl);
+      if (!chosen) return;
       const result = await checkDrift(
         identity,
         chosen.source,
@@ -364,215 +643,31 @@ export function CardModal({
           cancelRef={draftCancel}
           titleExtras={
             <>
-              {!dismissed && visibleItems.length > 0 && (
-                <div className="similar">
-                  <span className="similar-head" role="status">
-                    {visibleItems.length} similar{' '}
-                    {visibleItems.length === 1 ? 'item' : 'items'} — is this a
-                    duplicate?
-                  </span>
-                  <div className="similar-list">
-                    {visibleItems.map((item) => {
-                      const key = similarKey(item);
-                      const killedText =
-                        item.via === 'killed'
-                          ? killedChipText(item, new Date())
-                          : null;
-                      return (
-                        <div
-                          className={`similar-row${killedText ? ' killed' : ''}`}
-                          key={key}
-                        >
-                          <span
-                            className={`similar-via${killedText ? ' killed' : ''}`}
-                          >
-                            {killedText
-                              ? 'rejected'
-                              : item.via === 'card'
-                                ? 'on board'
-                                : 'imported'}
-                          </span>
-                          <span
-                            className="similar-title"
-                            title={
-                              killedText
-                                ? `${killedText} \u00b7 ${item.title}`
-                                : undefined
-                            }
-                          >
-                            {killedText
-                              ? `${killedText.slice(KILLED_PREFIX.length)} \u00b7 ${item.title}`
-                              : item.title}
-                          </span>
-                          <button
-                            type="button"
-                            aria-label={`Dismiss ${item.title}`}
-                            onClick={() =>
-                              setRemovedSimilar((current) => {
-                                const next = new Set(current);
-                                next.add(key);
-                                return next;
-                              })
-                            }
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <button
-                    type="button"
-                    aria-label="Dismiss similar items"
-                    onClick={() => setDismissed(true)}
-                  >
-                    ✕
-                  </button>
-                </div>
-              )}
-              {importLinks.length > 0 && (
-                <section className="drift-review" aria-label="Upstream review">
-                  {importLinks.length > 1 && (
-                    <>
-                      <label htmlFor={linkId}>Upstream link</label>
-                      <select
-                        id={linkId}
-                        value={selectedLink}
-                        disabled={driftBusy}
-                        onChange={(event) => resetDrift(event.target.value)}
-                      >
-                        {importLinks.map((link) => (
-                          <option key={link} value={link}>
-                            {link}
-                          </option>
-                        ))}
-                      </select>
-                    </>
-                  )}
-                  {provenance.length > 1 && (
-                    <>
-                      <label htmlFor={provenanceId}>Imported issue</label>
-                      <select
-                        id={provenanceId}
-                        value={selectedExternalKey}
-                        disabled={driftBusy}
-                        onChange={(event) => {
-                          setSelectedExternalKey(event.target.value);
-                          setDriftResult(null);
-                          setDriftError(null);
-                          setAcceptedAt('');
-                        }}
-                      >
-                        {provenance.map((item) => (
-                          <option
-                            key={item.external_key}
-                            value={item.external_key}
-                          >
-                            {item.title} — {item.external_key}
-                          </option>
-                        ))}
-                      </select>
-                    </>
-                  )}
-                  <div className="drift-controls">
-                    <button
-                      type="button"
-                      disabled={driftBusy}
-                      onClick={() =>
-                        void runDrift(
-                          provenance.length > 1
-                            ? selectedProvenance
-                            : undefined,
-                        )
-                      }
-                    >
-                      {driftAction === 'check'
-                        ? 'Checking…'
-                        : driftAction === 'accept'
-                          ? 'Updating…'
-                        : provenance.length > 1
-                          ? 'Check selected'
-                          : 'Check upstream'}
-                    </button>
-                    <span className="statusline">
-                      {driftAction === 'check' ? (
-                        <span className="flash busy" role="status">
-                          Checking upstream…
-                        </span>
-                      ) : driftAction === 'accept' ? (
-                        <span className="flash busy" role="status">
-                          Updating the comparison baseline…
-                        </span>
-                      ) : driftError ? (
-                        <span
-                          key={driftError}
-                          className="flash err"
-                          role="alert"
-                          title={driftError}
-                        >
-                          {driftError}
-                        </span>
-                      ) : acceptedAt !== '' ? (
-                        <span className="flash ok" role="status">
-                          Baseline updated{' '}
-                          {DRIFT_DATE_FORMAT.format(new Date(acceptedAt))}.
-                        </span>
-                      ) : provenance.length > 1 && !driftResult ? (
-                        <span className="flash" role="status">
-                          Choose the imported issue, then check it.
-                        </span>
-                      ) : driftResult ? (
-                        <span className="flash ok" role="status">
-                          {driftMessage(driftResult)}
-                        </span>
-                      ) : null}
-                    </span>
-                  </div>
-                  {driftResult?.state === 'drifted' && (
-                    <div className="drift-details">
-                      {driftResult.title_changed ? (
-                        <p>
-                          <strong>Title:</strong>{' '}
-                          {driftResult.baseline_title || '(untitled)'} →{' '}
-                          {driftResult.upstream_title || '(untitled)'}
-                        </p>
-                      ) : (
-                        <p>The issue body changed; the title did not.</p>
-                      )}
-                      {driftResult.summary !== '' && (
-                        <p>
-                          <strong>Summary:</strong> {driftResult.summary}
-                        </p>
-                      )}
-                      {selectedProvenance && driftResult.revision && (
-                        <div className="drift-accept">
-                          <p>
-                            This accepts the checked upstream version as the new
-                            comparison baseline. Edit the card separately.
-                          </p>
-                          <button
-                            type="button"
-                            disabled={driftBusy}
-                            onClick={() =>
-                              void acceptReviewedDrift(
-                                selectedProvenance,
-                                driftResult.revision!,
-                              )
-                            }
-                          >
-                            Update card
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <p className="drift-notice">
-                    {driftResult || acceptedAt !== ''
-                      ? 'kb does not sync. This was a one-time check you asked for; nothing was written to the forge.'
-                      : 'kb does not sync. Each check is a one-time read you ask for; nothing is written to the forge.'}
-                  </p>
-                </section>
-              )}
+              <SimilarPanel
+                items={shownItems}
+                onDismiss={dismissSimilar}
+                onDismissAll={() => setDismissed(true)}
+              />
+              <DriftReview
+                importLinks={importLinks}
+                linkId={linkId}
+                selectedLink={selectedLink}
+                provenanceId={provenanceId}
+                provenance={provenance}
+                selectedExternalKey={selectedExternalKey}
+                selectedProvenance={selectedProvenance}
+                result={driftResult}
+                error={driftError}
+                action={driftAction}
+                acceptedAt={acceptedAt}
+                busy={driftBusy}
+                onLinkChange={resetDrift}
+                onProvenanceChange={selectProvenance}
+                onCheck={(candidate) => void runDrift(candidate)}
+                onAccept={(candidate, revision) => {
+                  void acceptReviewedDrift(candidate, revision);
+                }}
+              />
             </>
           }
           onSave={onSave}

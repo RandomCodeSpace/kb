@@ -23,6 +23,20 @@ describe('tokenizeInline', () => {
     ]);
   });
 
+  it('continues after a malformed link candidate', () => {
+    expect(tokenizeInline('[bad](ftp://example.com) [docs](https://example.com/x)')).toEqual([
+      { kind: 'text', text: '[bad](ftp://example.com) ' },
+      { kind: 'link', text: 'docs', href: 'https://example.com/x' },
+    ]);
+  });
+
+  it('continues after incomplete and multi-line labels', () => {
+    expect(tokenizeInline('[bad\nlabel] [] [docs](https://example.com/x)')).toEqual([
+      { kind: 'text', text: '[bad\nlabel] [] ' },
+      { kind: 'link', text: 'docs', href: 'https://example.com/x' },
+    ]);
+  });
+
   it('rejects javascript: urls — stays literal text', () => {
     const toks = tokenizeInline('[evil](javascript:alert(1))');
     expect(toks.every((t) => t.kind !== 'link')).toBe(true);
@@ -35,6 +49,16 @@ describe('tokenizeInline', () => {
 
   it('does not treat "* " list stars as italic', () => {
     expect(tokenizeInline('2 * 3 * 4')).toEqual([{ kind: 'text', text: '2 * 3 * 4' }]);
+  });
+
+  it('keeps a long unterminated link candidate as plain text', () => {
+    const input = `[${'a'.repeat(10_000)}`;
+    expect(tokenizeInline(input)).toEqual([{ kind: 'text', text: input }]);
+  });
+
+  it('keeps repeated link starts with an unfinished URL linear', () => {
+    const input = `${'['.repeat(10_000)}label](https://${'a'.repeat(10_000)}`;
+    expect(tokenizeInline(input)).toEqual([{ kind: 'text', text: input }]);
   });
 });
 

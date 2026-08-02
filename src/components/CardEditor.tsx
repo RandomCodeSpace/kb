@@ -159,7 +159,7 @@ export function CardEditor({
         </div>
         <label className="checkline" htmlFor="f-blocked">
           <input id="f-blocked" type="checkbox" checked={blocked} onChange={(event) => setBlocked(event.target.checked)} />
-          Blocked — waiting on something else
+          {' '}Blocked — waiting on something else
         </label>
         <label htmlFor="f-tags">Labels (key::value for scoped)</label>
         <LabelsCombobox inputId="f-tags" value={tags} suggestions={labels} onChange={setTags} />

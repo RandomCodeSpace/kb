@@ -20,6 +20,24 @@ export function wireTasks(board: Board): Task[] {
   );
 }
 
+function checkboxMark(done: boolean): string {
+  return done ? 'x' : ' ';
+}
+
+function serializeTask(task: Task, status: Status): string {
+  let out = `- [${checkboxMark(status === 'done')}] ${titleLine(task)}\n`;
+  for (const line of task.desc.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed === '') continue;
+    const description = DESC_CHECKBOX_RE.test(trimmed) ? `\\${trimmed}` : trimmed;
+    out += `  ${description}\n`;
+  }
+  for (const check of task.checks) {
+    out += `  - [${checkboxMark(check.done)}] ${check.text}\n`;
+  }
+  return out;
+}
+
 export function serialize(board: Board): string {
   let out = `# ${board.title}\n`;
   const ordered = wireTasks(board);
@@ -29,17 +47,7 @@ export function serialize(board: Board): string {
     // tasks keeps legacy three-section boards byte-identical on the wire.
     if (status === 'cancelled' && tasks.length === 0) continue;
     out += `\n## ${STATUS_LABEL[status]}\n\n`;
-    for (const t of tasks) {
-      out += `- [${status === 'done' ? 'x' : ' '}] ${titleLine(t)}\n`;
-      for (const line of t.desc.split('\n')) {
-        const trimmed = line.trim();
-        if (trimmed)
-          out += `  ${DESC_CHECKBOX_RE.test(trimmed) ? `\\${trimmed}` : trimmed}\n`;
-      }
-      for (const c of t.checks) {
-        out += `  - [${c.done ? 'x' : ' '}] ${c.text}\n`;
-      }
-    }
+    for (const task of tasks) out += serializeTask(task, status);
   }
   return out;
 }
@@ -76,6 +84,38 @@ function escapeToken(tok: string): string {
   return needsEscape ? `\\${tok}` : tok;
 }
 
+function headerStatus(line: string, headerIdx: number): Status {
+  const label = line.slice(3).trim().toLowerCase();
+  // Unknown headers fall back to their position, saturating at the last
+  // column, so legacy three-section files keep their old mapping and a
+  // fourth unknown section lands in cancelled.
+  return (
+    STATUSES.find((candidate) => STATUS_LABEL[candidate].toLowerCase() === label) ??
+    STATUSES[Math.min(STATUSES.length - 1, headerIdx)]
+  );
+}
+
+function descriptionText(line: string): string {
+  const text = line.trim();
+  if (text.startsWith('\\') && DESC_CHECKBOX_RE.test(text.slice(1))) {
+    return text.slice(1);
+  }
+  return text;
+}
+
+function appendIndentedLine(
+  current: Task,
+  line: string,
+  check: { done: boolean; rest: string } | null,
+  descLines: Map<string, string[]>,
+): void {
+  if (check) {
+    current.checks.push({ text: check.rest, done: check.done } satisfies Check);
+    return;
+  }
+  descLines.get(current.id)!.push(descriptionText(line));
+}
+
 export function parse(input: string): Board {
   const board: Board = { title: 'Board', tasks: [] };
   let sawTitle = false;
@@ -93,13 +133,7 @@ export function parse(input: string): Board {
     }
     if (line.startsWith('## ')) {
       headerIdx++;
-      const label = line.slice(3).trim().toLowerCase();
-      // Unknown headers fall back to their position, saturating at the last
-      // column, so legacy three-section files keep their old mapping and a
-      // fourth unknown section lands in cancelled.
-      status =
-        STATUSES.find((s) => STATUS_LABEL[s].toLowerCase() === label) ??
-        STATUSES[Math.min(STATUSES.length - 1, headerIdx)];
+      status = headerStatus(line, headerIdx);
       current = null;
       continue;
     }
@@ -115,18 +149,7 @@ export function parse(input: string): Board {
       continue;
     }
     if (!current) continue;
-    if (check && indented) {
-      current.checks.push({ text: check.rest, done: check.done } satisfies Check);
-    } else {
-      const text = line.trim();
-      descLines
-        .get(current.id)!
-        .push(
-          text.startsWith('\\') && DESC_CHECKBOX_RE.test(text.slice(1))
-            ? text.slice(1)
-            : text,
-        );
-    }
+    appendIndentedLine(current, line, check, descLines);
   }
   for (const t of board.tasks) {
     t.desc = (descLines.get(t.id) ?? []).join('\n');
@@ -144,7 +167,7 @@ function stripCheckbox(s: string): { done: boolean; rest: string } | null {
 export function parseTitleLine(raw: string, status: Status, done: boolean): Task {
   let rest = raw.trim();
   let emoji = '';
-  const em = rest.match(EMOJI_RE);
+  const em = EMOJI_RE.exec(rest);
   if (em) {
     emoji = em[0];
     rest = rest.slice(em[0].length).trim();
