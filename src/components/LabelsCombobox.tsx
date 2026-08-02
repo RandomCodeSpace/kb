@@ -44,37 +44,56 @@ export function LabelsCombobox({
     inputRef.current?.focus();
   };
 
-  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'ArrowDown') {
+  const handleArrowDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    if (!showDrop) {
+      setOpen(true);
+      setHi(0);
+    } else {
+      setHi((hiIdx + 1) % filtered.length);
+    }
+  };
+
+  const handleArrowUp = (e: KeyboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    if (showDrop) setHi((hiIdx - 1 + filtered.length) % filtered.length);
+  };
+
+  const handleEnter = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (showDrop) {
       e.preventDefault();
-      if (!showDrop) {
-        setOpen(true);
-        setHi(0);
-      } else {
-        setHi((hiIdx + 1) % filtered.length);
-      }
-    } else if (e.key === 'ArrowUp') {
+      add(filtered[hiIdx]);
+    } else if (text.trim() !== '') {
       e.preventDefault();
-      if (showDrop) setHi((hiIdx - 1 + filtered.length) % filtered.length);
-    } else if (e.key === 'Enter') {
-      if (showDrop) {
-        e.preventDefault();
-        add(filtered[hiIdx]);
-      } else if (text.trim() !== '') {
-        e.preventDefault();
-        add(text);
-      }
-      // Empty input, no dropdown: fall through so the form can submit.
-    } else if (e.key === 'Escape') {
-      if (open) {
-        // Consume it: close only the dropdown, keep the modal open.
-        e.preventDefault();
-        e.stopPropagation();
-        setOpen(false);
-      }
-    } else if (e.key === 'Backspace' && text === '' && value.length > 0) {
+      add(text);
+    }
+    // Empty input, no dropdown: fall through so the form can submit.
+  };
+
+  const handleEscape = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (open) {
+      // Consume it: close only the dropdown, keep the modal open.
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+    }
+  };
+
+  const handleBackspace = () => {
+    if (text === '' && value.length > 0) {
       onChange(value.slice(0, -1));
     }
+  };
+
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    const keyActions: Partial<Record<string, () => void>> = {
+      ArrowDown: () => handleArrowDown(e),
+      ArrowUp: () => handleArrowUp(e),
+      Enter: () => handleEnter(e),
+      Escape: () => handleEscape(e),
+      Backspace: handleBackspace,
+    };
+    keyActions[e.key]?.();
   };
 
   return (

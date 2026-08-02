@@ -74,6 +74,17 @@ export function CardAIDraft({
     }
   };
 
+  let statusNote = <span className="ai-note">fills the form below — review, then Save</span>;
+  if (busy) {
+    statusNote = <span className="ai-note busy" role="status">Drafting the card…</span>;
+  } else if (error) {
+    statusNote = (
+      <span key={error} className="ai-note flash err" id={errorId} role="alert" title={error}>
+        {error}
+      </span>
+    );
+  }
+
   return (
     <div className="ai-box">
       <label htmlFor="f-ai">✨ Draft with AI</label>
@@ -96,15 +107,7 @@ export function CardAIDraft({
         >
           {busy ? 'Cancel' : 'Draft'}
         </button>
-        {busy ? (
-          <span className="ai-note busy" role="status">Drafting the card…</span>
-        ) : error ? (
-          <span key={error} className="ai-note flash err" id={errorId} role="alert" title={error}>
-            {error}
-          </span>
-        ) : (
-          <span className="ai-note">fills the form below — review, then Save</span>
-        )}
+        {statusNote}
       </div>
     </div>
   );

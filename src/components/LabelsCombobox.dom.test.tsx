@@ -41,6 +41,37 @@ describe('LabelsCombobox DOM', () => {
     expect(input.getAttribute('aria-activedescendant')).toMatch(/-1$/);
   });
 
+  it('consumes Escape while closing a dropdown nested in an Escape-handling parent', async () => {
+    const user = userEvent.setup();
+    const onParentEscape = vi.fn();
+    render(
+      <div
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') onParentEscape();
+        }}
+      >
+        <LabelsCombobox
+          inputId="nested-labels"
+          value={[]}
+          suggestions={['alpha']}
+          onChange={vi.fn()}
+        />
+      </div>,
+    );
+
+    const input = screen.getByRole('combobox');
+    await user.click(input);
+    expect(screen.getByRole('listbox')).toBeTruthy();
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(onParentEscape).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(input);
+
+    await user.keyboard('{Escape}');
+    expect(onParentEscape).toHaveBeenCalledTimes(1);
+  });
+
   it('opens from a closed keyboard state and supports pointer selection and chip-container focus', async () => {
     const onChange = vi.fn();
     const { container, rerender } = render(<LabelsCombobox inputId="labels3" value={['plain']} suggestions={['alpha', 'beta']} onChange={onChange} />);
