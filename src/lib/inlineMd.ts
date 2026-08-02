@@ -21,6 +21,11 @@ interface InlineMatch {
   token: InlineTok;
 }
 
+interface LinkCandidate {
+  match: InlineMatch | null;
+  cursor: number;
+}
+
 function matches(
   line: string,
   pattern: RegExp,
@@ -35,43 +40,37 @@ function matches(
   }));
 }
 
-function linkMatches(line: string): InlineMatch[] {
-  const found: InlineMatch[] = [];
-  let cursor = 0;
-  while (cursor < line.length) {
-    const start = line.indexOf('[', cursor);
-    if (start < 0) break;
-    const labelEnd = line.indexOf(']', start + 1);
-    if (labelEnd < 0) break;
-    const lineBreak = line.slice(start + 1, labelEnd).search(/[\r\n]/u);
-    if (lineBreak >= 0) {
-      cursor = start + lineBreak + 2;
-      continue;
-    }
-    if (labelEnd === start + 1 || line[labelEnd + 1] !== '(') {
-      cursor = labelEnd + 1;
-      continue;
-    }
+function parseLinkCandidate(
+  line: string,
+  start: number,
+  labelEnd: number,
+): LinkCandidate {
+  const lineBreak = line.slice(start + 1, labelEnd).search(/[\r\n]/u);
+  if (lineBreak >= 0) {
+    return { match: null, cursor: start + lineBreak + 2 };
+  }
+  if (labelEnd === start + 1 || line[labelEnd + 1] !== '(') {
+    return { match: null, cursor: labelEnd + 1 };
+  }
 
-    const hrefStart = labelEnd + 2;
-    if (!line.startsWith(HTTP_PREFIX, hrefStart) && !line.startsWith(HTTPS_PREFIX, hrefStart)) {
-      cursor = labelEnd + 1;
-      continue;
-    }
-    let hrefEnd = hrefStart;
-    while (
-      hrefEnd < line.length
-      && line[hrefEnd] !== ')'
-      && !WHITESPACE_PATTERN.test(line[hrefEnd])
-    ) {
-      hrefEnd += 1;
-    }
-    if (line[hrefEnd] !== ')') {
-      cursor = hrefEnd + 1;
-      continue;
-    }
+  const hrefStart = labelEnd + 2;
+  if (!line.startsWith(HTTP_PREFIX, hrefStart) && !line.startsWith(HTTPS_PREFIX, hrefStart)) {
+    return { match: null, cursor: labelEnd + 1 };
+  }
+  let hrefEnd = hrefStart;
+  while (
+    hrefEnd < line.length
+    && line[hrefEnd] !== ')'
+    && !WHITESPACE_PATTERN.test(line[hrefEnd])
+  ) {
+    hrefEnd += 1;
+  }
+  if (line[hrefEnd] !== ')') {
+    return { match: null, cursor: hrefEnd + 1 };
+  }
 
-    found.push({
+  return {
+    match: {
       start,
       end: hrefEnd + 1,
       priority: 3,
@@ -80,8 +79,22 @@ function linkMatches(line: string): InlineMatch[] {
         text: line.slice(start + 1, labelEnd),
         href: line.slice(hrefStart, hrefEnd),
       },
-    });
-    cursor = hrefEnd + 1;
+    },
+    cursor: hrefEnd + 1,
+  };
+}
+
+function linkMatches(line: string): InlineMatch[] {
+  const found: InlineMatch[] = [];
+  let cursor = 0;
+  while (cursor < line.length) {
+    const start = line.indexOf('[', cursor);
+    if (start < 0) break;
+    const labelEnd = line.indexOf(']', start + 1);
+    if (labelEnd < 0) break;
+    const candidate = parseLinkCandidate(line, start, labelEnd);
+    if (candidate.match) found.push(candidate.match);
+    cursor = candidate.cursor;
   }
   return found;
 }
