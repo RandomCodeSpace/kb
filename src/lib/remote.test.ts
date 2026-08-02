@@ -17,7 +17,7 @@ import {
   RemoteStore,
   sameBoardSemantics,
 } from './remote';
-import type { LiveBoardSnapshot } from './remote';
+import type { LiveBoardSnapshot, SaveAcknowledgement } from './remote';
 import { LocalStore } from './store';
 import type { DurableSnapshot } from './store';
 
@@ -96,6 +96,22 @@ function titles(b: Board): string[] {
   return b.tasks.map((t) => t.title);
 }
 
+function fixtureTask(id: string, title: string, desc = `description:${id}`): Board['tasks'][number] {
+  return {
+    id,
+    emoji: '',
+    title,
+    desc,
+    status: 'todo',
+    blocked: false,
+    prio: 3,
+    tags: [],
+    checks: [],
+    createdAt: '2026-08-01T00:00:00.000Z',
+    movedAt: '2026-08-01T00:00:00.000Z',
+  };
+}
+
 type Call = { url: string; method: string; headers: Record<string, string>; body: string };
 
 function deferred<T>() {
@@ -131,7 +147,7 @@ function stubFetch(script: Response[]): Call[] {
 /** saveRemote is fire-and-forget; resolve when it reports back. */
 function save(store: RemoteStore, b: Board): Promise<Board> {
   return new Promise<Board>((resolve, reject) => {
-    store.saveRemote(identity, b, reject, resolve);
+    store.saveRemote(identity, b, reject, ({ pushed }) => resolve(pushed));
   });
 }
 
@@ -140,9 +156,33 @@ type SaveResult = {
   taskIDs: ReadonlyMap<string, string>;
 };
 
+type CharacterizedAcknowledgement = SaveAcknowledgement;
+
+type CharacterizationCallback = (acknowledgement: SaveAcknowledgement) => void;
+
+function captureAcknowledgement(
+  start: (onSuccess: CharacterizationCallback, onError: (error: unknown) => void) => void,
+  delivery?: CharacterizationCallback,
+): Promise<CharacterizedAcknowledgement> {
+  return new Promise((resolve, reject) => {
+    start((acknowledgement) => {
+      delivery?.(acknowledgement);
+      resolve(acknowledgement);
+    }, reject);
+  });
+}
+
+function normalizedAcknowledgement(value: CharacterizedAcknowledgement) {
+  return {
+    ...value,
+    taskIDs: [...value.taskIDs],
+    isCurrent: value.isCurrent?.(),
+  };
+}
+
 function saveWithTaskIDs(store: RemoteStore, b: Board): Promise<SaveResult> {
   return new Promise<SaveResult>((resolve, reject) => {
-    store.saveRemote(identity, b, reject, (pushed, taskIDs) => {
+    store.saveRemote(identity, b, reject, ({ pushed, taskIDs }) => {
       resolve({ pushed, taskIDs });
     });
   });
@@ -357,6 +397,133 @@ describe('canonical three-way merge', () => {
     expect(result.board.tasks.map((task) => task.status)).toEqual([
       'todo', 'todo', 'doing',
     ]);
+  });
+
+  it('retains the canonical id of a server-only addition anchored between survivors', () => {
+    const base: Board = {
+      title: 'Base',
+      tasks: [fixtureTask('base-a', 'A'), fixtureTask('base-c', 'C')],
+    };
+    const baseIDs = new Map([
+      ['base-a', 'canonical-a'],
+      ['base-c', 'canonical-c'],
+    ]);
+    const remote: Board = {
+      title: 'Base',
+      tasks: [
+        fixtureTask('remote-a', 'A'),
+        fixtureTask('server-b', 'B'),
+        fixtureTask('remote-c', 'C'),
+      ],
+    };
+    const result = mergeCanonicalBoards(
+      base,
+      baseIDs,
+      remote,
+      new Map([
+        ['remote-a', 'canonical-a'],
+        ['server-b', 'canonical-b'],
+        ['remote-c', 'canonical-c'],
+      ]),
+      base,
+      baseIDs,
+    );
+
+    expect(result.board.tasks.map((task) => task.id)).toEqual([
+      'base-a', 'server-b', 'base-c',
+    ]);
+    expect([...result.canonicalTaskIDs].sort(([left], [right]) => left.localeCompare(right))).toEqual([
+      ['base-a', 'canonical-a'],
+      ['base-c', 'canonical-c'],
+      ['server-b', 'canonical-b'],
+    ]);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it('keeps same-title local and remote additions distinct in deterministic insertion order', () => {
+    const base: Board = { title: 'Base', tasks: [] };
+    const local: Board = {
+      title: 'Base',
+      tasks: [fixtureTask('local-same', 'Same title')],
+    };
+    const remote: Board = {
+      title: 'Base',
+      tasks: [fixtureTask('remote-same', 'Same title')],
+    };
+    const result = mergeCanonicalBoards(
+      local,
+      new Map(),
+      remote,
+      new Map([['remote-same', 'canonical-remote']]),
+      base,
+      new Map(),
+    );
+
+    expect(result.board.tasks.map((item) => [item.id, item.title, item.desc])).toEqual([
+      ['local-same', 'Same title', 'description:local-same'],
+      ['remote-same', 'Same title', 'description:remote-same'],
+    ]);
+    expect([...result.canonicalTaskIDs]).toEqual([
+      ['remote-same', 'canonical-remote'],
+    ]);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it.each([
+    ['unchanged', 'Base', 'Base', 'Base', 'Base', []],
+    ['local-only', 'Base', 'Local', 'Base', 'Local', []],
+    ['remote-only', 'Base', 'Base', 'Remote', 'Remote', []],
+    ['same-change', 'Base', 'Same', 'Same', 'Same', []],
+    ['divergent-change', 'Base', 'Local', 'Remote', 'Local', ['board title']],
+  ] as const)(
+    'preserves board-title conflict behavior for %s',
+    (_case, baseTitle, localTitle, remoteTitle, expectedTitle, expectedConflicts) => {
+      const result = mergeCanonicalBoards(
+        { title: localTitle, tasks: [] },
+        new Map(),
+        { title: remoteTitle, tasks: [] },
+        new Map(),
+        { title: baseTitle, tasks: [] },
+        new Map(),
+      );
+
+      expect({ title: result.board.title, conflicts: result.conflicts }).toEqual({
+        title: expectedTitle,
+        conflicts: expectedConflicts,
+      });
+    },
+  );
+});
+
+describe('legacy merge wire characterization', () => {
+  it('preserves duplicate identity, order, and exact serialized wire output', () => {
+    const local: Board = {
+      title: 'Duplicate',
+      tasks: [fixtureTask('local-1', 'Repeat'), fixtureTask('local-2', 'Repeat')],
+    };
+    const remote: Board = {
+      title: 'Duplicate',
+      tasks: [fixtureTask('remote-1', 'Repeat'), fixtureTask('remote-2', 'Repeat')],
+    };
+    const merged = mergeBoards(local, remote, { title: 'Duplicate', tasks: [] });
+
+    expect(merged.tasks).toEqual([
+      fixtureTask('local-1', 'Repeat'),
+      fixtureTask('local-2', 'Repeat'),
+      fixtureTask('remote-1', 'Repeat'),
+      fixtureTask('remote-2', 'Repeat'),
+    ]);
+    expect(wireTasks(merged).map((item) => item.id)).toEqual([
+      'local-1', 'local-2', 'remote-1', 'remote-2',
+    ]);
+    expect(serialize(merged)).toBe(
+      '# Duplicate\n\n## To Do\n\n' +
+      '- [ ] Repeat\n  description:local-1\n' +
+      '- [ ] Repeat\n  description:local-2\n' +
+      '- [ ] Repeat\n  description:remote-1\n' +
+      '- [ ] Repeat\n  description:remote-2\n\n' +
+      '## Doing\n\n\n## Done\n\n',
+    );
   });
 });
 
@@ -644,7 +811,7 @@ describe('RemoteStore concurrency', () => {
         identity,
         known,
         reject,
-        (_board, _ids, _conflicts, _operation, _current, committedGeneration) => {
+        ({ generation: committedGeneration }) => {
           resolve(committedGeneration);
         },
         { canonicalTaskIDs: ids, generation: 41 },
@@ -679,7 +846,7 @@ describe('RemoteStore concurrency', () => {
         identity,
         created,
         reject,
-        (_board, _ids, _conflicts, _operation, _current, committedGeneration) => {
+        ({ generation: committedGeneration }) => {
           resolve(committedGeneration);
         },
         { canonicalTaskIDs: new Map(), pendingWriteStager, generation: 9 },
@@ -774,17 +941,8 @@ describe('RemoteStore concurrency', () => {
         identity,
         latest,
         reject,
-        (
-          _board,
-          _ids,
-          _conflicts,
-          _operation,
-          _current,
-          generation,
-          version,
-          snapshot,
-        ) => {
-          resolve({ generation, version, snapshot });
+        ({ generation, durableVersion, durableSnapshot }) => {
+          resolve({ generation, version: durableVersion, snapshot: durableSnapshot });
         },
         { canonicalTaskIDs: ids, generation: 2 },
       );
@@ -1204,7 +1362,7 @@ describe('RemoteStore concurrency', () => {
         identity,
         local,
         reject,
-        (pushed, taskIDs) => resolve({ pushed, taskIDs }),
+        ({ pushed, taskIDs }) => resolve({ pushed, taskIDs }),
         { canonicalTaskIDs: new Map() },
       );
     });
@@ -1418,6 +1576,314 @@ describe('RemoteStore concurrency', () => {
     expect(JSON.parse(calls[0]!.body)).toEqual({
       board: serialize(pushed),
       task_ids: ['server-known', null],
+    });
+  });
+
+  it('sends a fully mapped JSON save without staging or idempotency and reports the exact acknowledgement', async () => {
+    const store = new RemoteStore();
+    const mapped: Board = {
+      title: 'Mapped',
+      tasks: [
+        { ...fixtureTask('z-done', 'Done Z'), status: 'done' },
+        fixtureTask('a-todo', 'Todo A'),
+        { ...fixtureTask('m-doing', 'Doing M'), status: 'doing' },
+      ],
+    };
+    const canonicalTaskIDs = new Map([
+      ['z-done', 'canonical-z'],
+      ['a-todo', 'canonical-a'],
+      ['m-doing', 'canonical-m'],
+    ]);
+    const wireTaskIDs = ['canonical-a', 'canonical-m', 'canonical-z'];
+    const wireBoard = '# Mapped\n\n## To Do\n\n' +
+      '- [ ] Todo A\n  description:a-todo\n\n' +
+      '## Doing\n\n- [ ] Doing M\n  description:m-doing\n\n' +
+      '## Done\n\n- [x] Done Z\n  description:z-done\n';
+    const exactBody = JSON.stringify({ board: wireBoard, task_ids: wireTaskIDs });
+    const durable = {
+      ...durableSnapshot(mapped, 7),
+      canonicalTaskIDs,
+      deletedCanonicalIDs: new Set(['canonical-deleted']),
+    };
+    const stagePendingBoardWrite = vi.fn();
+    const calls = stubFetch([
+      remoteSnapshot(mapped, wireTaskIDs, '"etag-base"'),
+      new Response(JSON.stringify({ task_ids: wireTaskIDs }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', ETag: '"etag-next"' },
+      }),
+      new Response(JSON.stringify({ task_ids: wireTaskIDs }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', ETag: '"etag-final"' },
+      }),
+    ]);
+    await store.loadRemote(identity);
+    const callback = vi.fn<CharacterizationCallback>();
+
+    const acknowledgement = await captureAcknowledgement((onSuccess, onError) => {
+      store.saveRemote(
+        identity,
+        mapped,
+        onError,
+        onSuccess,
+        {
+          canonicalTaskIDs,
+          generation: 7,
+          durableVersion: durable.version,
+          durableSnapshot: durable,
+          pendingWriteStager: { stagePendingBoardWrite },
+        },
+      );
+    }, callback);
+
+    expect(calls[1]).toEqual({
+      url: '/api/board',
+      method: 'PUT',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'If-Match': '"etag-base"',
+        'X-KB-User': 'alice',
+      },
+      body: exactBody,
+    });
+    expect(calls[1]!.headers['Idempotency-Key']).toBeUndefined();
+    expect(stagePendingBoardWrite).not.toHaveBeenCalled();
+    expect(callback).toHaveBeenCalledOnce();
+    expect(normalizedAcknowledgement(acknowledgement)).toEqual({
+      pushed: mapped,
+      taskIDs: [
+        ['z-done', 'canonical-z'],
+        ['a-todo', 'canonical-a'],
+        ['m-doing', 'canonical-m'],
+      ],
+      conflicts: [],
+      operationID: undefined,
+      isCurrent: true,
+      generation: 7,
+      durableVersion: { present: true, generation: 7 },
+      durableSnapshot: durable,
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      store.saveRemote(
+        identity,
+        mapped,
+        reject,
+        () => resolve(),
+        { canonicalTaskIDs },
+      );
+    });
+    expect(calls[2]!.headers['If-Match']).toBe('"etag-next"');
+    expect(calls[2]!.body).toBe(exactBody);
+    expect(wireTasks(mapped).map((item) => item.id)).toEqual([
+      'a-todo', 'm-doing', 'z-done',
+    ]);
+  });
+
+  it('delivers the exact named acknowledgement after the debounce interval', async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new RemoteStore();
+      const mapped: Board = {
+        title: 'Mapped',
+        tasks: [fixtureTask('mapped-a', 'Mapped A')],
+      };
+      const canonicalTaskIDs = new Map([['mapped-a', 'canonical-a']]);
+      const durable = { ...durableSnapshot(mapped, 7), canonicalTaskIDs };
+      const calls = stubFetch([
+        new Response(JSON.stringify({ task_ids: ['canonical-a'] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ETag: '"etag-next"' },
+        }),
+      ]);
+      const completed = captureAcknowledgement((onSuccess, onError) => {
+        store.saveRemoteDebounced(
+          identity,
+          mapped,
+          onError,
+          onSuccess,
+          {
+            canonicalTaskIDs,
+            generation: 7,
+            durableVersion: durable.version,
+            durableSnapshot: durable,
+          },
+        );
+      });
+
+      expect(calls).toEqual([]);
+      await vi.advanceTimersByTimeAsync(799);
+      expect(calls).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(completed.then(normalizedAcknowledgement)).resolves.toEqual({
+        pushed: mapped,
+        taskIDs: [['mapped-a', 'canonical-a']],
+        conflicts: [],
+        operationID: undefined,
+        isCurrent: true,
+        generation: 7,
+        durableVersion: { present: true, generation: 7 },
+        durableSnapshot: durable,
+      });
+      expect(calls).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('delivers the exact named acknowledgement after one board-title conflict retry', async () => {
+    const store = new RemoteStore();
+    const base: Board = {
+      title: 'Mapped',
+      tasks: [fixtureTask('base-a', 'Mapped A', 'description:mapped-a')],
+    };
+    const local: Board = {
+      title: 'Local title',
+      tasks: [fixtureTask('mapped-a', 'Mapped A')],
+    };
+    const remote: Board = {
+      title: 'Remote title',
+      tasks: [fixtureTask('server-a', 'Mapped A', 'description:server-a')],
+    };
+    const canonicalTaskIDs = new Map([['mapped-a', 'canonical-a']]);
+    const durable = {
+      ...durableSnapshot(local, 7),
+      canonicalTaskIDs,
+      deletedCanonicalIDs: new Set(['canonical-deleted']),
+    };
+    const calls = stubFetch([
+      remoteSnapshot(base, ['canonical-a'], '"etag-base"'),
+      new Response('conflict', { status: 409 }),
+      remoteSnapshot(remote, ['canonical-a'], '"etag-conflict"'),
+      new Response(JSON.stringify({ task_ids: ['canonical-a'] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', ETag: '"etag-next"' },
+      }),
+    ]);
+    let loadedIDs = new Map<string, string>();
+    await store.loadRemote(identity, (ids) => { loadedIDs = new Map(ids); });
+    const localIDs = new Map([[local.tasks[0]!.id, loadedIDs.values().next().value!]]);
+    const callback = vi.fn<CharacterizationCallback>();
+
+    const acknowledgement = await captureAcknowledgement((onSuccess, onError) => {
+      store.saveRemote(
+        identity,
+        local,
+        onError,
+        onSuccess,
+        {
+          canonicalTaskIDs: localIDs,
+          generation: 7,
+          durableVersion: durable.version,
+          durableSnapshot: durable,
+        },
+      );
+    }, callback);
+
+    const pushed: Board = {
+      title: 'Local title',
+      tasks: [fixtureTask('mapped-a', 'Mapped A', 'description:server-a')],
+    };
+    const initialBody = JSON.stringify({
+      board: serialize(local),
+      task_ids: ['canonical-a'],
+    });
+    const retryBody = JSON.stringify({
+      board: serialize(pushed),
+      task_ids: ['canonical-a'],
+    });
+    expect(calls.map(({ url, method, body }) => ({ url, method, body }))).toEqual([
+      { url: '/api/board', method: 'GET', body: '' },
+      { url: '/api/board', method: 'PUT', body: initialBody },
+      { url: '/api/board', method: 'GET', body: '' },
+      { url: '/api/board', method: 'PUT', body: retryBody },
+    ]);
+    expect(calls[1]!.headers['If-Match']).toBe('"etag-base"');
+    expect(calls[3]!.headers['If-Match']).toBe('"etag-conflict"');
+    expect(callback).toHaveBeenCalledOnce();
+    expect(callback.mock.calls[0]?.[0].conflicts).toEqual(['board title']);
+    expect(normalizedAcknowledgement(acknowledgement)).toEqual({
+      pushed,
+      taskIDs: [['mapped-a', 'canonical-a']],
+      conflicts: ['board title'],
+      operationID: undefined,
+      isCurrent: true,
+      generation: 7,
+      durableVersion: { present: true, generation: 7 },
+      durableSnapshot: durable,
+    });
+  });
+
+  it('keeps the acknowledgement currentness guard live after delivery', async () => {
+    const store = new RemoteStore();
+    const mapped: Board = {
+      title: 'Mapped',
+      tasks: [fixtureTask('mapped-a', 'Mapped A')],
+    };
+    const canonicalTaskIDs = new Map([['mapped-a', 'canonical-a']]);
+    const durable = { ...durableSnapshot(mapped, 7), canonicalTaskIDs };
+    stubFetch([
+      new Response(JSON.stringify({ task_ids: ['canonical-a'] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', ETag: '"etag-next"' },
+      }),
+    ]);
+
+    const acknowledgement = await captureAcknowledgement((onSuccess, onError) => {
+      store.saveRemote(
+        identity,
+        mapped,
+        onError,
+        onSuccess,
+        {
+          canonicalTaskIDs,
+          generation: 7,
+          durableVersion: durable.version,
+          durableSnapshot: durable,
+        },
+      );
+    });
+
+    expect(normalizedAcknowledgement(acknowledgement)).toEqual({
+      pushed: mapped,
+      taskIDs: [['mapped-a', 'canonical-a']],
+      conflicts: [],
+      operationID: undefined,
+      isCurrent: true,
+      generation: 7,
+      durableVersion: { present: true, generation: 7 },
+      durableSnapshot: durable,
+    });
+    store.cancel();
+    expect(acknowledgement.isCurrent?.()).toBe(false);
+  });
+
+  it('delivers absent optional acknowledgement fields for a legacy save', async () => {
+    const store = new RemoteStore();
+    const legacy: Board = {
+      title: 'Mapped',
+      tasks: [fixtureTask('mapped-a', 'Mapped A')],
+    };
+    stubFetch([new Response(null, { status: 204 })]);
+
+    const acknowledgement = await captureAcknowledgement((onSuccess, onError) => {
+      store.saveRemote(
+        identity,
+        legacy,
+        onError,
+        onSuccess,
+      );
+    });
+    expect(normalizedAcknowledgement(acknowledgement)).toEqual({
+      pushed: legacy,
+      taskIDs: [],
+      conflicts: [],
+      isCurrent: true,
+      operationID: undefined,
+      generation: undefined,
+      durableVersion: undefined,
+      durableSnapshot: undefined,
     });
   });
 
@@ -1735,8 +2201,8 @@ describe('RemoteStore concurrency', () => {
       ids: ReadonlyMap<string, string>;
       conflicts: readonly string[];
     }>((resolve, reject) => {
-      store.saveRemote(identity, local, reject, (pushed, pushedIDs, conflicts = []) => {
-        resolve({ pushed, ids: pushedIDs, conflicts });
+      store.saveRemote(identity, local, reject, ({ pushed, taskIDs, conflicts = [] }) => {
+        resolve({ pushed, ids: taskIDs, conflicts });
       }, { canonicalTaskIDs: ids });
     });
 
@@ -1770,7 +2236,7 @@ describe('RemoteStore concurrency', () => {
     ]);
     await store.loadRemote(identity);
     const saved = await new Promise<{ pushed: Board; conflicts: readonly string[] }>((resolve, reject) => {
-      store.saveRemote(identity, local, reject, (pushed, _ids, conflicts = []) => {
+      store.saveRemote(identity, local, reject, ({ pushed, conflicts = [] }) => {
         resolve({ pushed, conflicts });
       }, { canonicalTaskIDs: new Map() });
     });
@@ -2493,7 +2959,7 @@ describe('RemoteStore concurrency', () => {
     const release = deferred<void>();
     const mutated = vi.fn();
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 204 }))));
-    store.saveRemote(identity, board('A'), vi.fn(), async (_board, _ids, _conflicts, _operation, isCurrent) => {
+    store.saveRemote(identity, board('A'), vi.fn(), async ({ isCurrent }) => {
       await release.promise;
       if (isCurrent?.()) mutated();
     });
@@ -2986,7 +3452,7 @@ describe('RemoteStore concurrency', () => {
         identity,
         prepared.board,
         reject,
-        (pushed, taskIDs) => resolve({ pushed, taskIDs }),
+        ({ pushed, taskIDs }) => resolve({ pushed, taskIDs }),
         { canonicalTaskIDs: prepared.taskIDs },
       );
     });
@@ -3055,7 +3521,7 @@ describe('RemoteStore concurrency', () => {
         identity,
         active,
         reject,
-        async (pushed, committedIDs) => {
+        async ({ pushed, taskIDs: committedIDs }) => {
           const durable = mergeAcknowledgedState(
             newer, baseIDs, active, baseIDs, pushed, committedIDs,
           );

@@ -12,16 +12,18 @@ import type {
 const HEALTH_TIMEOUT_MS = 1500;
 const SAVE_DEBOUNCE_MS = 800;
 
-type SaveCallback = (
-  pushed: Board,
-  taskIDs: ReadonlyMap<string, string>,
-  conflicts?: readonly string[],
-  operationID?: string,
-  isCurrent?: () => boolean,
-  generation?: number,
-  durableVersion?: DurableVersion,
-  durableSnapshot?: DurableSnapshot,
-) => unknown | PromiseLike<unknown>;
+export interface SaveAcknowledgement {
+  pushed: Board;
+  taskIDs: ReadonlyMap<string, string>;
+  conflicts?: readonly string[];
+  operationID?: string;
+  isCurrent?: () => boolean;
+  generation?: number;
+  durableVersion?: DurableVersion;
+  durableSnapshot?: DurableSnapshot;
+}
+
+type SaveCallback = (acknowledgement: SaveAcknowledgement) => unknown;
 
 export interface PendingWriteStager {
   stagePendingBoardWrite(pending: {
@@ -56,6 +58,19 @@ type PendingSave = {
   isLiveCurrent?: () => boolean;
   pendingWriteStager?: PendingWriteStager;
   onObsolete?: () => void;
+};
+
+type PushAttempt = {
+  pushed: Board;
+  pushedIDs: ReadonlyMap<string, string>;
+  conflicts: readonly string[];
+  response: Response;
+};
+
+type PreparedBoardRequest = {
+  headers: Record<string, string>;
+  body: string;
+  durableCreate: boolean;
 };
 
 class AmbiguousWriteError extends Error {
@@ -115,6 +130,98 @@ function taskIDMapFromBody(
     mapped.set(tasks[i]!.id, canonicalID);
   }
   return mapped;
+}
+
+function prepareBoardRequest(
+  save: PendingSave,
+  board: Board,
+  ids: ReadonlyMap<string, string>,
+): PreparedBoardRequest {
+  if (save.legacy || save.canonicalTaskIDs === undefined) {
+    return {
+      headers: { Accept: 'application/json', 'Content-Type': 'text/markdown' },
+      body: serialize(board),
+      durableCreate: false,
+    };
+  }
+  const tasks = wireTasks(board);
+  return {
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      board: serialize(board),
+      task_ids: tasks.map((task) => ids.get(task.id) ?? null),
+    }),
+    durableCreate: tasks.some((task) => !ids.has(task.id)),
+  };
+}
+
+function durableVersionForSave(save: PendingSave): DurableVersion | undefined {
+  if (save.durableVersion) return save.durableVersion;
+  const generation = save.generation;
+  if (
+    typeof generation === 'number' &&
+    Number.isSafeInteger(generation) &&
+    generation >= 0
+  ) {
+    return { present: true, generation };
+  }
+  return undefined;
+}
+
+function mergeConflictSnapshot(
+  save: PendingSave,
+  server: RemoteSnapshot,
+  mergeBase: Board | null,
+  mergeBaseIDs: ReadonlyMap<string, string>,
+): Pick<PushAttempt, 'pushed' | 'pushedIDs' | 'conflicts'> {
+  let pushed = save.board;
+  let pushedIDs = save.canonicalTaskIDs ?? new Map<string, string>();
+  let conflicts = save.conflicts;
+  if (!server.board) return { pushed, pushedIDs, conflicts };
+
+  let titleAlreadyMerged = false;
+  if (
+    mergeBase &&
+    mergeBaseIDs.size > 0 &&
+    save.canonicalTaskIDs !== undefined &&
+    server.taskIDs.size > 0
+  ) {
+    const merged = mergeCanonicalBoards(
+      save.board,
+      save.canonicalTaskIDs,
+      server.board,
+      server.taskIDs,
+      mergeBase,
+      mergeBaseIDs,
+    );
+    pushed = merged.board;
+    pushedIDs = merged.canonicalTaskIDs;
+    conflicts = [...conflicts, ...merged.conflicts];
+    titleAlreadyMerged = true;
+  } else if (save.canonicalTaskIDs !== undefined && server.taskIDs.size > 0) {
+    const merged = mergeWithoutCanonicalBase(
+      save.board, save.canonicalTaskIDs, server.board, server.taskIDs,
+    );
+    pushed = merged.board;
+    pushedIDs = merged.taskIDs;
+  } else {
+    pushed = legacyMerge(save.board, server.board, mergeBase);
+  }
+
+  if (titleAlreadyMerged) return { pushed, pushedIDs, conflicts };
+  if (mergeBase) {
+    const titleConflicts: string[] = [];
+    pushed = {
+      ...pushed,
+      title: chooseField(
+        'board title', mergeBase.title, save.board.title, server.board.title, titleConflicts,
+      ),
+    };
+    conflicts = [...conflicts, ...titleConflicts];
+  } else if (save.board.title !== server.board.title) {
+    conflicts = [...conflicts, 'board title'];
+  }
+  return { pushed, pushedIDs, conflicts };
 }
 
 async function taskIDMap(
@@ -251,36 +358,54 @@ function chooseField<T>(
   return local;
 }
 
-function legacyMerge(local: Board, server: Board, base: Board | null): Board {
-  const known = new Map<string, number>();
-  for (const t of [...(base?.tasks ?? []), ...local.tasks]) {
-    known.set(taskKey(t), (known.get(taskKey(t)) ?? 0) + 1);
+function legacyTaskCounts(local: Board, base: Board | null): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const task of [...(base?.tasks ?? []), ...local.tasks]) {
+    const key = taskKey(task);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
   }
+  return counts;
+}
+
+function legacyPristineTasks(local: Board, base: Board | null): Map<string, Task[]> {
   const pristine = new Map<string, Task[]>();
-  if (base) {
-    const placed = new Set(base.tasks.map(placedKey));
-    for (const t of local.tasks) {
-      if (!placed.has(placedKey(t))) continue;
-      const bucket = pristine.get(taskKey(t));
-      if (bucket) {
-        bucket.push(t);
-      } else {
-        pristine.set(taskKey(t), [t]);
-      }
-    }
+  if (!base) return pristine;
+  const placed = new Set(base.tasks.map(placedKey));
+  for (const task of local.tasks) {
+    if (!placed.has(placedKey(task))) continue;
+    const key = taskKey(task);
+    const bucket = pristine.get(key);
+    if (bucket) bucket.push(task);
+    else pristine.set(key, [task]);
   }
+  return pristine;
+}
+
+function indexLegacyServerTasks(
+  server: Board,
+  known: Map<string, number>,
+  pristine: Map<string, Task[]>,
+): { extra: Task[]; moved: ReadonlyMap<Task, Task> } {
   const extra: Task[] = [];
   const moved = new Map<Task, Task>();
-  for (const t of server.tasks) {
-    const key = taskKey(t);
+  for (const task of server.tasks) {
+    const key = taskKey(task);
     const count = known.get(key) ?? 0;
-    if (count === 0) extra.push(t);
-    else {
-      known.set(key, count - 1);
-      const ours = pristine.get(key)?.shift();
-      if (ours && ours.status !== t.status) moved.set(ours, t);
+    if (count === 0) {
+      extra.push(task);
+      continue;
     }
+    known.set(key, count - 1);
+    const ours = pristine.get(key)?.shift();
+    if (ours && ours.status !== task.status) moved.set(ours, task);
   }
+  return { extra, moved };
+}
+
+function legacyMerge(local: Board, server: Board, base: Board | null): Board {
+  const known = legacyTaskCounts(local, base);
+  const pristine = legacyPristineTasks(local, base);
+  const { extra, moved } = indexLegacyServerTasks(server, known, pristine);
   if (extra.length === 0 && moved.size === 0) return local;
   return {
     ...local,
@@ -403,29 +528,20 @@ function placement(
   return { status: local.status, movedAt: local.movedAt };
 }
 
-/** Canonical-ID three-way merge used by first-party JSON synchronization. */
-export function mergeCanonicalBoards(
-  local: Board,
-  localIDs: ReadonlyMap<string, string>,
-  server: Board,
-  serverIDs: ReadonlyMap<string, string>,
-  base: Board,
-  baseIDs: ReadonlyMap<string, string>,
-): MergeResult {
-  const conflicts: string[] = [];
-  const baseByID = byCanonical(base, baseIDs);
-  const localByID = byCanonical(local, localIDs);
-  const serverByID = byCanonical(server, serverIDs);
+function mergeCanonicalSurvivors(
+  baseByID: ReadonlyMap<string, Task>,
+  localByID: ReadonlyMap<string, Task>,
+  serverByID: ReadonlyMap<string, Task>,
+  conflicts: string[],
+): Map<string, Task> {
   const mergedByID = new Map<string, Task>();
-
   for (const [canonical, baseTask] of baseByID) {
     const localTask = localByID.get(canonical);
     const remoteTask = serverByID.get(canonical);
-    // A deletion of a task in the base wins in either direction.
     if (!localTask || !remoteTask) continue;
     const merged: Task = { ...localTask };
     for (const field of MERGE_FIELDS) {
-      (merged as unknown as Record<string, unknown>)[field] = chooseField(
+      (merged as Record<keyof Task, unknown>)[field] = chooseField(
         `${localTask.title || canonical}: ${field}`,
         baseTask[field],
         localTask[field],
@@ -440,6 +556,92 @@ export function mergeCanonicalBoards(
     merged.movedAt = mergedPlacement.movedAt;
     mergedByID.set(canonical, merged);
   }
+  return mergedByID;
+}
+
+function chosenCanonicalSequence(
+  status: Status,
+  baseSeq: readonly string[],
+  localSeq: readonly string[],
+  remoteSeq: readonly string[],
+  conflicts: string[],
+): readonly string[] {
+  if (same(localSeq, baseSeq)) return remoteSeq;
+  if (!same(remoteSeq, baseSeq) && !same(localSeq, remoteSeq)) {
+    conflicts.push(`${status} column order`);
+  }
+  return localSeq;
+}
+
+function appendCanonicalStatusTasks(
+  status: Status,
+  context: {
+    local: Board;
+    localIDs: ReadonlyMap<string, string>;
+    server: Board;
+    serverIDs: ReadonlyMap<string, string>;
+    base: Board;
+    baseIDs: ReadonlyMap<string, string>;
+    baseCanonical: ReadonlySet<string>;
+    survivorIDs: ReadonlySet<string>;
+    mergedByID: ReadonlyMap<string, Task>;
+    seenNew: Set<string>;
+    conflicts: string[];
+  },
+): Task[] {
+  const { local, localIDs, server, serverIDs, base, baseIDs } = context;
+  const baseSeq = projectedSequence(
+    base, baseIDs, status, context.survivorIDs, context.mergedByID,
+  );
+  const localSeq = projectedSequence(
+    local, localIDs, status, context.survivorIDs, context.mergedByID,
+  );
+  const remoteSeq = projectedSequence(
+    server, serverIDs, status, context.survivorIDs, context.mergedByID,
+  );
+  const chosen = chosenCanonicalSequence(
+    status, baseSeq, localSeq, remoteSeq, context.conflicts,
+  );
+  const localNew = newTaskBuckets(
+    local, localIDs, context.baseCanonical, context.survivorIDs,
+    context.mergedByID, status, context.seenNew,
+  );
+  const remoteNew = newTaskBuckets(
+    server, serverIDs, context.baseCanonical, context.survivorIDs,
+    context.mergedByID, status, context.seenNew,
+  );
+  const ordered: Task[] = [
+    ...(localNew.get(null) ?? []),
+    ...(remoteNew.get(null) ?? []),
+  ];
+  for (const canonical of chosen) {
+    const task = context.mergedByID.get(canonical);
+    if (task?.status !== status) continue;
+    ordered.push(
+      task,
+      ...(localNew.get(canonical) ?? []),
+      ...(remoteNew.get(canonical) ?? []),
+    );
+  }
+  return ordered;
+}
+
+/** Canonical-ID three-way merge used by first-party JSON synchronization. */
+export function mergeCanonicalBoards(
+  local: Board,
+  localIDs: ReadonlyMap<string, string>,
+  server: Board,
+  serverIDs: ReadonlyMap<string, string>,
+  base: Board,
+  baseIDs: ReadonlyMap<string, string>,
+): MergeResult {
+  const conflicts: string[] = [];
+  const baseByID = byCanonical(base, baseIDs);
+  const localByID = byCanonical(local, localIDs);
+  const serverByID = byCanonical(server, serverIDs);
+  const mergedByID = mergeCanonicalSurvivors(
+    baseByID, localByID, serverByID, conflicts,
+  );
 
   const title = chooseField('board title', base.title, local.title, server.title, conflicts);
   const survivorIDs = new Set(mergedByID.keys());
@@ -450,39 +652,10 @@ export function mergeCanonicalBoards(
   const statuses: readonly Status[] = ['todo', 'doing', 'done', 'cancelled'];
 
   for (const status of statuses) {
-    const baseSeq = projectedSequence(
-      base, baseIDs, status, survivorIDs, mergedByID,
-    );
-    const localSeq = projectedSequence(
-      local, localIDs, status, survivorIDs, mergedByID,
-    );
-    const remoteSeq = projectedSequence(
-      server, serverIDs, status, survivorIDs, mergedByID,
-    );
-    const localChanged = !same(localSeq, baseSeq);
-    const remoteChanged = !same(remoteSeq, baseSeq);
-    let chosen = localSeq;
-    if (!localChanged) chosen = remoteSeq;
-    else if (remoteChanged && !same(localSeq, remoteSeq)) {
-      conflicts.push(`${status} column order`);
-    }
-    const localNew = newTaskBuckets(
-      local, localIDs, baseCanonical, survivorIDs, mergedByID, status, seenNew,
-    );
-    const remoteNew = newTaskBuckets(
-      server, serverIDs, baseCanonical, survivorIDs, mergedByID, status, seenNew,
-    );
-    const ordered: Task[] = [
-      ...(localNew.get(null) ?? []),
-      ...(remoteNew.get(null) ?? []),
-    ];
-    for (const canonical of chosen) {
-      const task = mergedByID.get(canonical);
-      if (!task || task.status !== status) continue;
-      ordered.push(task);
-      ordered.push(...(localNew.get(canonical) ?? []));
-      ordered.push(...(remoteNew.get(canonical) ?? []));
-    }
+    const ordered = appendCanonicalStatusTasks(status, {
+      local, localIDs, server, serverIDs, base, baseIDs, baseCanonical,
+      survivorIDs, mergedByID, seenNew, conflicts,
+    });
     for (const task of ordered) {
       tasks.push(task);
       const canonical = localIDs.get(task.id) ?? serverIDs.get(task.id);
@@ -1158,66 +1331,9 @@ export class RemoteStore {
     board: Board,
     ids: ReadonlyMap<string, string>,
   ): Promise<Response> {
-    const headers: Record<string, string> = { Accept: 'application/json' };
-    let durableCreate = false;
-    let body: string;
-    if (save.legacy || save.canonicalTaskIDs === undefined) {
-      headers['Content-Type'] = 'text/markdown';
-      body = serialize(board);
-    } else {
-      headers['Content-Type'] = 'application/json';
-      const tasks = wireTasks(board);
-      body = JSON.stringify({
-        board: serialize(board),
-        task_ids: tasks.map((task) => ids.get(task.id) ?? null),
-      });
-      if (tasks.some((task) => !ids.has(task.id))) {
-        durableCreate = true;
-        const legacyGeneration = save.generation;
-        let expectedVersion = save.durableVersion;
-        if (
-          !expectedVersion &&
-          typeof legacyGeneration === 'number' &&
-          Number.isSafeInteger(legacyGeneration) &&
-          legacyGeneration >= 0
-        ) {
-          expectedVersion = { present: true, generation: legacyGeneration };
-        }
-        if (save.pendingWriteStager && !expectedVersion) {
-          throw new Error('board write staging requires a durable version');
-        }
-        save.operationID ??= crypto.randomUUID();
-        headers['Idempotency-Key'] = save.operationID;
-        const staged = save.pendingWriteStager
-          ? await this.awaitAtEpoch(save.epoch, save.pendingWriteStager.stagePendingBoardWrite({
-            operation_id: save.operationID,
-            body,
-            sent_board: board,
-            sent_canonical_ids: Object.fromEntries(ids),
-            if_match: this.etag,
-          }, expectedVersion!, () => (
-            save.epoch === this.epoch && (save.isLiveCurrent?.() ?? true)
-          )))
-          : undefined;
-        if (staged && !staged.ok) {
-          throw staged.error ?? new Error('failed to stage board write');
-        }
-        if (staged) {
-          const stagedGeneration = staged.generation;
-          if (
-            typeof stagedGeneration !== 'number' ||
-            !Number.isSafeInteger(stagedGeneration) ||
-            stagedGeneration < 0
-          ) throw new Error('board write staging returned no generation');
-          save.generation = stagedGeneration;
-          save.durableVersion = staged.snapshot?.version ?? {
-            present: true,
-            generation: stagedGeneration,
-          };
-          if (staged.snapshot) save.durableSnapshot = staged.snapshot;
-        }
-      }
-    }
+    const { headers, body, durableCreate } = prepareBoardRequest(save, board, ids);
+    if (durableCreate) await this.stagePendingCreate(save, board, ids, body);
+    if (save.operationID && durableCreate) headers['Idempotency-Key'] = save.operationID;
     if (this.etag) headers['If-Match'] = this.etag;
     return this.awaitAtEpoch(save.epoch, authedFetch(save.identity, '/api/board', {
       method: 'PUT', headers, body, keepalive: save.keepalive,
@@ -1227,190 +1343,191 @@ export class RemoteStore {
     }));
   }
 
+  private async stagePendingCreate(
+    save: PendingSave,
+    board: Board,
+    ids: ReadonlyMap<string, string>,
+    body: string,
+  ): Promise<void> {
+    const expectedVersion = durableVersionForSave(save);
+    if (save.pendingWriteStager && !expectedVersion) {
+      throw new Error('board write staging requires a durable version');
+    }
+    save.operationID ??= crypto.randomUUID();
+    if (!save.pendingWriteStager) return;
+    const staged = await this.awaitAtEpoch(
+      save.epoch,
+      save.pendingWriteStager.stagePendingBoardWrite({
+        operation_id: save.operationID,
+        body,
+        sent_board: board,
+        sent_canonical_ids: Object.fromEntries(ids),
+        if_match: this.etag,
+      }, expectedVersion!, () => (
+        save.epoch === this.epoch && (save.isLiveCurrent?.() ?? true)
+      )),
+    );
+    if (!staged.ok) throw staged.error ?? new Error('failed to stage board write');
+    const stagedGeneration = staged.generation;
+    if (
+      typeof stagedGeneration !== 'number' ||
+      !Number.isSafeInteger(stagedGeneration) ||
+      stagedGeneration < 0
+    ) throw new Error('board write staging returned no generation');
+    save.generation = stagedGeneration;
+    save.durableVersion = staged.snapshot?.version ?? {
+      present: true,
+      generation: stagedGeneration,
+    };
+    if (staged.snapshot) save.durableSnapshot = staged.snapshot;
+  }
+
   private rebasePendingFromLearnedConflict(
     save: PendingSave,
     pushed: Board,
     pushedIDs: ReadonlyMap<string, string>,
   ): void {
+    const pending = this.pending;
     if (
-      !this.pending ||
-      this.pending.epoch !== save.epoch ||
-      this.pending.canonicalTaskIDs === undefined ||
+      pending?.epoch !== save.epoch ||
+      pending.canonicalTaskIDs === undefined ||
       save.canonicalTaskIDs === undefined
     ) return;
     const rebased = mergeCanonicalBoards(
-      this.pending.board,
-      this.pending.canonicalTaskIDs,
+      pending.board,
+      pending.canonicalTaskIDs,
       pushed,
       pushedIDs,
       save.board,
       save.canonicalTaskIDs,
     );
-    this.pending.board = rebased.board;
-    this.pending.canonicalTaskIDs = rebased.canonicalTaskIDs;
-    this.pending.conflicts = [...this.pending.conflicts, ...rebased.conflicts];
+    pending.board = rebased.board;
+    pending.canonicalTaskIDs = rebased.canonicalTaskIDs;
+    pending.conflicts = [...pending.conflicts, ...rebased.conflicts];
+  }
+
+  private async retryConflict(
+    save: PendingSave,
+    mergeBase: Board | null,
+    mergeBaseIDs: ReadonlyMap<string, string>,
+  ): Promise<PushAttempt> {
+    if (save.legacy) throw new Error('PUT /api/board failed: 409');
+    const server = await this.fetchSnapshotAtEpoch(save.identity, save.epoch);
+    const merged = mergeConflictSnapshot(save, server, mergeBase, mergeBaseIDs);
+    this.rebasePendingFromLearnedConflict(save, merged.pushed, merged.pushedIDs);
+    const response = await this.putBoard(save, merged.pushed, merged.pushedIDs);
+    this.assertEpoch(save.epoch);
+    return { ...merged, response };
+  }
+
+  private applyAcknowledgedPush(
+    save: PendingSave,
+    attempt: PushAttempt,
+    acknowledged: ReadonlyMap<string, string>,
+  ): ReadonlyMap<string, string> {
+    this.base = attempt.pushed;
+    const acknowledgedSaveIDs = mergeTaskIDMaps(attempt.pushedIDs, acknowledged);
+    this.baseTaskIDs = acknowledgedSaveIDs;
+    const tag = attempt.response.headers.get('ETag');
+    if (tag) this.etag = tag;
+
+    const pending = this.pending;
+    if (
+      pending?.epoch !== save.epoch ||
+      pending.canonicalTaskIDs === undefined ||
+      save.canonicalTaskIDs === undefined
+    ) return acknowledgedSaveIDs;
+    const pendingIDs = mergeTaskIDMaps(pending.canonicalTaskIDs, acknowledged);
+    const saveBaseIDs = mergeTaskIDMaps(save.canonicalTaskIDs, acknowledged);
+    const rebased = mergeCanonicalBoards(
+      pending.board,
+      pendingIDs,
+      attempt.pushed,
+      this.baseTaskIDs,
+      save.board,
+      saveBaseIDs,
+    );
+    pending.board = rebased.board;
+    pending.canonicalTaskIDs = rebased.canonicalTaskIDs;
+    pending.conflicts = [...pending.conflicts, ...rebased.conflicts];
+    return acknowledgedSaveIDs;
+  }
+
+  private applyAcknowledgementOutcome(save: PendingSave, outcome: unknown): void {
+    if (
+      typeof outcome !== 'object' ||
+      outcome === null ||
+      !('persisted' in outcome)
+    ) return;
+    const persistence = outcome as {
+      persisted?: unknown;
+      generation?: unknown;
+      snapshot?: DurableSnapshot;
+    };
+    if (persistence.persisted === false && save.operationID) {
+      throw new Error('create acknowledgement was not durably persisted');
+    }
+    const pending = this.pending;
+    if (persistence.persisted !== true || pending?.epoch !== save.epoch) return;
+    if (persistence.snapshot) {
+      pending.generation = persistence.snapshot.generation;
+      pending.durableVersion = persistence.snapshot.version;
+      pending.durableSnapshot = persistence.snapshot;
+    } else if (Number.isSafeInteger(persistence.generation)) {
+      const generation = persistence.generation as number;
+      pending.generation = generation;
+      pending.durableVersion = { present: true, generation };
+    }
+  }
+
+  private async deliverAcknowledgement(
+    save: PendingSave,
+    attempt: PushAttempt,
+    taskIDs: ReadonlyMap<string, string>,
+  ): Promise<void> {
+    if (!save.onSuccess) return;
+    try {
+      const outcome = await this.awaitAtEpoch(
+        save.epoch,
+        Promise.resolve(save.onSuccess({
+          pushed: attempt.pushed,
+          taskIDs,
+          conflicts: attempt.conflicts,
+          operationID: save.operationID,
+          isCurrent: () => save.epoch === this.epoch,
+          generation: save.generation,
+          durableVersion: save.durableVersion,
+          durableSnapshot: save.durableSnapshot,
+        })),
+      );
+      this.applyAcknowledgementOutcome(save, outcome);
+    } catch (error) {
+      this.assertEpoch(save.epoch);
+      throw new AmbiguousWriteError(error);
+    }
   }
 
   private async execute(save: PendingSave): Promise<void> {
-    let pushed = save.board;
-    let pushedIDs = save.canonicalTaskIDs ?? new Map<string, string>();
-    let conflicts: readonly string[] = save.conflicts;
     const mergeBase = this.base;
     const mergeBaseIDs = this.baseTaskIDs;
-    let res = await this.putBoard(save, pushed, pushedIDs);
-    this.assertEpoch(save.epoch);
-    if (res.status === 409) {
-      if (save.legacy) {
-        throw new Error('PUT /api/board failed: 409');
-      }
-      const server = await this.fetchSnapshotAtEpoch(save.identity, save.epoch);
-      if (server.board) {
-        let titleAlreadyMerged = false;
-        if (
-          mergeBase &&
-          mergeBaseIDs.size > 0 &&
-          save.canonicalTaskIDs !== undefined &&
-          server.taskIDs.size > 0
-        ) {
-          const merged = mergeCanonicalBoards(
-            save.board,
-            save.canonicalTaskIDs,
-            server.board,
-            server.taskIDs,
-            mergeBase,
-            mergeBaseIDs,
-          );
-          pushed = merged.board;
-          pushedIDs = merged.canonicalTaskIDs;
-          conflicts = [...conflicts, ...merged.conflicts];
-          titleAlreadyMerged = true;
-        } else if (
-          save.canonicalTaskIDs !== undefined &&
-          server.taskIDs.size > 0
-        ) {
-          const merged = mergeWithoutCanonicalBase(
-            save.board,
-            save.canonicalTaskIDs,
-            server.board,
-            server.taskIDs,
-          );
-          pushed = merged.board;
-          pushedIDs = merged.taskIDs;
-        } else {
-          pushed = legacyMerge(save.board, server.board, mergeBase);
-        }
-        if (!titleAlreadyMerged) {
-          if (mergeBase) {
-            const titleConflicts: string[] = [];
-            pushed = {
-              ...pushed,
-              title: chooseField(
-                'board title',
-                mergeBase.title,
-                save.board.title,
-                server.board.title,
-                titleConflicts,
-              ),
-            };
-            conflicts = [...conflicts, ...titleConflicts];
-          } else if (save.board.title !== server.board.title) {
-            conflicts = [...conflicts, 'board title'];
-          }
-        }
-      }
-      this.rebasePendingFromLearnedConflict(save, pushed, pushedIDs);
-      res = await this.putBoard(save, pushed, pushedIDs);
-      this.assertEpoch(save.epoch);
-    }
-    const acknowledged = await this.taskIDMapAtEpoch(
-      save.epoch, res, pushed, Boolean(save.operationID),
+    const initialResponse = await this.putBoard(
+      save, save.board, save.canonicalTaskIDs ?? new Map<string, string>(),
     );
     this.assertEpoch(save.epoch);
-    this.base = pushed;
-    const acknowledgedSaveIDs = mergeTaskIDMaps(pushedIDs, acknowledged);
-    this.baseTaskIDs = acknowledgedSaveIDs;
-    const tag = res.headers.get('ETag');
-    if (tag) this.etag = tag;
-    // A newer edit may have queued while this request was in flight. Rebase it
-    // before dispatch so the freshly committed merge cannot be deleted by a
-    // request carrying the new ETag but the old task set.
-    if (
-      this.pending &&
-      this.pending.epoch === save.epoch &&
-      this.pending.canonicalTaskIDs !== undefined &&
-      save.canonicalTaskIDs !== undefined
-    ) {
-      const pendingIDs = mergeTaskIDMaps(
-        this.pending.canonicalTaskIDs,
-        acknowledged,
-      );
-      const saveBaseIDs = mergeTaskIDMaps(
-        save.canonicalTaskIDs,
-        acknowledged,
-      );
-      const rebased = mergeCanonicalBoards(
-        this.pending.board,
-        pendingIDs,
-        pushed,
-        this.baseTaskIDs,
-        save.board,
-        saveBaseIDs,
-      );
-      this.pending.board = rebased.board;
-      this.pending.canonicalTaskIDs = rebased.canonicalTaskIDs;
-      this.pending.conflicts = [
-        ...this.pending.conflicts,
-        ...rebased.conflicts,
-      ];
-    }
-    if (save.onSuccess) {
-      try {
-        const outcome = await this.awaitAtEpoch(
-          save.epoch,
-          Promise.resolve(save.onSuccess(
-            pushed,
-            acknowledgedSaveIDs,
-            conflicts,
-            save.operationID,
-            () => save.epoch === this.epoch,
-            save.generation,
-            save.durableVersion,
-            save.durableSnapshot,
-          )),
-        );
-        if (
-          typeof outcome === 'object' &&
-          outcome !== null &&
-          'persisted' in outcome &&
-          (outcome as { persisted?: unknown }).persisted === false &&
-          save.operationID
-        ) throw new Error('create acknowledgement was not durably persisted');
-        if (
-          typeof outcome === 'object' &&
-          outcome !== null &&
-          'persisted' in outcome &&
-          (outcome as { persisted?: unknown }).persisted === true &&
-          this.pending?.epoch === save.epoch
-        ) {
-          const acknowledged = outcome as {
-            generation?: unknown;
-            snapshot?: DurableSnapshot;
-          };
-          if (acknowledged.snapshot) {
-            this.pending.generation = acknowledged.snapshot.generation;
-            this.pending.durableVersion = acknowledged.snapshot.version;
-            this.pending.durableSnapshot = acknowledged.snapshot;
-          } else if (Number.isSafeInteger(acknowledged.generation)) {
-            const generation = acknowledged.generation as number;
-            this.pending.generation = generation;
-            this.pending.durableVersion = { present: true, generation };
-          }
-        }
-      } catch (error) {
-        this.assertEpoch(save.epoch);
-        throw new AmbiguousWriteError(error);
-      }
-    }
+    const attempt = initialResponse.status === 409
+      ? await this.retryConflict(save, mergeBase, mergeBaseIDs)
+      : {
+        pushed: save.board,
+        pushedIDs: save.canonicalTaskIDs ?? new Map<string, string>(),
+        conflicts: save.conflicts,
+        response: initialResponse,
+      };
+    const acknowledged = await this.taskIDMapAtEpoch(
+      save.epoch, attempt.response, attempt.pushed, Boolean(save.operationID),
+    );
+    this.assertEpoch(save.epoch);
+    const acknowledgedSaveIDs = this.applyAcknowledgedPush(save, attempt, acknowledged);
+    await this.deliverAcknowledgement(save, attempt, acknowledgedSaveIDs);
   }
 
   private drain(): void {
@@ -1539,7 +1656,9 @@ export class RemoteStore {
     if (!this.etag) throw new Error('legacy recovery requires a board version');
     if (!snapshot.board) {
       return new Promise((resolve, reject) => {
-        this.queue(identity, local, reject, (board, taskIDs) => resolve({ board, taskIDs }), {
+        this.queue(identity, local, reject, ({ pushed, taskIDs }) => {
+          resolve({ board: pushed, taskIDs });
+        }, {
           legacy: true,
           onObsolete: () => reject(new Error('remote operation cancelled')),
         });
@@ -1581,7 +1700,9 @@ export class RemoteStore {
       ],
     };
     return new Promise((resolve, reject) => {
-      this.queue(identity, merged, reject, (board, taskIDs) => resolve({ board, taskIDs }), {
+      this.queue(identity, merged, reject, ({ pushed, taskIDs }) => {
+        resolve({ board: pushed, taskIDs });
+      }, {
         legacy: true,
         canonicalTaskIDs: recovered,
         onObsolete: () => reject(new Error('remote operation cancelled')),
