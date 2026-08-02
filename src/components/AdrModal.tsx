@@ -147,7 +147,7 @@ function AdrStatus({
   errorId: string;
 }>) {
   if (busy) {
-    return <span className="flash busy" role="status">Splitting the ADR…</span>;
+    return <output className="flash busy">Splitting the ADR…</output>;
   }
   if (tooBig) {
     return (

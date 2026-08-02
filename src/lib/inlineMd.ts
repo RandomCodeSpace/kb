@@ -10,7 +10,9 @@ export type InlineTok =
 const CODE_PATTERN = /`([^`\r\n]+)`/g;
 const BOLD_PATTERN = /\*\*([^*\r\n]+)\*\*/g;
 const ITALIC_PATTERN = /\*([^*\s][^*\r\n]*)\*/g;
-const LINK_PATTERN = /\[([^\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
+const WHITESPACE_PATTERN = /\s/u;
+const HTTP_PREFIX = 'http:' + '//';
+const HTTPS_PREFIX = 'https:' + '//';
 
 interface InlineMatch {
   start: number;
@@ -33,16 +35,63 @@ function matches(
   }));
 }
 
+function linkMatches(line: string): InlineMatch[] {
+  const found: InlineMatch[] = [];
+  let cursor = 0;
+  while (cursor < line.length) {
+    const start = line.indexOf('[', cursor);
+    if (start < 0) break;
+    const labelEnd = line.indexOf(']', start + 1);
+    if (labelEnd < 0) break;
+    const lineBreak = line.slice(start + 1, labelEnd).search(/[\r\n]/u);
+    if (lineBreak >= 0) {
+      cursor = start + lineBreak + 2;
+      continue;
+    }
+    if (labelEnd === start + 1 || line[labelEnd + 1] !== '(') {
+      cursor = labelEnd + 1;
+      continue;
+    }
+
+    const hrefStart = labelEnd + 2;
+    if (!line.startsWith(HTTP_PREFIX, hrefStart) && !line.startsWith(HTTPS_PREFIX, hrefStart)) {
+      cursor = labelEnd + 1;
+      continue;
+    }
+    let hrefEnd = hrefStart;
+    while (
+      hrefEnd < line.length
+      && line[hrefEnd] !== ')'
+      && !WHITESPACE_PATTERN.test(line[hrefEnd])
+    ) {
+      hrefEnd += 1;
+    }
+    if (line[hrefEnd] !== ')') {
+      cursor = hrefEnd + 1;
+      continue;
+    }
+
+    found.push({
+      start,
+      end: hrefEnd + 1,
+      priority: 3,
+      token: {
+        kind: 'link',
+        text: line.slice(start + 1, labelEnd),
+        href: line.slice(hrefStart, hrefEnd),
+      },
+    });
+    cursor = hrefEnd + 1;
+  }
+  return found;
+}
+
 function inlineMatches(line: string): InlineMatch[] {
   return [
     ...matches(line, CODE_PATTERN, 0, (match) => ({ kind: 'code', text: match[1] })),
     ...matches(line, BOLD_PATTERN, 1, (match) => ({ kind: 'bold', text: match[1] })),
     ...matches(line, ITALIC_PATTERN, 2, (match) => ({ kind: 'italic', text: match[1] })),
-    ...matches(line, LINK_PATTERN, 3, (match) => ({
-      kind: 'link',
-      text: match[1],
-      href: match[2],
-    })),
+    ...linkMatches(line),
   ].sort((left, right) => left.start - right.start || left.priority - right.priority);
 }
 

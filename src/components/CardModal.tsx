@@ -56,6 +56,7 @@ const DRIFT_DATE_FORMAT = new Intl.DateTimeFormat('en-US', {
   year: 'numeric',
   timeZone: 'UTC',
 });
+type DriftAction = 'check' | 'accept' | null;
 
 /**
  * Compact graveyard context for the advisory chip. Server validation already
@@ -173,9 +174,9 @@ function SimilarPanel({
   if (items.length === 0) return null;
   return (
     <div className="similar">
-      <span className="similar-head" role="status">
+      <output className="similar-head">
         {items.length} similar {items.length === 1 ? 'item' : 'items'} — is this a duplicate?
-      </span>
+      </output>
       <div className="similar-list">
         {items.map((item) => (
           <SimilarRow key={similarKey(item)} item={item} onDismiss={onDismiss} />
@@ -189,7 +190,7 @@ function SimilarPanel({
 }
 
 function driftButtonLabel(
-  action: 'check' | 'accept' | null,
+  action: DriftAction,
   multiple: boolean,
 ): string {
   if (action === 'check') return 'Checking…';
@@ -204,20 +205,20 @@ function DriftStatus({
   multiple,
   result,
 }: Readonly<{
-  action: 'check' | 'accept' | null;
+  action: DriftAction;
   error: string | null;
   acceptedAt: string;
   multiple: boolean;
   result: DriftResult | null;
 }>) {
   if (action === 'check') {
-    return <span className="flash busy" role="status">Checking upstream…</span>;
+    return <output className="flash busy">Checking upstream…</output>;
   }
   if (action === 'accept') {
     return (
-      <span className="flash busy" role="status">
+      <output className="flash busy">
         Updating the comparison baseline…
-      </span>
+      </output>
     );
   }
   if (error) {
@@ -229,20 +230,20 @@ function DriftStatus({
   }
   if (acceptedAt !== '') {
     return (
-      <span className="flash ok" role="status">
+      <output className="flash ok">
         Baseline updated {DRIFT_DATE_FORMAT.format(new Date(acceptedAt))}.
-      </span>
+      </output>
     );
   }
   if (multiple && !result) {
     return (
-      <span className="flash" role="status">
+      <output className="flash">
         Choose the imported issue, then check it.
-      </span>
+      </output>
     );
   }
   if (!result) return null;
-  return <span className="flash ok" role="status">{driftMessage(result)}</span>;
+  return <output className="flash ok">{driftMessage(result)}</output>;
 }
 
 function DriftDetails({
@@ -307,7 +308,7 @@ interface DriftReviewProps {
   selectedProvenance: ImportProvenance | undefined;
   result: DriftResult | null;
   error: string | null;
-  action: 'check' | 'accept' | null;
+  action: DriftAction;
   acceptedAt: string;
   busy: boolean;
   onLinkChange: (link: string) => void;
@@ -410,9 +411,7 @@ export function CardModal({
   const [selectedExternalKey, setSelectedExternalKey] = useState('');
   const [driftResult, setDriftResult] = useState<DriftResult | null>(null);
   const [driftError, setDriftError] = useState<string | null>(null);
-  const [driftAction, setDriftAction] = useState<
-    'check' | 'accept' | null
-  >(null);
+  const [driftAction, setDriftAction] = useState<DriftAction>(null);
   const [acceptedAt, setAcceptedAt] = useState('');
   const driftBusy = driftAction !== null;
   const draftCancel = useRef<(() => void) | null>(null);
