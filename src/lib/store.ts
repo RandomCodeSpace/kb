@@ -295,6 +295,82 @@ export interface LocalStoreOptions {
   locks?: LockManager | null;
 }
 
+interface StoredBoardSource {
+  raw: string | null;
+  legacy: boolean;
+}
+
+function selectStoredBoardSource(
+  storage: Storage,
+  framedKey: string,
+  legacyKey: string,
+  preRenameKey: string,
+): StoredBoardSource {
+  const framed = storage.getItem(framedKey);
+  const legacyKB = framed === null ? storage.getItem(legacyKey) : null;
+  const preRename = framed === null && legacyKB === null
+    ? storage.getItem(preRenameKey)
+    : null;
+  const raw = framed ?? legacyKB ?? preRename;
+  return { raw, legacy: framed === null && raw !== null };
+}
+
+function validStoredGeneration(value: unknown): boolean {
+  return value === undefined || (
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+  );
+}
+
+function snapshotFromEnvelope(parsed: Record<string, unknown>): DurableSnapshot | null {
+  if (
+    (parsed.version !== 2 && parsed.version !== ENVELOPE_VERSION) ||
+    !isBoard(parsed.board) ||
+    !isCanonicalRecord(parsed.canonical_ids, parsed.board)
+  ) return null;
+  const liveCanonicalIDs = new Set(Object.values(parsed.canonical_ids));
+  if (!isDeletedCanonicalIDs(parsed.deleted_canonical_ids, liveCanonicalIDs)) return null;
+  if (parsed.pending_board_write !== undefined && !isPendingBoardWrite(parsed.pending_board_write)) {
+    return null;
+  }
+  if (!validStoredGeneration(parsed.generation)) return null;
+  const generation = typeof parsed.generation === 'number' ? parsed.generation : 0;
+  return {
+    board: parsed.board,
+    seeded: false,
+    canonicalTaskIDs: new Map(Object.entries(parsed.canonical_ids)),
+    deletedCanonicalIDs: new Set(parsed.deleted_canonical_ids ?? []),
+    migratedRaw: parsed.identity_recovery_needed === true,
+    pendingBoardWrite: parsed.pending_board_write ?? null,
+    generation,
+    version: { present: true, generation },
+  };
+}
+
+function snapshotFromRawBoard(board: Board): DurableSnapshot {
+  return {
+    board,
+    seeded: false,
+    canonicalTaskIDs: new Map(),
+    deletedCanonicalIDs: new Set(),
+    migratedRaw: true,
+    pendingBoardWrite: null,
+    generation: 0,
+    version: { present: true, generation: 0 },
+  };
+}
+
+function parseStoredSnapshot(raw: string): DurableSnapshot | null {
+  const parsed = JSON.parse(raw) as unknown;
+  if (
+    isRecord(parsed) &&
+    (parsed.version === 2 || parsed.version === ENVELOPE_VERSION) &&
+    isBoard(parsed.board)
+  ) {
+    return snapshotFromEnvelope(parsed);
+  }
+  return isBoard(parsed) ? snapshotFromRawBoard(parsed) : null;
+}
+
 export class LocalStore implements BoardStore {
   private readonly ns: string;
   private readonly key: string;
@@ -333,79 +409,15 @@ export class LocalStore implements BoardStore {
     legacy: boolean;
   } {
     try {
-      const framed = this.storage.getItem(this.key);
-      const legacyKB = framed === null ? this.storage.getItem(this.legacyKey) : null;
-      const preRename = framed === null && legacyKB === null
-        ? this.storage.getItem(this.preRenameKey)
-        : null;
-      const raw = framed ?? legacyKB ?? preRename;
-      const legacy = framed === null && raw !== null;
+      const { raw, legacy } = selectStoredBoardSource(
+        this.storage,
+        this.key,
+        this.legacyKey,
+        this.preRenameKey,
+      );
       if (!raw) return { loaded: null, legacy };
-      const parsed = JSON.parse(raw) as unknown;
-      if (isRecord(parsed) && (parsed.version === 2 || parsed.version === ENVELOPE_VERSION) && isBoard(parsed.board)) {
-        if (!isCanonicalRecord(parsed.canonical_ids, parsed.board)) {
-          return { loaded: this.invalidStoredBoard(strict), legacy };
-        }
-        const liveCanonicalIDs = new Set(Object.values(parsed.canonical_ids));
-        if (!isDeletedCanonicalIDs(parsed.deleted_canonical_ids, liveCanonicalIDs)) {
-          return { loaded: this.invalidStoredBoard(strict), legacy };
-        }
-        if (parsed.pending_board_write !== undefined && !isPendingBoardWrite(parsed.pending_board_write)) {
-          return { loaded: this.invalidStoredBoard(strict), legacy };
-        }
-        if (
-          parsed.generation !== undefined &&
-          (typeof parsed.generation !== 'number' ||
-            !Number.isSafeInteger(parsed.generation) ||
-            parsed.generation < 0)
-        ) return { loaded: this.invalidStoredBoard(strict), legacy };
-        const envelope: BoardEnvelope = {
-          version: ENVELOPE_VERSION,
-          ...(parsed.generation !== undefined ? { generation: parsed.generation } : {}),
-          board: parsed.board,
-          canonical_ids: parsed.canonical_ids,
-          ...(parsed.deleted_canonical_ids
-            ? { deleted_canonical_ids: parsed.deleted_canonical_ids }
-            : {}),
-          ...(parsed.identity_recovery_needed === true
-            ? { identity_recovery_needed: true }
-            : {}),
-          ...(parsed.pending_board_write
-            ? { pending_board_write: parsed.pending_board_write }
-            : {}),
-        };
-        const canonicalTaskIDs = new Map(Object.entries(envelope.canonical_ids));
-        const generation = envelope.generation ?? 0;
-        const loaded: DurableSnapshot = {
-          board: envelope.board,
-          seeded: false,
-          canonicalTaskIDs,
-          deletedCanonicalIDs: new Set(envelope.deleted_canonical_ids ?? []),
-          migratedRaw: envelope.identity_recovery_needed === true,
-          pendingBoardWrite: envelope.pending_board_write ?? null,
-          generation,
-          version: { present: true, generation },
-        };
-        return { loaded, legacy };
-      }
-
-      // Pre-G003 values were a raw Board. Treat the migration logically here;
-      // the next locked mutation publishes the v3 envelope atomically.
-      if (!isBoard(parsed)) {
-        return { loaded: this.invalidStoredBoard(strict), legacy };
-      }
-      const board = parsed;
-      const loaded: DurableSnapshot = {
-        board,
-        seeded: false,
-        canonicalTaskIDs: new Map(),
-        deletedCanonicalIDs: new Set(),
-        migratedRaw: true,
-        pendingBoardWrite: null,
-        generation: 0,
-        version: { present: true, generation: 0 },
-      };
-      return { loaded, legacy };
+      const loaded = parseStoredSnapshot(raw);
+      return { loaded: loaded ?? this.invalidStoredBoard(strict), legacy };
     } catch (error) {
       if (strict) throw error;
       return { loaded: null, legacy: false };

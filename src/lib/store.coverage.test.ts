@@ -33,11 +33,65 @@ function task(id: string): Task {
   };
 }
 
+function storageEntries(storage: Storage) {
+  return Array.from({ length: storage.length }, (_value, index) => storage.key(index)!)
+    .sort()
+    .map((key) => [key, storage.getItem(key)] as const);
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe('local store residual validation branches', () => {
+  it.each([
+    {
+      name: 'malformed framed data blocks legacy and pre-rename data',
+      namespace: 'malformed-framed-precedence',
+      sources: ['framed', 'legacy', 'preRename'] as const,
+    },
+    {
+      name: 'malformed legacy data blocks pre-rename data',
+      namespace: 'malformed-legacy-precedence',
+      sources: ['legacy', 'preRename'] as const,
+    },
+  ])('$name without mutating any source bytes', ({ namespace, sources }) => {
+    const storage = new MemoryStorage();
+    const keys = {
+      framed: namespaceStorageKey('kb.board.v1', namespace),
+      legacy: legacyNamespaceStorageKey('kb.board.v1', namespace),
+      preRename: `webtui.board.v1.${namespace}`,
+    };
+    const bytes = {
+      framed: '{"version":3,"board":{"title":"invalid preferred","tasks":[]},"canonical_ids":[]}',
+      legacy: sources[0] === 'legacy'
+        ? '{"version":3,"board":{"title":"invalid preferred","tasks":[]},"canonical_ids":[]}'
+        : '{ "title": "legacy", "tasks": [] }',
+      preRename: '{\n  "title": "pre-rename",\n  "tasks": []\n}',
+    };
+    for (const source of sources) storage.setItem(keys[source], bytes[source]);
+    const before = storageEntries(storage);
+    const getItem = vi.spyOn(storage, 'getItem');
+    const setItem = vi.spyOn(storage, 'setItem');
+    const removeItem = vi.spyOn(storage, 'removeItem');
+    const local = new LocalStore(namespace, { storage, locks: null });
+    const expectedReads = sources[0] === 'framed'
+      ? [keys.framed]
+      : [keys.framed, keys.legacy];
+
+    expect(local.load()).toBeNull();
+    expect(getItem.mock.calls.map(([key]) => key)).toEqual(expectedReads);
+    getItem.mockClear();
+    expect(storageEntries(storage)).toEqual(before);
+    getItem.mockClear();
+    expect(() => local.loadSnapshot()).toThrow('stored board envelope is invalid');
+    expect(getItem.mock.calls.map(([key]) => key)).toEqual(expectedReads);
+    getItem.mockClear();
+    expect(storageEntries(storage)).toEqual(before);
+    expect(setItem).not.toHaveBeenCalled();
+    expect(removeItem).not.toHaveBeenCalled();
+  });
+
   it('constructs safely without navigator lock support', () => {
     vi.stubGlobal('navigator', undefined);
     const store = new LocalStore('no-navigator', { storage: new MemoryStorage() });

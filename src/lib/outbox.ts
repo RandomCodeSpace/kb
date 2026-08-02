@@ -54,6 +54,10 @@ type NewOutboxRecord =
   | Omit<TombstoneRecord, 'version' | 'generation'>
   | Omit<ImportRecord, 'version' | 'generation'>;
 
+type DeliverableRecord = TombstoneRecord | ImportRecord;
+type SelectedRecord = { key: string; record: DeliverableRecord };
+type DeliveryOutcome = 'success' | 'retry' | 'reauth' | 'blocked';
+
 export type OutboxStatus =
   | { kind: 'idle' }
   | { kind: 'blocked'; message: string }
@@ -294,6 +298,12 @@ function compareCodeUnits(left: string, right: string): number {
   return Number(left > right) - Number(left < right);
 }
 
+function deliveryFailureOutcome(error: unknown): Exclude<DeliveryOutcome, 'success'> {
+  if (error instanceof ReauthRequiredError) return 'reauth';
+  const status = isRecord(error) && typeof error.status === 'number' ? error.status : 0;
+  return status === 0 || status >= 500 ? 'retry' : 'blocked';
+}
+
 /** Durable, credential-free metadata journal for one immutable user namespace. */
 export class MetadataOutbox {
   private readonly storage: Storage;
@@ -325,29 +335,33 @@ export class MetadataOutbox {
    */
   private migrateLegacyRecords(): void {
     try {
-      const candidates: string[] = [];
-      for (let i = 0; i < this.storage.length; i += 1) {
-        const key = this.storage.key(i);
-        if (key?.startsWith(`${PREFIX}.`)) candidates.push(key);
-      }
-      for (const key of candidates) {
-        const record = parseRecord(this.storage.getItem(key));
-        if (!record) continue;
-        const encodedLogical = encodeURIComponent(logicalKey(record));
-        const expected = legacyNamespaceStorageKey(PREFIX, this.ns, encodedLogical);
-        if (key !== expected) continue;
-        const target = recordKey(this.ns, logicalKey(record));
-        if (this.storage.getItem(target) === null) {
-          try {
-            this.write(target, record);
-          } catch (error) {
-            if (error instanceof TypeError) continue;
-            throw error;
-          }
-        }
-      }
+      for (const key of this.legacyCandidateKeys()) this.migrateLegacyRecord(key);
     } catch {
       // Storage failures are surfaced by the normal record operations.
+    }
+  }
+
+  private legacyCandidateKeys(): string[] {
+    const candidates: string[] = [];
+    for (let i = 0; i < this.storage.length; i += 1) {
+      const key = this.storage.key(i);
+      if (key?.startsWith(`${PREFIX}.`)) candidates.push(key);
+    }
+    return candidates;
+  }
+
+  private migrateLegacyRecord(key: string): void {
+    const record = parseRecord(this.storage.getItem(key));
+    if (!record) return;
+    const encodedLogical = encodeURIComponent(logicalKey(record));
+    const expected = legacyNamespaceStorageKey(PREFIX, this.ns, encodedLogical);
+    if (key !== expected) return;
+    const target = recordKey(this.ns, logicalKey(record));
+    if (this.storage.getItem(target) !== null) return;
+    try {
+      this.write(target, record);
+    } catch (error) {
+      if (!(error instanceof TypeError)) throw error;
     }
   }
 
@@ -449,33 +463,43 @@ export class MetadataOutbox {
       for (const key of this.keys()) {
         const record = parseRecord(this.storage.getItem(key));
         if (!record) continue;
-        if (record.kind === 'import') {
-          if (record.state === 'sending') {
-            this.write(key, this.fresh({ ...record, state: 'retry' }));
-          }
-          continue;
-        }
-        const task = board.tasks.find((candidate) => candidate.id === record.clientTaskId);
-        if (!task || task.status !== 'cancelled') {
-          this.storage.removeItem(key);
-          continue;
-        }
-        if (record.state === 'sending') {
-          this.write(key, this.fresh({ ...record, state: 'retry' }));
-          continue;
-        }
-        if (record.state !== 'awaiting_canonical') continue;
-        const canonicalTaskId = canonicalTaskIDs.get(record.clientTaskId);
-        if (!canonicalTaskId) continue;
-        this.write(key, this.fresh({
-          kind: 'tombstone',
-          state: 'queued',
-          clientTaskId: record.clientTaskId,
-          canonicalTaskId,
-          reason: record.reason,
-        }));
+        this.reconcileRecord(key, record, board, canonicalTaskIDs);
       }
     });
+  }
+
+  private reconcileRecord(
+    key: string,
+    record: OutboxRecord,
+    board: Board,
+    canonicalTaskIDs: ReadonlyMap<string, string>,
+  ): void {
+    if (record.kind === 'import') {
+      this.retryInterruptedRecord(key, record);
+      return;
+    }
+    const task = board.tasks.find((candidate) => candidate.id === record.clientTaskId);
+    if (task?.status !== 'cancelled') {
+      this.storage.removeItem(key);
+      return;
+    }
+    if (this.retryInterruptedRecord(key, record)) return;
+    if (record.state !== 'awaiting_canonical') return;
+    const canonicalTaskId = canonicalTaskIDs.get(record.clientTaskId);
+    if (!canonicalTaskId) return;
+    this.write(key, this.fresh({
+      kind: 'tombstone',
+      state: 'queued',
+      clientTaskId: record.clientTaskId,
+      canonicalTaskId,
+      reason: record.reason,
+    }));
+  }
+
+  private retryInterruptedRecord(key: string, record: OutboxRecord): boolean {
+    if (record.state !== 'sending') return false;
+    this.write(key, this.fresh({ ...record, state: 'retry' }));
+    return true;
   }
 
   /** Restore and purge both cancel awaiting and already-deliverable intent. */
@@ -491,7 +515,7 @@ export class MetadataOutbox {
     await this.locked(() => this.storage.removeItem(key));
   }
 
-  private selectUnlocked(): { key: string; record: TombstoneRecord | ImportRecord } | null {
+  private selectUnlocked(): SelectedRecord | null {
     for (const key of this.keys()) {
       const record = parseRecord(this.storage.getItem(key));
       if (
@@ -510,8 +534,8 @@ export class MetadataOutbox {
   }
 
   private completeUnlocked(
-    selected: { key: string; record: TombstoneRecord | ImportRecord },
-    outcome: 'success' | 'retry' | 'reauth' | 'blocked',
+    selected: SelectedRecord,
+    outcome: DeliveryOutcome,
     error?: unknown,
   ): boolean {
     const current = parseRecord(this.storage.getItem(selected.key));
@@ -538,6 +562,29 @@ export class MetadataOutbox {
     return true;
   }
 
+  private dispatchDelivery(identity: Identity, record: DeliverableRecord): Promise<void> {
+    return record.kind === 'tombstone'
+      ? this.sendTombstone(identity, record.canonicalTaskId, record.reason)
+      : this.sendImport(identity, { source: record.source, items: [record.item] });
+  }
+
+  private async drainUnlocked(identity: Identity, session: number): Promise<void> {
+    for (;;) {
+      if (session !== this.session) return;
+      const selected = this.selectUnlocked();
+      if (!selected) return;
+      try {
+        await this.dispatchDelivery(identity, selected.record);
+        if (session !== this.session) return;
+        if (!this.completeUnlocked(selected, 'success')) return;
+      } catch (error) {
+        if (session !== this.session) return;
+        this.completeUnlocked(selected, deliveryFailureOutcome(error), error);
+        return;
+      }
+    }
+  }
+
   async drain(identity: Identity): Promise<void> {
     if (this.draining) return;
     if (!this.locks?.request) {
@@ -550,46 +597,7 @@ export class MetadataOutbox {
     this.draining = true;
     const session = this.session;
     try {
-      await this.locks.request(this.lockName(), async () => {
-        for (;;) {
-          if (session !== this.session) return;
-          const selected = this.selectUnlocked();
-          if (!selected) return;
-          try {
-            if (selected.record.kind === 'tombstone') {
-              await this.sendTombstone(
-                identity,
-                selected.record.canonicalTaskId,
-                selected.record.reason,
-              );
-            } else {
-              await this.sendImport(identity, {
-                source: selected.record.source,
-                items: [selected.record.item],
-              });
-            }
-            if (session !== this.session) return;
-            if (!this.completeUnlocked(selected, 'success')) return;
-          } catch (error) {
-            if (session !== this.session) return;
-            if (error instanceof ReauthRequiredError) {
-              if (!this.completeUnlocked(selected, 'reauth', error)) return;
-            } else {
-              const status =
-                typeof error === 'object' && error !== null &&
-                typeof (error as { status?: unknown }).status === 'number'
-                  ? (error as { status: number }).status
-                  : 0;
-              if (!this.completeUnlocked(
-                selected,
-                status === 0 || status >= 500 ? 'retry' : 'blocked',
-                error,
-              )) return;
-            }
-            return;
-          }
-        }
-      });
+      await this.locks.request(this.lockName(), () => this.drainUnlocked(identity, session));
     } finally {
       this.draining = false;
     }

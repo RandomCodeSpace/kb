@@ -89,6 +89,45 @@ function generations() {
   return () => `generation-${++value}`;
 }
 
+type StorageTrace =
+  | { op: 'set'; key: string; value: string }
+  | { op: 'remove'; key: string; value: string | null };
+
+function traceStorage(target: MemoryStorage) {
+  const trace: StorageTrace[] = [];
+  vi.spyOn(target, 'setItem').mockImplementation((key, value) => {
+    const normalized = String(value);
+    trace.push({ op: 'set', key, value: normalized });
+    target.values.set(key, normalized);
+  });
+  vi.spyOn(target, 'removeItem').mockImplementation((key) => {
+    trace.push({ op: 'remove', key, value: target.getItem(key) });
+    target.values.delete(key);
+  });
+  return trace;
+}
+
+function outboxImportKey(externalKey: string) {
+  return `kb.outbox.v1.ns.5:alice.import%3A${externalKey}`;
+}
+
+function rawImportRecord(
+  externalKey: string,
+  generation: string,
+  state: 'sending' | 'retry',
+  error?: string,
+) {
+  return JSON.stringify({
+    version: 1,
+    generation,
+    kind: 'import',
+    state,
+    source: 'ordering',
+    item: importRequestFor(externalKey).items[0],
+    ...(error === undefined ? {} : { error }),
+  });
+}
+
 let storage: MemoryStorage;
 let locks: SerialLocks;
 
@@ -98,6 +137,179 @@ beforeEach(() => {
 });
 
 describe('MetadataOutbox', () => {
+  it('stops after the first failed record and preserves later queued records byte-for-byte', async () => {
+    const statuses: Array<{ kind: string; message?: string }> = [];
+    const sent: string[] = [];
+    const outbox = new MetadataOutbox('alice', {
+      storage,
+      locks: locks as unknown as LockManager,
+      generation: generations(),
+      onStatus: (status) => statuses.push(status),
+      sendImport: async (_identity, request) => {
+        const externalKey = request.items[0]!.external_key;
+        sent.push(externalKey);
+        throw Object.assign(new Error(`${externalKey} failed`), { status: 503 });
+      },
+    });
+    for (const externalKey of ['01', '02', '03']) {
+      await outbox.enqueueImportLinks(importRequestFor(externalKey));
+    }
+    const keys = ['01', '02', '03'].map(outboxImportKey);
+    const before = keys.map((key) => storage.getItem(key));
+    const trace = traceStorage(storage);
+
+    await expect(drainAndReport(outbox, identity, (status) => statuses.push(status)))
+      .resolves.toBe(true);
+
+    expect(sent).toEqual(['01']);
+    expect(trace).toEqual([
+      {
+        op: 'set',
+        key: keys[0],
+        value: rawImportRecord('01', 'generation-4', 'sending'),
+      },
+      {
+        op: 'set',
+        key: keys[0],
+        value: rawImportRecord('01', 'generation-5', 'retry', '01 failed'),
+      },
+    ]);
+    expect(keys.map((key) => storage.getItem(key))).toEqual([
+      rawImportRecord('01', 'generation-5', 'retry', '01 failed'),
+      before[1],
+      before[2],
+    ]);
+    expect(outbox.records().map(({ generation, state }) => ({ generation, state }))).toEqual([
+      { generation: 'generation-5', state: 'retry' },
+      { generation: 'generation-2', state: 'queued' },
+      { generation: 'generation-3', state: 'queued' },
+    ]);
+    expect(statuses).toEqual([{ kind: 'retry', message: '01 failed' }]);
+  });
+
+  it('removes the first successful record then stops after the second record retries', async () => {
+    const statuses: Array<{ kind: string; message?: string }> = [];
+    const sent: string[] = [];
+    const outbox = new MetadataOutbox('alice', {
+      storage,
+      locks: locks as unknown as LockManager,
+      generation: generations(),
+      onStatus: (status) => statuses.push(status),
+      sendImport: async (_identity, request) => {
+        const externalKey = request.items[0]!.external_key;
+        sent.push(externalKey);
+        if (externalKey === '02') {
+          throw Object.assign(new Error('02 failed'), { status: 503 });
+        }
+      },
+    });
+    for (const externalKey of ['01', '02', '03']) {
+      await outbox.enqueueImportLinks(importRequestFor(externalKey));
+    }
+    const keys = ['01', '02', '03'].map(outboxImportKey);
+    const thirdBytes = storage.getItem(keys[2]);
+    const trace = traceStorage(storage);
+
+    await expect(drainAndReport(outbox, identity, (status) => statuses.push(status)))
+      .resolves.toBe(true);
+
+    expect(sent).toEqual(['01', '02']);
+    expect(trace).toEqual([
+      {
+        op: 'set',
+        key: keys[0],
+        value: rawImportRecord('01', 'generation-4', 'sending'),
+      },
+      { op: 'remove', key: keys[0], value: rawImportRecord('01', 'generation-4', 'sending') },
+      {
+        op: 'set',
+        key: keys[1],
+        value: rawImportRecord('02', 'generation-5', 'sending'),
+      },
+      {
+        op: 'set',
+        key: keys[1],
+        value: rawImportRecord('02', 'generation-6', 'retry', '02 failed'),
+      },
+    ]);
+    expect(keys.map((key) => storage.getItem(key))).toEqual([
+      null,
+      rawImportRecord('02', 'generation-6', 'retry', '02 failed'),
+      thirdBytes,
+    ]);
+    expect(outbox.records().map(({ generation, state }) => ({ generation, state }))).toEqual([
+      { generation: 'generation-6', state: 'retry' },
+      { generation: 'generation-3', state: 'queued' },
+    ]);
+    expect(statuses).toEqual([
+      { kind: 'idle' },
+      { kind: 'retry', message: '02 failed' },
+    ]);
+  });
+
+  it('preserves queued bytes after Web Lock rejection and drains once after lock recovery', async () => {
+    const nextGeneration = generations();
+    const setup = new MetadataOutbox('alice', {
+      storage, locks: locks as unknown as LockManager, generation: nextGeneration,
+    });
+    await setup.enqueueImportLinks(importRequestFor('lock-retry'));
+    const key = outboxImportKey('lock-retry');
+    const queuedBytes = storage.getItem(key);
+    const statuses: Array<{ kind: string; message?: string }> = [];
+    const sent: string[] = [];
+    const sendImport = vi.fn(async (_identity, request) => {
+      sent.push(request.items[0]!.external_key);
+    });
+    const trace = traceStorage(storage);
+    const rejected = new MetadataOutbox('alice', {
+      storage,
+      locks: {
+        request: () => Promise.reject(new Error('lock manager rejected request')),
+      } as unknown as LockManager,
+      generation: nextGeneration,
+      sendImport,
+    });
+
+    await expect(drainAndReport(rejected, identity, (status) => statuses.push(status)))
+      .resolves.toBe(false);
+    expect(sendImport).toHaveBeenCalledTimes(0);
+    expect(sent).toEqual([]);
+    expect(trace).toEqual([]);
+    expect([...storage.values]).toEqual([[key, queuedBytes]]);
+    expect(statuses).toEqual([{
+      kind: 'blocked',
+      message: 'metadata delivery infrastructure failed: lock manager rejected request',
+    }]);
+
+    const recovered = new MetadataOutbox('alice', {
+      storage,
+      locks: locks as unknown as LockManager,
+      generation: nextGeneration,
+      onStatus: (status) => statuses.push(status),
+      sendImport,
+    });
+    await expect(drainAndReport(recovered, identity, (status) => statuses.push(status)))
+      .resolves.toBe(true);
+    expect(sendImport).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual(['lock-retry']);
+    expect(trace).toEqual([
+      {
+        op: 'set',
+        key,
+        value: rawImportRecord('lock-retry', 'generation-2', 'sending'),
+      },
+      { op: 'remove', key, value: rawImportRecord('lock-retry', 'generation-2', 'sending') },
+    ]);
+    expect(storage.values.size).toBe(0);
+    expect(statuses).toEqual([
+      {
+        kind: 'blocked',
+        message: 'metadata delivery infrastructure failed: lock manager rejected request',
+      },
+      { kind: 'idle' },
+    ]);
+  });
+
   it('lists mixed external keys in storage-key code-unit order regardless of insertion order', async () => {
     const outbox = new MetadataOutbox('alice', {
       storage, locks: locks as unknown as LockManager, generation: generations(),
@@ -762,6 +974,32 @@ describe('MetadataOutbox', () => {
     await draining;
     expect(JSON.stringify([...storage.values])).toBe(before);
     expect(statuses).not.toHaveBeenCalled();
+  });
+
+  it('completes a resolved delivery before a subsequently queued cancellation', async () => {
+    const statuses = vi.fn();
+    const started = deferred<void>();
+    const sendImport = vi.fn(() => {
+      started.resolve();
+      return Promise.resolve();
+    });
+    const outbox = new MetadataOutbox('alice', {
+      storage,
+      locks: locks as unknown as LockManager,
+      generation: generations(),
+      sendImport,
+      onStatus: statuses,
+    });
+    await outbox.enqueueImportLinks(importRequest);
+
+    const draining = outbox.drain(identity);
+    await started.promise;
+    queueMicrotask(() => outbox.cancel());
+    await draining;
+
+    expect(outbox.records()).toEqual([]);
+    expect(statuses).toHaveBeenCalledOnce();
+    expect(statuses).toHaveBeenCalledWith({ kind: 'idle' });
   });
 
   it('surfaces reconstructed blocked state immediately', async () => {
