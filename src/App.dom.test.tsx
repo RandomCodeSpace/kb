@@ -5,6 +5,21 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Board, Task } from './lib/model';
 import type { Identity } from './lib/auth';
+import type { DurableSnapshot, DurableVersion, PendingBoardWrite } from './lib/store';
+import appSource from './App.tsx?raw';
+
+type SaveAcknowledgementFixture = {
+  pushed: Board;
+  taskIDs: ReadonlyMap<string, string>;
+  conflicts?: readonly string[];
+  operationID?: string;
+  isCurrent?: () => boolean;
+  generation?: number;
+  durableVersion?: DurableVersion;
+  durableSnapshot?: DurableSnapshot;
+};
+
+type SaveAcknowledgementCallback = (acknowledgement: SaveAcknowledgementFixture) => unknown;
 
 const state = vi.hoisted(() => ({
   identity: null as Identity | null,
@@ -21,7 +36,7 @@ const state = vi.hoisted(() => ({
   detectResolve: null as null | ((value: boolean) => void),
   remoteBoard: null as Board | null,
   migratedRaw: false,
-  pendingWrite: null as null | Record<string, unknown>,
+  pendingWrite: null as Partial<PendingBoardWrite> | null,
   startupMode: 'normal' as 'normal' | 'merged' | 'throw' | 'callbacks',
   pendingMode: 'clean' as 'clean' | 'push' | 'retry' | 'throw',
   legacyMode: 'clean' as 'clean' | 'push' | 'failed' | 'throw',
@@ -44,6 +59,19 @@ const state = vi.hoisted(() => ({
   clearedIdentity: 0,
   dirtyWrites: [] as boolean[],
   exported: [] as string[],
+  remoteAcknowledgement: null as SaveAcknowledgementFixture | null,
+  saveAcknowledgements: [] as Array<{
+    surface: 'immediate' | 'debounced';
+    sent: Board;
+    payload: SaveAcknowledgementFixture;
+  }>,
+  acknowledgementPersists: [] as Array<{
+    board: Board;
+    taskIDs: ReadonlyMap<string, string>;
+    expectedVersion: DurableVersion;
+    operationID: string | undefined;
+    current: boolean;
+  }>,
   remoteInstances: [] as Array<{ flush: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn> }>,
   outboxInstances: [] as Array<{ cancel: ReturnType<typeof vi.fn> }>,
   bursts: [] as Array<[number, number, number]>,
@@ -72,7 +100,10 @@ function board(tasks: Task[] = [task()]): Board {
   return { title: 'Test board', tasks };
 }
 
-function snapshot(nextBoard = state.board ?? board(), generation = 0) {
+function snapshot(
+  nextBoard: Board = state.board ?? board(),
+  generation = 0,
+): DurableSnapshot {
   return {
     board: nextBoard,
     seeded: false,
@@ -81,10 +112,53 @@ function snapshot(nextBoard = state.board ?? board(), generation = 0) {
       : new Map(nextBoard.tasks.map((item) => [item.id, `canonical-${item.id}`])),
     deletedCanonicalIDs: new Set<string>(),
     migratedRaw: state.migratedRaw,
-    pendingBoardWrite: state.pendingWrite,
+    pendingBoardWrite: state.pendingWrite as PendingBoardWrite | null,
     generation,
     version: { present: true, generation },
   };
+}
+
+function acknowledgementFixture(
+  pushed: Board,
+  canonicalID: string,
+  durableGeneration: number,
+  overrides: Partial<SaveAcknowledgementFixture> = {},
+): SaveAcknowledgementFixture {
+  const taskIDs = new Map(pushed.tasks.map((item) => [item.id, canonicalID]));
+  return {
+    pushed,
+    taskIDs,
+    conflicts: [],
+    operationID: 'ack-operation',
+    isCurrent: () => true,
+    generation: durableGeneration - 2,
+    durableVersion: { present: true, generation: durableGeneration - 1 },
+    durableSnapshot: {
+      ...snapshot(pushed, durableGeneration),
+      canonicalTaskIDs: taskIDs,
+    },
+    ...overrides,
+  };
+}
+
+function expectSaveDelivery(
+  surface: 'immediate' | 'debounced',
+  sent: Board,
+  payload: SaveAcknowledgementFixture,
+): void {
+  expect(state.saveAcknowledgements).toHaveLength(1);
+  const delivery = state.saveAcknowledgements[0]!;
+  expect(delivery.surface).toBe(surface);
+  expect(delivery.sent).toEqual(sent);
+  expect({
+    ...delivery.payload,
+    taskIDs: [...delivery.payload.taskIDs],
+    isCurrent: delivery.payload.isCurrent?.(),
+  }).toEqual({
+    ...payload,
+    taskIDs: [...payload.taskIDs],
+    isCurrent: payload.isCurrent?.(),
+  });
 }
 
 vi.mock('./lib/auth', () => {
@@ -144,6 +218,16 @@ vi.mock('./lib/store', () => {
       return this.persist(nextBoard, ids, deleted, ...rest);
     }
     saveAcknowledgement(nextBoard: Board, ids: ReadonlyMap<string, string>, deleted: ReadonlySet<string>, ...rest: unknown[]) {
+      const expectedVersion = rest[0] as DurableVersion;
+      const operationID = rest[1] as string | undefined;
+      const guard = rest[2] as () => boolean;
+      state.acknowledgementPersists.push({
+        board: nextBoard,
+        taskIDs: new Map(ids),
+        expectedVersion,
+        operationID,
+        current: guard(),
+      });
       return this.persist(nextBoard, ids, deleted, ...rest);
     }
     completeIdentityRecovery(nextBoard: Board, ids: ReadonlyMap<string, string>, deleted: ReadonlySet<string>, ...rest: unknown[]) {
@@ -194,31 +278,58 @@ vi.mock('./lib/remote', () => {
       if (state.prepareError) throw state.prepareError;
       return { board: nextBoard, taskIDs: ids, deletedCanonicalIDs: deleted };
     });
-    saveRemote = vi.fn((
+    private save(
+      surface: 'immediate' | 'debounced',
       _identity: Identity,
       nextBoard: Board,
       onError: (error: unknown) => void,
-      onSaved: (...args: unknown[]) => unknown,
+      onSaved: SaveAcknowledgementCallback,
       options: {
-        durableSnapshot?: ReturnType<typeof snapshot>;
+        durableSnapshot?: DurableSnapshot;
         isLiveCurrent?: () => boolean;
       } = {},
-    ) => {
+    ) {
       options.isLiveCurrent?.();
       if (state.remoteSaveError) return onError(state.remoteSaveError);
-      const ids = new Map(nextBoard.tasks.map((item) => [item.id, `canonical-${item.id}`]));
-      return void onSaved(
-        nextBoard,
-        ids,
-        state.remoteSaveConflicts,
-        'operation-1',
-        state.omitIsCurrent ? undefined : () => state.ackCurrent,
-        1,
-        { present: true, generation: 0 },
-        state.omitAckSnapshot ? undefined : options.durableSnapshot ?? snapshot(nextBoard),
-      );
-    });
-    saveRemoteDebounced = this.saveRemote;
+      const payload = state.remoteAcknowledgement ?? {
+        pushed: nextBoard,
+        taskIDs: new Map(nextBoard.tasks.map((item) => [item.id, `canonical-${item.id}`])),
+        conflicts: state.remoteSaveConflicts,
+        operationID: 'operation-1',
+        isCurrent: state.omitIsCurrent ? undefined : () => state.ackCurrent,
+        generation: 1,
+        durableVersion: { present: true, generation: 0 },
+        durableSnapshot: state.omitAckSnapshot
+          ? undefined
+          : options.durableSnapshot ?? snapshot(nextBoard),
+      } satisfies SaveAcknowledgementFixture;
+      state.saveAcknowledgements.push({
+        surface,
+        sent: nextBoard,
+        payload,
+      });
+      return void onSaved(payload);
+    }
+    saveRemote = vi.fn((
+      identity: Identity,
+      nextBoard: Board,
+      onError: (error: unknown) => void,
+      onSaved: SaveAcknowledgementCallback,
+      options?: {
+        durableSnapshot?: DurableSnapshot;
+        isLiveCurrent?: () => boolean;
+      },
+    ) => this.save('immediate', identity, nextBoard, onError, onSaved, options));
+    saveRemoteDebounced = vi.fn((
+      identity: Identity,
+      nextBoard: Board,
+      onError: (error: unknown) => void,
+      onSaved: SaveAcknowledgementCallback,
+      options?: {
+        durableSnapshot?: DurableSnapshot;
+        isLiveCurrent?: () => boolean;
+      },
+    ) => this.save('debounced', identity, nextBoard, onError, onSaved, options));
   }
   return {
     RemoteStore,
@@ -243,7 +354,12 @@ vi.mock('./lib/remote', () => {
     }) => {
       options.readLive?.();
       options.readDurable?.();
-      options.cancelled?.();
+      if (options.cancelled?.()) {
+        return {
+          candidate: options.candidate, conflicts: [], persisted: false,
+          recoveryPending: false, writes: 0,
+        };
+      }
       if (state.commitMode === 'recovery') {
         return {
           candidate: options.candidate, conflicts: ['live board'], persisted: false,
@@ -554,6 +670,7 @@ vi.mock('./components/Confetti', () => ({ Confetti: () => <div data-testid="conf
 import App, { LOCAL_PERSISTENCE_NOTICE } from './App';
 
 beforeEach(() => {
+  vi.useRealTimers();
   state.identity = manual;
   state.resolveIdentity = null;
   state.resolveError = null;
@@ -591,6 +708,9 @@ beforeEach(() => {
   state.clearedIdentity = 0;
   state.dirtyWrites = [];
   state.exported = [];
+  state.remoteAcknowledgement = null;
+  state.saveAcknowledgements = [];
+  state.acknowledgementPersists = [];
   state.remoteInstances = [];
   state.outboxInstances = [];
   state.bursts = [];
@@ -599,6 +719,56 @@ beforeEach(() => {
 });
 
 describe('App DOM orchestration', () => {
+  it('forwards generation, durable version, and durable snapshot at both save callback boundaries', () => {
+    const source = appSource;
+    const cases = [
+      {
+        surface: 'immediate',
+        start: 'remote.saveRemote(',
+        end: 'canonicalTaskIDs: localTaskIDs',
+      },
+      {
+        surface: 'debounced',
+        start: 'remote.saveRemoteDebounced(',
+        end: 'canonicalTaskIDs: sentIDs',
+      },
+    ] as const;
+
+    for (const { surface, start, end } of cases) {
+      const startAt = source.indexOf(start);
+      const endAt = source.indexOf(end, startAt);
+      expect(startAt, `${surface} save callback exists`).toBeGreaterThan(-1);
+      expect(endAt, `${surface} save options exist`).toBeGreaterThan(startAt);
+      const callbackSource = source.slice(startAt, endAt);
+      const parameters = callbackSource.match(/async\s*\(\s*([\s\S]*?)\s*\)\s*=>/)?.[1];
+      const acknowledgementArguments = callbackSource
+        .match(/acknowledgeRemote\(\s*([\s\S]*?)\s*\);/)?.[1]
+        .split(',')
+        .map((value) => value.trim());
+      expect(parameters, `${surface} callback parameters`).toBeDefined();
+      expect(acknowledgementArguments, `${surface} acknowledgement call`).toBeDefined();
+
+      let metadataBindings: string[];
+      if (parameters!.trimStart().startsWith('{')) {
+        metadataBindings = ['generation', 'durableVersion', 'durableSnapshot'].map((field) => {
+          const binding = parameters!.match(
+            new RegExp(`(?:^|,)\\s*${field}\\s*(?::\\s*([A-Za-z_$][\\w$]*))?\\s*(?:,|})`),
+          );
+          expect(binding, `${surface} binds ${field}`).not.toBeNull();
+          return binding?.[1] ?? field;
+        });
+      } else {
+        metadataBindings = parameters!.split(',').map((value) => value.trim()).slice(5, 8);
+      }
+
+      expect(metadataBindings, `${surface} callback metadata order`).toHaveLength(3);
+      expect(
+        acknowledgementArguments!.slice(6, 9),
+        `${surface} acknowledgement metadata forwarding`,
+      ).toEqual(metadataBindings);
+    }
+  });
+
   it('adopts a manual identity and signs out without network access', async () => {
     state.identity = null;
     const user = userEvent.setup();
@@ -1061,6 +1231,131 @@ describe('App DOM orchestration', () => {
     render(<App />);
     await waitFor(() => expect(state.remoteInstances.length).toBeGreaterThan(1));
     expect(state.dirtyWrites.at(-1)).not.toBe(false);
+  });
+
+  it('passes the exact named acknowledgement payload through the immediate save surface', async () => {
+    state.detect = true;
+    state.dirty = true;
+    const sent = state.board!;
+    const pushed = board([task({
+      id: 'ack-immediate',
+      title: 'Immediate acknowledgement',
+      status: 'done',
+    })]);
+    const payload = acknowledgementFixture(pushed, 'canonical-immediate', 23, {
+      conflicts: ['remote title'],
+      operationID: 'immediate-operation',
+      generation: 17,
+      durableVersion: { present: true, generation: 19 },
+    });
+    state.remoteAcknowledgement = payload;
+    render(<App />);
+
+    await waitFor(() => expect(state.acknowledgementPersists).toHaveLength(1));
+    expectSaveDelivery('immediate', sent, payload);
+    expect(state.acknowledgementPersists).toEqual([{
+      board: pushed,
+      taskIDs: new Map([['ack-immediate', 'canonical-immediate']]),
+      expectedVersion: { present: true, generation: 23 },
+      operationID: 'immediate-operation',
+      current: true,
+    }]);
+    expect(state.board).toEqual(pushed);
+    expect(screen.getByText('Immediate acknowledgement:done:false')).not.toBeNull();
+    expect(await screen.findAllByText(/Concurrent edits conflicted in remote title/))
+      .toHaveLength(2);
+    await waitFor(() => {
+      expect(state.dirtyWrites.at(-1)).toBe(false);
+      expect(screen.getByRole('img', { name: 'synced to server' })).not.toBeNull();
+    });
+  });
+
+  it('passes the exact named acknowledgement payload through the debounced save surface', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-08-02T12:00:00.000Z'));
+    state.detect = true;
+    const sent = board([task({ status: 'doing', movedAt: '2026-08-02T12:00:00.000Z' })]);
+    const pushed = board([task({
+      id: 'ack-debounced',
+      title: 'Debounced acknowledgement',
+      status: 'doing',
+    })]);
+    const payload = acknowledgementFixture(pushed, 'canonical-debounced', 31, {
+      operationID: 'debounced-operation',
+      generation: 29,
+      durableVersion: { present: true, generation: 30 },
+    });
+    state.remoteAcknowledgement = payload;
+    const user = userEvent.setup();
+    render(<App />);
+    await waitFor(() => expect(state.remoteInstances).toHaveLength(1));
+
+    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
+    await waitFor(() => expect(state.acknowledgementPersists).toHaveLength(1));
+    expectSaveDelivery('debounced', sent, payload);
+    expect(state.acknowledgementPersists).toEqual([{
+      board: pushed,
+      taskIDs: new Map([['ack-debounced', 'canonical-debounced']]),
+      expectedVersion: { present: true, generation: 31 },
+      operationID: 'debounced-operation',
+      current: true,
+    }]);
+    expect(state.board).toEqual(pushed);
+    expect(screen.getByText('Debounced acknowledgement:doing:false')).not.toBeNull();
+    await waitFor(() => {
+      expect(state.dirtyWrites.at(-1)).toBe(false);
+      expect(screen.getByRole('img', { name: 'synced to server' })).not.toBeNull();
+    });
+  });
+
+  it('rejects a stale debounced acknowledgement before persistence or adoption', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-08-02T12:00:00.000Z'));
+    state.detect = true;
+    const original = state.board!;
+    const pushed = board([task({ id: 'stale-task', title: 'Stale acknowledgement' })]);
+    const payload = acknowledgementFixture(pushed, 'canonical-stale', 41, {
+      operationID: 'stale-operation',
+      isCurrent: () => false,
+    });
+    state.remoteAcknowledgement = payload;
+    const user = userEvent.setup();
+    render(<App />);
+    await waitFor(() => expect(state.remoteInstances).toHaveLength(1));
+
+    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
+    await waitFor(() => expect(state.saveAcknowledgements).toHaveLength(1));
+    expectSaveDelivery('debounced', board([task({
+      status: 'doing',
+      movedAt: '2026-08-02T12:00:00.000Z',
+    })]), payload);
+    expect(state.acknowledgementPersists).toEqual([]);
+    expect(state.board).not.toEqual(pushed);
+    expect(state.board?.tasks[0]?.id).toBe(original.tasks[0]?.id);
+    expect(screen.queryByText(/Stale acknowledgement/)).toBeNull();
+    expect(state.dirtyWrites.at(-1)).toBe(true);
+  });
+
+  it('keeps an immediate acknowledgement with omitted optional fields unapplied', async () => {
+    state.detect = true;
+    state.dirty = true;
+    const sent = state.board!;
+    const pushed = board([task({ id: 'optional-task', title: 'Missing optional fields' })]);
+    const payload: SaveAcknowledgementFixture = {
+      pushed,
+      taskIDs: new Map([['optional-task', 'canonical-optional']]),
+      conflicts: [],
+    };
+    state.remoteAcknowledgement = payload;
+    render(<App />);
+
+    await waitFor(() => expect(state.saveAcknowledgements).toHaveLength(1));
+    expectSaveDelivery('immediate', sent, payload);
+    expect(state.acknowledgementPersists).toEqual([]);
+    expect(state.board).toEqual(sent);
+    expect(screen.queryByText(/Missing optional fields/)).toBeNull();
+    expect(state.dirtyWrites).not.toContain(false);
+    expect(screen.getByRole('img', { name: 'sync off — local only' })).not.toBeNull();
   });
 
   it('uses the acknowledgement currentness default when the adapter omits the callback', async () => {

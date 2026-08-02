@@ -574,16 +574,16 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
         (err) => {
           if (!cancelled) onSaveError(err);
         },
-        async (
+        async ({
           pushed,
           taskIDs,
           conflicts = [],
           operationID,
           isCurrent,
-          ackGeneration,
-          ackVersion,
-          ackSnapshot,
-        ) => {
+          generation: ackGeneration,
+          durableVersion: ackVersion,
+          durableSnapshot: ackSnapshot,
+        }) => {
           // Only an ack for the newest edit may clear the dirty flag.
           const fresh = editGenRef.current === gen;
           if (cancelled) return;
@@ -975,16 +975,16 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
             identity,
             persistedBoard,
             onSaveError,
-            async (
+            async ({
               pushed,
               taskIDs,
               conflicts = [],
               operationID,
               isCurrent,
-              ackGeneration,
-              ackVersion,
-              ackSnapshot,
-            ) => {
+              generation: ackGeneration,
+              durableVersion: ackVersion,
+              durableSnapshot: ackSnapshot,
+            }) => {
               const acknowledged = await acknowledgeRemote(
                 persistedBoard,
                 sentIDs,
