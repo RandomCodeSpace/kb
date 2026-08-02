@@ -101,6 +101,42 @@ export function escapeAction(
   return saving ? 'ignore' : 'close';
 }
 
+function nextHasKey(key: string, keyCleared: boolean, hasKey: boolean): boolean {
+  if (key !== '') return true;
+  if (keyCleared) return false;
+  return hasKey;
+}
+
+function StatusMessage({
+  status,
+  errorId,
+}: Readonly<{ status: FormStatus; errorId: string }>) {
+  if (status.kind === 'idle') return null;
+  if (status.kind === 'err') {
+    return (
+      <span
+        key={`err:${status.msg}`}
+        className="flash err"
+        id={`${errorId}-status`}
+        role="alert"
+        title={status.msg}
+      >
+        {status.msg}
+      </span>
+    );
+  }
+  return (
+    <span
+      key={`${status.kind}:${status.msg}`}
+      className={`flash ${status.kind}`}
+      role="status"
+      title={status.msg}
+    >
+      {status.msg}
+    </span>
+  );
+}
+
 export function SettingsModal({
   identity,
   serverPresent,
@@ -184,8 +220,8 @@ export function SettingsModal({
       const { keyCleared } = await putSettings(identity, patch);
       // A base-URL host change makes the server drop the stored key so it
       // can never be sent to the new endpoint unconfirmed.
-      const nextHasKey = key !== '' ? true : keyCleared ? false : hasKey;
-      setHasKey(nextHasKey);
+      const storedKey = nextHasKey(key, keyCleared, hasKey);
+      setHasKey(storedKey);
       setKey('');
       setSave({
         kind: 'ok',
@@ -196,7 +232,7 @@ export function SettingsModal({
       onSaved({
         ai_base_url: baseUrl.trim(),
         ai_model: model.trim(),
-        has_key: nextHasKey,
+        has_key: storedKey,
       });
     } catch (err) {
       setSave({
@@ -270,7 +306,7 @@ export function SettingsModal({
             checked={debug}
             onChange={(e) => onDebugChange(e.target.checked)}
           />
-          Show debug overlay
+          {' '}Show debug overlay
         </label>
         <p className="mnote">
           A small panel with the frame rate, renderer capabilities and a frame
@@ -397,26 +433,7 @@ export function SettingsModal({
                   title carries the untruncated message (the line clamps at
                   two rows so a long server error cannot grow the row). */}
               <span className="statusline">
-                {status.kind === 'err' ? (
-                  <span
-                    key={`err:${status.msg}`}
-                    className="flash err"
-                    id={`${errorId}-status`}
-                    role="alert"
-                    title={status.msg}
-                  >
-                    {status.msg}
-                  </span>
-                ) : status.kind !== 'idle' ? (
-                  <span
-                    key={`${status.kind}:${status.msg}`}
-                    className={`flash ${status.kind}`}
-                    role="status"
-                    title={status.msg}
-                  >
-                    {status.msg}
-                  </span>
-                ) : null}
+                <StatusMessage status={status} errorId={errorId} />
               </span>
               <button type="submit" className="save" disabled={!loaded || busy}>
                 {save.kind === 'busy' ? 'Saving…' : 'Save'}

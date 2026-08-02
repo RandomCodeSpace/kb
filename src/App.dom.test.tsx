@@ -741,12 +741,10 @@ describe('App DOM orchestration', () => {
       expect(endAt, `${surface} save options exist`).toBeGreaterThan(startAt);
       const callbackSource = source.slice(startAt, endAt);
       const parameters = callbackSource.match(/async\s*\(\s*([\s\S]*?)\s*\)\s*=>/)?.[1];
-      const acknowledgementArguments = callbackSource
-        .match(/acknowledgeRemote\(\s*([\s\S]*?)\s*\);/)?.[1]
-        .split(',')
-        .map((value) => value.trim());
+      const acknowledgementFields = callbackSource
+        .match(/acknowledgeRemote\(\{\s*([\s\S]*?)\s*\}\);/)?.[1];
       expect(parameters, `${surface} callback parameters`).toBeDefined();
-      expect(acknowledgementArguments, `${surface} acknowledgement call`).toBeDefined();
+      expect(acknowledgementFields, `${surface} acknowledgement call`).toBeDefined();
 
       let metadataBindings: string[];
       if (parameters!.trimStart().startsWith('{')) {
@@ -762,10 +760,17 @@ describe('App DOM orchestration', () => {
       }
 
       expect(metadataBindings, `${surface} callback metadata order`).toHaveLength(3);
-      expect(
-        acknowledgementArguments!.slice(6, 9),
-        `${surface} acknowledgement metadata forwarding`,
-      ).toEqual(metadataBindings);
+      const acknowledgementNames = [
+        'expectedGeneration',
+        'expectedVersion',
+        'acknowledgementBase',
+      ];
+      for (const [index, name] of acknowledgementNames.entries()) {
+        expect(
+          acknowledgementFields,
+          `${surface} acknowledgement metadata forwarding`,
+        ).toMatch(new RegExp(`${name}:\\s*${metadataBindings[index]}`));
+      }
     }
   });
 

@@ -124,7 +124,7 @@ describe('IntegrationsSection DOM', () => {
     await user.click(screen.getByRole('button', { name: 'Remove work' }));
     const armed = screen.getByRole('button', { name: 'Confirm removal of work' });
     armed.blur();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Remove work' })).toBeTruthy());
+    await screen.findByRole('button', { name: 'Remove work' });
   });
 
   it('drops stale test and save outcomes after a generation switch', async () => {

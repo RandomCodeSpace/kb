@@ -3,7 +3,7 @@ import { CONFETTI_COLORS } from './confetti';
 
 /** Stable tag color: same hash the approved prototype used, over the shared palette. */
 export function tagColor(tag: string): string {
-  return CONFETTI_COLORS[(tag.length + (tag.charCodeAt(0) || 0)) % CONFETTI_COLORS.length];
+  return CONFETTI_COLORS[(tag.length + (tag.codePointAt(0) || 0)) % CONFETTI_COLORS.length];
 }
 
 /** Distinct tags used anywhere on the board, sorted. */

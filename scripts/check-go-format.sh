@@ -47,6 +47,8 @@ else
         echo "format: invalid recorded gofmt status" >&2
         exit "$xargs_status"
         ;;
+      *)
+        ;;
     esac
     echo "format: gofmt failed" >&2
     exit "$status"

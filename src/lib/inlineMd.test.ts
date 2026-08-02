@@ -36,6 +36,11 @@ describe('tokenizeInline', () => {
   it('does not treat "* " list stars as italic', () => {
     expect(tokenizeInline('2 * 3 * 4')).toEqual([{ kind: 'text', text: '2 * 3 * 4' }]);
   });
+
+  it('keeps a long unterminated link candidate as plain text', () => {
+    const input = `[${'a'.repeat(10_000)}`;
+    expect(tokenizeInline(input)).toEqual([{ kind: 'text', text: input }]);
+  });
 });
 
 describe('parseDesc', () => {

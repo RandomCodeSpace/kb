@@ -1594,11 +1594,14 @@ body {
 .modal .actions button:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
 /* Filled actions keep their colour and take ink text: white on the green
    measured 3.40:1 and on the red 3.08:1, ink measures 4.57:1 and 5.04:1. */
-.modal .actions .save { margin-left: auto; background: var(--green); }
+.modal .actions .save {
+  margin-left: auto;
+  min-width: 104px;
+  background: var(--green);
+}
 /* Labels that swap mid-flight ("Save"/"Saving…", "Test connection"/"Cancel
    test") hold a floor width, so the swap never nudges the buttons beside
    them. Sized to the longer label of each pair. */
-.modal .actions .save { min-width: 104px; }
 .modal .actions .test { min-width: 148px; }
 .modal .actions .cancel-split { min-width: 118px; }
 .modal .actions .save.propose { min-width: 152px; }
@@ -1718,6 +1721,7 @@ body {
 }
 .ai-box textarea { min-height: var(--sp-12); }
 .ai-row { display: flex; align-items: center; gap: var(--sp-3); margin-top: var(--sp-2); }
+/* The Draft/Cancel swap holds a floor so the morph never moves the note. */
 .ai-go {
   font: inherit;
   font-size: var(--fs-sm);
@@ -1731,6 +1735,7 @@ body {
   color: var(--ink);
   cursor: pointer;
   box-shadow: 2px 2px 0 var(--ink);
+  min-width: 72px;
 }
 .ai-go:active { transform: translate(2px, 2px); box-shadow: none; }
 .ai-go:disabled {
@@ -1739,8 +1744,6 @@ body {
   transform: none;
   box-shadow: 2px 2px 0 var(--ink);
 }
-/* The Draft/Cancel swap holds a floor so the morph never moves the note. */
-.ai-go { min-width: 72px; }
 .ai-note { font-size: var(--fs-xs); line-height: var(--lh-body); font-weight: 700; color: var(--dim); }
 /* An error in the note slot keeps the note's size, not .flash's. */
 .ai-note.flash { margin: 0; font-size: var(--fs-xs); animation: kb-rise var(--dur-2) var(--ease-out); }

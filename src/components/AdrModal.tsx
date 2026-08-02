@@ -100,6 +100,76 @@ export interface AdrModalProps {
   onClose: () => void;
 }
 
+function updateStoryRows(
+  rows: StoryRow[] | null,
+  index: number,
+  change: Partial<StoryRow>,
+): StoryRow[] | null {
+  if (rows === null) return null;
+  return rows.map((row, rowIndex) => (
+    rowIndex === index ? { ...row, ...change } : row
+  ));
+}
+
+function adrDescribedBy(
+  tooBig: boolean,
+  sizeErrorId: string,
+  hasURL: boolean,
+  error: string | null,
+  errorId: string,
+): string | undefined {
+  const ids: string[] = [];
+  if (tooBig) ids.push(sizeErrorId);
+  if (!hasURL && error) ids.push(errorId);
+  return ids.length > 0 ? ids.join(' ') : undefined;
+}
+
+function proposeDisabled(
+  busy: boolean,
+  hasAdr: boolean,
+  hasURL: boolean,
+  tooBig: boolean,
+): boolean {
+  return busy || (!hasAdr && !hasURL) || (hasAdr && hasURL) || tooBig;
+}
+
+function AdrStatus({
+  busy,
+  tooBig,
+  error,
+  sizeErrorId,
+  errorId,
+}: Readonly<{
+  busy: boolean;
+  tooBig: boolean;
+  error: string | null;
+  sizeErrorId: string;
+  errorId: string;
+}>) {
+  if (busy) {
+    return <span className="flash busy" role="status">Splitting the ADR…</span>;
+  }
+  if (tooBig) {
+    return (
+      <span className="flash err" id={sizeErrorId} role="alert">
+        that ADR is over {Math.round(ADR_MAX_BYTES / 1024)} KiB — trim it first
+      </span>
+    );
+  }
+  if (!error) return null;
+  return (
+    <span
+      key={error}
+      className="flash err"
+      id={errorId}
+      role="alert"
+      title={error}
+    >
+      {error}
+    </span>
+  );
+}
+
 /**
  * Paste or upload an ADR, get proposed stories, review them, then commit.
  * Nothing reaches the board until "Add selected" — the review step is the
@@ -196,9 +266,7 @@ export function AdrModal({
   };
 
   const patch = (i: number, change: Partial<StoryRow>) => {
-    setRows((rs) =>
-      rs === null ? rs : rs.map((r, j) => (j === i ? { ...r, ...change } : r)),
-    );
+    setRows((current) => updateStoryRows(current, i, change));
   };
 
   const selected = rows === null ? [] : rowsToTasks(rows, dest);
@@ -237,11 +305,13 @@ export function AdrModal({
               disabled={busy || hasURL}
               // ADR validation and request failures are attached to this input.
               aria-invalid={tooBig || (!hasURL && error !== null) || undefined}
-              aria-describedby={
-                [tooBig ? sizeErrorId : '', !hasURL && error ? errorId : '']
-                  .filter(Boolean)
-                  .join(' ') || undefined
-              }
+              aria-describedby={adrDescribedBy(
+                tooBig,
+                sizeErrorId,
+                hasURL,
+                error,
+                errorId,
+              )}
             />
             <p className="mnote">…or split from a forge issue</p>
             <div className="mrow" inert={busy}>
@@ -322,37 +392,19 @@ export function AdrModal({
                 {busy ? 'Cancel split' : 'Cancel'}
               </button>
               <span className="statusline">
-                {busy ? (
-                  <span className="flash busy" role="status">
-                    Splitting the ADR…
-                  </span>
-                ) : tooBig ? (
-                  <span className="flash err" id={sizeErrorId} role="alert">
-                    that ADR is over {Math.round(ADR_MAX_BYTES / 1024)} KiB —
-                    trim it first
-                  </span>
-                ) : error ? (
-                  <span
-                    key={error}
-                    className="flash err"
-                    id={errorId}
-                    role="alert"
-                    title={error}
-                  >
-                    {error}
-                  </span>
-                ) : null}
+                <AdrStatus
+                  busy={busy}
+                  tooBig={tooBig}
+                  error={error}
+                  sizeErrorId={sizeErrorId}
+                  errorId={errorId}
+                />
               </span>
               <button
                 type="button"
                 className="save propose"
                 onClick={() => void run()}
-                disabled={
-                  busy ||
-                  (!hasAdr && !hasURL) ||
-                  (hasAdr && hasURL) ||
-                  tooBig
-                }
+                disabled={proposeDisabled(busy, hasAdr, hasURL, tooBig)}
               >
                 {busy ? 'Splitting…' : 'Propose stories'}
               </button>

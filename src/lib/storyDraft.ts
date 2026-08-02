@@ -52,7 +52,7 @@ export function coerceStoryDraft(body: unknown): StoryDraft {
     title: typeof fields.title === 'string' ? oneLine(fields.title) : '',
     emoji:
       typeof fields.emoji === 'string'
-        ? (fields.emoji.trim().match(EMOJI_RE)?.[0] ?? '')
+        ? (EMOJI_RE.exec(fields.emoji.trim())?.[0] ?? '')
         : '',
     desc: typeof fields.desc === 'string' ? multiLine(fields.desc) : '',
     prio,

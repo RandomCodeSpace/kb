@@ -81,6 +81,32 @@ export interface ImportModalProps {
   onClose: () => void;
 }
 
+function ImportStatus({
+  busy,
+  error,
+  errorId,
+}: Readonly<{ busy: boolean; error: string | null; errorId: string }>) {
+  if (busy) {
+    return (
+      <span className="flash busy" role="status">
+        Fetching and transforming issues…
+      </span>
+    );
+  }
+  if (!error) return null;
+  return (
+    <span
+      key={error}
+      className="flash err"
+      id={errorId}
+      role="alert"
+      title={error}
+    >
+      {error}
+    </span>
+  );
+}
+
 /**
  * Fetch source issues first, then hold every transformed card for review.
  * No board state changes until the explicit Add selected action.
@@ -253,21 +279,7 @@ export function ImportModal({
                 {busy ? 'Cancel fetch' : 'Cancel'}
               </button>
               <span className="statusline">
-                {busy ? (
-                  <span className="flash busy" role="status">
-                    Fetching and transforming issues…
-                  </span>
-                ) : error ? (
-                  <span
-                    key={error}
-                    className="flash err"
-                    id={errorId}
-                    role="alert"
-                    title={error}
-                  >
-                    {error}
-                  </span>
-                ) : null}
+                <ImportStatus busy={busy} error={error} errorId={errorId} />
               </span>
               <button
                 type="button"

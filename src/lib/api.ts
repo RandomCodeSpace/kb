@@ -522,7 +522,7 @@ export function coerceDriftResult(body: unknown): DriftResult {
     Number.isNaN(Date.parse(baselineAt)) ||
     Number.isNaN(Date.parse(checkedAt))
   ) {
-    throw new Error('invalid drift response');
+    throw new TypeError('invalid drift response');
   }
 
   const result: DriftResult = {
@@ -537,7 +537,7 @@ export function coerceDriftResult(body: unknown): DriftResult {
   };
   if (state !== 'baseline_recorded') {
     if (typeof fields.title_changed !== 'boolean') {
-      throw new Error('invalid drift response');
+      throw new TypeError('invalid drift response');
     }
     result.title_changed = fields.title_changed;
   }
@@ -578,10 +578,10 @@ export function coerceImportProvenanceItems(
   }
   const items = (body as Record<string, unknown>).items;
   if (!Array.isArray(items)) {
-    throw new Error('invalid import provenance response');
+    throw new TypeError('invalid import provenance response');
   }
   const coerced = items.map(coerceImportProvenance);
-  if (coerced.some((item) => item === null)) {
+  if (coerced.includes(null)) {
     throw new Error('invalid import provenance response');
   }
   return coerced as ImportProvenance[];

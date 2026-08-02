@@ -14,7 +14,7 @@ const EMOJI_RE = /^\p{Extended_Pictographic}️?/u;
  * disagree about what the field may hold.
  */
 export function firstEmoji(s: string): string {
-  const m = s.trim().match(EMOJI_RE);
+  const m = EMOJI_RE.exec(s.trim());
   return m ? m[0] : '';
 }
 
