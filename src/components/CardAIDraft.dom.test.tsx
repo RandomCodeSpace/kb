@@ -66,4 +66,35 @@ describe('CardAIDraft DOM', () => {
     fireEvent.click(button);
     expect(never).not.toHaveBeenCalled();
   });
+
+  it('preserves add/edit prompts and reports every busy transition', async () => {
+    const user = userEvent.setup();
+    let resolveDraft!: (value: typeof draft) => void;
+    const aiDraft = vi.fn(() => new Promise<typeof draft>((resolve) => { resolveDraft = resolve; }));
+    const onBusyChange = vi.fn();
+    const { rerender } = render(
+      <CardAIDraft {...base} aiDraft={aiDraft} onBusyChange={onBusyChange} />,
+    );
+
+    const prompt = screen.getByLabelText('✨ Draft with AI');
+    expect(prompt.getAttribute('placeholder')).toBe('Describe the task to draft…');
+    await user.type(prompt, 'draft this');
+    await user.click(screen.getByRole('button', { name: 'Draft' }));
+    await waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(true));
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
+    resolveDraft(draft);
+    await waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(false));
+    expect(onBusyChange.mock.calls.map(([busy]) => busy)).toEqual([false, true, false]);
+
+    rerender(
+      <CardAIDraft
+        {...base}
+        state={{ mode: 'edit', task: { id: '1', title: 'old', emoji: '', desc: '', status: 'todo', blocked: false, prio: 3, tags: [], checks: [], createdAt: '', movedAt: '' } }}
+        aiDraft={aiDraft}
+        onBusyChange={onBusyChange}
+      />,
+    );
+    expect(prompt.getAttribute('placeholder')).toBe('How should this card change?');
+    expect(screen.getByText('fills the form below — review, then Save')).toBeTruthy();
+  });
 });

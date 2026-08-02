@@ -312,12 +312,13 @@ export function IntegrationsSection({
     try {
       const { tokenCleared } = await putIntegration(identity, name, patch);
       if (operationGeneration.current !== operation) return;
+      const hasToken = row.pat !== '' || (!tokenCleared && row.hasToken);
       patchRow(row.key, row.generation, {
         persisted: true,
         name,
         baseURL,
         pat: '',
-        hasToken: row.pat !== '' ? true : tokenCleared ? false : row.hasToken,
+        hasToken,
         busy: null,
         status: integrationStatus(name, 'save', 'ok'),
       });
@@ -430,6 +431,33 @@ export function IntegrationsSection({
             const rowLabel = row.name.trim() || `new source ${index + 1}`;
             const prefix = `${sectionId}-integration-${index}`;
             const statusId = `${prefix}-status`;
+            let removeLabel =
+              armedRemove === row.key ? 'Confirm remove' : 'Remove';
+            if (row.busy === 'remove') removeLabel = 'Removing…';
+
+            let statusContent =
+              row.status === null ? null : (
+                <span
+                  key={row.status.key}
+                  className={`flash ${row.status.kind}`}
+                  id={statusId}
+                  role={row.status.role}
+                  title={row.status.msg}
+                >
+                  {row.status.msg}
+                </span>
+              );
+            if (row.busy !== null) {
+              statusContent = (
+                <span
+                  key={`${row.key}:${row.busy}:busy`}
+                  className="flash busy"
+                  role="status"
+                >
+                  {busyMessage[row.busy]}
+                </span>
+              );
+            }
 
             return (
               <div
@@ -533,34 +561,10 @@ export function IntegrationsSection({
                   }
                   onClick={() => void handleRemove(row)}
                 >
-                  {row.busy === 'remove'
-                    ? 'Removing…'
-                    : armedRemove === row.key
-                      ? 'Confirm remove'
-                      : 'Remove'}
+                  {removeLabel}
                 </button>
 
-                <span className="statusline">
-                  {row.busy !== null ? (
-                    <span
-                      key={`${row.key}:${row.busy}:busy`}
-                      className="flash busy"
-                      role="status"
-                    >
-                      {busyMessage[row.busy]}
-                    </span>
-                  ) : row.status !== null ? (
-                    <span
-                      key={row.status.key}
-                      className={`flash ${row.status.kind}`}
-                      id={statusId}
-                      role={row.status.role}
-                      title={row.status.msg}
-                    >
-                      {row.status.msg}
-                    </span>
-                  ) : null}
-                </span>
+                <span className="statusline">{statusContent}</span>
               </div>
             );
           })}
