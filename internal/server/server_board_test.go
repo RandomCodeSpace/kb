@@ -264,9 +264,21 @@ func TestConfigEndpoint(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 			t.Fatalf("config JSON: %v (body=%s)", err, w.Body)
 		}
-		want := map[string]any{"azure_client_id": "", "azure_tenant_id": ""}
+		want := map[string]any{"azure_client_id": "", "azure_tenant_id": "", "auth_mode": "open"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("config = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("token mode is reported", func(t *testing.T) {
+		h, _ := newTestServer(t, Config{Token: "s3cret"})
+		w := doReq(t, h, "GET", "/api/config", "", nil)
+		var got map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("config JSON: %v", err)
+		}
+		if got["auth_mode"] != "token" {
+			t.Errorf("auth_mode = %v, want token", got["auth_mode"])
 		}
 	})
 
@@ -285,9 +297,10 @@ func TestConfigEndpoint(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 			t.Fatalf("config JSON: %v", err)
 		}
-		want := map[string]any{"azure_client_id": "app-client-id", "azure_tenant_id": tenant}
+		// Entra outranks the also-set token, mirroring the auth precedence.
+		want := map[string]any{"azure_client_id": "app-client-id", "azure_tenant_id": tenant, "auth_mode": "entra"}
 		if !reflect.DeepEqual(got, want) {
-			t.Errorf("config = %v, want exactly the two public IDs", got)
+			t.Errorf("config = %v, want exactly the two public IDs and the mode", got)
 		}
 		if strings.Contains(w.Body.String(), "s3cret") {
 			t.Errorf("config leaks the shared secret: %s", w.Body)

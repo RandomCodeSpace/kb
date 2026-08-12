@@ -15,7 +15,7 @@ describe('SettingsModal DOM', () => {
   it('loads, tests unsaved values, saves, toggles debug, and closes', async () => {
     const user = userEvent.setup();
     const onSaved = vi.fn(), onDebugChange = vi.fn(), onClose = vi.fn();
-    render(<SettingsModal identity={identity} serverPresent debug={false} onDebugChange={onDebugChange} onClose={onClose} onSaved={onSaved} />);
+    render(<SettingsModal identity={identity} displayNameValue="" onDisplayNameChange={() => {}} serverPresent debug={false} onDebugChange={onDebugChange} onClose={onClose} onSaved={onSaved} />);
     const base = await screen.findByDisplayValue('https://llm.local/v1');
     await user.clear(base); await user.type(base, ' https://other/v1 ');
     await user.clear(screen.getByLabelText('Model')); await user.type(screen.getByLabelText('Model'), ' newer ');
@@ -33,7 +33,7 @@ describe('SettingsModal DOM', () => {
     const user = userEvent.setup();
     settings.test.mockImplementation((_i, _p, signal: AbortSignal) => new Promise((_r, reject) => signal.addEventListener('abort', () => reject(new DOMException('abort', 'AbortError')))));
     const onClose = vi.fn();
-    const { rerender } = render(<SettingsModal identity={identity} serverPresent debug={false} onDebugChange={vi.fn()} onClose={onClose} onSaved={vi.fn()} />);
+    const { rerender } = render(<SettingsModal identity={identity} displayNameValue="" onDisplayNameChange={() => {}} serverPresent debug={false} onDebugChange={vi.fn()} onClose={onClose} onSaved={vi.fn()} />);
     await screen.findByDisplayValue('small');
     await user.click(screen.getByRole('button', { name: 'Test connection' }));
     await user.click(screen.getByRole('button', { name: 'Cancel test' }));
@@ -41,7 +41,7 @@ describe('SettingsModal DOM', () => {
     settings.put.mockRejectedValueOnce('bad');
     await user.click(screen.getByRole('button', { name: 'Save' }));
     expect((await screen.findByRole('alert')).textContent).toContain('save failed');
-    rerender(<SettingsModal identity={identity} serverPresent={false} debug={false} onDebugChange={vi.fn()} onClose={onClose} onSaved={vi.fn()} />);
+    rerender(<SettingsModal identity={identity} displayNameValue="" onDisplayNameChange={() => {}} serverPresent={false} debug={false} onDebugChange={vi.fn()} onClose={onClose} onSaved={vi.fn()} />);
     expect(screen.getByText(/AI drafting needs the kb server/)).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Close' }));
     expect(onClose).toHaveBeenCalled();
@@ -50,7 +50,7 @@ describe('SettingsModal DOM', () => {
   it('shows load and negative test errors and reports a key cleared by host change', async () => {
     const user = userEvent.setup();
     settings.get.mockRejectedValueOnce(new Error('offline'));
-    render(<SettingsModal identity={identity} serverPresent debug={false} onDebugChange={vi.fn()} onClose={vi.fn()} onSaved={vi.fn()} />);
+    render(<SettingsModal identity={identity} displayNameValue="" onDisplayNameChange={() => {}} serverPresent debug={false} onDebugChange={vi.fn()} onClose={vi.fn()} onSaved={vi.fn()} />);
     expect((await screen.findByRole('alert')).textContent).toContain('could not load settings');
     cleanup();
 
@@ -58,7 +58,7 @@ describe('SettingsModal DOM', () => {
     settings.test.mockResolvedValueOnce({ ok: false, error: 'model missing' });
     settings.put.mockResolvedValueOnce({ keyCleared: true });
     const onSaved = vi.fn();
-    render(<SettingsModal identity={identity} serverPresent debug={false} onDebugChange={vi.fn()} onClose={vi.fn()} onSaved={onSaved} />);
+    render(<SettingsModal identity={identity} displayNameValue="" onDisplayNameChange={() => {}} serverPresent debug={false} onDebugChange={vi.fn()} onClose={vi.fn()} onSaved={onSaved} />);
     await screen.findByDisplayValue('https://old/v1');
     await user.click(screen.getByRole('button', { name: 'Test connection' }));
     expect((await screen.findByRole('alert')).textContent).toContain('model missing');
@@ -73,7 +73,7 @@ describe('SettingsModal DOM', () => {
     let rejectTest!: (reason: unknown) => void;
     settings.test.mockImplementationOnce((_i, _p, signal: AbortSignal) => new Promise((_resolve, reject) => { rejectTest = reject; signal.addEventListener('abort', () => reject(new DOMException('abort', 'AbortError'))); }));
     const onClose = vi.fn();
-    const first = render(<SettingsModal identity={identity} serverPresent debug={false} onDebugChange={vi.fn()} onClose={onClose} onSaved={vi.fn()} />);
+    const first = render(<SettingsModal identity={identity} displayNameValue="" onDisplayNameChange={() => {}} serverPresent debug={false} onDebugChange={vi.fn()} onClose={onClose} onSaved={vi.fn()} />);
     await screen.findByDisplayValue('small');
     await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -87,7 +87,7 @@ describe('SettingsModal DOM', () => {
 
     let resolveSave!: (value: { keyCleared: boolean }) => void;
     settings.put.mockReturnValueOnce(new Promise((resolve) => { resolveSave = resolve; }));
-    render(<SettingsModal identity={identity} serverPresent debug={false} onDebugChange={vi.fn()} onClose={onClose} onSaved={vi.fn()} />);
+    render(<SettingsModal identity={identity} displayNameValue="" onDisplayNameChange={() => {}} serverPresent debug={false} onDebugChange={vi.fn()} onClose={onClose} onSaved={vi.fn()} />);
     await screen.findByDisplayValue('small');
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await user.keyboard('{Escape}');
@@ -103,7 +103,7 @@ describe('SettingsModal DOM', () => {
   it('ignores stale loads and covers default test/save failures', async () => {
     let resolveLoad!: (value: { ai_base_url: string; ai_model: string; has_key: boolean }) => void;
     settings.get.mockReturnValueOnce(new Promise((resolve) => { resolveLoad = resolve; }));
-    const stale = render(<SettingsModal identity={identity} serverPresent debug={false} onDebugChange={vi.fn()} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const stale = render(<SettingsModal identity={identity} displayNameValue="" onDisplayNameChange={() => {}} serverPresent debug={false} onDebugChange={vi.fn()} onClose={vi.fn()} onSaved={vi.fn()} />);
     stale.unmount();
     resolveLoad({ ai_base_url: 'late', ai_model: 'late', has_key: false });
     await Promise.resolve();
@@ -111,11 +111,22 @@ describe('SettingsModal DOM', () => {
     settings.get.mockResolvedValue({ ai_base_url: '', ai_model: '', has_key: false });
     settings.test.mockResolvedValueOnce({ ok: false });
     settings.put.mockRejectedValueOnce(new Error('save exploded'));
-    render(<SettingsModal identity={identity} serverPresent debug={false} onDebugChange={vi.fn()} onClose={vi.fn()} onSaved={vi.fn()} />);
+    render(<SettingsModal identity={identity} displayNameValue="" onDisplayNameChange={() => {}} serverPresent debug={false} onDebugChange={vi.fn()} onClose={vi.fn()} onSaved={vi.fn()} />);
     await waitFor(() => expect((screen.getByRole('button', { name: 'Test connection' }) as HTMLButtonElement).disabled).toBe(false));
     await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
     expect((await screen.findByRole('alert')).textContent).toContain('connection failed');
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect((await screen.findByRole('alert')).textContent).toContain('save exploded');
+  });
+
+  it('edits the device-local display name outside the AI form', async () => {
+    const user = userEvent.setup();
+    const onDisplayNameChange = vi.fn();
+    render(<SettingsModal identity={identity} displayNameValue="Board Goblin" onDisplayNameChange={onDisplayNameChange} serverPresent={false} debug={false} onDebugChange={vi.fn()} onClose={vi.fn()} onSaved={vi.fn()} />);
+    // Present even offline: the name is a device preference, not AI config.
+    const field = screen.getByLabelText('Display name');
+    expect((field as HTMLInputElement).value).toBe('Board Goblin');
+    await user.type(field, '!');
+    expect(onDisplayNameChange).toHaveBeenCalledWith('Board Goblin!');
   });
 });

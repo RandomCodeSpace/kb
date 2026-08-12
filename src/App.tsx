@@ -25,15 +25,19 @@ import {
   removeIntentBeforeMutation,
 } from './lib/outbox';
 import type { OutboxStatus } from './lib/outbox';
-import type { Identity } from './lib/auth';
+import type { BootAction, Identity } from './lib/auth';
 import {
+  bootAction,
   clearIdentity,
   displayName,
   identityNamespace,
   loadIdentity,
+  loadLocalDisplayName,
   ReauthRequiredError,
   resolveAzureIdentity,
   saveIdentity,
+  saveLocalDisplayName,
+  serverAuthMode,
 } from './lib/auth';
 import {
   commitLiveCandidate,
@@ -145,12 +149,37 @@ const SYNC_TITLE: Record<SyncState, string> = {
 export default function App() {
   const [identity, setIdentity] = useState<Identity | null>(() => loadIdentity());
   const [identityError, setIdentityError] = useState<string | null>(null);
+  // An explicit sign-out or account switch: the gate is then a request, and
+  // the open-mode auto-adopt below must not skip past it.
+  const [gateRequested, setGateRequested] = useState(false);
+  const [boot, setBoot] = useState<BootAction | null>(null);
 
   const adoptIdentity = (i: Identity) => {
     saveIdentity(i);
     setIdentityError(null);
+    setGateRequested(false);
     setIdentity(i);
   };
+
+  // With no stored identity the next step depends on the server's auth mode:
+  // open mode adopts "default" and shows the board directly (the gate would
+  // only be choosing a board namespace), every other mode gets the gate. An
+  // explicitly requested gate renders synchronously and skips the ask.
+  useEffect(() => {
+    if (identity !== null || gateRequested) return;
+    let cancelled = false;
+    setBoot(null);
+    void serverAuthMode().then((mode) => {
+      if (cancelled) return;
+      const action = bootAction(mode, false);
+      if (action.kind === 'adopt') adoptIdentity(action.identity);
+      else setBoot(action);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identity, gateRequested]);
 
   useEffect(() => {
     if (identity?.kind !== 'azure' || identity.homeAccountId) return;
@@ -173,7 +202,19 @@ export default function App() {
   }, [identity]);
 
   if (!identity) {
-    return <IdentityGate onIdentity={adoptIdentity} />;
+    if (gateRequested || boot?.kind === 'gate') {
+      return <IdentityGate onIdentity={adoptIdentity} />;
+    }
+    // The auth mode is still being asked for; in open mode the board follows
+    // with no gate at all, so nothing interactive belongs here.
+    return (
+      <main className="gate">
+        <div className="gate-card">
+          <h1>kb</h1>
+          <p className="gate-note">Connecting…</p>
+        </div>
+      </main>
+    );
   }
   if (identity.kind === 'azure' && !identity.homeAccountId) {
     return (
@@ -188,6 +229,7 @@ export default function App() {
                 className="gate-btn"
                 onClick={() => {
                   clearIdentity();
+                  setGateRequested(true);
                   setIdentity(null);
                 }}
               >
@@ -210,6 +252,9 @@ export default function App() {
       onIdentity={adoptIdentity}
       onSignOut={() => {
         clearIdentity();
+        // Sign-out must land on the gate even in open mode: it is the one
+        // way to pick a different board namespace there.
+        setGateRequested(true);
         setIdentity(null);
       }}
     />
@@ -285,6 +330,9 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
   const [sync, setSync] = useState<SyncState>('off');
   const [serverPresent, setServerPresent] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  // Device-local display name shown in the header; set in Settings. Cosmetic
+  // only — the identity and board namespace never change with it.
+  const [localName, setLocalName] = useState(loadLocalDisplayName);
   // Open while the person is being asked to restore an expired session; see
   // the effect below and ReconnectModal.
   const [showReconnect, setShowReconnect] = useState(false);
@@ -1494,7 +1542,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
             {/* The name is what a person recognises; the full email stays as
                 the tooltip, and the stored identity is untouched. */}
             <span className="who" title={identity.id}>
-              {displayName(identity)}
+              {localName.trim() === '' ? displayName(identity) : localName.trim()}
             </span>
             {/* The dot is a picture of the sync state, not a live region: its
                 content never changes, so swapping its aria-label announced
@@ -1663,6 +1711,11 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
           onDebugChange={(on) => {
             setDebugEnabled(on);
             setDebug(on);
+          }}
+          displayNameValue={localName}
+          onDisplayNameChange={(name) => {
+            saveLocalDisplayName(name);
+            setLocalName(name);
           }}
           onClose={() => setShowSettings(false)}
           onSaved={setAiSettings}
