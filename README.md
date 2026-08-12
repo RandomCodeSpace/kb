@@ -57,6 +57,13 @@ go install github.com/RandomCodeSpace/kb@latest
 kb --port 8080 --data ~/boards
 ```
 
+Release tags from v0.7.3 onward include the built web UI, so `go install`
+produces the complete binary. Earlier tags (v0.7.2 and below) contain no UI
+when installed this way — the API, CLI, and MCP server work, but the web
+board answers 404; use the prebuilt binaries from the GitHub release page
+for those versions instead. Releases are cut with `scripts/release.sh`,
+which commits the built UI on the release tag itself.
+
 A bare `kb` (or `kb` with only flags) serves the embedded SPA and the API on
 the given port. Data lives in a SQLite database under the data directory
 (default `~/.local/share/kb`, or `KB_DATA` / `--data`).
