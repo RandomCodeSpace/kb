@@ -20,6 +20,10 @@ export interface SettingsModalProps {
   debug: boolean;
   /** Toggle the overlay; the caller persists the flag (see DebugOverlay). */
   onDebugChange: (on: boolean) => void;
+  /** Device-local display name shown in the header; '' means none set. */
+  displayNameValue: string;
+  /** Applies immediately; the caller persists it. Cosmetic only. */
+  onDisplayNameChange: (name: string) => void;
   onClose: () => void;
   /** Called after a successful save with the new client-visible settings. */
   onSaved: (settings: AISettings) => void;
@@ -142,6 +146,8 @@ export function SettingsModal({
   serverPresent,
   debug,
   onDebugChange,
+  displayNameValue,
+  onDisplayNameChange,
   onClose,
   onSaved,
 }: Readonly<SettingsModalProps>) {
@@ -296,6 +302,20 @@ export function SettingsModal({
             a touch has no way to reach. It is printed in full here. */}
         <p className="mnote">
           Signed in as <code>{identity.id}</code>
+        </p>
+        {/* Applies immediately and is remembered on this device — cosmetic
+            only, so it never touches the identity or which board loads. */}
+        <label htmlFor="s-display-name">Display name</label>
+        <input
+          id="s-display-name"
+          value={displayNameValue}
+          onChange={(e) => onDisplayNameChange(e.target.value)}
+          placeholder="shown in the header on this device"
+          autoComplete="off"
+        />
+        <p className="mnote">
+          Shown in the header instead of the id above. This device only; the
+          board and its sync identity are unaffected.
         </p>
         {/* Applies immediately and is remembered on this device — it is a
             display preference, not part of the AI form's Save. */}

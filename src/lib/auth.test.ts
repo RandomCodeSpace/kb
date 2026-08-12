@@ -530,6 +530,109 @@ describe('azureConfig', () => {
   });
 });
 
+describe('serverAuthMode', () => {
+  function stubConfigFetch(body: unknown, status = 200) {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  it('reports each mode the server can declare', async () => {
+    for (const mode of ['open', 'token', 'entra'] as const) {
+      stubConfigFetch({ auth_mode: mode });
+      const auth = await freshAuth();
+      expect(await auth.serverAuthMode()).toBe(mode);
+    }
+  });
+
+  it('shares the cached /api/config fetch with azureConfig', async () => {
+    const fetchMock = stubConfigFetch({
+      azure_client_id: 'cid',
+      azure_tenant_id: 'tid',
+      auth_mode: 'entra',
+    });
+    const auth = await freshAuth();
+    expect(await auth.serverAuthMode()).toBe('entra');
+    expect(await auth.azureConfig()).toEqual({ clientId: 'cid', tenantId: 'tid' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('is unknown for an older server, junk values, and a failing fetch', async () => {
+    stubConfigFetch({ azure_client_id: '', azure_tenant_id: '' });
+    expect(await (await freshAuth()).serverAuthMode()).toBe('unknown');
+    stubConfigFetch({ auth_mode: 7 });
+    expect(await (await freshAuth()).serverAuthMode()).toBe('unknown');
+    stubConfigFetch({}, 500);
+    expect(await (await freshAuth()).serverAuthMode()).toBe('unknown');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new Error('offline'))),
+    );
+    expect(await (await freshAuth()).serverAuthMode()).toBe('unknown');
+  });
+});
+
+describe('bootAction', () => {
+  it('adopts the CLI-aligned default identity in open mode', async () => {
+    const auth = await freshAuth();
+    expect(auth.bootAction('open', false)).toEqual({
+      kind: 'adopt',
+      identity: { kind: 'manual', id: 'default' },
+    });
+  });
+
+  it('keeps the gate for every credentialed or unknowable mode', async () => {
+    const auth = await freshAuth();
+    for (const mode of ['token', 'entra', 'unknown'] as const) {
+      expect(auth.bootAction(mode, false)).toEqual({ kind: 'gate' });
+    }
+  });
+
+  it('never skips past an explicitly requested gate, even in open mode', async () => {
+    const auth = await freshAuth();
+    expect(auth.bootAction('open', true)).toEqual({ kind: 'gate' });
+  });
+});
+
+describe('local display name', () => {
+  it('round-trips through storage and clears on blank', async () => {
+    const auth = await freshAuth();
+    expect(auth.loadLocalDisplayName()).toBe('');
+    auth.saveLocalDisplayName('Board Goblin');
+    expect(auth.loadLocalDisplayName()).toBe('Board Goblin');
+    expect(mem.get('kb.displayName.v1')).toBe('Board Goblin');
+    auth.saveLocalDisplayName('   ');
+    expect(auth.loadLocalDisplayName()).toBe('');
+    expect(mem.has('kb.displayName.v1')).toBe(false);
+  });
+
+  it('degrades to no name when storage is unavailable', async () => {
+    const auth = await freshAuth();
+    const broken = {
+      getItem: () => {
+        throw new Error('denied');
+      },
+      setItem: () => {
+        throw new Error('denied');
+      },
+      removeItem: () => {
+        throw new Error('denied');
+      },
+    };
+    vi.stubGlobal('localStorage', broken);
+    expect(auth.loadLocalDisplayName()).toBe('');
+    auth.saveLocalDisplayName('nope');
+    auth.saveLocalDisplayName('');
+  });
+});
+
 describe('isAuthRedirect', () => {
   it('is false for a normal load', () => {
     expect(isAuthRedirect('', '')).toBe(false);

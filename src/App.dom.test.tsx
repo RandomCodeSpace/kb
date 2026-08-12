@@ -23,6 +23,8 @@ type SaveAcknowledgementCallback = (acknowledgement: SaveAcknowledgementFixture)
 
 const state = vi.hoisted(() => ({
   identity: null as Identity | null,
+  authMode: 'unknown' as 'open' | 'token' | 'entra' | 'unknown',
+  localDisplayName: '',
   resolveIdentity: null as Identity | null,
   resolveError: null as unknown,
   resolveDeferred: null as Promise<Identity> | null,
@@ -184,6 +186,17 @@ vi.mock('./lib/auth', () => {
     identityNamespace: (identity: Identity) =>
       identity.kind === 'azure' ? `azure.${identity.homeAccountId ?? 'pending'}` : identity.id,
     displayName: (identity: Identity) => identity.name || identity.id,
+    serverAuthMode: async () => state.authMode,
+    // Mirrors the real bootAction contract; the real one is unit-tested in
+    // auth.test.ts, this copy keeps the mocked module self-contained.
+    bootAction: (mode: string, gateRequested: boolean) =>
+      gateRequested || mode !== 'open'
+        ? { kind: 'gate' }
+        : { kind: 'adopt', identity: { kind: 'manual', id: 'default' } },
+    loadLocalDisplayName: () => state.localDisplayName,
+    saveLocalDisplayName: (name: string) => {
+      state.localDisplayName = name;
+    },
   };
 });
 
@@ -631,12 +644,14 @@ vi.mock('./components/ConfirmDialog', () => ({
 }));
 
 vi.mock('./components/SettingsModal', () => ({
-  SettingsModal: ({ onSaved, onDebugChange, onClose, serverPresent }: {
+  SettingsModal: ({ onSaved, onDebugChange, onClose, serverPresent, displayNameValue, onDisplayNameChange }: {
     onSaved: (value: { has_key: boolean; ai_base_url: string }) => void;
     onDebugChange: (value: boolean) => void;
     onClose: () => void;
     serverPresent: boolean;
-  }) => <div role="dialog" aria-label="settings"><span>{String(serverPresent)}</span><button onClick={() => onSaved({ has_key: true, ai_base_url: '' })}>enable ai</button><button onClick={() => onDebugChange(true)}>enable debug</button><button onClick={onClose}>close settings</button></div>,
+    displayNameValue: string;
+    onDisplayNameChange: (name: string) => void;
+  }) => <div role="dialog" aria-label="settings"><span>{String(serverPresent)}</span><span>name:{displayNameValue}</span><button onClick={() => onSaved({ has_key: true, ai_base_url: '' })}>enable ai</button><button onClick={() => onDebugChange(true)}>enable debug</button><button onClick={() => onDisplayNameChange('Amit K')}>set display name</button><button onClick={onClose}>close settings</button></div>,
 }));
 
 vi.mock('./components/AdrModal', () => ({
@@ -672,6 +687,8 @@ import App, { LOCAL_PERSISTENCE_NOTICE } from './App';
 beforeEach(() => {
   vi.useRealTimers();
   state.identity = manual;
+  state.authMode = 'unknown';
+  state.localDisplayName = '';
   state.resolveIdentity = null;
   state.resolveError = null;
   state.resolveDeferred = null;
@@ -779,7 +796,8 @@ describe('App DOM orchestration', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole('button', { name: 'use manual identity' }));
+    // The gate appears once the server's auth mode resolves (mocked 'unknown').
+    await user.click(await screen.findByRole('button', { name: 'use manual identity' }));
     expect(await screen.findByText('alice')).not.toBeNull();
     expect(state.savedIdentities).toEqual([manual]);
 
@@ -787,6 +805,47 @@ describe('App DOM orchestration', () => {
     expect(screen.getByRole('button', { name: 'use manual identity' })).not.toBeNull();
     expect(state.clearedIdentity).toBe(1);
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('opens the board directly as "default" in open mode, with no gate', async () => {
+    state.identity = null;
+    state.authMode = 'open';
+    render(<App />);
+
+    // The header identity appears without any gate interaction.
+    expect((await screen.findByTitle('default')).textContent).toBe('default');
+    expect(screen.queryByRole('button', { name: 'use manual identity' })).toBeNull();
+    expect(state.savedIdentities).toEqual([{ kind: 'manual', id: 'default' }]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('sign-out in open mode still reaches the gate to pick another board', async () => {
+    state.identity = null;
+    state.authMode = 'open';
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByTitle('default');
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+    // The auto-adopt must not skip past an explicitly requested gate.
+    expect(screen.getByRole('button', { name: 'use manual identity' })).not.toBeNull();
+    await user.click(screen.getByRole('button', { name: 'use manual identity' }));
+    expect(await screen.findByText('alice')).not.toBeNull();
+  });
+
+  it('shows the device-local display name in the header and updates it from settings', async () => {
+    state.localDisplayName = 'Board Goblin';
+    const user = userEvent.setup();
+    render(<App />);
+
+    // Overrides the identity label; the id stays as the tooltip.
+    expect((await screen.findByTitle('alice')).textContent).toBe('Board Goblin');
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(screen.getByText('name:Board Goblin')).not.toBeNull();
+    await user.click(screen.getByRole('button', { name: 'set display name' }));
+    expect(state.localDisplayName).toBe('Amit K');
+    expect((await screen.findByTitle('alice')).textContent).toBe('Amit K');
   });
 
   it('restores an Azure identity, and offers a retry gate when restoration fails', async () => {

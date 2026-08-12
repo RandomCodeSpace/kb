@@ -139,6 +139,31 @@ export function displayName(i: Identity): string {
   return name === '' ? i.id : name;
 }
 
+const DISPLAY_NAME_KEY = 'kb.displayName.v1';
+
+/**
+ * A device-local display name, set in Settings and shown in the header in
+ * place of the identity label. Cosmetic only: the identity, board namespace,
+ * and sync are untouched. Notably it is the only personalization available
+ * in open mode, where the identity is auto-adopted and never typed.
+ */
+export function loadLocalDisplayName(): string {
+  try {
+    return localStorage.getItem(DISPLAY_NAME_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export function saveLocalDisplayName(name: string): void {
+  try {
+    if (name.trim() === '') localStorage.removeItem(DISPLAY_NAME_KEY);
+    else localStorage.setItem(DISPLAY_NAME_KEY, name);
+  } catch {
+    // Storage unavailable — the name lives for this page only.
+  }
+}
+
 /**
  * Local-storage namespace for an identity: lowercase, keep [a-z0-9._@-],
  * replace everything else with '-', strip leading dots, empty becomes
@@ -298,29 +323,43 @@ export function azureConfigured(): boolean {
   return azureEnv() !== null;
 }
 
-let serverConfig: Promise<AzureConfig | null> | null = null;
+/** The credential the server demands, or 'unknown' when it cannot be asked. */
+export type ServerAuthMode = 'open' | 'token' | 'entra' | 'unknown';
+
+interface ServerConfigSnapshot {
+  azure: AzureConfig | null;
+  mode: ServerAuthMode;
+}
+
+let serverConfig: Promise<ServerConfigSnapshot> | null = null;
 
 /**
- * The client/tenant ids the server was started with. Both are public by
- * design (they ship in every MSAL SPA bundle) and the endpoint needs no auth —
- * the SPA reads it before login. Any failure (no server, dev mode, 404)
- * resolves to null so the env fallback applies. Cached for the page's life.
+ * The client/tenant ids and auth mode the server was started with. The ids
+ * are public by design (they ship in every MSAL SPA bundle) and the endpoint
+ * needs no auth — the SPA reads it before login. Any failure (no server, dev
+ * mode, 404, an older binary without auth_mode) resolves to no ids and
+ * 'unknown', so the env fallback and the identity gate apply as before.
+ * Cached for the page's life.
  */
-function fetchServerConfig(): Promise<AzureConfig | null> {
+function fetchServerConfig(): Promise<ServerConfigSnapshot> {
   serverConfig ??= (async () => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), CONFIG_TIMEOUT_MS);
     try {
       const res = await fetch('/api/config', { signal: ctrl.signal });
-      if (!res.ok) return null;
+      if (!res.ok) return { azure: null, mode: 'unknown' as const };
       const b = (await res.json()) as Record<string, unknown>;
       const clientId =
         typeof b.azure_client_id === 'string' ? b.azure_client_id.trim() : '';
       const tenantId =
         typeof b.azure_tenant_id === 'string' ? b.azure_tenant_id.trim() : '';
-      return clientId && tenantId ? { clientId, tenantId } : null;
+      const mode =
+        b.auth_mode === 'open' || b.auth_mode === 'token' || b.auth_mode === 'entra'
+          ? b.auth_mode
+          : ('unknown' as const);
+      return { azure: clientId && tenantId ? { clientId, tenantId } : null, mode };
     } catch {
-      return null;
+      return { azure: null, mode: 'unknown' as const };
     } finally {
       clearTimeout(timer);
     }
@@ -330,7 +369,32 @@ function fetchServerConfig(): Promise<AzureConfig | null> {
 
 /** Runtime server config wins; the build-time env is the dev fallback. */
 export async function azureConfig(): Promise<AzureConfig | null> {
-  return (await fetchServerConfig()) ?? azureEnv();
+  return (await fetchServerConfig()).azure ?? azureEnv();
+}
+
+/** Which credential the API will demand for this origin. */
+export async function serverAuthMode(): Promise<ServerAuthMode> {
+  return (await fetchServerConfig()).mode;
+}
+
+export type BootAction = { kind: 'gate' } | { kind: 'adopt'; identity: Identity };
+
+/**
+ * What the app does when no identity is stored. Open mode has no credential
+ * to collect, so the gate would only be choosing a board namespace — the app
+ * adopts "default" instead, the same namespace the CLI writes to without
+ * --user, and the board opens directly. Every other mode keeps the gate (it
+ * collects a token there), as does an unreachable or older server, where
+ * guessing "no auth needed" would be wrong. `gateRequested` is an explicit
+ * sign-out or account switch: a person asking to choose is never skipped
+ * past the choice.
+ */
+export function bootAction(
+  mode: ServerAuthMode,
+  gateRequested: boolean,
+): BootAction {
+  if (gateRequested || mode !== 'open') return { kind: 'gate' };
+  return { kind: 'adopt', identity: { kind: 'manual', id: 'default' } };
 }
 
 /** True when either source supplies both ids. */

@@ -504,21 +504,39 @@ func etagMatches(ifMatch, etag string) bool {
 	return false
 }
 
-// configResponse carries the browser-side Entra IDs. Both are public by
-// design — every MSAL SPA ships them in its bundle — but the endpoint must
-// stay minimal: it is unauthenticated (the SPA needs it before login), so
-// nothing else may ever be added here.
+// configResponse carries the browser-side Entra IDs and the server's auth
+// mode. The IDs are public by design — every MSAL SPA ships them in its
+// bundle — and the mode only names which credential the API will demand,
+// which an unauthenticated probe learns from a 401 anyway. The endpoint is
+// unauthenticated (the SPA needs it before login), so nothing sensitive may
+// ever be added here.
 type configResponse struct {
 	AzureClientID string `json:"azure_client_id"`
 	AzureTenantID string `json:"azure_tenant_id"`
+	// AuthMode is "open", "token", or "entra". The SPA skips the identity
+	// gate entirely in open mode: with no credential to collect, the gate
+	// was only choosing a board namespace, and open mode uses "default" —
+	// the same namespace the CLI writes to without --user.
+	AuthMode string `json:"auth_mode"`
 }
 
-// handleConfig serves the runtime Entra configuration. The released binary
-// is built without VITE_* values, so the SPA cannot learn them at build
-// time; it reads them here instead. Unset env yields empty strings, which
-// the SPA treats as "no Entra configured".
+// handleConfig serves the runtime Entra configuration and auth mode. The
+// released binary is built without VITE_* values, so the SPA cannot learn
+// them at build time; it reads them here instead. Unset env yields empty
+// strings, which the SPA treats as "no Entra configured".
 func (s *server) handleConfig(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, configResponse{AzureClientID: s.cfg.ClientID, AzureTenantID: s.cfg.TenantID})
+	mode := "open"
+	switch {
+	case s.cfg.TenantID != "":
+		mode = "entra"
+	case s.cfg.Token != "":
+		mode = "token"
+	}
+	writeJSON(w, configResponse{
+		AzureClientID: s.cfg.ClientID,
+		AzureTenantID: s.cfg.TenantID,
+		AuthMode:      mode,
+	})
 }
 
 func (s *server) handleLabels(w http.ResponseWriter, _ *http.Request, user string) {
