@@ -40,6 +40,11 @@ commands:
                          (requires --yes)
   help                   show this help
 
+other modes (not task commands):
+  kb                     with no command: serve the web UI (kb --help
+                         lists the serve flags)
+  kb mcp                 serve the board to AI agents over MCP stdio
+
 common flags (every command):
   --user name    board owner (default "default")
   --data dir     data directory (default $KB_DATA or ~/.local/share/kb)
