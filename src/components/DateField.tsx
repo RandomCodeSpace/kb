@@ -190,11 +190,19 @@ export function DateField({
       ArrowUp: -7,
       ArrowDown: 7,
     };
+    if (e.key !== 'PageUp' && e.key !== 'PageDown' && !(e.key in jump)) return;
+    e.preventDefault();
+    // The move may land in a month whose grid no longer contains the cell
+    // that has focus (PageUp from Aug 12 renders a July grid ending Aug 9),
+    // which unmounts it and drops focus to <body> — where the roving effect's
+    // containment check would decline to follow and every further grid key
+    // would go nowhere. The key came from inside the grid, so re-arm the
+    // effect unconditionally; the ‹ › month buttons never pass through here
+    // and keep their focus exactly as before.
+    enterGridRef.current = true;
     if (e.key in jump) {
-      e.preventDefault();
       setFocusISO((f) => moveDays(f, jump[e.key]));
-    } else if (e.key === 'PageUp' || e.key === 'PageDown') {
-      e.preventDefault();
+    } else {
       setFocusISO((f) => moveMonths(f, e.key === 'PageUp' ? -1 : 1));
     }
   };

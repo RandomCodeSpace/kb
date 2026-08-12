@@ -77,7 +77,7 @@ func TestRunWebServerReportsStartupErrors(t *testing.T) {
 		var output bytes.Buffer
 		err := runWebServerWithFlagOutput([]string{"--unknown"}, &output)
 		var flagErr *webFlagError
-		if !errors.As(err, &flagErr) || !strings.Contains(output.String(), "Usage of ") {
+		if !errors.As(err, &flagErr) || !strings.Contains(output.String(), "usage: kb") {
 			t.Fatalf("unknown flag error/output = %v / %q", err, output.String())
 		}
 	})
@@ -86,8 +86,14 @@ func TestRunWebServerReportsStartupErrors(t *testing.T) {
 		resetServerEnv(t)
 		var output bytes.Buffer
 		err := runWebServerWithFlagOutput([]string{"-h"}, &output)
-		if !errors.Is(err, flag.ErrHelp) || !strings.Contains(output.String(), "Usage of ") {
+		if !errors.Is(err, flag.ErrHelp) || !strings.Contains(output.String(), "usage: kb") {
 			t.Fatalf("help error/output = %v / %q", err, output.String())
+		}
+		// The serve flags must still be printed after the overview.
+		for _, want := range []string{"-port", "-data", "-log"} {
+			if !strings.Contains(output.String(), want) {
+				t.Errorf("--help does not document the %s serve flag", want)
+			}
 		}
 	})
 
@@ -154,7 +160,7 @@ func TestMainFlagProcessContract(t *testing.T) {
 				}
 				code = exitErr.ExitCode()
 			}
-			if code != tt.wantCode || !strings.Contains(string(output), "Usage of kb") {
+			if code != tt.wantCode || !strings.Contains(string(output), "usage: kb") {
 				t.Fatalf("exit/output = %d / %q, want %d with usage", code, output, tt.wantCode)
 			}
 		})
@@ -168,6 +174,17 @@ func TestMainFlagProcessHelper(t *testing.T) {
 	}
 	os.Args = []string{"kb", arg}
 	main()
+}
+
+// `kb --help` is answered by the serve FlagSet, which knows nothing about the
+// dispatch table — the overview text is maintained by hand. This is the guard
+// that keeps it complete: every registered subcommand must be named in it.
+func TestRootUsageNamesEverySubcommand(t *testing.T) {
+	for name := range subcommands {
+		if !strings.Contains(rootUsageText, name) {
+			t.Errorf("root usage text does not mention the %q subcommand", name)
+		}
+	}
 }
 
 func TestSmallStartupHelpers(t *testing.T) {

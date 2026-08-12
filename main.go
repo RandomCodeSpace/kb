@@ -131,6 +131,21 @@ type webFlagError struct{ err error }
 func (e *webFlagError) Error() string { return e.err.Error() }
 func (e *webFlagError) Unwrap() error { return e.err }
 
+// rootUsageText is what `kb --help` prints before the serve flags. Every
+// registered subcommand must appear here; TestRootUsageNamesEverySubcommand
+// fails when the dispatch table and this text drift apart.
+const rootUsageText = `usage: kb [flags]            serve the web UI (default)
+       kb <command> [args]   work with tasks from the terminal
+
+commands:
+  add, list, update, move, done, cancel, restore, rm
+             the task CLI — run "kb help" for the full reference
+  mcp        serve the board to AI agents over MCP stdio
+  help       task CLI reference
+
+serve flags:
+`
+
 // runWebServer performs one web-server startup and returns startup/runtime
 // failures to main. Keeping process termination at the outermost boundary
 // makes every wiring branch testable without forking a subprocess.
@@ -144,6 +159,13 @@ func runWebServerWithFlagOutput(args []string, output io.Writer) error {
 	port := flags.String("port", envOr("KB_PORT", "8080"), "listen port (env KB_PORT)")
 	dataDir := flags.String("data", defaultDataDir(), "board storage directory (env KB_DATA)")
 	logPath := flags.String("log", envOr("KB_LOG_FILE", ""), "write logs to this file instead of stderr (env KB_LOG_FILE)")
+	// The default FlagSet usage only lists the serve flags, which hid the
+	// entire subcommand surface from `kb --help`; the task CLI was only
+	// discoverable by already knowing to type `kb help`.
+	flags.Usage = func() {
+		fmt.Fprint(flags.Output(), rootUsageText)
+		flags.PrintDefaults()
+	}
 	if err := flags.Parse(args); err != nil {
 		return &webFlagError{err: err}
 	}
