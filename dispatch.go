@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -61,43 +62,79 @@ func dispatchArgs(args []string, stderr io.Writer) (handled bool, exitCode int) 
 var readBuildInfo = debug.ReadBuildInfo
 var versionOut io.Writer = os.Stdout
 
-// runVersion prints the build's version: kb version. go-install builds carry
-// the module version; release binaries are built at the tagged commit with a
-// clean tree, so the toolchain stamps the same value there. A plain go build
-// in a checkout reports devel plus the commit it was built from.
+// runVersion prints the build's version: kb version [--json]. go-install
+// builds carry the module version; release binaries are built at the tagged
+// commit with a clean tree, so the toolchain stamps the same value there. A
+// plain go build in a checkout reports devel plus the commit it was built
+// from.
 func runVersion(args []string) error {
-	if len(args) > 0 {
+	fs := flag.NewFlagSet("kb version", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOut := fs.Bool("json", false, "print the version as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
 		return fmt.Errorf("version takes no arguments")
 	}
 	info, ok := readBuildInfo()
+	if *jsonOut {
+		encoded, err := json.MarshalIndent(versionJSON(info, ok), "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(versionOut, string(encoded))
+		return nil
+	}
 	fmt.Fprintln(versionOut, versionString(info, ok))
 	return nil
 }
 
-func versionString(info *debug.BuildInfo, ok bool) string {
+// versionParts extracts the display version, the 12-char revision, and the
+// dirty flag from build info. version is "unknown" without build info and
+// "devel" for unstamped builds.
+func versionParts(info *debug.BuildInfo, ok bool) (version, revision string, modified bool) {
 	if !ok || info == nil {
-		return "kb (unknown build)"
+		return "unknown", "", false
 	}
-	v := info.Main.Version
-	if v == "" || v == "(devel)" {
-		v = "devel"
+	version = info.Main.Version
+	if version == "" || version == "(devel)" {
+		version = "devel"
 	}
-	var revision, modified string
 	for _, s := range info.Settings {
 		switch s.Key {
 		case "vcs.revision":
 			revision = s.Value
 		case "vcs.modified":
-			modified = s.Value
+			modified = s.Value == "true"
 		}
 	}
-	out := "kb " + v
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	return version, revision, modified
+}
+
+type versionInfoJSON struct {
+	Version  string `json:"version"`
+	Revision string `json:"revision,omitempty"`
+	Modified bool   `json:"modified,omitempty"`
+}
+
+func versionJSON(info *debug.BuildInfo, ok bool) versionInfoJSON {
+	version, revision, modified := versionParts(info, ok)
+	return versionInfoJSON{Version: version, Revision: revision, Modified: modified}
+}
+
+func versionString(info *debug.BuildInfo, ok bool) string {
+	version, revision, modified := versionParts(info, ok)
+	if version == "unknown" {
+		return "kb (unknown build)"
+	}
+	out := "kb " + version
 	if revision != "" {
-		if len(revision) > 12 {
-			revision = revision[:12]
-		}
 		out += " (" + revision
-		if modified == "true" {
+		if modified {
 			out += ", modified"
 		}
 		out += ")"

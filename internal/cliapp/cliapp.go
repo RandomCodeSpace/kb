@@ -26,6 +26,7 @@ import (
 
 const noBlockedFlagName = "no-blocked"
 const forceFlagUsage = "finish a task with open checklist items or a blocked flag"
+const jsonFlagUsage = "print the affected task as JSON"
 
 const usageText = `usage: kb <command> [flags]
 
@@ -52,6 +53,8 @@ other modes (not task commands):
 common flags (every command):
   --user name    board owner (default $KB_USER or "default")
   --data dir     data directory (default $KB_DATA or ~/.local/share/kb)
+  --json         machine output: list prints an array of full tasks, every
+                 other command prints the affected task as one JSON object
 
 card flags (add and update):
   --desc text    description
@@ -76,7 +79,6 @@ card flags (add and update):
 list flags:
   --status s     show one column only
   --all          include cancelled tasks (hidden by default)
-  --json         print full tasks as JSON
 
 move, done, and update flags:
   --force        finish a task that still has open checklist items or is
@@ -453,6 +455,7 @@ func (a *app) cmdAdd(args []string) int {
 	fs, user, data := a.newFlagSet("add")
 	var cf cardFlags
 	registerCardFlags(fs, &cf, false)
+	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -472,6 +475,9 @@ func (a *app) cmdAdd(args []string) int {
 		it, err := be.add(t)
 		if err != nil {
 			return err
+		}
+		if *jsonF {
+			return writeJSONItem(a.stdout, it)
 		}
 		fmt.Fprintf(a.stdout, "added %s %s\n", displayID(it), it.task.Title)
 		return nil
@@ -664,6 +670,7 @@ func (a *app) cmdUpdate(args []string) int {
 	var cf cardFlags
 	registerCardFlags(fs, &cf, true)
 	force := fs.Bool("force", false, forceFlagUsage)
+	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -680,6 +687,9 @@ func (a *app) cmdUpdate(args []string) int {
 		if err != nil {
 			return err
 		}
+		if *jsonF {
+			return writeJSONItem(a.stdout, it)
+		}
 		fmt.Fprintf(a.stdout, "updated %s %s\n", displayID(it), it.task.Title)
 		return nil
 	})
@@ -688,6 +698,7 @@ func (a *app) cmdUpdate(args []string) int {
 func (a *app) cmdMove(args []string) int {
 	fs, user, data := a.newFlagSet("move")
 	force := fs.Bool("force", false, forceFlagUsage)
+	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -699,12 +710,13 @@ func (a *app) cmdMove(args []string) int {
 	if err != nil {
 		return a.usageErr(err)
 	}
-	return a.moveTo(*user, *data, pos[0], st, *force)
+	return a.moveTo(*user, *data, pos[0], st, *force, *jsonF)
 }
 
 func (a *app) cmdDone(args []string) int {
 	fs, user, data := a.newFlagSet("done")
 	force := fs.Bool("force", false, forceFlagUsage)
+	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -712,13 +724,14 @@ func (a *app) cmdDone(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("done needs exactly one <id-prefix> argument"))
 	}
-	return a.moveTo(*user, *data, pos[0], board.StatusDone, *force)
+	return a.moveTo(*user, *data, pos[0], board.StatusDone, *force, *jsonF)
 }
 
 // cmdCancel soft-deletes a task: it moves to the cancelled column and stays
 // on the board, unlike rm --yes which deletes the row for good.
 func (a *app) cmdCancel(args []string) int {
 	fs, user, data := a.newFlagSet("cancel")
+	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -726,12 +739,13 @@ func (a *app) cmdCancel(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("cancel needs exactly one <id-prefix> argument"))
 	}
-	return a.moveTo(*user, *data, pos[0], board.StatusCancelled, false)
+	return a.moveTo(*user, *data, pos[0], board.StatusCancelled, false, *jsonF)
 }
 
 // cmdRestore undoes a cancel, putting the task back at the end of To Do.
 func (a *app) cmdRestore(args []string) int {
 	fs, user, data := a.newFlagSet("restore")
+	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -739,18 +753,21 @@ func (a *app) cmdRestore(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("restore needs exactly one <id-prefix> argument"))
 	}
-	return a.moveTo(*user, *data, pos[0], board.StatusTodo, false)
+	return a.moveTo(*user, *data, pos[0], board.StatusTodo, false, *jsonF)
 }
 
 // moveTo is the shared body of move, done, cancel, and restore. Moving to
 // done with open checklist items or a blocked flag is refused unless force
 // is set: the CLI has no interactive confirmation, so it errors out rather
 // than shipping something the user may not have meant to.
-func (a *app) moveTo(user, data, ref string, to board.Status, force bool) int {
+func (a *app) moveTo(user, data, ref string, to board.Status, force, asJSON bool) int {
 	return a.withBackend(user, data, func(be backend) error {
 		it, err := be.move(ref, to, force)
 		if err != nil {
 			return err
+		}
+		if asJSON {
+			return writeJSONItem(a.stdout, it)
 		}
 		fmt.Fprintf(a.stdout, "moved %s -> %s\n", displayID(it), it.task.Status)
 		return nil
@@ -760,6 +777,7 @@ func (a *app) moveTo(user, data, ref string, to board.Status, force bool) int {
 func (a *app) cmdRm(args []string) int {
 	fs, user, data := a.newFlagSet("rm")
 	yes := fs.Bool("yes", false, "confirm deletion")
+	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -784,6 +802,9 @@ func (a *app) cmdRm(args []string) int {
 		if err != nil {
 			return err
 		}
+		if *jsonF {
+			return writeJSONItem(a.stdout, it)
+		}
 		fmt.Fprintf(a.stdout, "deleted %s %s\n", displayID(it), it.task.Title)
 		return nil
 	})
@@ -791,7 +812,7 @@ func (a *app) cmdRm(args []string) int {
 
 // findItem locates ref among items without mutating anything (rm preview):
 // exact ref match first (remote "i2", full UUIDs), then a bare remote index,
-// then a unique local prefix.
+// then a stable sequence number, then a unique local prefix.
 func findItem(items []item, ref string) (item, error) {
 	for _, it := range items {
 		if it.ref == ref {
@@ -802,6 +823,16 @@ func findItem(items []item, ref string) (item, error) {
 		if it.ref == "i"+ref {
 			return it, nil
 		}
+	}
+	// Digits-only refs are sequence numbers and never fall through to
+	// UUID-prefix matching, mirroring the store's resolution rule.
+	if n, ok := seqRef(ref); ok {
+		for _, it := range items {
+			if it.task.Seq == n {
+				return it, nil
+			}
+		}
+		return item{}, fmt.Errorf("no task matches id %q", ref)
 	}
 	var match item
 	n := 0
@@ -821,6 +852,25 @@ func findItem(items []item, ref string) (item, error) {
 }
 
 // --- output ---
+
+// seqRef reports whether ref addresses a task by stable sequence number:
+// all digits, optionally after one leading '#'.
+func seqRef(ref string) (int, bool) {
+	ref = strings.TrimPrefix(ref, "#")
+	if ref == "" {
+		return 0, false
+	}
+	for _, r := range ref {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(ref)
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	return n, true
+}
 
 // displayID renders the id agents type back: the stable #n when the task
 // carries one, else the shortened ref (an i-N index in remote mode, where
@@ -879,32 +929,49 @@ type taskJSON struct {
 	MovedAt   string      `json:"movedAt,omitempty"`
 }
 
-// writeJSON renders items as a JSON array of full tasks. Remote tasks carry
-// no UUID, so their ephemeral ref becomes the id.
+// itemJSON builds the wire shape of one task. Remote tasks carry no UUID,
+// so their ephemeral ref becomes the id.
+func itemJSON(it item) taskJSON {
+	t := it.task
+	j := taskJSON{
+		ID: t.ID, Seq: t.Seq, Emoji: t.Emoji, Title: t.Title, Desc: t.Desc,
+		Status: string(t.Status), Blocked: t.Blocked, Prio: t.Prio, Due: t.Due,
+		Effort: t.Effort, Tags: t.Tags, Position: t.Position,
+	}
+	if j.ID == "" {
+		j.ID = it.ref
+	}
+	for _, c := range t.Checks {
+		j.Checks = append(j.Checks, checkJSON{Text: c.Text, Done: c.Done})
+	}
+	if !t.CreatedAt.IsZero() {
+		j.CreatedAt = t.CreatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !t.MovedAt.IsZero() {
+		j.MovedAt = t.MovedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return j
+}
+
+// writeJSON renders items as a JSON array of full tasks.
 func writeJSON(w io.Writer, items []item) error {
 	out := make([]taskJSON, 0, len(items))
 	for _, it := range items {
-		t := it.task
-		j := taskJSON{
-			ID: t.ID, Seq: t.Seq, Emoji: t.Emoji, Title: t.Title, Desc: t.Desc,
-			Status: string(t.Status), Blocked: t.Blocked, Prio: t.Prio, Due: t.Due,
-			Effort: t.Effort, Tags: t.Tags, Position: t.Position,
-		}
-		if j.ID == "" {
-			j.ID = it.ref
-		}
-		for _, c := range t.Checks {
-			j.Checks = append(j.Checks, checkJSON{Text: c.Text, Done: c.Done})
-		}
-		if !t.CreatedAt.IsZero() {
-			j.CreatedAt = t.CreatedAt.UTC().Format(time.RFC3339Nano)
-		}
-		if !t.MovedAt.IsZero() {
-			j.MovedAt = t.MovedAt.UTC().Format(time.RFC3339Nano)
-		}
-		out = append(out, j)
+		out = append(out, itemJSON(it))
 	}
 	b, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode json: %w", err)
+	}
+	b = append(b, '\n')
+	_, err = w.Write(b)
+	return err
+}
+
+// writeJSONItem renders one affected task as a single JSON object — the
+// --json form of every mutation verb's confirmation line.
+func writeJSONItem(w io.Writer, it item) error {
+	b, err := json.MarshalIndent(itemJSON(it), "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode json: %w", err)
 	}
