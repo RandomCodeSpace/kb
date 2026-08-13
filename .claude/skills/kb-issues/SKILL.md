@@ -1,14 +1,16 @@
 ---
 name: kb-issues
-description: Use the kb CLI as a local replacement for GitHub/GitLab issue commands (gh issue, glab issue). Use when tracking tasks, bugs, or issues locally with kb instead of a remote issue tracker, or when translating a gh/glab issue workflow to kb.
+description: Map GitHub/GitLab issue workflows onto the kb CLI. Opt-in only - use when the user explicitly chooses kb as their issue tracker, typically because they have no GitHub/GitLab access or want issues tracked locally. Never substitute kb for gh/glab issue commands by default; when a repo has a reachable GitHub/GitLab tracker, that tracker stays the default.
 ---
 
-# kb as a local issue tracker
+# kb as a local issue tracker (opt-in)
 
-kb is a local-first kanban board with a CLI. Where a workflow reaches for
-`gh issue` or `glab issue`, use the `kb` verbs below instead. State lives in
-a local SQLite database (default `~/.local/share/kb`), or on a kb server
-when `KB_SERVER` is set.
+kb is a local-first kanban board with a CLI. This skill applies only after
+the user has chosen kb for issue tracking — it is an alternative for when
+GitHub/GitLab is unavailable or unwanted, not a replacement policy. Once
+chosen, where a workflow reaches for `gh issue` or `glab issue`, use the
+`kb` verbs below instead. State lives in a local SQLite database (default
+`~/.local/share/kb`), or on a kb server when `KB_SERVER` is set.
 
 ## Environment
 
