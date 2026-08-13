@@ -129,7 +129,7 @@ func TestEntraAuth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			hdr := map[string]string{"Authorization": "Bearer " + tt.token()}
-			w := doReq(t, h, "PUT", "/api/board", "# board\n", hdr)
+			w := putBoard(t, h, "# board\n", hdr)
 			if w.Code != tt.want {
 				t.Fatalf("got %d, want %d (body=%s)", w.Code, tt.want, w.Body)
 			}

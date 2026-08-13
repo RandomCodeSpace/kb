@@ -1019,14 +1019,27 @@ export async function deleteTask(
  * Replace the whole board with a markdown document — the one write with no
  * per-task equivalent, used by the file import so "replace the board" stays a
  * single atomic step rather than N deletes and M creates.
+ *
+ * The server refuses a markdown PUT that carries no If-Match, so the import
+ * reads the current version token first; the 404 for a board that does not
+ * exist carries one too. A token that went stale between the read and the
+ * write surfaces as a 409 rather than deleting the intervening work.
  */
 export async function replaceBoard(
   identity: Identity,
   markdown: string,
 ): Promise<void> {
+  const current = await authedFetch(identity, '/api/board', { method: 'GET' });
+  const token = current.headers.get('ETag');
+  if (!token) {
+    throw new TaskRequestError(
+      await errText(current, `board import failed: ${current.status}`),
+      current.status,
+    );
+  }
   const res = await authedFetch(identity, '/api/board', {
     method: 'PUT',
-    headers: { 'Content-Type': 'text/markdown; charset=utf-8' },
+    headers: { 'Content-Type': 'text/markdown; charset=utf-8', 'If-Match': token },
     body: markdown,
   });
   if (!res.ok) {

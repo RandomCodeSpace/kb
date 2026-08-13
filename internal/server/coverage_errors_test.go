@@ -411,6 +411,7 @@ func TestClosedStoreHandlersReturnServerErrorsWithoutEgress(t *testing.T) {
 		{name: "get board", call: func(s *server, w http.ResponseWriter, r *http.Request) { s.handleGetBoard(w, r, "u") }},
 		{name: "put board", body: "# Board\n", call: func(s *server, w http.ResponseWriter, r *http.Request) {
 			r.Header.Set("Content-Type", "text/markdown")
+			r.Header.Set("If-Match", "*")
 			s.handlePutBoard(w, r, "u")
 		}},
 		{name: "tombstone", body: `{"task_id":"id","reason":"reason"}`, call: func(s *server, w http.ResponseWriter, r *http.Request) { s.handleTombstone(w, r, "u") }},

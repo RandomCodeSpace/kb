@@ -511,6 +511,7 @@ func TestRemainingPureAndNetworkErrorBranches(t *testing.T) {
 
 	put := httptest.NewRequest(http.MethodPut, "/api/board", strings.NewReader("# Board"))
 	put.Header.Set("Content-Type", "text/markdown")
+	put.Header.Set("If-Match", "*")
 	put.Header.Set("Idempotency-Key", "not-a-uuid")
 	putResult := httptest.NewRecorder()
 	(&server{store: newTestStore(t)}).handlePutBoard(putResult, put, "user")

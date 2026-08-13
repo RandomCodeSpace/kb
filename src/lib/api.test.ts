@@ -1130,23 +1130,51 @@ describe('per-task board API', () => {
   });
 
   describe('replaceBoard', () => {
-    it('puts the markdown document as text/markdown', async () => {
-      const fetchMock = stubJSON(null, 204);
+    /** The import reads the version token first: the PUT is conditional. */
+    function stubBoardWrite(etag: string | null, status = 204) {
+      const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
+        Promise.resolve(
+          init?.method === 'PUT'
+            ? new Response(status === 204 ? null : 'board changed since it was read', { status })
+            : new Response('# Board\n', {
+                status: 404,
+                headers: etag === null ? {} : { ETag: etag },
+              }),
+        ),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+
+    it('puts the markdown document as text/markdown with the current token', async () => {
+      const fetchMock = stubBoardWrite('"r7"');
       await replaceBoard(identity, '# Board\n');
-      const [url, init] = fetchMock.mock.calls[0]!;
+      const [readUrl, readInit] = fetchMock.mock.calls[0]!;
+      expect(readUrl).toBe('/api/board');
+      expect(readInit?.method).toBe('GET');
+      const [url, init] = fetchMock.mock.calls[1]!;
       expect(url).toBe('/api/board');
       expect(init?.method).toBe('PUT');
       expect(init?.headers).toMatchObject({
         'Content-Type': 'text/markdown; charset=utf-8',
+        'If-Match': '"r7"',
       });
       expect(init?.body).toBe('# Board\n');
     });
 
+    it('raises a read that carries no version token instead of writing blind', async () => {
+      const fetchMock = stubBoardWrite(null);
+      await expect(replaceBoard(identity, '# Board\n')).rejects.toMatchObject({
+        status: 404,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
     it('raises a refused replacement', async () => {
-      stubText('invalid board payload', 400);
+      stubBoardWrite('"r7"', 409);
       await expect(replaceBoard(identity, 'junk')).rejects.toMatchObject({
-        message: 'invalid board payload',
-        status: 400,
+        message: 'board changed since it was read',
+        status: 409,
       });
     });
   });

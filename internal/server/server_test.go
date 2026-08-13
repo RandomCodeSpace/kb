@@ -66,6 +66,22 @@ func doReq(t *testing.T, h http.Handler, method, target, body string, hdr map[st
 	return w
 }
 
+// putBoard performs a markdown board PUT, filling in the current version
+// token when the caller supplied no If-Match: markdown PUTs without one are
+// refused with 428. The token comes from a GET carrying the caller's own
+// headers, so authenticated tests stay authenticated.
+func putBoard(t *testing.T, h http.Handler, body string, hdr map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	if _, ok := hdr["If-Match"]; ok {
+		return doReq(t, h, http.MethodPut, "/api/board", body, hdr)
+	}
+	merged := map[string]string{"If-Match": doReq(t, h, http.MethodGet, "/api/board", "", hdr).Header().Get("ETag")}
+	for k, v := range hdr {
+		merged[k] = v
+	}
+	return doReq(t, h, http.MethodPut, "/api/board", body, merged)
+}
+
 // canonical is the markdown the server returns for a stored board: the wire
 // format survives a Parse/Serialize round trip, not raw bytes.
 func canonical(md string) string {
@@ -120,7 +136,7 @@ func TestOpenModeRoundTrip(t *testing.T) {
 		t.Fatalf("GET before save: got %d, want 404", w.Code)
 	}
 	const in = "# My Board\n\n## To Do\n\n- [ ] 🚀 thing !1 @2026-08-01 ~M #backend\n  detail line\n  - [ ] substep\n"
-	if w := doReq(t, h, "PUT", "/api/board", in, nil); w.Code != http.StatusNoContent {
+	if w := putBoard(t, h, in, nil); w.Code != http.StatusNoContent {
 		t.Fatalf("PUT: got %d, want 204 (body=%s)", w.Code, w.Body)
 	}
 	w := doReq(t, h, "GET", "/api/board", "", nil)
@@ -144,7 +160,7 @@ func TestOpenModeRoundTrip(t *testing.T) {
 
 	// Named user gets an independent board under the sanitized identity.
 	hdr := map[string]string{"X-KB-User": "Alice"}
-	if w := doReq(t, h, "PUT", "/api/board", "# alice\n", hdr); w.Code != http.StatusNoContent {
+	if w := putBoard(t, h, "# alice\n", hdr); w.Code != http.StatusNoContent {
 		t.Fatalf("PUT as Alice: got %d, want 204", w.Code)
 	}
 	if w := doReq(t, h, "GET", "/api/board", "", hdr); w.Body.String() != canonical("# alice\n") {
@@ -173,7 +189,7 @@ func TestTokenMode(t *testing.T) {
 		t.Errorf("missing X-KB-User: got %d, want 400", w.Code)
 	}
 	good := map[string]string{"Authorization": "Bearer s3cret", "X-KB-User": "bob"}
-	if w := doReq(t, h, "PUT", "/api/board", "# b\n", good); w.Code != http.StatusNoContent {
+	if w := putBoard(t, h, "# b\n", good); w.Code != http.StatusNoContent {
 		t.Fatalf("PUT with token: got %d, want 204 (body=%s)", w.Code, w.Body)
 	}
 	w := doReq(t, h, "GET", "/api/board", "", good)

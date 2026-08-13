@@ -163,6 +163,8 @@ func TestRebindingAndCSRFRejected(t *testing.T) {
 			"Origin: http://" + addr,
 			"Sec-Fetch-Site: same-origin",
 			"Content-Type: text/markdown; charset=utf-8",
+			// Markdown PUTs are conditional; the seeded board makes * match.
+			"If-Match: *",
 		}, "# mine\n")
 		if resp.StatusCode != http.StatusNoContent {
 			t.Fatalf("same-origin PUT: got %d, want 204", resp.StatusCode)
