@@ -141,6 +141,7 @@ commands:
   add, list, update, move, done, cancel, restore, rm
              the task CLI — run "kb help" for the full reference
   mcp        serve the board to AI agents over MCP stdio
+  version    print the kb version
   help       task CLI reference
 
 serve flags:
