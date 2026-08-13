@@ -43,6 +43,12 @@ commands:
                          (requires --yes)
   users                  list board owners and their task counts (local
                          database only; --json for machine output)
+  comment add <id> "text"
+                         append a comment to a task
+  comment list <id>      list a task's comments oldest-first
+  comment rm <cid>       delete a comment for good (requires --yes);
+                         comment ids are c1, c2, ... per board, stable and
+                         never reused. Comments are local-only for now.
   help                   show this help
 
 other modes (not task commands):
@@ -105,7 +111,8 @@ remote mode:
   KB_SERVER=http://host:port operates over the HTTP API instead of the
   local database; KB_SERVER_TOKEN adds a bearer token. Task ids are then
   ephemeral listing indexes (i1, i2, ...) valid against the current board.
-  users is local-only: the server API serves one board per identity.
+  users and comment are local-only: the server API serves one board per
+  identity and has no comment endpoints yet.
 `
 
 // Run executes one kb CLI invocation. args starts with the subcommand,
@@ -140,6 +147,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return a.cmdRm(rest)
 	case "users":
 		return a.cmdUsers(rest)
+	case "comment":
+		return a.cmdComment(rest)
 	}
 	fmt.Fprintf(stderr, "kb: unknown command %q\n\n%s", cmd, usageText)
 	return 2
@@ -953,13 +962,9 @@ func itemJSON(it item) taskJSON {
 	return j
 }
 
-// writeJSON renders items as a JSON array of full tasks.
-func writeJSON(w io.Writer, items []item) error {
-	out := make([]taskJSON, 0, len(items))
-	for _, it := range items {
-		out = append(out, itemJSON(it))
-	}
-	b, err := json.MarshalIndent(out, "", "  ")
+// writeSingleJSON renders v as indented JSON with a trailing newline.
+func writeSingleJSON(w io.Writer, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode json: %w", err)
 	}
@@ -968,14 +973,17 @@ func writeJSON(w io.Writer, items []item) error {
 	return err
 }
 
+// writeJSON renders items as a JSON array of full tasks.
+func writeJSON(w io.Writer, items []item) error {
+	out := make([]taskJSON, 0, len(items))
+	for _, it := range items {
+		out = append(out, itemJSON(it))
+	}
+	return writeSingleJSON(w, out)
+}
+
 // writeJSONItem renders one affected task as a single JSON object — the
 // --json form of every mutation verb's confirmation line.
 func writeJSONItem(w io.Writer, it item) error {
-	b, err := json.MarshalIndent(itemJSON(it), "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode json: %w", err)
-	}
-	b = append(b, '\n')
-	_, err = w.Write(b)
-	return err
+	return writeSingleJSON(w, itemJSON(it))
 }

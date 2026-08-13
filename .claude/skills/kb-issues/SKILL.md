@@ -38,6 +38,9 @@ chosen, where a workflow reaches for `gh issue` or `glab issue`, use the
 | `gh issue close N --reason "not planned"` | `kb cancel <id>` (reversible) |
 | `gh issue reopen N` | `kb restore <id>` (cancelled → todo) |
 | `gh issue delete N` | `kb rm <id> --yes` (permanent, prefer cancel) |
+| `gh issue comment N --body B` | `kb comment add <id> "B"` |
+| view comments | `kb comment list <id> [--json]` |
+| delete a comment | `kb comment rm <cid> --yes` (ids are `c1, c2, ...`, stable) |
 | assignees | one board per user: `--user name`; `kb users` lists boards |
 
 Run `kb help` for every flag (priority, due dates, effort, checklists,
@@ -59,8 +62,9 @@ blocked flag, status moves).
   richer than open/closed. `done` refuses to land while checklist items
   are open or the task is blocked, unless `--force`.
 - Labels are `--tag` values: plain strings, no colors, created on use.
-- There are no issue comments, no milestones, and no stable issue
-  numbers to cross-reference. Put discussion in the description
-  (`--desc`) or checklist items (`--check`).
+- Comments are append-only with delete (`kb comment rm`); there is no
+  comment editing — delete and re-post instead. Comments are local-only
+  (no remote/`KB_SERVER` support yet).
+- There are no milestones and no cross-references between tasks yet.
 - `kb rm` is a hard delete with no undo; `kb cancel` is the reversible
   close and almost always the right choice.

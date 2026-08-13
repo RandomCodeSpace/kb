@@ -88,7 +88,7 @@ type kb struct {
 	beforeDoneGuard func()
 }
 
-// newServer builds the MCP server with all seven board tools registered.
+// newServer builds the MCP server with all nine board tools registered.
 func newServer(st *store.Store, user string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "kb", Title: "kb kanban board", Version: "1.0.0"}, nil)
 	k := &kb{st: st, user: user}
@@ -120,6 +120,14 @@ func newServer(st *store.Store, user string) *mcp.Server {
 		Name:        "duplicate_check",
 		Description: "Check a proposed title, body, and exact provenance link; check before creating a card to avoid duplicating existing work; returns cheap stubs, fetch details only if needed.",
 	}, k.duplicateCheck)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "add_comment",
+		Description: "Append a comment to a task identified by its stable number (12 or #12), UUID, or unique UUID prefix. Comments are an append-only log with stable per-board ids (c1, c2, ...) that are never reused. Returns the created comment.",
+	}, k.addComment)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_comments",
+		Description: "List a task's comments oldest-first. The task is identified by its stable number (12 or #12), UUID, or unique UUID prefix. Returns each comment's id, author, body, and creation time.",
+	}, k.listComments)
 	return srv
 }
 

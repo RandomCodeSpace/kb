@@ -233,6 +233,28 @@ INSERT INTO board_sequences(user, next)
 SELECT user, MAX(seq) + 1 FROM tasks GROUP BY user;
 CREATE UNIQUE INDEX tasks_user_seq ON tasks (user, seq);
 `,
+	// v8: task comments. Comment ids are per-board (scope) and monotonic —
+	// the same never-reuse contract as task sequence numbers, backed by the
+	// same counter shape. Comments key on the task UUID, so they survive
+	// ReplaceBoard whenever the task's identity is preserved; there is
+	// deliberately no foreign key because ReplaceBoard deletes and reinserts
+	// task rows (see tombstones), and orphans are swept in that transaction.
+	`
+CREATE TABLE comments (
+  scope      TEXT NOT NULL,
+  id         INTEGER NOT NULL,
+  task_id    TEXT NOT NULL,
+  author     TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (scope, id)
+);
+CREATE INDEX comments_scope_task ON comments (scope, task_id);
+CREATE TABLE comment_sequences (
+  user TEXT PRIMARY KEY,
+  next INTEGER NOT NULL
+);
+`,
 }
 
 // migrate creates the meta table and applies any pending schema versions.
