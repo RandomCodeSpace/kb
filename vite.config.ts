@@ -34,9 +34,9 @@ export default defineConfig({
         'src/test/**',
       ],
       thresholds: {
-        branches: 95.07,
-        functions: 98.71,
-        lines: 99.42,
+        branches: 95.39,
+        functions: 98.83,
+        lines: 99.48,
         statements: 98.20,
       },
     },

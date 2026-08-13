@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { Check, Task } from '../lib/model';
-import { newTask } from '../lib/model';
+import { makeTask } from '../test/task';
 import { shipWarning, shipWarningLines } from './ShipDialog';
 
 function task(checks: Check[], blocked = false): Task {
-  return newTask({ title: 'ship me', checks, blocked });
+  return makeTask({ title: 'ship me', checks, blocked });
 }
 
 describe('shipWarning', () => {

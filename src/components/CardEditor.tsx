@@ -1,13 +1,22 @@
 import { useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
-import type { AIStoryRequest, StoryDraft } from '../lib/api';
-import type { Check, Effort, Prio } from '../lib/model';
-import { newTask } from '../lib/model';
+import type { AIStoryRequest, StoryDraft, TaskPatch } from '../lib/api';
+import type { Check, Effort, Prio, TaskDraft } from '../lib/model';
+import { newDraft } from '../lib/model';
 import type { ModalState } from './CardModal';
 import { CardAIDraft } from './CardAIDraft';
 import { DateField } from './DateField';
 import { EmojiField, firstEmoji } from './EmojiField';
 import { LabelsCombobox } from './LabelsCombobox';
+
+/**
+ * What Save asks the board to do. Adding proposes a draft the server turns
+ * into a task; editing names the task and the fields to change, so nothing
+ * the form did not touch is resent.
+ */
+export type CardSave =
+  | { mode: 'add'; draft: TaskDraft }
+  | { mode: 'edit'; taskId: string; patch: TaskPatch };
 
 export interface CardEditorProps {
   state: ModalState;
@@ -18,7 +27,7 @@ export interface CardEditorProps {
   onBusyChange: (busy: boolean) => void;
   cancelRef: RefObject<(() => void) | null>;
   titleExtras: ReactNode;
-  onSave: (task: ReturnType<typeof newTask>) => void;
+  onSave: (save: CardSave) => void;
   onDelete: (taskId: string) => void;
   onClose: () => void;
 }
@@ -81,18 +90,32 @@ export function CardEditor({
 
   const save = () => {
     if (!title.trim()) return;
+    // due and effort go out as '' rather than omitted: on a patch an absent
+    // field means "leave it alone", so clearing a date has to be said.
     const next = {
       emoji: firstEmoji(emoji),
       title: title.trim(),
       desc: desc.trim(),
       blocked,
       prio,
-      due: due || undefined,
-      effort: effort === '' ? undefined : effort,
+      due,
+      effort,
       tags,
       checks: textToChecks(checks),
     };
-    onSave(state.mode === 'add' ? newTask({ ...next, status: state.status }) : { ...state.task, ...next });
+    onSave(
+      state.mode === 'add'
+        ? {
+          mode: 'add',
+          draft: newDraft({
+            ...next,
+            status: state.status,
+            due: due || undefined,
+            effort: effort === '' ? undefined : effort,
+          }),
+        }
+        : { mode: 'edit', taskId: state.task.id, patch: next },
+    );
   };
 
   return (

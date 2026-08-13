@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import type { Status, Task } from '../lib/model';
+import type { Status, TaskDraft } from '../lib/model';
 import { STATUS_LABEL, STATUSES } from '../lib/model';
 import type {
   ForgeSource,
@@ -45,11 +45,11 @@ export function toImportRows(drafts: readonly ImportDraft[]): ImportRow[] {
   });
 }
 
-/** Convert reviewed imports through the ADR helper so task shape stays shared. */
+/** Convert reviewed imports through the ADR helper so draft shape stays shared. */
 export function importRowsToTasks(
   rows: readonly ImportRow[],
   status: Status,
-): Task[] {
+): TaskDraft[] {
   return rowsToTasks(rows, status);
 }
 
@@ -76,7 +76,8 @@ export interface ImportModalProps {
     req: ImportPreviewRequest,
     signal: AbortSignal,
   ) => Promise<ImportPreview>;
-  onAdd: (tasks: Task[]) => void;
+  /** Resolves with the titles that actually became cards. */
+  onAdd: (drafts: TaskDraft[]) => Promise<ReadonlySet<string>>;
   onCommitLinks: (req: RecordImportLinksRequest) => void;
   onClose: () => void;
 }
@@ -202,12 +203,16 @@ export function ImportModal({
   const tasks = rows === null ? [] : importRowsToTasks(rows, dest);
   const links = rows === null ? [] : selectedLinkItems(rows);
 
-  const addSelected = () => {
+  const addSelected = async () => {
     if (rows === null || tasks.length === 0) return;
-    // Cards are primary. The API helper deliberately makes the provenance
-    // journal best-effort, so this call cannot undo or block the board commit.
-    onAdd(tasks);
-    if (links.length > 0) onCommitLinks({ source, items: links });
+    // Cards are primary: the provenance journal is best-effort and can never
+    // undo or block the board commit. It is still written after the creates
+    // rather than alongside them, and only for the cards that exist — an
+    // issue journalled as imported when its card was refused is a link to
+    // nothing, and the next import would call it a duplicate.
+    const created = await onAdd(tasks);
+    const journal = links.filter((item) => created.has(item.title));
+    if (journal.length > 0) onCommitLinks({ source, items: journal });
   };
 
   return (
@@ -369,7 +374,7 @@ export function ImportModal({
                 type="button"
                 className="save"
                 disabled={tasks.length === 0}
-                onClick={addSelected}
+                onClick={() => void addSelected()}
               >
                 Add selected ({tasks.length})
               </button>

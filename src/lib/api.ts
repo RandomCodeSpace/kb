@@ -1,5 +1,7 @@
 import type { Identity } from './auth';
 import { getApiToken, ReauthRequiredError } from './auth';
+import type { Check, Effort, Prio, Status, Task, TaskDraft } from './model';
+import { STATUSES } from './model';
 import { coerceStoryDraft } from './storyDraft';
 import type { StoryDraft } from './storyDraft';
 
@@ -467,8 +469,9 @@ export async function importPreview(
 }
 
 /**
- * Journal selected source links after cards are added. The caller owns durable
- * retry; rejecting failures is what prevents the outbox from dropping work.
+ * Journal selected source links after cards are added. Rejecting rather than
+ * swallowing is what lets the caller tell an expired session apart from a
+ * refused write — the cards are already committed either way.
  */
 export async function recordImportLinks(
   identity: Identity,
@@ -808,5 +811,228 @@ export async function getTaskComments(
     return coerceTaskComments(await res.json());
   } catch {
     return [];
+  }
+}
+
+/* ---------------------------------------------------------------- tasks --- */
+
+const HEALTH_TIMEOUT_MS = 1500;
+const JSON_HEADERS = { 'Content-Type': 'application/json' } as const;
+
+/**
+ * Whether a kb server is answering on this origin. Unauthenticated on purpose
+ * (GET /api/health needs no credential), so it also answers before the SPA
+ * knows whether its token is still good.
+ */
+export async function detect(): Promise<boolean> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), HEALTH_TIMEOUT_MS);
+  try {
+    const res = await fetch('/api/health', { signal: ctrl.signal });
+    if (!res.ok) return false;
+    return ((await res.json()) as { ok?: unknown }).ok === true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * A refused task write. `status` distinguishes the cases the UI treats
+ * differently: 409 is the server's completion guard (unticked checklist,
+ * blocked flag, or an open blocker the SPA cannot see), 400 a field the
+ * server will not store.
+ */
+export class TaskRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'TaskRequestError';
+  }
+}
+
+/**
+ * The write half of the task wire. Only the fields present are changed;
+ * `tags` and `checks` replace wholesale rather than merge. `index` is the
+ * slot within the destination column, counted over that column's other tasks,
+ * and `force` bypasses the server's completion guard.
+ */
+export interface TaskPatch {
+  title?: string;
+  emoji?: string;
+  desc?: string;
+  status?: Status;
+  blocked?: boolean;
+  prio?: Prio;
+  due?: string;
+  effort?: Effort | '';
+  tags?: string[];
+  checks?: Check[];
+  index?: number;
+  force?: true;
+}
+
+function apiText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function apiChecks(value: unknown): Check[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return [];
+    const check = item as Record<string, unknown>;
+    if (typeof check.text !== 'string') return [];
+    return [{ text: check.text, done: check.done === true }];
+  });
+}
+
+/**
+ * Turn one wire task into a Task. Every `omitempty` field the server drops
+ * (emoji, desc, blocked, tags, checks, due, effort, timestamps) is filled in
+ * here, so nothing downstream has to cope with an absent one. A row without a
+ * usable id, title, or status is dropped rather than rendered half-formed.
+ */
+export function coerceApiTask(value: unknown): Task | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const fields = value as Record<string, unknown>;
+  const id = apiText(fields.id).trim();
+  const status = STATUSES.find((s) => s === fields.status);
+  if (id === '' || typeof fields.title !== 'string' || status === undefined) {
+    return null;
+  }
+  const prio = typeof fields.prio === 'number' && [1, 2, 3, 4].includes(fields.prio)
+    ? (fields.prio as Prio)
+    : 3;
+  const due = apiText(fields.due);
+  const effort = fields.effort === 'S' || fields.effort === 'M' || fields.effort === 'L'
+    ? fields.effort
+    : undefined;
+  return {
+    id,
+    emoji: apiText(fields.emoji),
+    title: fields.title,
+    desc: apiText(fields.desc),
+    status,
+    blocked: fields.blocked === true,
+    prio,
+    ...(due === '' ? {} : { due }),
+    ...(effort === undefined ? {} : { effort }),
+    tags: Array.isArray(fields.tags)
+      ? fields.tags.filter((tag): tag is string => typeof tag === 'string')
+      : [],
+    checks: apiChecks(fields.checks),
+    createdAt: apiText(fields.createdAt),
+    movedAt: apiText(fields.movedAt),
+  };
+}
+
+export function coerceApiTasks(body: unknown): Task[] {
+  if (!Array.isArray(body)) return [];
+  return body.flatMap((item) => {
+    const task = coerceApiTask(item);
+    return task === null ? [] : [task];
+  });
+}
+
+async function taskResponse(res: Response, what: string): Promise<Task> {
+  if (!res.ok) {
+    throw new TaskRequestError(
+      await errText(res, `${what} failed: ${res.status}`),
+      res.status,
+    );
+  }
+  const task = coerceApiTask(await res.json());
+  if (!task) throw new TaskRequestError(`${what} returned an unusable task`, res.status);
+  return task;
+}
+
+/**
+ * The whole board, in board order (status rank, then column position), so it
+ * renders straight from the array with no client-side sort.
+ */
+export async function listTasks(identity: Identity): Promise<Task[]> {
+  const res = await authedFetch(identity, '/api/tasks');
+  if (!res.ok) {
+    throw new TaskRequestError(
+      await errText(res, `load board failed: ${res.status}`),
+      res.status,
+    );
+  }
+  return coerceApiTasks(await res.json());
+}
+
+/** Create a task. The server assigns the id, sequence, and column position. */
+export async function createTask(
+  identity: Identity,
+  draft: TaskDraft,
+): Promise<Task> {
+  const res = await authedFetch(identity, '/api/tasks', {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({
+      title: draft.title,
+      emoji: draft.emoji,
+      desc: draft.desc,
+      status: draft.status,
+      blocked: draft.blocked,
+      prio: draft.prio,
+      due: draft.due ?? '',
+      effort: draft.effort ?? '',
+      tags: draft.tags,
+      checks: draft.checks,
+    }),
+  });
+  return taskResponse(res, 'create task');
+}
+
+export async function patchTask(
+  identity: Identity,
+  taskId: string,
+  patch: TaskPatch,
+): Promise<Task> {
+  const res = await authedFetch(
+    identity,
+    `/api/tasks/${encodeURIComponent(taskId)}`,
+    { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify(patch) },
+  );
+  return taskResponse(res, 'save task');
+}
+
+/**
+ * Permanently delete a task; the server cascades its tombstone, comments, and
+ * links. Deliberately bodyless: the API's method guard rejects a body-bearing
+ * DELETE that declares no JSON content type.
+ */
+export async function deleteTask(
+  identity: Identity,
+  taskId: string,
+): Promise<Task> {
+  const res = await authedFetch(
+    identity,
+    `/api/tasks/${encodeURIComponent(taskId)}`,
+    { method: 'DELETE' },
+  );
+  return taskResponse(res, 'delete task');
+}
+
+/**
+ * Replace the whole board with a markdown document — the one write with no
+ * per-task equivalent, used by the file import so "replace the board" stays a
+ * single atomic step rather than N deletes and M creates.
+ */
+export async function replaceBoard(
+  identity: Identity,
+  markdown: string,
+): Promise<void> {
+  const res = await authedFetch(identity, '/api/board', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'text/markdown; charset=utf-8' },
+    body: markdown,
+  });
+  if (!res.ok) {
+    throw new TaskRequestError(
+      await errText(res, `board import failed: ${res.status}`),
+      res.status,
+    );
   }
 }

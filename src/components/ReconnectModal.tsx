@@ -12,7 +12,7 @@ export interface ReconnectModalProps {
   onIdentity: (identity: Identity) => void;
   /** Give up on this identity entirely and go back to the gate. */
   onSignOut: () => void;
-  /** Dismiss and keep working locally. */
+  /** Dismiss the dialog; the session stays expired and nothing gets saved. */
   onClose: () => void;
 }
 
@@ -34,14 +34,14 @@ export function reconnectError(err: unknown): string {
  * The server token lives in sessionStorage on purpose (it authorizes every
  * user's board, so it must not sit in localStorage), while the identity lives
  * in localStorage. A new browser session therefore starts signed in with no
- * token: the header says who you are, the board reads from local storage, and
- * every API call 401s. Before this dialog the only sign of that was a dot in
- * the header, and the only way out was to sign out and back in — which nothing
- * on screen said.
+ * token: the header says who you are, and every API call 401s. Before this
+ * dialog the only sign of that was a dot in the header, and the only way out
+ * was to sign out and back in — which nothing on screen said.
  *
- * Dismissable by design: the board is fully usable from local storage, and the
- * edits made meanwhile are pushed once the session is restored. The header
- * keeps a Reconnect button for as long as the session is expired.
+ * The board is the server's; there is no local copy and no outbox behind it,
+ * so an expired session means every edit is refused and undone. Dismissable
+ * only so the board can be read while it lasts — the header keeps a Reconnect
+ * button for as long as the session is expired.
  */
 export function ReconnectModal({
   identity,
@@ -99,8 +99,8 @@ export function ReconnectModal({
     <div
       className="modal-backdrop"
       onPointerDown={(e) => {
-        // Dismissable by clicking away: the board still works without a
-        // server, so this must not hold the app hostage.
+        // Dismissable by clicking away: the board can still be read while the
+        // session is dead, so this must not hold the app hostage.
         if (e.target === e.currentTarget && !busy) onClose();
       }}
     >
@@ -124,9 +124,10 @@ export function ReconnectModal({
       >
         <h2 id={titleId}>Session expired</h2>
         <p id={bodyId} className="mnote">
-          The server is no longer accepting this session, so nothing is being
-          saved to it. Your board is safe on this device and will be pushed as
-          soon as the session is restored.
+          The server is no longer accepting this session, so nothing can be
+          saved. The board lives on the server and there is no copy on this
+          device, so any change you make now is refused and undone. Reconnect
+          to start saving again.
         </p>
         {/* The failure message rides in the action row's reserved slot (same
             pattern as Settings): mounted above the controls it grew the modal
@@ -148,7 +149,7 @@ export function ReconnectModal({
                 Sign out
               </button>
               <button type="button" onClick={onClose} disabled={busy}>
-                Work offline
+                Keep looking
               </button>
               <span className="statusline">
                 {error && (
@@ -185,7 +186,7 @@ export function ReconnectModal({
                 Sign out
               </button>
               <button type="button" onClick={onClose} disabled={busy}>
-                Work offline
+                Keep looking
               </button>
               <span className="statusline">
                 {error && (

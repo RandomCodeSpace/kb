@@ -3,17 +3,17 @@ import { useState } from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
-import type { Task } from '../lib/model';
 import { CardEditor } from './CardEditor';
+import type { CardSave } from './CardEditor';
 
 const task = { id: 't1', emoji: '🔧', title: 'Original', desc: 'old', status: 'todo' as const, blocked: false, prio: 3 as const, due: '2026-08-10', effort: 'M' as const, tags: ['type::bug'], checks: [{ text: 'done check', done: true }, { text: 'open check', done: false }], createdAt: '2026-01-01T00:00:00Z', movedAt: '2026-01-01T00:00:00Z' };
 
-function Harness(props: { mode: 'add' | 'edit'; onSave: (task: Task) => void; onDelete?: (id: string) => void; onClose?: () => void }) {
+function Harness(props: { mode: 'add' | 'edit'; onSave: (save: CardSave) => void; onDelete?: (id: string) => void; onClose?: () => void }) {
   const [title, setTitle] = useState(props.mode === 'edit' ? task.title : '');
   return <CardEditor state={props.mode === 'edit' ? { mode: 'edit', task } : { mode: 'add', status: 'doing' }} labels={['type::bug', 'env::prod']} title={title} onTitleChange={setTitle} onBusyChange={vi.fn()} cancelRef={{ current: null }} titleExtras={<p>extras</p>} onSave={props.onSave} onDelete={props.onDelete ?? vi.fn()} onClose={props.onClose ?? vi.fn()} />;
 }
 
-function AIHarness(props: { onSave: (task: Task) => void; aiDraft: (req: import('../lib/api').AIStoryRequest, signal?: AbortSignal) => Promise<import('../lib/api').StoryDraft> }) {
+function AIHarness(props: { onSave: (save: CardSave) => void; aiDraft: (req: import('../lib/api').AIStoryRequest, signal?: AbortSignal) => Promise<import('../lib/api').StoryDraft> }) {
   const [title, setTitle] = useState('seed');
   return <CardEditor state={{ mode: 'add', status: 'todo' }} labels={[]} aiDraft={props.aiDraft} title={title} onTitleChange={setTitle} onBusyChange={vi.fn()} cancelRef={{ current: null }} titleExtras={null} onSave={props.onSave} onDelete={vi.fn()} onClose={vi.fn()} />;
 }
@@ -30,7 +30,7 @@ describe('CardEditor DOM', () => {
     await user.click(screen.getByLabelText(/Blocked/));
     await user.clear(screen.getByLabelText(/Checklist/)); await user.type(screen.getByLabelText(/Checklist/), 'x shipped\nnext');
     await user.click(screen.getByRole('button', { name: 'Save' }));
-    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ id: 't1', title: 'Reviewed', desc: 'updated', blocked: true, prio: 1, effort: 'L', checks: [{ text: 'shipped', done: true }, { text: 'next', done: false }] }));
+    expect(onSave).toHaveBeenCalledWith({ mode: 'edit', taskId: 't1', patch: expect.objectContaining({ title: 'Reviewed', desc: 'updated', blocked: true, prio: 1, effort: 'L', checks: [{ text: 'shipped', done: true }, { text: 'next', done: false }] }) });
     await user.click(screen.getByRole('button', { name: 'Delete' }));
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onDelete).toHaveBeenCalledWith('t1');
@@ -40,13 +40,14 @@ describe('CardEditor DOM', () => {
   it('requires a title and creates a task in the requested column', async () => {
     const user = userEvent.setup();
     const onSave = vi.fn();
-    vi.spyOn(crypto, 'randomUUID').mockReturnValue('00000000-0000-4000-8000-000000000001');
     render(<Harness mode="add" onSave={onSave} />);
     const save = screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement;
     expect(save.disabled).toBe(true);
     await user.type(screen.getByLabelText('Title'), 'New card');
     await user.click(save);
-    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ id: '00000000-0000-4000-8000-000000000001', title: 'New card', status: 'doing' }));
+    expect(onSave).toHaveBeenCalledWith({ mode: 'add', draft: expect.objectContaining({ title: 'New card', status: 'doing' }) });
+    // The draft carries no id: the server assigns one on create.
+    expect(onSave.mock.calls[0]![0].draft).not.toHaveProperty('id');
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
   });
 
@@ -63,7 +64,7 @@ describe('CardEditor DOM', () => {
     expect((screen.getByLabelText('Due') as HTMLInputElement).value).toBe('2026-09-01');
     expect((screen.getByLabelText('Effort') as HTMLSelectElement).value).toBe('S');
     await user.click(screen.getByRole('button', { name: 'Save' }));
-    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ title: 'Drafted', emoji: '🔧', desc: 'generated', tags: ['ai'], checks: [{ text: 'verify', done: true }] }));
+    expect(onSave).toHaveBeenCalledWith({ mode: 'add', draft: expect.objectContaining({ title: 'Drafted', emoji: '🔧', desc: 'generated', tags: ['ai'], checks: [{ text: 'verify', done: true }] }) });
   });
 
   it('keeps the reviewed title when an AI draft omits one and ignores a forced blank submit', async () => {

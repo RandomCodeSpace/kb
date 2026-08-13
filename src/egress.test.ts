@@ -57,7 +57,6 @@ const URL_ALLOWLIST: { file: string; url: string; why: string }[] = [
 const EGRESS_ALLOWLIST: { file: string; why: string }[] = [
   { file: 'lib/api.ts', why: 'the same-origin /api client' },
   { file: 'lib/auth.ts', why: 'GET /api/config, same-origin' },
-  { file: 'lib/remote.ts', why: 'GET /api/health, same-origin' },
 ];
 
 /**
@@ -199,7 +198,7 @@ describe('egress guard', () => {
   it('keeps the allowlists small and honest', () => {
     // Growth here is the signal to re-read "What kb sends over the network".
     expect(URL_ALLOWLIST.length).toBeLessThanOrEqual(3);
-    expect(EGRESS_ALLOWLIST.length).toBeLessThanOrEqual(3);
+    expect(EGRESS_ALLOWLIST.length).toBeLessThanOrEqual(2);
     for (const a of [...URL_ALLOWLIST, ...EGRESS_ALLOWLIST]) {
       expect(FILES).toContain(a.file);
       expect(a.why.length).toBeGreaterThan(10);

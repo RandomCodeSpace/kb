@@ -50,7 +50,7 @@ describe('ReconnectModal DOM', () => {
     const onIdentity = vi.fn(), onSignOut = vi.fn(), onClose = vi.fn();
     render(<ReconnectModal identity={{ kind: 'azure', id: 'a', homeAccountId: 'old' }} onIdentity={onIdentity} onSignOut={onSignOut} onClose={onClose} />);
     await user.click(screen.getByRole('button', { name: 'Sign out' }));
-    await user.click(screen.getByRole('button', { name: 'Work offline' }));
+    await user.click(screen.getByRole('button', { name: 'Keep looking' }));
     await user.click(screen.getByRole('button', { name: 'Sign in again' }));
     await waitFor(() => expect(onIdentity).toHaveBeenCalledWith(expect.objectContaining({ homeAccountId: 'fresh' })));
     expect(onSignOut).toHaveBeenCalled();
@@ -75,6 +75,16 @@ describe('ReconnectModal DOM', () => {
     render(<ReconnectModal identity={{ kind: 'azure', id: 'a', homeAccountId: 'old' }} onIdentity={vi.fn()} onSignOut={vi.fn()} onClose={vi.fn()} />);
     await user.click(screen.getByRole('button', { name: 'Sign in again' }));
     expect((await screen.findByRole('alert')).textContent).toContain('Sign-in failed');
+  });
+
+  it('promises nothing about work done while the session is expired', () => {
+    render(<ReconnectModal identity={{ kind: 'manual', id: 'alice' }} onIdentity={vi.fn()} onSignOut={vi.fn()} onClose={vi.fn()} />);
+    const body = screen.getByRole('dialog').querySelector('.mnote')?.textContent ?? '';
+    // There is no local board and no outbox behind it: a change made now is
+    // refused and undone, so the dialog must not offer to push it later.
+    expect(body).toContain('refused and undone');
+    expect(body).not.toMatch(/pushed|safe on this device|will be saved/);
+    expect(screen.queryByRole('button', { name: 'Work offline' })).toBeNull();
   });
 
   it('ignores an empty manual submit and covers non-Escape dialog keys', () => {

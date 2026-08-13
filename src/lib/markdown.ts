@@ -1,5 +1,15 @@
-import type { Board, Check, Effort, Prio, Status, Task } from './model';
-import { STATUS_LABEL, STATUSES, newTask } from './model';
+import type { Check, Effort, Prio, Status, TaskDraft } from './model';
+import { STATUS_LABEL, STATUSES, newDraft } from './model';
+
+/**
+ * A board as the markdown codec sees it: a title and tasks with no ids or
+ * timestamps. Serializing accepts real Tasks too — they carry every field the
+ * wire has a place for, and the rest is server bookkeeping the file omits.
+ */
+export interface DraftBoard {
+  title: string;
+  tasks: TaskDraft[];
+}
 
 const EMOJI_RE = /^\p{Extended_Pictographic}(?:️)?/u;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -14,7 +24,9 @@ const BLOCKED_TOKEN = '%blocked';
  * Tasks in the order serialize() writes them and the Go parser receives them:
  * canonical column order, preserving board order within each column.
  */
-export function wireTasks(board: Board): Task[] {
+export function wireTasks(
+  board: Readonly<{ tasks: readonly TaskDraft[] }>,
+): TaskDraft[] {
   return STATUSES.flatMap((status) =>
     board.tasks.filter((task) => task.status === status),
   );
@@ -24,7 +36,7 @@ function checkboxMark(done: boolean): string {
   return done ? 'x' : ' ';
 }
 
-function serializeTask(task: Task, status: Status): string {
+function serializeTask(task: TaskDraft, status: Status): string {
   let out = `- [${checkboxMark(status === 'done')}] ${titleLine(task)}\n`;
   for (const line of task.desc.split('\n')) {
     const trimmed = line.trim();
@@ -38,7 +50,9 @@ function serializeTask(task: Task, status: Status): string {
   return out;
 }
 
-export function serialize(board: Board): string {
+export function serialize(
+  board: Readonly<{ title: string; tasks: readonly TaskDraft[] }>,
+): string {
   let out = `# ${board.title}\n`;
   const ordered = wireTasks(board);
   for (const status of STATUSES) {
@@ -57,7 +71,7 @@ export function serialize(board: Board): string {
  * into metadata are backslash-escaped; whitespace runs collapse to single
  * spaces, matching what parse() does on read.
  */
-export function titleLine(t: Task): string {
+export function titleLine(t: TaskDraft): string {
   const title = t.title.split(/\s+/).filter(Boolean).map(escapeToken).join(' ');
   let s = t.emoji ? `${t.emoji} ${title}` : title;
   if (t.prio !== 3) s += ` !${t.prio}`;
@@ -104,25 +118,27 @@ function descriptionText(line: string): string {
 }
 
 function appendIndentedLine(
-  current: Task,
+  current: TaskDraft,
   line: string,
   check: { done: boolean; rest: string } | null,
-  descLines: Map<string, string[]>,
+  descLines: Map<TaskDraft, string[]>,
 ): void {
   if (check) {
     current.checks.push({ text: check.rest, done: check.done } satisfies Check);
     return;
   }
-  descLines.get(current.id)!.push(descriptionText(line));
+  descLines.get(current)!.push(descriptionText(line));
 }
 
-export function parse(input: string): Board {
-  const board: Board = { title: 'Board', tasks: [] };
+export function parse(input: string): DraftBoard {
+  const board: DraftBoard = { title: 'Board', tasks: [] };
   let sawTitle = false;
   let status: Status | null = null;
-  let current: Task | null = null;
+  let current: TaskDraft | null = null;
   let headerIdx = -1;
-  const descLines = new Map<string, string[]>();
+  // Keyed by the draft itself: parsed tasks have no id to key on, and none is
+  // minted here — the server assigns one if the draft is ever created.
+  const descLines = new Map<TaskDraft, string[]>();
 
   for (const raw of input.split('\n')) {
     const line = raw.replace(/\r$/, '');
@@ -145,14 +161,14 @@ export function parse(input: string): Board {
     if (!indented && check) {
       current = parseTitleLine(check.rest, status, check.done);
       board.tasks.push(current);
-      descLines.set(current.id, []);
+      descLines.set(current, []);
       continue;
     }
     if (!current) continue;
     appendIndentedLine(current, line, check, descLines);
   }
   for (const t of board.tasks) {
-    t.desc = (descLines.get(t.id) ?? []).join('\n');
+    t.desc = (descLines.get(t) ?? []).join('\n');
   }
   return board;
 }
@@ -164,7 +180,11 @@ function stripCheckbox(s: string): { done: boolean; rest: string } | null {
   return null;
 }
 
-export function parseTitleLine(raw: string, status: Status, done: boolean): Task {
+export function parseTitleLine(
+  raw: string,
+  status: Status,
+  done: boolean,
+): TaskDraft {
   let rest = raw.trim();
   let emoji = '';
   const em = EMOJI_RE.exec(rest);
@@ -172,7 +192,7 @@ export function parseTitleLine(raw: string, status: Status, done: boolean): Task
     emoji = em[0];
     rest = rest.slice(em[0].length).trim();
   }
-  const t = newTask({ title: '', status: done ? 'done' : status, emoji });
+  const t = newDraft({ title: '', status: done ? 'done' : status, emoji });
   const words: string[] = [];
   for (const tok of rest.split(/\s+/)) {
     // Escaped word: strip one backslash, keep it as title text.

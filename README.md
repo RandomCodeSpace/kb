@@ -169,10 +169,12 @@ wildcard, while a concurrent deletion returns `409`. A pre-upgrade content-hash
 token receives the same `409` and current revision token, after which a normal
 refetch/retry works.
 
-Normal SPA sync refetches after a conflict, merges by canonical id when the
-mapping is available, and retries once; a second conflict is surfaced. Remote
-CLI mutations and degraded legacy-browser recovery surface `409` without an
-unsafe unconditional retry.
+The SPA no longer takes this path for ordinary work: it reads and writes
+through the per-task endpoints and keeps no board of its own. It uses
+`PUT /api/board` only for the markdown file import, deliberately
+unconditionally — that action's whole point is "discard everything now on the
+board". Remote CLI mutations surface `409` without an unsafe unconditional
+retry.
 
 Only the compatibility path — a `text/markdown` `PUT` with no `If-Match` — is
 unconditional and last-writer-wins. It can silently delete intervening work.
@@ -213,30 +215,26 @@ By default a successful `PUT` answers `204` with no body. A literal
 `Accept: application/json;q=0` retain `204`. Both success forms carry the
 committed revision `ETag`.
 
-The browser persists an envelope-v3 `pending_board_write` containing the exact
-JSON bytes, original `If-Match`, operation UUID, sent board, and canonical map
-before a create-bearing request. Startup replays that request before normal
-sync, then refetches and three-way merges current local and remote state against
-the acknowledged commit. Edits committed while either replay request is in
-flight are reread and merged before persistence. The pending record is cleared
-only in the same localStorage write that persists its matching acknowledgement.
-An uncertain transport or invalid success response blocks every later save
-until that exact pending request is replayed, reconciled, and durably
-acknowledged. If acknowledgement persistence fails, the stored envelope retains
-the original pending operation; ordinary saves cannot erase it.
+**The board lives on the server.** The SPA holds no copy of it. It reads
+`GET /api/tasks` on startup and after reconnecting, writes every change through
+the per-task endpoints, and reads the list back once after each write, so the
+display reflects what the server has even when the CLI or MCP is writing at the
+same time. Task ids come from the server; the browser never mints one. There is
+no offline mode: with no server there is no board, and the page says so.
 
-**Durable metadata delivery.** The SPA journals cancellation reasons and
-import provenance in a credential-free, per-account local outbox. A reason is
-stored before the board can acknowledge its canonical task id. Queued work is
-retried after startup, an `online` event, and successful board synchronization.
-Network and `5xx` failures remain queued; `401` requests reauthentication;
-permanent `4xx` failures remain visibly blocked. Cross-tab drains use Web
-Locks. If that exclusion is unavailable, work stays queued and the UI reports
-that delivery is blocked rather than risking an unordered write. Restoring or
-purging a cancelled card removes its pending reason before changing the board.
-A delivery failure does not roll back the cancellation or imported cards;
-failure to remove stale intent blocks a restore or purge before the board
-changes.
+A refused write shows the server's own words — a rejected field, or the
+completion guard refusing a move to Done — and is followed by the same refetch,
+so the card snaps back to where the server left it. Drag and keyboard moves send
+the destination status and the slot within that column; the confirmation dialog
+for shipping an unfinished card sends `force` once the person has answered it.
+
+**Metadata that follows a write.** A cancellation reason is recorded after the
+card reaches Cancelled, because the server only accepts a tombstone for a
+cancelled task. If that second request fails the card stays cancelled with no
+reason and the UI says so. Import provenance is best-effort in the same way: a
+failure is reported and never rolls back the cards that were created. Restoring
+a cancelled card drops its tombstone server-side; deleting one cascades to its
+comments and links.
 
 ## The board format
 
@@ -808,9 +806,9 @@ The server picks its mode from environment variables at startup:
    read and write every board and settings entry.
 
 In Azure mode, the browser also persists MSAL's immutable `homeAccountId` and
-uses it to select exactly one cached account and namespace local board, dirty,
-canonical-id, and outbox state. It never falls back to MSAL's active account or
-the first cached account. An older email-only identity is upgraded only when
+uses it to select exactly one cached account and to namespace the device-local
+state that remains (today's shipped tally). It never falls back to MSAL's active
+account or the first cached account. An older email-only identity is upgraded only when
 exactly one cached account has that username; zero or multiple matches require
 sign-in again before a token is requested.
 
@@ -1123,11 +1121,12 @@ the race, the stale full-board write receives `409` instead of deleting that
 change. Safety comes from this shared revision invariant, not from task-level
 storage by itself.
 
+The SPA's own writes are task-level, so they advance the revision like any
+other writer and cannot delete a change they never read. Its one full-board
+write is the markdown file import.
+
 The legacy markdown replacement still matches incoming cards to existing rows
 by status/title and then title so ids and creation timestamps can survive a
 round-trip. A markdown `PUT` without `If-Match` remains unconditional for
 compatibility and can overwrite concurrent work. Prefer conditional clients
 and the canonical-id JSON envelope; keep a markdown export if you want history.
-Dirty legacy bootstrap also rereads edits made during its GET or PUT, persists
-the reconciled board and canonical map, and conditionally pushes only the newer
-work. A failed local persistence keeps that board dirty.

@@ -36,99 +36,16 @@ export const STATUS_LABEL: Record<Status, string> = {
   cancelled: 'Cancelled',
 };
 
-export const CURRENT_SEED_SCHEMA = 1;
-export const SEED_ID_FORMAT_VERSION = 1;
-
-const SEED_CATALOG_RELEASED_AT = '2026-08-01T00:00:00.000Z';
-const SEED_SLOTS = [
-  'drag-to-doing',
-  'checklist-on-board',
-  'add-own-task',
-] as const;
-type SeedSlot = typeof SEED_SLOTS[number];
-
-/** Frame seed identity fields so namespace and slot boundaries are injective. */
-function seedTaskID(namespace: string, slot: SeedSlot): string {
-  const encodedNamespace = encodeURIComponent(namespace);
-  const encodedSlot = encodeURIComponent(slot);
-  return `seed.v${SEED_ID_FORMAT_VERSION}.ns.${encodedNamespace.length}:${encodedNamespace}` +
-    `.slot.${encodedSlot.length}:${encodedSlot}`;
-}
-
-function seedTask(
-  namespace: string,
-  slot: SeedSlot,
-  partial: Omit<Task, 'id' | 'createdAt' | 'movedAt'>,
-): Task {
-  return {
-    id: seedTaskID(namespace, slot),
-    createdAt: SEED_CATALOG_RELEASED_AT,
-    movedAt: SEED_CATALOG_RELEASED_AT,
-    ...partial,
-  };
-}
-
 /**
- * Return the virtual starter catalog. Seed identity is deliberately independent
- * from content schema so unchanged slots keep their identity across rollbacks.
+ * A task the server has not created yet. Ids and timestamps are the server's
+ * to assign — the SPA never mints one — so everything that proposes a new card
+ * (the editor, the ADR split, an issue import, a markdown file) speaks this
+ * shape until POST /api/tasks answers with the real task.
  */
-export function seedBoard(
-  namespace = 'default',
-  schemaVersion = CURRENT_SEED_SCHEMA,
-): Board {
-  // The parameter establishes the content-version contract before a second
-  // catalog exists. Identity must not include it.
-  void schemaVersion;
-  return {
-    title: 'kb',
-    tasks: [
-      seedTask(namespace, SEED_SLOTS[0], {
-        emoji: '👋', title: 'Drag me to Doing', prio: 2, status: 'todo',
-        desc: 'Drag the ⠿ grip (or anywhere with a mouse) and drop.',
-        blocked: false,
-        tags: ['start::here'],
-        checks: [],
-      }),
-      seedTask(namespace, SEED_SLOTS[1], {
-        emoji: '✅', title: 'Tick my checklist on the board', prio: 3, status: 'todo',
-        desc: 'Expand with the ▾ button. Finishing every item ships the card.',
-        blocked: false,
-        checks: [
-          { text: 'expand the checklist', done: false },
-          { text: 'tick this one', done: false },
-          { text: 'and this one — watch the card ship', done: false },
-        ],
-        tags: ['type::demo'], effort: 'S',
-      }),
-      seedTask(namespace, SEED_SLOTS[2], {
-        emoji: '➕', title: 'Add your own task', prio: 3, status: 'todo',
-        desc: 'The + button in any column. Tags support scoped labels like env::prod.',
-        blocked: false,
-        tags: [],
-        checks: [],
-      }),
-    ],
-  };
-}
+export type TaskDraft = Omit<Task, 'id' | 'createdAt' | 'movedAt'>;
 
-/**
- * crypto.randomUUID is a secure-context API, so a board served over plain
- * HTTP on a LAN host does not have it. getRandomValues is available in every
- * context kb runs in; fall back to a spec-shaped v4 built from it.
- */
-export function newId(): string {
-  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
-  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-export function newTask(partial: Partial<Task> & { title: string }): Task {
-  const now = new Date().toISOString();
+export function newDraft(partial: Partial<TaskDraft> & { title: string }): TaskDraft {
   return {
-    id: newId(),
     emoji: '',
     desc: '',
     status: 'todo',
@@ -136,8 +53,6 @@ export function newTask(partial: Partial<Task> & { title: string }): Task {
     prio: 3,
     tags: [],
     checks: [],
-    createdAt: now,
-    movedAt: now,
     ...partial,
   };
 }

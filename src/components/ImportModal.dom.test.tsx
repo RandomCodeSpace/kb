@@ -11,7 +11,7 @@ const preview = { kind: 'issue' as const, total_hint: 2, fetched: 1, truncated: 
 describe('ImportModal DOM', () => {
   it('fetches a mocked forge preview, edits, and commits cards plus provenance', async () => {
     const user = userEvent.setup();
-    const onPreview = vi.fn().mockResolvedValue(preview), onAdd = vi.fn(), onCommitLinks = vi.fn();
+    const onPreview = vi.fn().mockResolvedValue(preview), onAdd = vi.fn().mockResolvedValue(new Set(['Reviewed import'])), onCommitLinks = vi.fn();
     render(<ImportModal sources={[source]} onPreview={onPreview} onAdd={onAdd} onCommitLinks={onCommitLinks} onClose={vi.fn()} />);
     await user.type(screen.getByLabelText(/Issue, project/), ' org/repo ');
     await user.click(screen.getByRole('button', { name: 'Fetch' }));
@@ -21,7 +21,38 @@ describe('ImportModal DOM', () => {
     await user.type(screen.getByLabelText('Card title'), 'Reviewed import');
     await user.click(screen.getByRole('button', { name: 'Add selected (1)' }));
     expect(onAdd.mock.calls[0][0][0].title).toBe('Reviewed import');
-    expect(onCommitLinks).toHaveBeenCalledWith({ source: 'work', items: [expect.objectContaining({ external_key: 'github:org/repo#1', title: 'Reviewed import' })] });
+    await waitFor(() => expect(onCommitLinks).toHaveBeenCalledWith({ source: 'work', items: [expect.objectContaining({ external_key: 'github:org/repo#1', title: 'Reviewed import' })] }));
+  });
+
+  it('journals provenance only for the issues whose cards were created', async () => {
+    const user = userEvent.setup();
+    const second = { ...draft, title: 'Second', link: 'github#2', external_key: 'github:org/repo#2', url: 'https://github.com/org/repo/issues/2' };
+    const onPreview = vi.fn().mockResolvedValue({ ...preview, drafts: [draft, second] });
+    // The first card was created, the second refused.
+    const onAdd = vi.fn().mockResolvedValue(new Set(['Imported']));
+    const onCommitLinks = vi.fn();
+    render(<ImportModal sources={[source]} onPreview={onPreview} onAdd={onAdd} onCommitLinks={onCommitLinks} onClose={vi.fn()} />);
+    await user.type(screen.getByLabelText(/Issue, project/), 'org/repo');
+    await user.click(screen.getByRole('button', { name: 'Fetch' }));
+    await user.click(await screen.findByRole('button', { name: 'Add selected (2)' }));
+
+    // An issue journalled as imported when its card was refused is a link to
+    // nothing, and the next import would call it a duplicate.
+    await waitFor(() => expect(onCommitLinks).toHaveBeenCalledTimes(1));
+    expect(onCommitLinks).toHaveBeenCalledWith({
+      source: 'work',
+      items: [expect.objectContaining({ external_key: 'github:org/repo#1' })],
+    });
+    cleanup();
+
+    const noneCreated = vi.fn().mockResolvedValue(new Set<string>());
+    const untouched = vi.fn();
+    render(<ImportModal sources={[source]} onPreview={vi.fn().mockResolvedValue(preview)} onAdd={noneCreated} onCommitLinks={untouched} onClose={vi.fn()} />);
+    await user.type(screen.getByLabelText(/Issue, project/), 'org/repo');
+    await user.click(screen.getByRole('button', { name: 'Fetch' }));
+    await user.click(await screen.findByRole('button', { name: 'Add selected (1)' }));
+    await waitFor(() => expect(noneCreated).toHaveBeenCalled());
+    expect(untouched).not.toHaveBeenCalled();
   });
 
   it('cancels stale requests and reports empty or unknown failures', async () => {
@@ -87,7 +118,7 @@ describe('ImportModal DOM', () => {
     cleanup();
 
     const noLink = { ...draft, link: undefined, external_key: undefined, url: undefined };
-    const onAdd = vi.fn(), onCommitLinks = vi.fn();
+    const onAdd = vi.fn().mockResolvedValue(new Set(['Imported'])), onCommitLinks = vi.fn();
     render(<ImportModal sources={[source]} onPreview={vi.fn().mockResolvedValue({ ...preview, drafts: [noLink] })} onAdd={onAdd} onCommitLinks={onCommitLinks} onClose={close} />);
     await user.type(screen.getByLabelText(/Issue, project/), 'org/repo');
     await user.click(screen.getByRole('button', { name: 'Fetch' }));

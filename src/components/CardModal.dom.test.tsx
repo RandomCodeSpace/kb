@@ -25,9 +25,9 @@ describe('CardModal DOM', () => {
       { id: 1, author: 'alice', body: 'shipped in **v2**', createdAt: '2026-08-13T08:00:00Z' },
       { id: 2, author: 'bob', body: '- follow up', createdAt: 'garbage' },
     ]);
-    render(<CardModal state={{ mode: 'edit', task }} identity={identity} canonicalTaskId="server-id" labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={vi.fn()} />);
+    render(<CardModal state={{ mode: 'edit', task }} identity={identity} labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={vi.fn()} />);
     const section = await screen.findByRole('region', { name: 'Comments' });
-    await waitFor(() => expect(api.comments).toHaveBeenCalledWith(identity, 'server-id', expect.any(AbortSignal)));
+    await waitFor(() => expect(api.comments).toHaveBeenCalledWith(identity, 'local', expect.any(AbortSignal)));
     expect(section.querySelector('h3')?.textContent).toBe('2 comments');
     expect(screen.getByText('alice')).toBeTruthy();
     expect(screen.getByText('Aug 13, 2026')).toBeTruthy();
@@ -38,12 +38,14 @@ describe('CardModal DOM', () => {
     expect(section.textContent).not.toContain('Invalid');
   });
 
-  it('shows no comments section for empty lists and never fetches without a canonical id', async () => {
-    const withoutId = render(<CardModal state={{ mode: 'edit', task }} identity={identity} labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={vi.fn()} />);
+  it('shows no comments section for an empty list and never fetches for a new card', async () => {
+    const empty = render(<CardModal state={{ mode: 'edit', task }} identity={identity} labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={vi.fn()} />);
+    await waitFor(() => expect(api.comments).toHaveBeenCalledOnce());
     expect(screen.queryByRole('region', { name: 'Comments' })).toBeNull();
-    withoutId.unmount();
+    empty.unmount();
+    vi.clearAllMocks();
 
-    render(<CardModal state={{ mode: 'add', status: 'todo' }} identity={identity} canonicalTaskId="server-id" labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={vi.fn()} />);
+    render(<CardModal state={{ mode: 'add', status: 'todo' }} identity={identity} labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={vi.fn()} />);
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Comments' })).toBeNull());
     expect(api.comments).not.toHaveBeenCalled();
   });
@@ -52,7 +54,7 @@ describe('CardModal DOM', () => {
     api.comments.mockResolvedValue([
       { id: 1, author: 'alice', body: 'only one', createdAt: '2026-08-13T08:00:00Z' },
     ]);
-    render(<CardModal state={{ mode: 'edit', task }} identity={identity} canonicalTaskId="server-id" labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={vi.fn()} />);
+    render(<CardModal state={{ mode: 'edit', task }} identity={identity} labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={vi.fn()} />);
     const section = await screen.findByRole('region', { name: 'Comments' });
     expect(section.querySelector('h3')?.textContent).toBe('1 comment');
   });
@@ -71,7 +73,7 @@ describe('CardModal DOM', () => {
   it('checks and accepts upstream drift entirely through mocked forge APIs', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
-    render(<CardModal state={{ mode: 'edit', task }} identity={identity} canonicalTaskId="server-id" labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={onClose} />);
+    render(<CardModal state={{ mode: 'edit', task }} identity={identity} labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={onClose} />);
     await user.click(screen.getByRole('button', { name: 'Check upstream' }));
     await waitFor(() => expect(api.provenance).toHaveBeenCalledWith(identity, 'gitlab#1', expect.any(AbortSignal)));
     expect(await screen.findByText(/Upstream changed since/)).toBeTruthy();
