@@ -715,6 +715,9 @@ func (s *Store) replaceBoardTx(tx *sql.Tx, user string, b board.Board, canonical
 	if err := reconcileBoardTombstonesTx(tx, user); err != nil {
 		return nil, err
 	}
+	if err := reconcileCommentsTx(tx, user); err != nil {
+		return nil, err
+	}
 	return taskIDs, nil
 }
 
@@ -1138,6 +1141,9 @@ func (s *Store) DeleteTask(user, idPrefix string) (board.Task, error) {
 		}
 		if _, err := tx.Exec(`DELETE FROM tombstones WHERE scope = ? AND task_id = ?`, user, id); err != nil {
 			return fmt.Errorf("store: delete task tombstone: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM comments WHERE scope = ? AND task_id = ?`, user, id); err != nil {
+			return fmt.Errorf("store: delete task comments: %w", err)
 		}
 		out = t
 		return nil

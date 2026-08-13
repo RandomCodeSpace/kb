@@ -138,7 +138,7 @@ const rootUsageText = `usage: kb [flags]            serve the web UI (default)
        kb <command> [args]   work with tasks from the terminal
 
 commands:
-  add, list, update, move, done, cancel, restore, rm, users
+  add, list, update, move, done, cancel, restore, rm, users, comment
              the task CLI — run "kb help" for the full reference
   mcp        serve the board to AI agents over MCP stdio
   version    print the kb version
