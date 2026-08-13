@@ -1178,13 +1178,54 @@ func (s *Store) DeleteTask(user, idPrefix string) (board.Task, error) {
 // ListTasks returns the user's tasks in status then position order; an empty
 // status means all statuses.
 func (s *Store) ListTasks(user string, status board.Status) ([]board.Task, error) {
-	if status == "" {
-		return queryTasks(s.db, `SELECT `+taskCols+` FROM tasks WHERE user = ? ORDER BY `+statusRank+`, position`, user)
+	return s.FilterTasks(user, TaskFilter{Status: status})
+}
+
+// TaskFilter narrows a task listing. The zero value lists every task.
+type TaskFilter struct {
+	// Status keeps one column only.
+	Status board.Status
+	// Search is free text matched against title, description, and tags via
+	// the FTS index: every word must appear, the last one as a prefix.
+	Search string
+	// Tags are exact label matches; a task must carry every one (AND).
+	Tags []string
+}
+
+const maxSearchBytes = 500
+
+// FilterTasks lists the user's tasks matching every condition in f, in board
+// order (columns in status order, tasks by position).
+func (s *Store) FilterTasks(user string, f TaskFilter) ([]board.Task, error) {
+	query := `SELECT ` + taskCols + ` FROM tasks WHERE user = ?`
+	args := []any{user}
+	if f.Status != "" {
+		if !f.Status.Valid() {
+			return nil, fmt.Errorf("store: invalid status %q", f.Status)
+		}
+		query += ` AND status = ?`
+		args = append(args, string(f.Status))
 	}
-	if !status.Valid() {
-		return nil, fmt.Errorf("store: invalid status %q", status)
+	if len(f.Search) > maxSearchBytes {
+		return nil, errors.New("store: search query too long")
 	}
-	return queryTasks(s.db, `SELECT `+taskCols+` FROM tasks WHERE user = ? AND status = ? ORDER BY position`, user, string(status))
+	if match := ftsSearchQuery(f.Search); match != "" {
+		query += ` AND id IN (SELECT id FROM tasks_fts WHERE tasks_fts MATCH ? AND scope = ?)`
+		args = append(args, match, user)
+	}
+	for _, tag := range f.Tags {
+		if strings.TrimSpace(tag) == "" {
+			return nil, errors.New("store: tag filter must not be empty")
+		}
+		query += ` AND EXISTS (SELECT 1 FROM json_each(tasks.tags) WHERE json_each.value = ?)`
+		args = append(args, tag)
+	}
+	if f.Status != "" {
+		query += ` ORDER BY position`
+	} else {
+		query += ` ORDER BY ` + statusRank + `, position`
+	}
+	return queryTasks(s.db, query, args...)
 }
 
 // Labels returns the user's distinct labels, most recently used first.

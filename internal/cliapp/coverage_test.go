@@ -103,7 +103,7 @@ func TestLocalBackendPropagatesClosedStoreErrors(t *testing.T) {
 	if err := local.close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := local.list(""); err == nil {
+	if _, err := local.list(store.TaskFilter{}); err == nil {
 		t.Error("list on closed store succeeded")
 	}
 	if _, err := local.add(board.Task{Title: "closed"}); err == nil {
@@ -195,7 +195,7 @@ func TestRemoteTransportRequestAndReadFailures(t *testing.T) {
 			return nil, transportErr
 		})},
 	}
-	if _, err := broken.list(""); !errors.Is(err, transportErr) {
+	if _, err := broken.list(store.TaskFilter{}); !errors.Is(err, transportErr) {
 		t.Fatalf("list transport err=%v", err)
 	}
 	if _, err := broken.add(board.Task{Title: "x"}); !errors.Is(err, transportErr) {
@@ -216,12 +216,12 @@ func TestRemoteTransportRequestAndReadFailures(t *testing.T) {
 			return response(http.StatusOK, coverageErrorBody{err: readErr}, `"r1"`), nil
 		})},
 	}
-	if _, err := readBroken.list(""); !errors.Is(err, readErr) {
+	if _, err := readBroken.list(store.TaskFilter{}); !errors.Is(err, readErr) {
 		t.Fatalf("read body err=%v", err)
 	}
 
 	malformed := &remoteBackend{base: "://bad", user: "default", client: http.DefaultClient}
-	if _, err := malformed.list(""); err == nil {
+	if _, err := malformed.list(store.TaskFilter{}); err == nil {
 		t.Fatal("malformed GET base unexpectedly succeeded")
 	}
 
@@ -232,7 +232,7 @@ func TestRemoteTransportRequestAndReadFailures(t *testing.T) {
 			return response(http.StatusServiceUnavailable, io.NopCloser(strings.NewReader("")), ""), nil
 		})},
 	}
-	if _, err := blankError.list(""); err == nil || !strings.Contains(err.Error(), "Service Unavailable") {
+	if _, err := blankError.list(store.TaskFilter{}); err == nil || !strings.Contains(err.Error(), "Service Unavailable") {
 		t.Fatalf("blank HTTP error=%v", err)
 	}
 

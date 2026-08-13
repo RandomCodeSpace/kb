@@ -126,14 +126,21 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-// handleListTasks serves GET /api/tasks?status=.
+// handleListTasks serves GET /api/tasks?status=&search=&tag=. Free text
+// matches title, description, and tags; repeated tag params AND together.
 func (s *server) handleListTasks(w http.ResponseWriter, r *http.Request, user string) {
-	status := board.Status(strings.TrimSpace(r.URL.Query().Get("status")))
+	params := r.URL.Query()
+	status := board.Status(strings.TrimSpace(params.Get("status")))
 	if status != "" && !status.Valid() {
 		http.Error(w, "invalid status filter", http.StatusBadRequest)
 		return
 	}
-	tasks, err := s.store.ListTasks(user, status)
+	filter := store.TaskFilter{
+		Status: status,
+		Search: strings.TrimSpace(params.Get("search")),
+		Tags:   params["tag"],
+	}
+	tasks, err := s.store.FilterTasks(user, filter)
 	if err != nil {
 		taskAPIError(w, user, err)
 		return
