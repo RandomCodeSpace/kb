@@ -32,6 +32,8 @@ chosen, where a workflow reaches for `gh issue` or `glab issue`, use the
 | `gh issue list` | `kb list` |
 | `gh issue list --json ...` | `kb list --json` (full tasks, fixed shape) |
 | `gh issue list --state all` | `kb list --all` (includes cancelled) |
+| `gh issue list --search "text"` | `kb list --search "text"` (matches title, description, tags) |
+| `gh issue list --label bug --label ui` | `kb list --tag bug --tag ui` (all tags must match) |
 | `gh issue view N` | `kb view N` (full task + comments; `--json`) |
 | `gh issue edit N --title/--body` | `kb update <id> --title T --desc B` |
 | `gh issue close N` | `kb done <id>` |

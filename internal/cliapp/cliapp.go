@@ -90,6 +90,9 @@ card flags (add and update):
 
 list flags:
   --status s     show one column only
+  --search text  free text over title, description, and tags; every word
+                 must appear, the last as a prefix
+  --tag t        keep tasks carrying this label; repeatable, all must match
   --all          include cancelled tasks (hidden by default)
 
 move, done, and update flags:
@@ -211,7 +214,7 @@ func (a *app) withBackend(user, data string, fn func(backend) error) int {
 // backend is the storage abstraction shared by local (SQLite) and remote
 // (HTTP wire markdown) modes.
 type backend interface {
-	list(status board.Status) ([]item, error)
+	list(filter store.TaskFilter) ([]item, error)
 	add(t board.Task) (item, error)
 	// update applies the field patch and the optional status move as one
 	// atomic step. Moving to done is guarded exactly as move and done are:
@@ -493,14 +496,14 @@ func (a *app) cmdAdd(args []string) int {
 	})
 }
 
-func outputList(be backend, st board.Status, all, asJSON bool, stdout io.Writer) error {
-	items, err := be.list(st)
+func outputList(be backend, filter store.TaskFilter, all, asJSON bool, stdout io.Writer) error {
+	items, err := be.list(filter)
 	if err != nil {
 		return err
 	}
 	// Cancelled tasks are soft-deleted: they stay on the board but out of
 	// the way until asked for by --all or by name.
-	if st == "" && !all {
+	if filter.Status == "" && !all {
 		kept := make([]item, 0, len(items))
 		for _, it := range items {
 			if it.task.Status != board.StatusCancelled {
@@ -567,6 +570,9 @@ func (a *app) cmdUsers(args []string) int {
 func (a *app) cmdList(args []string) int {
 	fs, user, data := a.newFlagSet("list")
 	statusF := fs.String("status", "", "show one column only")
+	searchF := fs.String("search", "", "free text over title, description, and tags")
+	var tagsF stringList
+	fs.Var(&tagsF, "tag", "keep tasks carrying this label; repeatable, all must match")
 	allF := fs.Bool("all", false, "include cancelled tasks")
 	jsonF := fs.Bool("json", false, "print full tasks as JSON")
 	pos, err := parseInterleaved(fs, args)
@@ -576,16 +582,16 @@ func (a *app) cmdList(args []string) int {
 	if len(pos) != 0 {
 		return a.usageErr(fmt.Errorf("list takes no arguments, got %q", pos[0]))
 	}
-	var st board.Status
+	filter := store.TaskFilter{Search: strings.TrimSpace(*searchF), Tags: tagsF}
 	if *statusF != "" {
 		s, err := parseStatus(*statusF)
 		if err != nil {
 			return a.usageErr(err)
 		}
-		st = s
+		filter.Status = s
 	}
 	return a.withBackend(*user, *data, func(be backend) error {
-		return outputList(be, st, *allF, *jsonF, a.stdout)
+		return outputList(be, filter, *allF, *jsonF, a.stdout)
 	})
 }
 
@@ -797,7 +803,7 @@ func (a *app) cmdRm(args []string) int {
 	ref := pos[0]
 	return a.withBackend(*user, *data, func(be backend) error {
 		if !*yes {
-			items, err := be.list("")
+			items, err := be.list(store.TaskFilter{})
 			if err != nil {
 				return err
 			}

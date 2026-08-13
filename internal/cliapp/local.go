@@ -75,8 +75,8 @@ func openLocalStore(dataDir string, stderr io.Writer) (*store.Store, error) {
 
 func (l *localBackend) close() error { return l.st.Close() }
 
-func (l *localBackend) list(status board.Status) ([]item, error) {
-	tasks, err := l.st.ListTasks(l.user, status)
+func (l *localBackend) list(filter store.TaskFilter) ([]item, error) {
+	tasks, err := l.st.FilterTasks(l.user, filter)
 	if err != nil {
 		return nil, err
 	}

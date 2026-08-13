@@ -94,7 +94,7 @@ func newServer(st *store.Store, user string) *mcp.Server {
 	k := &kb{st: st, user: user}
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_tasks",
-		Description: "List kanban tasks on the board, ordered by column (todo, doing, done, cancelled) then position. Optionally filter to a single column. Cancelled tasks are soft-deleted ones; they are included unless a status filter excludes them. Returns each task's id, title, status, blocked, prio, due, effort, tags, checks, and desc.",
+		Description: "List kanban tasks on the board, ordered by column (todo, doing, done, cancelled) then position. Optional filters: a single column (status), free text over title/description/tags (search), and exact labels that must all be present (tags). Cancelled tasks are soft-deleted ones; they are included unless a status filter excludes them. Returns each task's id, title, status, blocked, prio, due, effort, tags, checks, and desc.",
 	}, k.listTasks)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "add_task",
@@ -208,7 +208,9 @@ func toSimilarStub(hit store.SimilarHit) similarStub {
 // --- tool inputs/outputs ---
 
 type listTasksInput struct {
-	Status string `json:"status,omitempty" jsonschema:"optional column filter: todo, doing, done, or cancelled; omit for all columns"`
+	Status string   `json:"status,omitempty" jsonschema:"optional column filter: todo, doing, done, or cancelled; omit for all columns"`
+	Search string   `json:"search,omitempty" jsonschema:"free text matched against title, description, and tags; every word must appear, the last as a prefix"`
+	Tags   []string `json:"tags,omitempty" jsonschema:"exact label filters; a task must carry every listed tag"`
 }
 
 type listTasksOutput struct {
@@ -294,7 +296,11 @@ func (k *kb) listTasks(_ context.Context, _ *mcp.CallToolRequest, in listTasksIn
 		}
 		status = st
 	}
-	tasks, err := k.st.ListTasks(k.user, status)
+	tasks, err := k.st.FilterTasks(k.user, store.TaskFilter{
+		Status: status,
+		Search: in.Search,
+		Tags:   in.Tags,
+	})
 	if err != nil {
 		return nil, listTasksOutput{}, err
 	}

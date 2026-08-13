@@ -228,10 +228,20 @@ func patchToWrite(p store.TaskPatch, moveTo *board.Status, force bool) wireWrite
 
 // --- backend interface ---
 
-func (r *remoteBackend) list(status board.Status) ([]item, error) {
+func (r *remoteBackend) list(filter store.TaskFilter) ([]item, error) {
+	params := url.Values{}
+	if filter.Status != "" {
+		params.Set("status", string(filter.Status))
+	}
+	if filter.Search != "" {
+		params.Set("search", filter.Search)
+	}
+	for _, tag := range filter.Tags {
+		params.Add("tag", tag)
+	}
 	path := "/api/tasks"
-	if status != "" {
-		path += "?status=" + url.QueryEscape(string(status))
+	if encoded := params.Encode(); encoded != "" {
+		path += "?" + encoded
 	}
 	var tasks []wireTask
 	if err := r.call(http.MethodGet, path, nil, &tasks); err != nil {

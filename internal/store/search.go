@@ -56,6 +56,24 @@ func FtsQuery(raw string) string {
 	return strings.Join(tokens, " OR ")
 }
 
+// ftsSearchQuery converts free text into an AND of literal FTS phrases with
+// the last one a prefix, so "auth log" matches tasks containing both "auth"
+// and a word starting with "log". Empty text means no filter.
+func ftsSearchQuery(raw string) string {
+	tokens := strings.FieldsFunc(raw, searchTokenBoundary)
+	if len(tokens) == 0 {
+		return ""
+	}
+	if len(tokens) > 12 {
+		tokens = tokens[:12]
+	}
+	for i, token := range tokens {
+		tokens[i] = `"` + strings.ReplaceAll(token, `"`, `""`) + `"`
+	}
+	tokens[len(tokens)-1] += "*"
+	return strings.Join(tokens, " AND ")
+}
+
 // Similarity is the Sorensen-Dice coefficient over normalized token sets.
 // It is pure and deterministic so the duplicate threshold can be tested
 // without a database.
