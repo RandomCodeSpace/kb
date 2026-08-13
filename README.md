@@ -90,8 +90,9 @@ Markdown remains the **legacy wire and export format**, not the storage format.
 First-party browser sync can wrap the same markdown in a JSON identity envelope:
 
 - `GET/PUT /api/board` still accept `text/markdown`; UI import/export is
-  unchanged. A markdown `PUT` without `If-Match` retains the legacy
-  unconditional replacement behavior.
+  unchanged. Every `PUT` must carry `If-Match`, whichever format it sends:
+  without one the server answers `428 Precondition Required` rather than
+  replacing the board blind.
 - `Accept: application/json` on `GET` returns the markdown with canonical task
   ids. `Content-Type: application/json` on `PUT` sends those ids back so
   renames, moves, and duplicate titles retain identity.
@@ -125,7 +126,7 @@ left unchanged.
 | GET    | `/api/health`     | none | `200` JSON `{"ok":true}`                                              |
 | GET    | `/api/config`     | none | `200` JSON `{"azure_client_id","azure_tenant_id"}` (see Entra below)  |
 | GET    | `/api/board`      | yes  | `200` `text/markdown`, or JSON `{"board","task_ids"}` when requested; `404` if none exists; every result carries an `ETag` |
-| PUT    | `/api/board`      | yes  | `text/markdown` or JSON `{"board","task_ids"}`; `204`, negotiated `200` `{"task_ids":[…]}`, or `409` for a stale `If-Match` |
+| PUT    | `/api/board`      | yes  | `text/markdown` or JSON `{"board","task_ids"}`; `204`, negotiated `200` `{"task_ids":[…]}`, `409` for a stale `If-Match`, or `428` for a `PUT` that sends none |
 | GET    | `/api/labels`     | yes  | `200` JSON array of your labels, most recently used first             |
 | GET    | `/api/similar`    | yes  | Similar-card advisory for query text; cheap stubs only                |
 | POST   | `/api/tombstones` | yes  | Record why a card was killed: `{"task_id","reason"}`; responds `204`  |
@@ -171,16 +172,21 @@ refetch/retry works.
 
 The SPA no longer takes this path for ordinary work: it reads and writes
 through the per-task endpoints and keeps no board of its own. It uses
-`PUT /api/board` only for the markdown file import, deliberately
-unconditionally — that action's whole point is "discard everything now on the
-board". Remote CLI mutations surface `409` without an unsafe unconditional
-retry.
+`PUT /api/board` only for the markdown file import, which reads the current
+token and sends it back, so an import that would discard work committed since
+that read fails with `409` instead. Remote CLI mutations surface `409` without
+an unsafe unconditional retry.
 
-Only the compatibility path — a `text/markdown` `PUT` with no `If-Match` — is
-unconditional and last-writer-wins. It can silently delete intervening work.
-The JSON path uses a database compare-and-swap even during request handling,
-but clients must still send the `ETag` from their own read to protect the whole
-read/edit/write interval.
+There is no unconditional path left. A `PUT` with no `If-Match` — `text/markdown`
+or JSON — is refused with `428 Precondition Required` and a plain-text body
+naming the header, because that write would silently delete every task created
+since the client last read. Curl-style clients should `GET /api/board`, keep the
+`ETag`, and send it back as `If-Match` (`If-Match: *` replaces whatever board
+already exists). The rule is deliberately symmetric: a condition the server
+synthesized from its own read would only cover the microseconds inside the
+request, not the client's read/edit/write interval, which is where an
+intervening CLI or MCP write actually lands — so swapping the content type
+cannot buy back the unconditional behavior.
 
 **Canonical-id JSON negotiation.** A literal `Accept: application/json` on
 `GET /api/board` returns:
@@ -1127,6 +1133,6 @@ write is the markdown file import.
 
 The legacy markdown replacement still matches incoming cards to existing rows
 by status/title and then title so ids and creation timestamps can survive a
-round-trip. A markdown `PUT` without `If-Match` remains unconditional for
-compatibility and can overwrite concurrent work. Prefer conditional clients
-and the canonical-id JSON envelope; keep a markdown export if you want history.
+round-trip. A `PUT` without `If-Match` is refused with `428` on both wire
+formats, so no client can overwrite concurrent work by omitting the header. Prefer the
+canonical-id JSON envelope; keep a markdown export if you want history.

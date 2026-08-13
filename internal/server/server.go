@@ -58,10 +58,6 @@ type server struct {
 	pinHost      bool
 	csp          string // SPA Content-Security-Policy, fixed at construction
 
-	// afterUnconditionalBoardReplace is a deterministic test seam for writes
-	// by another process after this server commits but before it responds.
-	afterUnconditionalBoardReplace func()
-
 	// afterConditionalBoardSnapshot is a deterministic test seam for a writer
 	// between the handler's preliminary read and the store-owned predicate.
 	afterConditionalBoardSnapshot func()

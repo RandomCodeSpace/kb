@@ -20,7 +20,7 @@ func TestLabels(t *testing.T) {
 	}
 
 	const in = "# B\n\n## To Do\n\n- [ ] t1 #backend #type::bug\n"
-	if w := doReq(t, h, "PUT", "/api/board", in, nil); w.Code != http.StatusNoContent {
+	if w := putBoard(t, h, in, nil); w.Code != http.StatusNoContent {
 		t.Fatalf("PUT board: got %d", w.Code)
 	}
 	w = doReq(t, h, "GET", "/api/labels", "", nil)

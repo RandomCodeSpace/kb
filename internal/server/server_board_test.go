@@ -20,11 +20,11 @@ func TestPutBodyLimit(t *testing.T) {
 	h, _ := newTestServer(t, Config{})
 
 	over := strings.Repeat("x", maxBodyBytes+1)
-	if w := doReq(t, h, "PUT", "/api/board", over, nil); w.Code != http.StatusRequestEntityTooLarge {
+	if w := putBoard(t, h, over, nil); w.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversized PUT: got %d, want 413", w.Code)
 	}
 	exact := strings.Repeat("x", maxBodyBytes)
-	if w := doReq(t, h, "PUT", "/api/board", exact, nil); w.Code != http.StatusNoContent {
+	if w := putBoard(t, h, exact, nil); w.Code != http.StatusNoContent {
 		t.Errorf("exactly 1 MiB PUT: got %d, want 204", w.Code)
 	}
 }
@@ -34,9 +34,7 @@ func TestPutBoardTaskIDAcknowledgement(t *testing.T) {
 
 	t.Run("application JSON returns IDs in parsed task order", func(t *testing.T) {
 		h, st := newTestServer(t, Config{})
-		w := doReq(t, h, "PUT", "/api/board", wire, map[string]string{
-			"Accept": "application/json",
-		})
+		w := putBoard(t, h, wire, map[string]string{"Accept": "application/json"})
 		if w.Code != http.StatusOK {
 			t.Fatalf("PUT = %d %q, want 200", w.Code, w.Body)
 		}
@@ -73,9 +71,7 @@ func TestPutBoardTaskIDAcknowledgement(t *testing.T) {
 		// identities by wire position. The acknowledgement must report that
 		// actual assignment rather than guessing from the duplicate title.
 		const movedWire = "# B\n\n## To Do\n\n- [ ] Duplicate\n  second\n\n## Cancelled\n\n- [ ] Duplicate\n  first\n"
-		w = doReq(t, h, "PUT", "/api/board", movedWire, map[string]string{
-			"Accept": "application/json",
-		})
+		w = putBoard(t, h, movedWire, map[string]string{"Accept": "application/json"})
 		if w.Code != http.StatusOK {
 			t.Fatalf("moved PUT = %d %q, want 200", w.Code, w.Body)
 		}
@@ -122,7 +118,7 @@ func TestPutBoardTaskIDAcknowledgement(t *testing.T) {
 
 	t.Run("caller without JSON Accept keeps legacy no-content response", func(t *testing.T) {
 		h, _ := newTestServer(t, Config{})
-		w := doReq(t, h, "PUT", "/api/board", wire, nil)
+		w := putBoard(t, h, wire, nil)
 		if w.Code != http.StatusNoContent || w.Body.Len() != 0 {
 			t.Fatalf("PUT = %d %q, want 204 with no body", w.Code, w.Body)
 		}
@@ -154,9 +150,7 @@ func TestBoardTaskIDsUseMarkdownWireOrder(t *testing.T) {
 func TestGetBoardTaskIDAcknowledgement(t *testing.T) {
 	const wire = "# B\n\n## To Do\n\n- [ ] Duplicate\n  first\n- [ ] Duplicate\n  second\n\n## Doing\n\n- [ ] Other\n\n## Done\n\n- [x] Duplicate\n  done\n"
 	h, _ := newTestServer(t, Config{})
-	put := doReq(t, h, "PUT", "/api/board", wire, map[string]string{
-		"Accept": "application/json",
-	})
+	put := putBoard(t, h, wire, map[string]string{"Accept": "application/json"})
 	if put.Code != http.StatusOK {
 		t.Fatalf("seed PUT = %d %q, want 200", put.Code, put.Body)
 	}
@@ -321,7 +315,7 @@ func TestBlockedAndCancelledSurviveTheAPIRoundTrip(t *testing.T) {
 	wire := string(raw)
 	h, st := newTestServer(t, Config{})
 
-	if w := doReq(t, h, "PUT", "/api/board", wire, nil); w.Code != http.StatusNoContent {
+	if w := putBoard(t, h, wire, nil); w.Code != http.StatusNoContent {
 		t.Fatalf("PUT: got %d, want 204 (body=%s)", w.Code, w.Body)
 	}
 
@@ -375,7 +369,7 @@ func TestBoardVersionToken(t *testing.T) {
 	h, st := newTestServer(t, Config{})
 
 	const seed = "# B\n\n## To Do\n\n- [ ] first\n"
-	if w := doReq(t, h, "PUT", "/api/board", seed, nil); w.Code != http.StatusNoContent {
+	if w := putBoard(t, h, seed, nil); w.Code != http.StatusNoContent {
 		t.Fatalf("seed PUT: got %d (body=%s)", w.Code, w.Body)
 	}
 	w := doReq(t, h, "GET", "/api/board", "", nil)
@@ -425,13 +419,13 @@ func TestBoardVersionToken(t *testing.T) {
 		t.Errorf("PUT after an out-of-band write: got %d, want 409", w.Code)
 	}
 
-	// If-Match: * only asserts existence, and an unconditional PUT keeps the
-	// old last-writer-wins behavior for clients that send no token.
+	// If-Match: * only asserts existence, while a markdown PUT that carries no
+	// token at all is refused: it would be a blind full-board overwrite.
 	if w := doReq(t, h, "PUT", "/api/board", "# B\n\n## To Do\n\n- [ ] star\n", map[string]string{"If-Match": "*"}); w.Code != http.StatusNoContent {
 		t.Errorf("If-Match * PUT: got %d, want 204", w.Code)
 	}
-	if w := doReq(t, h, "PUT", "/api/board", "# B\n\n## To Do\n\n- [ ] plain\n", nil); w.Code != http.StatusNoContent {
-		t.Errorf("unconditional PUT: got %d, want 204", w.Code)
+	if w := doReq(t, h, "PUT", "/api/board", "# B\n\n## To Do\n\n- [ ] plain\n", nil); w.Code != http.StatusPreconditionRequired {
+		t.Errorf("PUT without If-Match: got %d, want 428", w.Code)
 	}
 }
 
@@ -479,7 +473,7 @@ func TestBoardVersionTokenOnMissingBoard(t *testing.T) {
 func TestJSONBoardPutPreservesCanonicalIdentity(t *testing.T) {
 	h, st := newTestServer(t, Config{})
 	const seed = "# B\n\n## To Do\n\n- [ ] Duplicate\n  first\n- [ ] Duplicate\n  second\n"
-	seeded := doReq(t, h, http.MethodPut, "/api/board", seed, map[string]string{"Accept": "application/json"})
+	seeded := putBoard(t, h, seed, map[string]string{"Accept": "application/json"})
 	if seeded.Code != http.StatusOK {
 		t.Fatalf("seed PUT = %d %q", seeded.Code, seeded.Body)
 	}
@@ -532,7 +526,7 @@ func TestJSONBoardPutPreservesCanonicalIdentity(t *testing.T) {
 
 func TestJSONBoardPutValidationIsNonDisclosingAndStaleWins(t *testing.T) {
 	h, st := newTestServer(t, Config{})
-	seed := doReq(t, h, http.MethodPut, "/api/board", "# B\n\n## To Do\n\n- [ ] One\n- [ ] Two\n", map[string]string{"Accept": "application/json"})
+	seed := putBoard(t, h, "# B\n\n## To Do\n\n- [ ] One\n- [ ] Two\n", map[string]string{"Accept": "application/json"})
 	var ack struct {
 		TaskIDs []string `json:"task_ids"`
 	}
@@ -736,7 +730,7 @@ func TestIfMatchStarPredicateIsTransactional(t *testing.T) {
 
 func TestJSONBoardCreateReceiptReplay(t *testing.T) {
 	h, st := newTestServer(t, Config{})
-	seed := doReq(t, h, http.MethodPut, "/api/board", "# B\n", map[string]string{"Accept": "application/json"})
+	seed := putBoard(t, h, "# B\n", map[string]string{"Accept": "application/json"})
 	bodyBytes, err := json.Marshal(map[string]any{
 		"board": "# B\n\n## To Do\n\n- [ ] New\n", "task_ids": []any{nil},
 	})
@@ -838,7 +832,7 @@ func TestJSONBoardReceiptReplayWinsAfterPeerCommit(t *testing.T) {
 
 func TestIdempotencyKeyRequiresCreationBearingJSON(t *testing.T) {
 	h, _ := newTestServer(t, Config{})
-	seed := doReq(t, h, http.MethodPut, "/api/board", "# B\n", nil)
+	seed := putBoard(t, h, "# B\n", nil)
 	key := "6fa459ea-ee8a-3ca4-894e-db77e160355e"
 	markdown := doReq(t, h, http.MethodPut, "/api/board", "# B\n", map[string]string{
 		"Content-Type": "text/markdown", "If-Match": seed.Header().Get("ETag"), "Idempotency-Key": key,
@@ -912,7 +906,108 @@ func TestConditionalBoardPutAcrossServerInstances(t *testing.T) {
 	}
 }
 
-func TestUnconditionalPutReturnsItsOwnCommittedIDsAndRevision(t *testing.T) {
+// A markdown PUT with no If-Match used to be a last-writer-wins full-board
+// overwrite. It is now refused outright, and the refusal has to say what the
+// client must send instead.
+func TestMarkdownPutWithoutIfMatchIsRefused(t *testing.T) {
+	h, st := newTestServer(t, Config{})
+	seedToken := doReq(t, h, http.MethodGet, "/api/board", "", nil).Header().Get("ETag")
+	if w := doReq(t, h, http.MethodPut, "/api/board", "# B\n\n## To Do\n\n- [ ] Seed\n", map[string]string{
+		"If-Match": seedToken,
+	}); w.Code != http.StatusNoContent {
+		t.Fatalf("seed PUT = %d %q", w.Code, w.Body)
+	}
+
+	w := doReq(t, h, http.MethodPut, "/api/board", "# Clobber\n", map[string]string{
+		"Accept": "application/json",
+	})
+	if w.Code != http.StatusPreconditionRequired {
+		t.Fatalf("markdown PUT without If-Match = %d %q, want 428", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), "If-Match") {
+		t.Errorf("428 body = %q, want it to name the If-Match header", w.Body)
+	}
+	if !strings.Contains(w.Body.String(), "/api/board") {
+		t.Errorf("428 body = %q, want it to point at GET /api/board", w.Body)
+	}
+	b, err := st.Board("default")
+	if err != nil {
+		t.Fatalf("store.Board: %v", err)
+	}
+	if len(b.Tasks) != 1 || b.Tasks[0].Title != "Seed" {
+		t.Fatalf("board after the refused PUT = %+v, want the seeded task intact", b.Tasks)
+	}
+}
+
+// The JSON envelope replaces the whole board too, so omitting If-Match there
+// must be refused exactly like markdown. A condition synthesized from the
+// handler's own read would only cover the microseconds inside the request,
+// leaving the client's read/edit/write interval — where the CLI and MCP
+// writes land — unprotected, and a caller could buy back the last-writer-wins
+// overwrite just by swapping the content type.
+func TestJSONPutWithoutIfMatchIsRefused(t *testing.T) {
+	h, st := newTestServer(t, Config{})
+	if err := st.ReplaceBoard("default", board.Parse("# B\n\n## To Do\n\n- [ ] Seed\n")); err != nil {
+		t.Fatalf("seed board: %v", err)
+	}
+
+	w := doReq(t, h, http.MethodPut, "/api/board", `{"board":"# Clobber\n","task_ids":[]}`, map[string]string{
+		"Content-Type": "application/json", "Accept": "application/json",
+	})
+	if w.Code != http.StatusPreconditionRequired {
+		t.Fatalf("JSON PUT without If-Match = %d %q, want 428", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), "If-Match") {
+		t.Errorf("428 body = %q, want it to name the If-Match header", w.Body)
+	}
+	b, err := st.Board("default")
+	if err != nil {
+		t.Fatalf("store.Board: %v", err)
+	}
+	if len(b.Tasks) != 1 || b.Tasks[0].Title != "Seed" {
+		t.Fatalf("board after the refused JSON PUT = %+v, want the seeded task intact", b.Tasks)
+	}
+}
+
+// The refusal is about the missing precondition, not about the body: the
+// guard answers before the body is read, so an oversized body that would
+// otherwise be a 413 still gets the 428.
+func TestMarkdownPutWithoutIfMatchIsRefusedBeforeReadingBody(t *testing.T) {
+	h, _ := newTestServer(t, Config{})
+	w := doReq(t, h, http.MethodPut, "/api/board", strings.Repeat("x", maxBodyBytes+1), nil)
+	if w.Code != http.StatusPreconditionRequired {
+		t.Fatalf("oversized PUT without If-Match = %d %q, want 428", w.Code, w.Body)
+	}
+}
+
+// If-Match: * is the "replace whatever is there" token, and it stays usable
+// for markdown once a board exists, including a board with no tasks.
+func TestMarkdownPutWithStarOnEmptyBoard(t *testing.T) {
+	h, st := newTestServer(t, Config{})
+	created := doReq(t, h, http.MethodPut, "/api/board", "# Empty\n", map[string]string{
+		"If-Match": doReq(t, h, http.MethodGet, "/api/board", "", nil).Header().Get("ETag"),
+	})
+	if created.Code != http.StatusNoContent {
+		t.Fatalf("create PUT = %d %q", created.Code, created.Body)
+	}
+	w := doReq(t, h, http.MethodPut, "/api/board", "# Empty\n\n## To Do\n\n- [ ] Star\n", map[string]string{
+		"If-Match": "*",
+	})
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("If-Match * PUT onto an empty board = %d %q, want 204", w.Code, w.Body)
+	}
+	b, err := st.Board("default")
+	if err != nil {
+		t.Fatalf("store.Board: %v", err)
+	}
+	if len(b.Tasks) != 1 || b.Tasks[0].Title != "Star" {
+		t.Fatalf("board after the wildcard PUT = %+v, want the starred task", b.Tasks)
+	}
+}
+
+// A conditional markdown PUT still reports the IDs and revision of its own
+// commit, even when another process replaces the board straight afterwards.
+func TestConditionalPutReturnsItsOwnCommittedIDsAndRevision(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kb.db")
 	a, err := store.Open(path, []byte("test-secret"))
 	if err != nil {
@@ -925,24 +1020,20 @@ func TestUnconditionalPutReturnsItsOwnCommittedIDsAndRevision(t *testing.T) {
 	}
 	defer b.Close()
 	srv := newServer(Config{}, testStatic, a)
-	var committed store.BoardSnapshot
-	srv.afterUnconditionalBoardReplace = func() {
-		committed, err = b.ReadBoardSnapshot("default")
-		if err != nil {
-			t.Errorf("read exact unconditional commit: %v", err)
-			return
-		}
-		err = b.ReplaceBoard("default", board.Parse("# External\n\n## To Do\n\n- [ ] Intervening\n"))
-		if err != nil {
-			t.Errorf("intervening replace: %v", err)
-		}
-	}
 	h := srv.handler()
-	w := doReq(t, h, http.MethodPut, "/api/board", "# Legacy\n\n## To Do\n\n- [ ] Mine\n", map[string]string{
-		"Accept": "application/json",
+	token := doReq(t, h, http.MethodGet, "/api/board", "", nil).Header().Get("ETag")
+	w := doReq(t, h, http.MethodPut, "/api/board", "# Mine\n\n## To Do\n\n- [ ] Mine\n", map[string]string{
+		"Accept": "application/json", "If-Match": token,
 	})
-	if w.Code != http.StatusOK || err != nil {
-		t.Fatalf("unconditional PUT = %d %q hookErr=%v", w.Code, w.Body, err)
+	if w.Code != http.StatusOK {
+		t.Fatalf("conditional PUT = %d %q", w.Code, w.Body)
+	}
+	committed, err := b.ReadBoardSnapshot("default")
+	if err != nil {
+		t.Fatalf("read exact commit: %v", err)
+	}
+	if err := b.ReplaceBoard("default", board.Parse("# External\n\n## To Do\n\n- [ ] Intervening\n")); err != nil {
+		t.Fatalf("intervening replace: %v", err)
 	}
 	var ack struct {
 		TaskIDs []string `json:"task_ids"`
@@ -970,7 +1061,10 @@ func TestUnconditionalPutReturnsItsOwnCommittedIDsAndRevision(t *testing.T) {
 	}
 }
 
-func TestJSONBoardPutWithoutIfMatchConflictsWithWriterAfterSnapshot(t *testing.T) {
+// The client-supplied If-Match is evaluated inside the store transaction, not
+// against the handler's preliminary read: a writer that commits between the
+// two still takes the write.
+func TestJSONBoardPutConflictsWithWriterAfterSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kb.db")
 	st, err := store.Open(path, []byte("test-secret"))
 	if err != nil {
@@ -980,9 +1074,7 @@ func TestJSONBoardPutWithoutIfMatchConflictsWithWriterAfterSnapshot(t *testing.T
 
 	srv := newServer(Config{}, testStatic, st)
 	h := srv.handler()
-	seed := doReq(t, h, http.MethodPut, "/api/board", "# Seed\n\n## To Do\n\n- [ ] Keep\n", map[string]string{
-		"Accept": "application/json",
-	})
+	seed := putBoard(t, h, "# Seed\n\n## To Do\n\n- [ ] Keep\n", map[string]string{"Accept": "application/json"})
 	if seed.Code != http.StatusOK {
 		t.Fatalf("seed PUT = %d %q", seed.Code, seed.Body)
 	}
@@ -1025,6 +1117,7 @@ func TestJSONBoardPutWithoutIfMatchConflictsWithWriterAfterSnapshot(t *testing.T
 		result <- doReq(t, h, http.MethodPut, "/api/board", string(payload), map[string]string{
 			"Content-Type": "application/json",
 			"Accept":       "application/json",
+			"If-Match":     seed.Header().Get("ETag"),
 		})
 	}()
 
@@ -1053,7 +1146,7 @@ func TestJSONBoardPutWithoutIfMatchConflictsWithWriterAfterSnapshot(t *testing.T
 
 func TestIfMatchCombinesRepeatedHeaderFields(t *testing.T) {
 	h, _ := newTestServer(t, Config{})
-	seed := doReq(t, h, http.MethodPut, "/api/board", "# B\n\n## To Do\n\n- [ ] Seed\n", nil)
+	seed := putBoard(t, h, "# B\n\n## To Do\n\n- [ ] Seed\n", nil)
 	current := seed.Header().Get("ETag")
 	r := httptest.NewRequest(http.MethodPut, "/api/board", strings.NewReader("# B\n\n## To Do\n\n- [ ] Updated\n"))
 	r.Host = "127.0.0.1:8080"

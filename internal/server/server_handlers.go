@@ -48,6 +48,11 @@ const (
 	configuredSourceUnavailableMessage = "configured source unavailable"
 	linkTagPrefix                      = "link::"
 	connectionFailedMessage            = "connection failed"
+
+	// missingIfMatchMessage is returned to any full-board PUT that would
+	// otherwise get a last-writer-wins overwrite.
+	missingIfMatchMessage = "board PUT requires If-Match: GET /api/board and send its ETag back as If-Match " +
+		"(If-Match: * replaces whatever board already exists)"
 )
 
 func (s *server) handleSimilar(w http.ResponseWriter, r *http.Request, user string) {
@@ -193,10 +198,9 @@ func (s *server) handleGetBoard(w http.ResponseWriter, r *http.Request, user str
 		return
 	}
 	md := board.Serialize(snapshot.Board)
-	// The 404 carries the token too: it is the version of "no board", and a
-	// client that never got one would send no If-Match at all, making its
-	// first PUT unconditional — the very write most likely to land on a board
-	// the CLI or MCP created in the meantime.
+	// The 404 carries the token too: it is the version of "no board", so a
+	// client whose first read found nothing still has something to send as
+	// If-Match — without it every first write would be refused with 428.
 	w.Header().Set("ETag", etag)
 	if !snapshot.Exists {
 		http.Error(w, "no board saved", http.StatusNotFound)
@@ -211,15 +215,6 @@ func (s *server) handleGetBoard(w http.ResponseWriter, r *http.Request, user str
 	}
 	w.Header().Set(contentTypeHeader, "text/markdown; charset=utf-8")
 	_, _ = io.WriteString(w, md)
-}
-
-// handlePutBoard replaces the whole board. A full-board PUT would otherwise
-// silently delete tasks the CLI or MCP created since the client last read,
-// so a client that sends If-Match with the token from its GET is told 409
-// instead, and can refetch and merge. Clients that send no If-Match keep the
-// old last-writer-wins behavior.
-func shouldInvokeBoardSnapshotHook(want string, isJSON bool) bool {
-	return want != "" || isJSON
 }
 
 func boardOperationID(r *http.Request) (string, error) {
@@ -269,14 +264,6 @@ func containsTaskCreation(ids []*string) bool {
 	return false
 }
 
-func boardPutCondition(want string, isJSON bool, revision int64) store.BoardWriteCondition {
-	condition := boardWriteCondition(want)
-	if want == "" && isJSON {
-		return store.BoardWriteCondition{Present: true, Revisions: []int64{revision}}
-	}
-	return condition
-}
-
 func (s *server) replaceBoard(
 	user string,
 	nextBoard board.Board,
@@ -285,17 +272,10 @@ func (s *server) replaceBoard(
 	operationID, requestHash string,
 	isJSON bool,
 ) ([]string, int64, bool, error) {
-	if condition.Present || operationID != "" {
-		return s.store.ReplaceBoardConditionalWithReceipt(
-			user, nextBoard, canonicalIDs, condition, operationID, requestHash,
-			isJSON && containsTaskCreation(canonicalIDs),
-		)
-	}
-	taskIDs, revision, err := s.store.ReplaceBoardWithTaskIDsAndRevision(user, nextBoard)
-	if err == nil && s.afterUnconditionalBoardReplace != nil {
-		s.afterUnconditionalBoardReplace()
-	}
-	return taskIDs, revision, false, err
+	return s.store.ReplaceBoardConditionalWithReceipt(
+		user, nextBoard, canonicalIDs, condition, operationID, requestHash,
+		isJSON && containsTaskCreation(canonicalIDs),
+	)
 }
 
 func writeBoardPutError(w http.ResponseWriter, user string, err error) {
@@ -311,7 +291,22 @@ func writeBoardPutError(w http.ResponseWriter, user string, err error) {
 	}
 }
 
+// handlePutBoard replaces the whole board. A full-board PUT would otherwise
+// silently delete tasks the CLI or MCP created since the client last read, so
+// every PUT is conditional on a client-supplied If-Match carrying the token
+// from its own GET, and a stale one is told 409 so it can refetch and merge.
+// The header is required on both wire formats: a condition the handler
+// synthesized from its own read would only cover the microseconds inside the
+// request, not the client's read/edit/write interval, which is where the
+// intervening task-level writes actually land.
 func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user string) {
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get(contentTypeHeader))
+	isJSON := mediaType == jsonMediaType
+	want := strings.TrimSpace(strings.Join(r.Header.Values("If-Match"), ","))
+	if want == "" {
+		http.Error(w, missingIfMatchMessage, http.StatusPreconditionRequired)
+		return
+	}
 	body, ok := readBody(w, r)
 	if !ok {
 		return
@@ -321,18 +316,16 @@ func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user str
 		http.Error(w, invalidBoardPayloadMessage, http.StatusBadRequest)
 		return
 	}
-	mediaType, _, _ := mime.ParseMediaType(r.Header.Get(contentTypeHeader))
-	isJSON := mediaType == jsonMediaType
 	requestHash := boardPutRequestHash(mediaType, body)
 
-	snapshot, _, err := s.currentBoard(user)
-	if err != nil {
+	// The preliminary read only surfaces storage failures before any parsing;
+	// the write predicate comes from If-Match, never from this snapshot.
+	if _, _, err := s.currentBoard(user); err != nil {
 		log.Printf("read board for %s: %s", logSafe(user), logSafe(err.Error()))
 		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
 		return
 	}
-	want := strings.TrimSpace(strings.Join(r.Header.Values("If-Match"), ","))
-	if s.afterConditionalBoardSnapshot != nil && shouldInvokeBoardSnapshotHook(want, isJSON) {
+	if s.afterConditionalBoardSnapshot != nil {
 		s.afterConditionalBoardSnapshot()
 	}
 
@@ -346,9 +339,8 @@ func (s *server) handlePutBoard(w http.ResponseWriter, r *http.Request, user str
 			return
 		}
 	}
-	condition := boardPutCondition(want, isJSON, snapshot.Revision)
 	taskIDs, revision, replayed, err := s.replaceBoard(
-		user, nextBoard, canonicalIDs, condition, operationID, requestHash, isJSON,
+		user, nextBoard, canonicalIDs, boardWriteCondition(want), operationID, requestHash, isJSON,
 	)
 	if err != nil {
 		writeBoardPutError(w, user, err)
