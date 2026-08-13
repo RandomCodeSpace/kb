@@ -88,7 +88,7 @@ type kb struct {
 	beforeDoneGuard func()
 }
 
-// newServer builds the MCP server with all nine board tools registered.
+// newServer builds the MCP server with all ten board tools registered.
 func newServer(st *store.Store, user string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "kb", Title: "kb kanban board", Version: "1.0.0"}, nil)
 	k := &kb{st: st, user: user}
@@ -121,6 +121,10 @@ func newServer(st *store.Store, user string) *mcp.Server {
 		Description: "Check a proposed title, body, and exact provenance link; check before creating a card to avoid duplicating existing work; returns cheap stubs, fetch details only if needed.",
 	}, k.duplicateCheck)
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "get_task",
+		Description: "Fetch one task in full — every field plus its comments — identified by its stable number (12 or #12), UUID, or unique UUID prefix.",
+	}, k.getTask)
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "add_comment",
 		Description: "Append a comment to a task identified by its stable number (12 or #12), UUID, or unique UUID prefix. Comments are an append-only log with stable per-board ids (c1, c2, ...) that are never reused. Returns the created comment.",
 	}, k.addComment)
@@ -142,6 +146,7 @@ type check struct {
 // taskJSON is the task shape returned by every tool.
 type taskJSON struct {
 	ID      string   `json:"id"`
+	Seq     int      `json:"seq,omitempty" jsonschema:"stable per-board task number, displayed #n"`
 	Emoji   string   `json:"emoji,omitempty"`
 	Title   string   `json:"title"`
 	Desc    string   `json:"desc,omitempty"`
@@ -157,6 +162,7 @@ type taskJSON struct {
 func toTaskJSON(t board.Task) taskJSON {
 	out := taskJSON{
 		ID:      t.ID,
+		Seq:     t.Seq,
 		Emoji:   t.Emoji,
 		Title:   t.Title,
 		Desc:    t.Desc,

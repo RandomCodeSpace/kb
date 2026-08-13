@@ -26,6 +26,12 @@ func TestCommentToolsRoundTrip(t *testing.T) {
 		t.Fatalf("list_comments = %+v", listed.Comments)
 	}
 
+	var got getTaskOutput
+	callOK(t, cs, "get_task", map[string]any{"id": "#1"}, &got)
+	if got.Task.Seq != 1 || got.Task.Title != "Discussable" || len(got.Comments) != 1 {
+		t.Fatalf("get_task = %+v", got)
+	}
+
 	// Errors surface as tool errors: missing task, empty body.
 	for name, args := range map[string]map[string]any{
 		"add_comment on missing task": {"id": "9", "body": "text"},

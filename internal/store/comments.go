@@ -36,6 +36,24 @@ func nextCommentID(q dbtx, user string) (int, error) {
 	return next - 1, nil
 }
 
+// Task fetches one task by reference (sequence number, UUID, or unique
+// prefix) without mutating anything.
+func (s *Store) Task(user, ref string) (board.Task, error) {
+	var out board.Task
+	err := s.withTx(func(tx *sql.Tx) error {
+		id, err := resolveID(tx, user, ref)
+		if err != nil {
+			return err
+		}
+		out, err = getTask(tx, user, id)
+		return err
+	})
+	if err != nil {
+		return board.Task{}, err
+	}
+	return out, nil
+}
+
 // AddComment appends a comment to the task matching taskRef (sequence
 // number, UUID, or unique prefix) and returns it with its assigned id.
 func (s *Store) AddComment(user, taskRef, author, body string) (Comment, error) {

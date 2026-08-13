@@ -44,6 +44,31 @@ type listCommentsOutput struct {
 	Comments []commentJSON `json:"comments"`
 }
 
+type getTaskInput struct {
+	ID string `json:"id" jsonschema:"task to fetch: stable number (12 or #12), UUID, or unique UUID prefix"`
+}
+
+type getTaskOutput struct {
+	Task     taskJSON      `json:"task"`
+	Comments []commentJSON `json:"comments,omitempty"`
+}
+
+func (k *kb) getTask(_ context.Context, _ *mcp.CallToolRequest, in getTaskInput) (*mcp.CallToolResult, getTaskOutput, error) {
+	t, err := k.st.Task(k.user, in.ID)
+	if err != nil {
+		return nil, getTaskOutput{}, err
+	}
+	comments, err := k.st.Comments(k.user, t.ID)
+	if err != nil {
+		return nil, getTaskOutput{}, err
+	}
+	out := getTaskOutput{Task: toTaskJSON(t)}
+	for _, c := range comments {
+		out.Comments = append(out.Comments, toCommentJSON(c))
+	}
+	return nil, out, nil
+}
+
 func (k *kb) addComment(_ context.Context, _ *mcp.CallToolRequest, in addCommentInput) (*mcp.CallToolResult, addCommentOutput, error) {
 	c, err := k.st.AddComment(k.user, in.ID, k.user, in.Body)
 	if err != nil {
