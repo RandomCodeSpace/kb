@@ -75,6 +75,7 @@ func localEnv(t *testing.T) string {
 	t.Helper()
 	t.Setenv("KB_SERVER", "")
 	t.Setenv("KB_SERVER_TOKEN", "")
+	t.Setenv("KB_USER", "")
 	t.Setenv("KB_SECRET", "test-secret")
 	return t.TempDir()
 }
