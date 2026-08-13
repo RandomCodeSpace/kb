@@ -14,6 +14,19 @@ func TestDisplayRefShortensLongIDs(t *testing.T) {
 	}
 }
 
+func TestLocalViewAndCommentsRejectUnknownRefs(t *testing.T) {
+	dir := localEnv(t)
+	if _, errS, code := runCmd(t, "add", "Seed", "--data", dir); code != 0 {
+		t.Fatalf("seed add failed: %s", errS)
+	}
+	if _, errS, code := runCmd(t, "view", "9", "--data", dir); code != 1 || !strings.Contains(errS, "no task matches") {
+		t.Fatalf("view unknown: code=%d stderr=%q", code, errS)
+	}
+	if _, errS, code := runCmd(t, "comment", "list", "9", "--data", dir); code != 1 || !strings.Contains(errS, "no task matches") {
+		t.Fatalf("comment list unknown: code=%d stderr=%q", code, errS)
+	}
+}
+
 func TestRemoteFullFieldWritesEndToEnd(t *testing.T) {
 	remoteEnv(t)
 
