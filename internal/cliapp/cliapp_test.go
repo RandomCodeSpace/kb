@@ -165,7 +165,7 @@ func TestLocalLifecycle(t *testing.T) {
 	}
 
 	// Patch by unique id prefix: only provided flags change.
-	out, errS, code = runCmd(t, "update", t1.ID[:8], "--data", dir, "--title", "Write the docs v2", "--prio", "1")
+	out, errS, code = runCmd(t, "update", t1.ID, "--data", dir, "--title", "Write the docs v2", "--prio", "1")
 	if code != 0 {
 		t.Fatalf("update failed (code %d): %s", code, errS)
 	}
@@ -178,7 +178,7 @@ func TestLocalLifecycle(t *testing.T) {
 	}
 
 	// update --status moves the task.
-	if _, errS, code = runCmd(t, "update", t1.ID[:8], "--data", dir, "--status", "doing"); code != 0 {
+	if _, errS, code = runCmd(t, "update", t1.ID, "--data", dir, "--status", "doing"); code != 0 {
 		t.Fatalf("update --status failed (code %d): %s", code, errS)
 	}
 	if n := len(listJSON(t, "--data", dir, "--status", "doing")); n != 2 {
@@ -186,7 +186,7 @@ func TestLocalLifecycle(t *testing.T) {
 	}
 
 	// move and done.
-	out, errS, code = runCmd(t, "move", t2.ID[:8], "done", "--data", dir)
+	out, errS, code = runCmd(t, "move", t2.ID, "done", "--data", dir)
 	if code != 0 {
 		t.Fatalf("move failed (code %d): %s", code, errS)
 	}
@@ -203,14 +203,14 @@ func TestLocalLifecycle(t *testing.T) {
 	}
 
 	// rm refuses without --yes, deletes with it.
-	_, errS, code = runCmd(t, "rm", t2.ID[:8], "--data", dir)
+	_, errS, code = runCmd(t, "rm", t2.ID, "--data", dir)
 	if code != 1 || !strings.Contains(errS, "--yes") {
 		t.Errorf("rm without --yes: code %d stderr %q, want code 1 mentioning --yes", code, errS)
 	}
 	if n := len(listJSON(t, "--data", dir)); n != 2 {
 		t.Fatalf("rm without --yes deleted something: %d tasks left", n)
 	}
-	out, errS, code = runCmd(t, "rm", t2.ID[:8], "--yes", "--data", dir)
+	out, errS, code = runCmd(t, "rm", t2.ID, "--yes", "--data", dir)
 	if code != 0 {
 		t.Fatalf("rm --yes failed (code %d): %s", code, errS)
 	}
@@ -331,7 +331,7 @@ func TestDoneRefusesOpenWork(t *testing.T) {
 	}
 	id := listJSON(t, "--data", dir)[0].ID
 
-	_, errS, code := runCmd(t, "done", id[:8], "--data", dir)
+	_, errS, code := runCmd(t, "done", id, "--data", dir)
 	if code != 1 {
 		t.Fatalf("done with open checks: code %d, want 1", code)
 	}
@@ -343,28 +343,28 @@ func TestDoneRefusesOpenWork(t *testing.T) {
 	}
 
 	// move <id> done is the same transition and refuses identically.
-	if _, _, code = runCmd(t, "move", id[:8], "done", "--data", dir); code != 1 {
+	if _, _, code = runCmd(t, "move", id, "done", "--data", dir); code != 1 {
 		t.Errorf("move ... done with open checks: code %d, want 1", code)
 	}
 
 	// Ticking everything off clears the warning without --force.
-	if _, errS, code = runCmd(t, "update", id[:8], "--data", dir, "--check", "tag build"); code != 0 {
+	if _, errS, code = runCmd(t, "update", id, "--data", dir, "--check", "tag build"); code != 0 {
 		t.Fatalf("update --check failed (code %d): %s", code, errS)
 	}
-	if _, errS, code = runCmd(t, "update", id[:8], "--data", dir, "--blocked"); code != 0 {
+	if _, errS, code = runCmd(t, "update", id, "--data", dir, "--blocked"); code != 0 {
 		t.Fatalf("update --blocked failed (code %d): %s", code, errS)
 	}
 	// Still blocked, so still refused — and the message says so.
-	_, errS, code = runCmd(t, "done", id[:8], "--data", dir)
+	_, errS, code = runCmd(t, "done", id, "--data", dir)
 	if code != 1 || !strings.Contains(errS, "flagged blocked") {
 		t.Fatalf("done while blocked: code %d stderr %q", code, errS)
 	}
-	if _, errS, code = runCmd(t, "update", id[:8], "--data", dir, "--no-blocked"); code != 0 {
+	if _, errS, code = runCmd(t, "update", id, "--data", dir, "--no-blocked"); code != 0 {
 		t.Fatalf("update --no-blocked failed (code %d): %s", code, errS)
 	}
 	// One open item remains ("tag build" replaced the list, unticked), so
 	// --force is the way through.
-	if _, errS, code = runCmd(t, "done", id[:8], "--force", "--data", dir); code != 0 {
+	if _, errS, code = runCmd(t, "done", id, "--force", "--data", dir); code != 0 {
 		t.Fatalf("done --force failed (code %d): %s", code, errS)
 	}
 	if got := listJSON(t, "--data", dir)[0].Status; got != "done" {
@@ -418,7 +418,7 @@ func TestCheckDonePrefixClosesTheDoneGuard(t *testing.T) {
 	id := listJSON(t, "--data", dir)[0].ID
 
 	// The same call with the item left open is still refused.
-	_, errS, code := runCmd(t, "update", id[:8], "--check", "reproduce locally", "--status", "done", "--data", dir)
+	_, errS, code := runCmd(t, "update", id, "--check", "reproduce locally", "--status", "done", "--data", dir)
 	if code != 1 || !strings.Contains(errS, "1 of 1 checklist items are still open") {
 		t.Fatalf("update leaving the item open: code %d stderr %q", code, errS)
 	}
@@ -427,7 +427,7 @@ func TestCheckDonePrefixClosesTheDoneGuard(t *testing.T) {
 	}
 
 	// Ticking it in the very same call clears the guard: no --force needed.
-	if _, errS, code = runCmd(t, "update", id[:8], "--check", "x reproduce locally", "--status", "done", "--data", dir); code != 0 {
+	if _, errS, code = runCmd(t, "update", id, "--check", "x reproduce locally", "--status", "done", "--data", dir); code != 0 {
 		t.Fatalf("ticking the last item and finishing in one update failed (code %d): %s", code, errS)
 	}
 	task := listJSON(t, "--data", dir)[0]
@@ -452,7 +452,7 @@ func TestUpdateStatusDoneGuard(t *testing.T) {
 
 	// Refused — and the field patch that rode along in the same call must be
 	// rolled back with the move, not left behind.
-	_, errS, code := runCmd(t, "update", id[:8], "--status", "done", "--title", "Renamed", "--data", dir)
+	_, errS, code := runCmd(t, "update", id, "--status", "done", "--title", "Renamed", "--data", dir)
 	if code != 1 {
 		t.Fatalf("update --status done with open checks: code %d, want 1", code)
 	}
@@ -468,7 +468,7 @@ func TestUpdateStatusDoneGuard(t *testing.T) {
 	}
 
 	// --force is the way through, and it carries the patch with it.
-	if _, errS, code = runCmd(t, "update", id[:8], "--status", "done", "--title", "Shipped", "--force", "--data", dir); code != 0 {
+	if _, errS, code = runCmd(t, "update", id, "--status", "done", "--title", "Shipped", "--force", "--data", dir); code != 0 {
 		t.Fatalf("update --status done --force failed (code %d): %s", code, errS)
 	}
 	if got = listJSON(t, "--data", dir)[0]; got.Status != "done" || got.Title != "Shipped" {
@@ -489,10 +489,10 @@ func TestUpdateStatusDoneGuard(t *testing.T) {
 	if blocked.ID == "" {
 		t.Fatal("blocked task missing from the listing")
 	}
-	if _, _, code := runCmd(t, "update", blocked.ID[:8], "--status", "done", "--data", dir); code != 1 {
+	if _, _, code := runCmd(t, "update", blocked.ID, "--status", "done", "--data", dir); code != 1 {
 		t.Errorf("update --status done on a blocked task: code %d, want 1", code)
 	}
-	if _, errS, code := runCmd(t, "update", blocked.ID[:8], "--no-blocked", "--status", "done", "--data", dir); code != 0 {
+	if _, errS, code := runCmd(t, "update", blocked.ID, "--no-blocked", "--status", "done", "--data", dir); code != 0 {
 		t.Fatalf("clearing blocked and finishing in one update failed (code %d): %s", code, errS)
 	}
 	for _, task := range listJSON(t, "--data", dir) {
@@ -522,17 +522,17 @@ func TestBlockedFlag(t *testing.T) {
 	if out != want {
 		t.Errorf("blocked list table:\n%q\nwant:\n%q", out, want)
 	}
-	if _, errS, code := runCmd(t, "update", task.ID[:8], "--no-blocked", "--data", dir); code != 0 {
+	if _, errS, code := runCmd(t, "update", task.ID, "--no-blocked", "--data", dir); code != 0 {
 		t.Fatalf("update --no-blocked failed (code %d): %s", code, errS)
 	}
 	if listJSON(t, "--data", dir)[0].Blocked {
 		t.Error("--no-blocked did not clear the flag")
 	}
 	// A patch that says nothing about blocked leaves it alone.
-	if _, _, code := runCmd(t, "update", task.ID[:8], "--blocked", "--data", dir); code != 0 {
+	if _, _, code := runCmd(t, "update", task.ID, "--blocked", "--data", dir); code != 0 {
 		t.Fatal("re-block failed")
 	}
-	if _, _, code := runCmd(t, "update", task.ID[:8], "--prio", "1", "--data", dir); code != 0 {
+	if _, _, code := runCmd(t, "update", task.ID, "--prio", "1", "--data", dir); code != 0 {
 		t.Fatal("prio patch failed")
 	}
 	if got := listJSON(t, "--data", dir)[0]; !got.Blocked || got.Prio != 1 {
@@ -552,7 +552,7 @@ func TestCancelRestore(t *testing.T) {
 	}
 	drop := listJSON(t, "--data", dir)[1].ID
 
-	out, errS, code := runCmd(t, "cancel", drop[:8], "--data", dir)
+	out, errS, code := runCmd(t, "cancel", drop, "--data", dir)
 	if code != 0 {
 		t.Fatalf("cancel failed (code %d): %s", code, errS)
 	}
@@ -576,7 +576,7 @@ func TestCancelRestore(t *testing.T) {
 	}
 
 	// Restore puts it back in To Do.
-	if _, errS, code = runCmd(t, "restore", drop[:8], "--data", dir); code != 0 {
+	if _, errS, code = runCmd(t, "restore", drop, "--data", dir); code != 0 {
 		t.Fatalf("restore failed (code %d): %s", code, errS)
 	}
 	if tasks := listJSON(t, "--data", dir); len(tasks) != 2 {
@@ -587,7 +587,7 @@ func TestCancelRestore(t *testing.T) {
 	}
 
 	// rm --yes keeps its hard-delete meaning.
-	if _, errS, code = runCmd(t, "rm", drop[:8], "--yes", "--data", dir); code != 0 {
+	if _, errS, code = runCmd(t, "rm", drop, "--yes", "--data", dir); code != 0 {
 		t.Fatalf("rm --yes failed (code %d): %s", code, errS)
 	}
 	if n := len(listJSON(t, "--data", dir, "--all")); n != 1 {

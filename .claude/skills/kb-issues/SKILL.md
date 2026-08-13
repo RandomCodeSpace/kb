@@ -32,7 +32,7 @@ chosen, where a workflow reaches for `gh issue` or `glab issue`, use the
 | `gh issue list` | `kb list` |
 | `gh issue list --json ...` | `kb list --json` (full tasks, fixed shape) |
 | `gh issue list --state all` | `kb list --all` (includes cancelled) |
-| `gh issue view N` | `kb list --json` and select by id (no single-task view) |
+| `gh issue view N` | `kb view N` (full task + comments; `--json`) |
 | `gh issue edit N --title/--body` | `kb update <id> --title T --desc B` |
 | `gh issue close N` | `kb done <id>` |
 | `gh issue close N --reason "not planned"` | `kb cancel <id>` (reversible) |

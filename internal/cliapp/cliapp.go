@@ -33,6 +33,7 @@ const usageText = `usage: kb <command> [flags]
 commands:
   add "title"            add a task
   list                   list tasks
+  view <id>              show one task in full, comments included
   update <id>            patch a task (only provided flags change)
   move <id> <status>     move a task to todo, doing, done, or cancelled
   done <id>              shorthand for: move <id> done
@@ -149,6 +150,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return a.cmdUsers(rest)
 	case "comment":
 		return a.cmdComment(rest)
+	case "view":
+		return a.cmdView(rest)
 	}
 	fmt.Fprintf(stderr, "kb: unknown command %q\n\n%s", cmd, usageText)
 	return 2
