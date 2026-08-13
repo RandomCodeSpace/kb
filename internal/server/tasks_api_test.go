@@ -173,6 +173,74 @@ func TestTasksAPIRequiresAuthAndIsolatesUsers(t *testing.T) {
 	}
 }
 
+// columnTitles reads a column back through the list endpoint, which serves
+// tasks in position order.
+func columnTitles(t *testing.T, h http.Handler, status string) string {
+	t.Helper()
+	w := doReq(t, h, "GET", "/api/tasks?status="+status, "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list %s = %d %s", status, w.Code, w.Body)
+	}
+	var tasks []apiTask
+	if err := json.Unmarshal(w.Body.Bytes(), &tasks); err != nil {
+		t.Fatalf("decode list: %v\n%s", err, w.Body)
+	}
+	titles := make([]string, 0, len(tasks))
+	for i, task := range tasks {
+		if task.Position != i {
+			t.Fatalf("%s position[%d] = %d, want %d", status, i, task.Position, i)
+		}
+		titles = append(titles, task.Title)
+	}
+	return strings.Join(titles, ",")
+}
+
+func TestTasksAPIPatchIndex(t *testing.T) {
+	h, _ := newTestServer(t, Config{})
+	for _, body := range []string{
+		`{"title":"A"}`, `{"title":"B"}`, `{"title":"C"}`,
+		`{"title":"X","status":"doing"}`, `{"title":"Y","status":"doing"}`,
+	} {
+		if w := doReq(t, h, "POST", "/api/tasks", body, nil); w.Code != http.StatusCreated {
+			t.Fatalf("seed %s = %d %s", body, w.Code, w.Body)
+		}
+	}
+
+	// A status move with an index lands at that slot instead of appending.
+	w := doReq(t, h, "PATCH", "/api/tasks/1", `{"status":"doing","index":1}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("positional move = %d %s", w.Code, w.Body)
+	}
+	if got := decodeAPITask(t, w.Body.String()); got.Status != "doing" || got.Position != 1 {
+		t.Fatalf("moved = %+v", got)
+	}
+	if got := columnTitles(t, h, "doing"); got != "X,A,Y" {
+		t.Fatalf("doing = %s, want X,A,Y", got)
+	}
+	if got := columnTitles(t, h, "todo"); got != "B,C" {
+		t.Fatalf("todo = %s, want B,C", got)
+	}
+
+	// An index alone is a reorder, not an empty patch.
+	if w = doReq(t, h, "PATCH", "/api/tasks/3", `{"index":0}`, nil); w.Code != http.StatusOK {
+		t.Fatalf("reorder = %d %s", w.Code, w.Body)
+	}
+	if got := columnTitles(t, h, "todo"); got != "C,B" {
+		t.Fatalf("todo = %s, want C,B", got)
+	}
+
+	// Beyond the end clamps; negative is a 400.
+	if w = doReq(t, h, "PATCH", "/api/tasks/3", `{"index":99}`, nil); w.Code != http.StatusOK {
+		t.Fatalf("clamped reorder = %d %s", w.Code, w.Body)
+	}
+	if got := columnTitles(t, h, "todo"); got != "B,C" {
+		t.Fatalf("todo = %s, want B,C", got)
+	}
+	if w = doReq(t, h, "PATCH", "/api/tasks/3", `{"index":-1}`, nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("negative index = %d %s", w.Code, w.Body)
+	}
+}
+
 func TestTasksAPIPatchFields(t *testing.T) {
 	h, st := newTestServer(t, Config{})
 	if w := doReq(t, h, "POST", "/api/tasks", `{"title":"Patch me","desc":"old"}`, nil); w.Code != http.StatusCreated {

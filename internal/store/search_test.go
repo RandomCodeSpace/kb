@@ -368,7 +368,7 @@ func TestFTSWriteThroughTracksEveryTaskWritePath(t *testing.T) {
 	added := addSearchTask(t, s, board.Task{Title: "addunique marker"})
 	requireSingleCardHit(t, s, "alice", "addunique", added.ID, board.StatusTodo)
 
-	updated, err := s.UpdateAndMoveTask("alice", added.ID, TaskPatch{Title: sptr("updateunique marker")}, nil, nil)
+	updated, err := s.UpdateAndMoveTask("alice", added.ID, TaskPatch{Title: sptr("updateunique marker")}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("UpdateAndMoveTask: %v", err)
 	}

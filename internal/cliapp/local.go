@@ -106,7 +106,7 @@ func (l *localBackend) update(ref string, p store.TaskPatch, moveTo *board.Statu
 		// moving to done in a single update is a legitimate finish.
 		guard = func(t board.Task) error { return doneGuardErr(t.ID, t) }
 	}
-	out, err := l.st.UpdateAndMoveTask(l.user, ref, p, moveTo, guard)
+	out, err := l.st.UpdateAndMoveTask(l.user, ref, p, moveTo, nil, guard)
 	if err != nil {
 		return item{}, friendlyIDErr(err, ref)
 	}
@@ -123,7 +123,7 @@ func (l *localBackend) move(ref string, to board.Status, force bool) (item, erro
 			return doneGuardErr(t.ID, t)
 		}
 	}
-	t, err := l.st.UpdateAndMoveTask(l.user, ref, store.TaskPatch{}, &to, guard)
+	t, err := l.st.UpdateAndMoveTask(l.user, ref, store.TaskPatch{}, &to, nil, guard)
 	if err != nil {
 		return item{}, friendlyIDErr(err, ref)
 	}

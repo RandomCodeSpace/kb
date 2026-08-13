@@ -224,7 +224,7 @@ func TestStoreMethodsReturnErrorsAfterDatabaseClose(t *testing.T) {
 		{name: "BoardWriteReceipt", call: func() error { _, _, err := s.BoardWriteReceipt("u", "op"); return err }},
 		{name: "AddTask", call: func() error { _, err := s.AddTask("u", board.Task{Title: "task"}); return err }},
 		{name: "UpdateTask", call: func() error { _, err := s.UpdateTask("u", "id", TaskPatch{}); return err }},
-		{name: "UpdateAndMoveTask", call: func() error { _, err := s.UpdateAndMoveTask("u", "id", TaskPatch{}, nil, nil); return err }},
+		{name: "UpdateAndMoveTask", call: func() error { _, err := s.UpdateAndMoveTask("u", "id", TaskPatch{}, nil, nil, nil); return err }},
 		{name: "MoveTask", call: func() error { _, err := s.MoveTask("u", "id", board.StatusDoing); return err }},
 		{name: "DeleteTask", call: func() error { _, err := s.DeleteTask("u", "id"); return err }},
 		{name: "ListTasks", call: func() error { _, err := s.ListTasks("u", ""); return err }},
@@ -904,7 +904,7 @@ func TestTaskMutationValidationAndRollbackBoundaries(t *testing.T) {
 		t.Fatal("AddTask accepted an invalid status")
 	}
 	invalid := board.Status("invalid")
-	if _, err := s.UpdateAndMoveTask("u", "missing", TaskPatch{}, &invalid, nil); err == nil {
+	if _, err := s.UpdateAndMoveTask("u", "missing", TaskPatch{}, &invalid, nil, nil); err == nil {
 		t.Fatal("UpdateAndMoveTask accepted an invalid status")
 	}
 	if _, err := s.ListTasks("u", invalid); err == nil {

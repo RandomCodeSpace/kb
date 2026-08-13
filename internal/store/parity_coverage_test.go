@@ -316,7 +316,7 @@ func TestDoneGateReportsBrokenLinkState(t *testing.T) {
 	mustExecCoverage(t, s, `INSERT INTO task_links(scope, blocker_id, blocked_id) VALUES ('u', 'ghost', '`+task.ID+`')`)
 	done := board.StatusDone
 	guard := func(board.Task) error { return nil }
-	if _, err := s.UpdateAndMoveTask("u", "1", TaskPatch{}, &done, guard); err == nil {
+	if _, err := s.UpdateAndMoveTask("u", "1", TaskPatch{}, &done, nil, guard); err == nil {
 		t.Fatal("guarded done survived a dangling blocker edge")
 	}
 }

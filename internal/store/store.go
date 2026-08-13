@@ -977,11 +977,21 @@ func (s *Store) AddTask(user string, t board.Task) (board.Task, error) {
 // updated task. The merged task must pass ValidateTaskFields. Setting Tags
 // upserts labels.
 func (s *Store) UpdateTask(user, idPrefix string, patch TaskPatch) (board.Task, error) {
-	return s.UpdateAndMoveTask(user, idPrefix, patch, nil, nil)
+	return s.UpdateAndMoveTask(user, idPrefix, patch, nil, nil, nil)
 }
 
 // UpdateAndMoveTask applies patch and then, when moveTo is non-nil, moves the
 // task to that column — both inside a single transaction.
+//
+// index, when non-nil, is the target slot within the destination column,
+// clamped to [0, column length]; a negative index is an error. With moveTo it
+// replaces the default append; without moveTo it reorders the task inside its
+// current column and leaves MovedAt alone, matching ReplaceBoard, where a task
+// that stays in its status keeps its MovedAt. An index paired with a moveTo
+// naming the column the task already occupies is that same reorder, so a client
+// that always sends the destination column does not reset MovedAt by dragging a
+// card within its column. A patch carrying nothing but an index is a reorder,
+// not an empty update.
 //
 // guard, when non-nil, is called with the post-patch task after the patch is
 // written but before the move. The ordering is deliberate: a patch can itself
@@ -989,15 +999,19 @@ func (s *Store) UpdateTask(user, idPrefix string, patch TaskPatch) (board.Task, 
 // while sending the task to done in one call), so the guard must judge the
 // state the caller is actually asking for, not the state it started from.
 // A non-nil error from guard aborts the transaction, rolling back the patch
-// too: a refused move never leaves a partial update behind.
-func (s *Store) UpdateAndMoveTask(user, idPrefix string, patch TaskPatch, moveTo *board.Status, guard func(board.Task) error) (board.Task, error) {
+// and any repositioning too: a refused move never leaves a partial update
+// behind.
+func (s *Store) UpdateAndMoveTask(user, idPrefix string, patch TaskPatch, moveTo *board.Status, index *int, guard func(board.Task) error) (board.Task, error) {
 	if moveTo != nil && !moveTo.Valid() {
 		return board.Task{}, fmt.Errorf("store: invalid status %q", *moveTo)
+	}
+	if index != nil && *index < 0 {
+		return board.Task{}, fmt.Errorf("store: invalid index %d", *index)
 	}
 	var out board.Task
 	err := s.withTx(func(tx *sql.Tx) error {
 		var err error
-		out, err = s.updateAndMoveTaskTx(tx, user, idPrefix, patch, moveTo, guard)
+		out, err = s.updateAndMoveTaskTx(tx, user, idPrefix, patch, moveTo, index, guard)
 		return err
 	})
 	if err != nil {
@@ -1006,7 +1020,7 @@ func (s *Store) UpdateAndMoveTask(user, idPrefix string, patch TaskPatch, moveTo
 	return out, nil
 }
 
-func (s *Store) updateAndMoveTaskTx(tx *sql.Tx, user, idPrefix string, patch TaskPatch, moveTo *board.Status, guard func(board.Task) error) (board.Task, error) {
+func (s *Store) updateAndMoveTaskTx(tx *sql.Tx, user, idPrefix string, patch TaskPatch, moveTo *board.Status, index *int, guard func(board.Task) error) (board.Task, error) {
 	id, err := resolveID(tx, user, idPrefix)
 	if err != nil {
 		return board.Task{}, err
@@ -1036,11 +1050,39 @@ func (s *Store) updateAndMoveTaskTx(tx *sql.Tx, user, idPrefix string, patch Tas
 		}
 	}
 	if moveTo == nil {
+		if index == nil {
+			return task, nil
+		}
+		// Same-column reorder: position changes, MovedAt does not.
+		pos, err := repositionTask(tx, user, task.Status, task.ID, *index)
+		if err != nil {
+			return board.Task{}, err
+		}
+		task.Position = pos
 		return task, nil
 	}
-	task, err = moveTask(tx, user, task, *moveTo)
-	if err != nil {
-		return board.Task{}, err
+	from := task.Status
+	// A positional move into the column the task already occupies is the same
+	// reorder as the moveTo == nil path: repositionTask below does the work and
+	// MovedAt survives it.
+	if index == nil || *moveTo != from {
+		task, err = moveTask(tx, user, task, *moveTo)
+		if err != nil {
+			return board.Task{}, err
+		}
+	}
+	if index != nil {
+		pos, err := repositionTask(tx, user, task.Status, task.ID, *index)
+		if err != nil {
+			return board.Task{}, err
+		}
+		task.Position = pos
+		if from != task.Status {
+			// The task left a hole behind; close it so both columns stay 0..n-1.
+			if err := compactColumn(tx, user, from); err != nil {
+				return board.Task{}, err
+			}
+		}
 	}
 	if *moveTo != board.StatusCancelled {
 		if err := deleteRestoredTaskTombstoneTx(tx, user, task.ID); err != nil {
@@ -1123,7 +1165,72 @@ func (s *Store) patchTask(tx *sql.Tx, user, id string, patch TaskPatch) (board.T
 // MoveTask moves the task matching idPrefix to status to, appending it to
 // that column and stamping MovedAt.
 func (s *Store) MoveTask(user, idPrefix string, to board.Status) (board.Task, error) {
-	return s.UpdateAndMoveTask(user, idPrefix, TaskPatch{}, &to, nil)
+	return s.UpdateAndMoveTask(user, idPrefix, TaskPatch{}, &to, nil, nil)
+}
+
+// repositionTask splices id into column st at index, clamped to the column
+// length, and rewrites that column's positions to 0..n-1. Columns hold a
+// handful of tasks, so a full rewrite is cheaper to reason about than sparse
+// gaps.
+func repositionTask(tx *sql.Tx, user string, st board.Status, id string, index int) (int, error) {
+	ids, err := columnTaskIDs(tx, user, st, id)
+	if err != nil {
+		return 0, err
+	}
+	if index > len(ids) {
+		index = len(ids)
+	}
+	ordered := make([]string, 0, len(ids)+1)
+	ordered = append(ordered, ids[:index]...)
+	ordered = append(ordered, id)
+	ordered = append(ordered, ids[index:]...)
+	if err := writePositions(tx, user, ordered); err != nil {
+		return 0, err
+	}
+	return index, nil
+}
+
+// compactColumn rewrites column st's positions to 0..n-1.
+func compactColumn(tx *sql.Tx, user string, st board.Status) error {
+	ids, err := columnTaskIDs(tx, user, st, "")
+	if err != nil {
+		return err
+	}
+	return writePositions(tx, user, ids)
+}
+
+// columnTaskIDs lists a column's task ids in position order, skipping exclude.
+func columnTaskIDs(q dbtx, user string, st board.Status, exclude string) ([]string, error) {
+	rows, err := q.Query(`SELECT id FROM tasks WHERE user = ? AND status = ? ORDER BY position, seq`, user, string(st))
+	if err != nil {
+		return nil, fmt.Errorf("store: list column: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: scan column: %w", err)
+		}
+		if id == exclude {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list column: %w", err)
+	}
+	return ids, nil
+}
+
+// writePositions stamps ids with positions 0..len(ids)-1.
+func writePositions(tx *sql.Tx, user string, ids []string) error {
+	for i, id := range ids {
+		if _, err := tx.Exec(`UPDATE tasks SET position = ? WHERE user = ? AND id = ?`, i, user, id); err != nil {
+			return fmt.Errorf("store: set position: %w", err)
+		}
+	}
+	return nil
 }
 
 // moveTask appends t to column to and stamps MovedAt, returning the moved

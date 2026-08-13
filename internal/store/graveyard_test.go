@@ -549,7 +549,7 @@ func TestRestoreAndFullBoardReplacementRemoveTombstones(t *testing.T) {
 		}
 		title := "Restored and renamed"
 		to := board.StatusDoing
-		updated, err := s.UpdateAndMoveTask("alice", task.ID, TaskPatch{Title: &title}, &to, nil)
+		updated, err := s.UpdateAndMoveTask("alice", task.ID, TaskPatch{Title: &title}, &to, nil, nil)
 		if err != nil || updated.Status != to || updated.Title != title {
 			t.Fatalf("UpdateAndMoveTask = %+v, %v", updated, err)
 		}

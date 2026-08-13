@@ -153,13 +153,15 @@ func (s *server) handleListTasks(w http.ResponseWriter, r *http.Request, user st
 }
 
 // taskWriteRequest is the body of POST /api/tasks and PATCH /api/tasks/{ref}.
-// On PATCH only provided fields change; status moves the task and force
-// bypasses the completion guard.
+// On PATCH only provided fields change; status moves the task, index places it
+// within the destination column, and force bypasses the completion guard.
+// Create ignores index: a new task always lands at the end of its column.
 type taskWriteRequest struct {
 	Title   *string     `json:"title"`
 	Desc    *string     `json:"desc"`
 	Emoji   *string     `json:"emoji"`
 	Status  *string     `json:"status"`
+	Index   *int        `json:"index"`
 	Prio    *int        `json:"prio"`
 	Due     *string     `json:"due"`
 	Effort  *string     `json:"effort"`
@@ -262,7 +264,9 @@ func (s *server) handleGetTask(w http.ResponseWriter, r *http.Request, user stri
 }
 
 // handlePatchTask serves PATCH /api/tasks/{ref}: a field patch plus an
-// optional status move, one transaction, guarded like the CLI unless force.
+// optional status move and column position, one transaction, guarded like the
+// CLI unless force. An index on its own is a reorder, so it counts as a
+// non-empty patch.
 func (s *server) handlePatchTask(w http.ResponseWriter, r *http.Request, user string) {
 	var req taskWriteRequest
 	if !decodeBody(w, r, &req) {
@@ -296,7 +300,7 @@ func (s *server) handlePatchTask(w http.ResponseWriter, r *http.Request, user st
 		}
 		moveTo = &st
 	}
-	if patch == (store.TaskPatch{}) && moveTo == nil {
+	if patch == (store.TaskPatch{}) && moveTo == nil && req.Index == nil {
 		http.Error(w, "patch needs at least one field", http.StatusBadRequest)
 		return
 	}
@@ -309,7 +313,7 @@ func (s *server) handlePatchTask(w http.ResponseWriter, r *http.Request, user st
 			return nil
 		}
 	}
-	t, err := s.store.UpdateAndMoveTask(user, r.PathValue("ref"), patch, moveTo, guard)
+	t, err := s.store.UpdateAndMoveTask(user, r.PathValue("ref"), patch, moveTo, req.Index, guard)
 	if err != nil {
 		taskAPIError(w, user, err)
 		return
