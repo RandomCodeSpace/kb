@@ -293,3 +293,44 @@ func TestPositionHelpersReportWriteFailures(t *testing.T) {
 		t.Fatal("same-column reorder succeeded with updates refused")
 	}
 }
+
+// TestUpdateAndMoveTaskSameStatusRepositionFailure sends the current status
+// with an index so moveTask is skipped and the failure surfaces from
+// repositionTask inside the transaction.
+func TestUpdateAndMoveTaskSameStatusRepositionFailure(t *testing.T) {
+	s := seedPositionBoard(t)
+	target := taskByTitle(t, s, "A")
+	mustExecCoverage(t, s, `CREATE TRIGGER refuse_task_updates BEFORE UPDATE ON tasks BEGIN SELECT RAISE(ABORT, 'update refused'); END`)
+	todo, index := board.StatusTodo, 1
+	if _, err := s.UpdateAndMoveTask("u", target.ID, TaskPatch{}, &todo, &index, nil); err == nil || !strings.Contains(err.Error(), "set position") {
+		t.Fatalf("err = %v, want set position failure", err)
+	}
+}
+
+// TestUpdateAndMoveTaskCompactionFailure refuses updates only to rows still
+// in the source column, so the move and target-column reposition succeed and
+// the failure surfaces from compactColumn.
+func TestUpdateAndMoveTaskCompactionFailure(t *testing.T) {
+	s := seedPositionBoard(t)
+	target := taskByTitle(t, s, "A")
+	mustExecCoverage(t, s, `CREATE TRIGGER refuse_todo_updates BEFORE UPDATE ON tasks WHEN NEW.status = 'todo' BEGIN SELECT RAISE(ABORT, 'update refused'); END`)
+	doing, index := board.StatusDoing, 0
+	if _, err := s.UpdateAndMoveTask("u", target.ID, TaskPatch{}, &doing, &index, nil); err == nil || !strings.Contains(err.Error(), "set position") {
+		t.Fatalf("err = %v, want set position failure", err)
+	}
+	if got := strings.Join(columnTitles(t, s, board.StatusTodo), ","); got != "A,B,C" {
+		t.Fatalf("todo = %s, want rollback to A,B,C", got)
+	}
+}
+
+// TestColumnTaskIDsReportsUnscannableRows recreates tasks loose with a NULL
+// id so the row scan fails.
+func TestColumnTaskIDsReportsUnscannableRows(t *testing.T) {
+	s := newStore(t)
+	mustExecCoverage(t, s, `DROP TABLE tasks`)
+	mustExecCoverage(t, s, `CREATE TABLE tasks (user TEXT, id TEXT, status TEXT, position INTEGER, seq INTEGER)`)
+	mustExecCoverage(t, s, `INSERT INTO tasks(user, id, status, position, seq) VALUES ('u', NULL, 'todo', 0, 1)`)
+	if _, err := columnTaskIDs(s.db, "u", board.StatusTodo, ""); err == nil || !strings.Contains(err.Error(), "scan column") {
+		t.Fatalf("columnTaskIDs err = %v, want scan column failure", err)
+	}
+}
