@@ -4,54 +4,8 @@ import type { Prio, Task } from '../lib/model';
 import { cardLabel, isScoped, progress } from '../lib/model';
 import { ageChip, dueChip, ymd } from '../lib/urgency';
 import { tagColor } from '../lib/labels';
-import type { InlineTok } from '../lib/inlineMd';
-import { parseDesc, tokenizeInline } from '../lib/inlineMd';
-
-export function InlineText({ toks }: Readonly<{ toks: InlineTok[] }>) {
-  return (
-    <>
-      {toks.map((t, i) => {
-        switch (t.kind) {
-          case 'code':
-            return <code key={i}>{t.text}</code>;
-          case 'bold':
-            return <strong key={i}>{t.text}</strong>;
-          case 'italic':
-            return <em key={i}>{t.text}</em>;
-          case 'link':
-            return (
-              <a
-                key={i}
-                href={t.href}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
-              >
-                {t.text}
-              </a>
-            );
-          default:
-            return <span key={i}>{t.text}</span>;
-        }
-      })}
-    </>
-  );
-}
-
-function Desc({ text }: Readonly<{ text: string }>) {
-  return (
-    <div className="desc">
-      {parseDesc(text).map((l, i) => (
-        <div key={i} className={l.bullet ? 'dline bullet' : 'dline'}>
-          {l.bullet && <span className="bdot">•</span>}
-          <span>
-            <InlineText toks={l.toks} />
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
+import { tokenizeInline } from '../lib/inlineMd';
+import { InlineText, RichDesc } from './RichText';
 
 /**
  * The handlers take the task id rather than closing over it, so a column can
@@ -179,7 +133,7 @@ export const Card = memo(function Card({
           ⠿
         </span>
       </div>
-      {task.desc !== '' && <Desc text={task.desc} />}
+      {task.desc !== '' && <RichDesc text={task.desc} />}
       {p && (
         <>
           <div className="prog">

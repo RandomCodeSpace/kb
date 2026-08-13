@@ -20,10 +20,9 @@ import {
   isAbortError,
 } from '../lib/api';
 import { useDialogFocus } from '../lib/focus';
-import { parseDesc } from '../lib/inlineMd';
 import { shouldQuery } from '../lib/similar';
 import { CardEditor } from './CardEditor';
-import { InlineText } from './Card';
+import { RichDesc } from './RichText';
 
 export type ModalState =
   | { mode: 'add'; status: Status }
@@ -326,16 +325,7 @@ function CommentsSection({ comments }: Readonly<{ comments: readonly TaskComment
             <span className="comment-author">{comment.author}</span>
             <span className="comment-date">{commentDateText(comment.createdAt)}</span>
           </div>
-          <div className="comment-body">
-            {parseDesc(comment.body).map((line, i) => (
-              <div key={i} className={line.bullet ? 'dline bullet' : 'dline'}>
-                {line.bullet && <span className="bdot">•</span>}
-                <span>
-                  <InlineText toks={line.toks} />
-                </span>
-              </div>
-            ))}
-          </div>
+          <RichDesc text={comment.body} className="comment-body" />
         </article>
       ))}
     </section>
