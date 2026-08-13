@@ -165,4 +165,24 @@ describe('Card DOM behavior', () => {
     expect(due).not.toBeNull();
     expect(due?.textContent).toContain('overdue');
   });
+
+  it('turns label chips into filter buttons only when onTagClick is wired', async () => {
+    const user = userEvent.setup();
+    const onTagClick = vi.fn();
+    const onEdit = vi.fn();
+    render(
+      <Card task={BASE_TASK} onTagClick={onTagClick} onEdit={onEdit} />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Filter by label backend' }));
+    await user.click(screen.getByRole('button', { name: 'Filter by label type::bug' }));
+    expect(onTagClick.mock.calls).toEqual([['backend'], ['type::bug']]);
+    // A label press filters; it must not also open the editor.
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it('keeps labels as plain chips without onTagClick', () => {
+    renderCard();
+    expect(screen.queryByRole('button', { name: /Filter by label/ })).toBeNull();
+    expect(screen.getByRole('img', { name: 'Label backend' })).toBeTruthy();
+  });
 });

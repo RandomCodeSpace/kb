@@ -571,6 +571,7 @@ vi.mock('./components/Board', () => ({
     onAdd,
     onRestore,
     onPurge,
+    onTagClick,
   }: {
     board: Board;
     onMove: (id: string, status: Task['status'], index?: number) => void;
@@ -579,6 +580,7 @@ vi.mock('./components/Board', () => ({
     onAdd: (status: Task['status']) => void;
     onRestore: (id: string) => void;
     onPurge: (id: string) => void;
+    onTagClick?: (tag: string) => void;
   }) => (
     <section aria-label="board-double">
       <button onClick={() => onAdd('todo')}>add todo</button>
@@ -596,6 +598,7 @@ vi.mock('./components/Board', () => ({
           <button onClick={() => onTick(item.id, 99, { x: 2, y: 3 })}>tick invalid {item.id}</button>
           <button onClick={() => onRestore(item.id)}>restore {item.id}</button>
           <button onClick={() => onPurge(item.id)}>purge {item.id}</button>
+          <button onClick={() => onTagClick?.(item.tags[0] ?? '')}>tag {item.id}</button>
         </div>
       ))}
     </section>
@@ -979,6 +982,39 @@ describe('App DOM orchestration', () => {
     await user.clear(screen.getByRole('textbox', { name: 'confirm input' }));
     await user.click(screen.getByRole('button', { name: 'confirm action' }));
     expect(await screen.findByText(/First task:cancelled:false,false/)).not.toBeNull();
+  });
+
+  it('filters the board by text and label toggles without touching stored tasks', async () => {
+    state.board = board([
+      task({ id: 't1', title: 'Fix login', desc: 'auth expiry', tags: ['bug', 'auth'] }),
+      task({ id: 't2', title: 'Landing page', desc: '', tags: ['ui'] }),
+    ]);
+    const user = userEvent.setup();
+    render(<App />);
+    expect(screen.getByTestId('task-t1')).toBeTruthy();
+    expect(screen.getByTestId('task-t2')).toBeTruthy();
+
+    // Free text narrows by title/desc/tags, case-insensitively.
+    const input = screen.getByRole('searchbox', { name: 'Filter cards by text' });
+    await user.type(input, 'LOGIN');
+    expect(screen.queryByTestId('task-t2')).toBeNull();
+    expect(screen.getByTestId('task-t1')).toBeTruthy();
+    expect(screen.getByText('1 of 2 cards')).toBeTruthy();
+
+    // Clear restores everything.
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(screen.getByTestId('task-t2')).toBeTruthy();
+    expect(screen.queryByText(/of 2 cards/)).toBeNull();
+
+    // A label click narrows; clicking its chip in the bar releases it.
+    await user.click(screen.getByRole('button', { name: 'tag t1' }));
+    expect(screen.queryByTestId('task-t2')).toBeNull();
+    const chip = screen.getByRole('button', { name: 'Stop filtering by label bug' });
+    await user.click(chip);
+    expect(screen.getByTestId('task-t2')).toBeTruthy();
+
+    // Filtering is display-only: the stored board still has both tasks.
+    expect(state.board?.tasks).toHaveLength(2);
   });
 
   it('does not persist an indexed same-slot move', async () => {

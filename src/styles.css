@@ -1544,6 +1544,49 @@ body {
   box-shadow: 2px 2px 0 var(--ink);
 }
 
+/* Board filter row: free-text input plus active label toggles. */
+.filterbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3) var(--sp-2);
+}
+.filter-text {
+  min-height: var(--ctl-h);
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: var(--sp-1) var(--sp-2);
+  font: inherit;
+  max-width: 260px;
+  flex: 1 1 160px;
+  background: #fff;
+}
+.ftag,
+.fclear {
+  min-height: var(--ctl-h);
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: var(--sp-1) var(--sp-2);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  background: #e9edf2;
+}
+.fcount {
+  font-size: var(--fs-sm);
+  font-weight: 800;
+}
+/* A label chip that is also a button: the chip supplies the look. */
+.tagbtn {
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  display: inline-flex;
+}
+
 /* Read-only comments below the card form. Written from the CLI and MCP;
    the modal only shows them. */
 .comments {

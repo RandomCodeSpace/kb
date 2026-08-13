@@ -1,4 +1,4 @@
-import { memo, useEffect, useId, useRef, useState } from 'react';
+import { Fragment, memo, useEffect, useId, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { Prio, Task } from '../lib/model';
 import { cardLabel, isScoped, progress } from '../lib/model';
@@ -76,6 +76,8 @@ export interface CardProps {
   onRestore?: (taskId: string) => void;
   /** Cancelled column only: the one path to a real delete. */
   onPurge?: (taskId: string) => void;
+  /** Click on a label chip: toggle it into the board filter. */
+  onTagClick?: (tag: string) => void;
 }
 
 const PRIO_COLOR: Record<Prio, string> = {
@@ -109,6 +111,7 @@ export const Card = memo(function Card({
   onCardKey,
   onRestore,
   onPurge,
+  onTagClick,
 }: CardProps) {
   const [open, setOpen] = useState(false);
   const checksRef = useRef<HTMLDivElement>(null);
@@ -281,12 +284,11 @@ export const Card = memo(function Card({
             {task.effort}
           </span>
         )}
-        {task.tags.map((tag) =>
-          isScoped(tag) ? (
+        {task.tags.map((tag) => {
+          const chip = isScoped(tag) ? (
             // The two halves are one label; read apart they are two unrelated
             // words, so the pill names itself and its pieces stay decoration.
             <span
-              key={tag}
               className="slabel"
               role="img"
               aria-label={`Label ${tag.split('::')[0]}: ${tag.split('::').slice(1).join('::')}`}
@@ -298,7 +300,6 @@ export const Card = memo(function Card({
             </span>
           ) : (
             <span
-              key={tag}
               className="tag"
               role="img"
               aria-label={`Label ${tag}`}
@@ -306,8 +307,23 @@ export const Card = memo(function Card({
             >
               #{tag}
             </span>
-          ),
-        )}
+          );
+          // Buttons are excluded from the card's open-editor click, so a
+          // label press filters the board instead of opening the card.
+          return onTagClick ? (
+            <button
+              key={tag}
+              type="button"
+              className="tagbtn"
+              aria-label={`Filter by label ${tag}`}
+              onClick={() => onTagClick(tag)}
+            >
+              {chip}
+            </button>
+          ) : (
+            <Fragment key={tag}>{chip}</Fragment>
+          );
+        })}
       </div>
       {(onRestore || onPurge) && (
         <div className="cardacts">
