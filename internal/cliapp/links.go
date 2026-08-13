@@ -27,8 +27,8 @@ func (a *app) cmdLink(args []string) int {
 	default:
 		return a.usageErr(fmt.Errorf("unknown relation %q (want blocks or blocked-by)", pos[1]))
 	}
-	return a.withLocalStore(*user, *data, func(st *store.Store, u string) error {
-		blocker, blocked, err := st.Link(u, blockerRef, blockedRef)
+	return a.withBackend(*user, *data, func(be backend) error {
+		blocker, blocked, err := be.link(blockerRef, blockedRef)
 		if err != nil {
 			return err
 		}
@@ -53,8 +53,8 @@ func (a *app) cmdUnlink(args []string) int {
 	if len(pos) != 2 {
 		return a.usageErr(errors.New("unlink needs exactly two <id> arguments"))
 	}
-	return a.withLocalStore(*user, *data, func(st *store.Store, u string) error {
-		if err := st.Unlink(u, pos[0], pos[1]); err != nil {
+	return a.withBackend(*user, *data, func(be backend) error {
+		if err := be.unlink(pos[0], pos[1]); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return fmt.Errorf("no link between %q and %q", pos[0], pos[1])
 			}

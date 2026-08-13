@@ -1026,8 +1026,9 @@ func (s *Store) updateAndMoveTaskTx(tx *sql.Tx, user, idPrefix string, patch Tas
 				return board.Task{}, err
 			}
 			if len(open) > 0 {
-				return board.Task{}, fmt.Errorf("%s still blocks %s %q; re-run with --force to finish it anyway",
-					describeBlockers(open), displayTaskRef(task), task.Title)
+				return board.Task{}, &CompletionBlockedError{msg: fmt.Sprintf(
+					"%s still blocks %s %q; re-run with --force to finish it anyway",
+					describeBlockers(open), displayTaskRef(task), task.Title)}
 			}
 		}
 		if err := guard(task); err != nil {

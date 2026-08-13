@@ -155,8 +155,10 @@ func TestJSONOutputPropagatesWriterFailure(t *testing.T) {
 		t.Fatalf("writeJSON err=%v, want %v", err, want)
 	}
 
-	ws := &wireServer{doc: "# B\n\n## To Do\n\n- [ ] One\n", has: true}
-	srv := httptest.NewServer(ws.handler())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[{"id":"a","seq":1,"title":"One","status":"todo","prio":3}]`)
+	}))
 	defer srv.Close()
 	t.Setenv("KB_SERVER", srv.URL)
 	t.Setenv("KB_SERVER_TOKEN", "")
@@ -184,40 +186,6 @@ func response(status int, body io.ReadCloser, etag string) *http.Response {
 	}
 }
 
-func TestRemoteStatusFilteringAndHTTPFailures(t *testing.T) {
-	doc := "# B\n\n## To Do\n\n- [ ] One\n\n## Doing\n\n- [ ] Two\n"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("ETag", `"r1"`)
-		if r.Method == http.MethodPut {
-			http.Error(w, "write rejected", http.StatusConflict)
-			return
-		}
-		_, _ = io.WriteString(w, doc)
-	}))
-	defer srv.Close()
-	r := newRemote(srv.URL, "", "default").(*remoteBackend)
-	filtered, err := r.list(board.StatusDoing)
-	if err != nil || len(filtered) != 1 || filtered[0].task.Title != "Two" {
-		t.Fatalf("filtered list=%+v err=%v", filtered, err)
-	}
-	if _, err := r.list(board.StatusDone); err != nil {
-		t.Fatalf("empty filtered list: %v", err)
-	}
-	if _, err := r.add(board.Task{Title: "Three"}); err == nil || !strings.Contains(err.Error(), "write rejected") {
-		t.Fatalf("add PUT failure: %v", err)
-	}
-	title := "Renamed"
-	if _, err := r.update("i1", store.TaskPatch{Title: &title}, nil, false); err == nil || !strings.Contains(err.Error(), "write rejected") {
-		t.Fatalf("update PUT failure: %v", err)
-	}
-	if _, err := r.remove("i1"); err == nil || !strings.Contains(err.Error(), "write rejected") {
-		t.Fatalf("remove PUT failure: %v", err)
-	}
-	if _, err := r.remove("i9"); err == nil || !strings.Contains(err.Error(), "no task") {
-		t.Fatalf("remove bad ref: %v", err)
-	}
-}
-
 func TestRemoteTransportRequestAndReadFailures(t *testing.T) {
 	transportErr := errors.New("transport down")
 	broken := &remoteBackend{
@@ -233,14 +201,11 @@ func TestRemoteTransportRequestAndReadFailures(t *testing.T) {
 	if _, err := broken.add(board.Task{Title: "x"}); !errors.Is(err, transportErr) {
 		t.Fatalf("add transport err=%v", err)
 	}
-	if _, err := broken.update("i1", store.TaskPatch{}, nil, false); !errors.Is(err, transportErr) {
+	if _, err := broken.update("1", store.TaskPatch{}, nil, false); !errors.Is(err, transportErr) {
 		t.Fatalf("update transport err=%v", err)
 	}
-	if _, err := broken.remove("i1"); !errors.Is(err, transportErr) {
+	if _, err := broken.remove("1"); !errors.Is(err, transportErr) {
 		t.Fatalf("remove transport err=%v", err)
-	}
-	if err := broken.putBoard(board.Board{Title: "B"}, `"r1"`); !errors.Is(err, transportErr) {
-		t.Fatalf("PUT transport err=%v", err)
 	}
 
 	readErr := errors.New("body broke")
@@ -251,16 +216,13 @@ func TestRemoteTransportRequestAndReadFailures(t *testing.T) {
 			return response(http.StatusOK, coverageErrorBody{err: readErr}, `"r1"`), nil
 		})},
 	}
-	if _, err := readBroken.fetchBoard(); !errors.Is(err, readErr) {
+	if _, err := readBroken.list(""); !errors.Is(err, readErr) {
 		t.Fatalf("read body err=%v", err)
 	}
 
 	malformed := &remoteBackend{base: "://bad", user: "default", client: http.DefaultClient}
-	if _, err := malformed.fetchBoard(); err == nil {
+	if _, err := malformed.list(""); err == nil {
 		t.Fatal("malformed GET base unexpectedly succeeded")
-	}
-	if err := malformed.putBoard(board.Board{Title: "B"}, `"r1"`); err == nil {
-		t.Fatal("malformed PUT base unexpectedly succeeded")
 	}
 
 	blankError := &remoteBackend{
@@ -270,24 +232,12 @@ func TestRemoteTransportRequestAndReadFailures(t *testing.T) {
 			return response(http.StatusServiceUnavailable, io.NopCloser(strings.NewReader("")), ""), nil
 		})},
 	}
-	if _, err := blankError.fetchBoard(); err == nil || !strings.Contains(err.Error(), "Service Unavailable") {
+	if _, err := blankError.list(""); err == nil || !strings.Contains(err.Error(), "Service Unavailable") {
 		t.Fatalf("blank HTTP error=%v", err)
 	}
-}
 
-func TestApplyPatchAllFields(t *testing.T) {
-	emoji, title, desc := "x", "new", "description"
-	due, effort, blocked, prio := "2026-08-01", "L", true, 1
-	tags := []string{"coverage"}
-	checks := []board.Check{{Text: "tested", Done: true}}
-	task := board.Task{}
-	applyPatch(&task, store.TaskPatch{
-		Emoji: &emoji, Title: &title, Desc: &desc, Due: &due, Effort: &effort,
-		Blocked: &blocked, Prio: &prio, Tags: &tags, Checks: &checks,
-	})
-	if task.Emoji != emoji || task.Title != title || task.Desc != desc || task.Due != due ||
-		task.Effort != effort || !task.Blocked || task.Prio != prio || len(task.Tags) != 1 ||
-		len(task.Checks) != 1 || !task.Checks[0].Done {
-		t.Fatalf("patched task=%+v", task)
+	// The retired i-N indexes fail fast, before any request is made.
+	if _, err := broken.update("i2", store.TaskPatch{}, nil, false); err == nil || !strings.Contains(err.Error(), "stable number") {
+		t.Fatalf("i-N ref = %v, want the retirement error", err)
 	}
 }

@@ -76,8 +76,10 @@ func TestCommentUsageAndRemoteErrors(t *testing.T) {
 		t.Errorf("comment on missing task: code=%d stderr=%q", code, errS)
 	}
 
+	// Remote mode reaches for the comment endpoint (an unreachable server is
+	// a transport error naming the API path, not a refusal).
 	t.Setenv("KB_SERVER", "http://127.0.0.1:1")
-	if _, errS, code := runCmd(t, "comment", "list", "1"); code != 1 || !strings.Contains(errS, "KB_SERVER") {
+	if _, errS, code := runCmd(t, "comment", "list", "1"); code != 1 || !strings.Contains(errS, "/api/tasks/1/comments") {
 		t.Errorf("remote comment: code=%d stderr=%q", code, errS)
 	}
 }

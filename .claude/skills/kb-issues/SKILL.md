@@ -48,13 +48,11 @@ blocked flag, status moves).
 
 ## Task ids
 
-- Local mode: stable per-board numbers `#1`, `#2`, ... assigned once and
-  never reused, exactly like gh issue numbers. Address tasks by bare
-  number (`kb done 12`) or `#12`; UUIDs remain in `--json` (`id`) with
-  the number as `seq`, and UUID prefixes still resolve.
-- Remote mode (`KB_SERVER`): ephemeral listing indexes `i1`, `i2`, ...
-  valid only against the current listing — re-run `kb list` after writes
-  and never store these ids.
+Tasks carry stable per-board numbers `#1`, `#2`, ... assigned once and
+never reused, exactly like gh issue numbers — the same ids locally and
+against a `KB_SERVER`. Address tasks by bare number (`kb done 12`) or
+`#12`; UUIDs remain in `--json` (`id`) with the number as `seq`, and UUID
+prefixes still resolve.
 
 ## Semantics that differ from GitHub/GitLab
 
@@ -63,11 +61,12 @@ blocked flag, status moves).
   are open or the task is blocked, unless `--force`.
 - Labels are `--tag` values: plain strings, no colors, created on use.
 - Comments are append-only with delete (`kb comment rm`); there is no
-  comment editing — delete and re-post instead. Comments are local-only
-  (no remote/`KB_SERVER` support yet).
+  comment editing — delete and re-post instead.
 - Cross-references are typed blocks edges: `kb link <a> blocks <b>`
   (or `blocked-by`), `kb unlink <a> <b>`, shown in `kb view`. Finishing
-  a task with open blockers is refused unless `--force`. Local-only.
+  a task with open blockers is refused unless `--force`.
+- Every command works locally and against a `KB_SERVER` except
+  `kb users`, which reads the local database.
 - There are no milestones.
 - `kb rm` is a hard delete with no undo; `kb cancel` is the reversible
   close and almost always the right choice.

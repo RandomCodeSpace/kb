@@ -138,6 +138,50 @@ func (l *localBackend) remove(ref string) (item, error) {
 	return item{ref: t.ID, task: t}, nil
 }
 
+func (l *localBackend) view(ref string) (item, []store.Comment, store.TaskLinks, error) {
+	t, err := l.st.Task(l.user, ref)
+	if err != nil {
+		return item{}, nil, store.TaskLinks{}, friendlyIDErr(err, ref)
+	}
+	comments, err := l.st.Comments(l.user, t.ID)
+	if err != nil {
+		return item{}, nil, store.TaskLinks{}, err
+	}
+	links, err := l.st.TaskLinks(l.user, t.ID)
+	if err != nil {
+		return item{}, nil, store.TaskLinks{}, err
+	}
+	return item{ref: t.ID, task: t}, comments, links, nil
+}
+
+func (l *localBackend) commentAdd(ref, body string) (store.Comment, error) {
+	c, err := l.st.AddComment(l.user, ref, l.user, body)
+	if err != nil {
+		return store.Comment{}, friendlyIDErr(err, ref)
+	}
+	return c, nil
+}
+
+func (l *localBackend) comments(ref string) ([]store.Comment, error) {
+	out, err := l.st.Comments(l.user, ref)
+	if err != nil {
+		return nil, friendlyIDErr(err, ref)
+	}
+	return out, nil
+}
+
+func (l *localBackend) commentRm(id int) (store.Comment, error) {
+	return l.st.DeleteComment(l.user, id)
+}
+
+func (l *localBackend) link(blockerRef, blockedRef string) (board.Task, board.Task, error) {
+	return l.st.Link(l.user, blockerRef, blockedRef)
+}
+
+func (l *localBackend) unlink(aRef, bRef string) error {
+	return l.st.Unlink(l.user, aRef, bRef)
+}
+
 // friendlyIDErr rewords the store's prefix-resolution sentinels with the id
 // the user actually typed.
 func friendlyIDErr(err error, ref string) error {

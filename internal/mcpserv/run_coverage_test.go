@@ -121,7 +121,9 @@ func TestFindTaskResolution(t *testing.T) {
 	if got, err := k.findTask(first.ID); err != nil || got.ID != first.ID {
 		t.Fatalf("exact task = %+v, %v", got, err)
 	}
-	if got, err := k.findTask(first.ID[:8]); err != nil || got.ID != first.ID {
+	// The 9-char prefix includes the UUID's first hyphen, so it can never
+	// parse as an all-digit sequence reference.
+	if got, err := k.findTask(first.ID[:9]); err != nil || got.ID != first.ID {
 		t.Fatalf("unique prefix = %+v, %v", got, err)
 	}
 	if _, err := k.findTask(""); err == nil || !strings.Contains(err.Error(), "list_tasks") {
@@ -131,14 +133,14 @@ func TestFindTaskResolution(t *testing.T) {
 		t.Fatalf("missing prefix error = %v", err)
 	}
 
-	prefix := first.ID[:1]
+	prefix := first.ID[:9]
 	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=temp_store(2)")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	secondID := prefix + "0000000-0000-4000-8000-000000000001"
+	secondID := prefix + "0000-4000-8000-000000000001"
 	if _, err := db.Exec(`INSERT INTO tasks (id, user, title, status, created_at, moved_at) VALUES (?, 'tester', 'candidate', 'todo', ?, ?)`, secondID, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}

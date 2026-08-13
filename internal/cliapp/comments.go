@@ -3,7 +3,6 @@ package cliapp
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -30,16 +29,6 @@ func commentToJSON(c store.Comment) commentJSON {
 	}
 }
 
-// resolveLocalUser applies the same normalization openBackend does, for
-// commands that talk to the store directly.
-func resolveLocalUser(user string) (string, error) {
-	user = strings.TrimSpace(user)
-	if user == "" {
-		user = "default"
-	}
-	return store.SanitizeUser(user)
-}
-
 // commentRef parses a comment id: "7" or "c7".
 func commentRef(ref string) (int, bool) {
 	ref = strings.TrimPrefix(ref, "c")
@@ -50,8 +39,7 @@ func commentRef(ref string) (int, bool) {
 	return n, true
 }
 
-// cmdComment dispatches the comment sub-verbs. Comments are local-only until
-// the server API grows comment endpoints, so KB_SERVER mode is refused.
+// cmdComment dispatches the comment sub-verbs.
 func (a *app) cmdComment(args []string) int {
 	if len(args) == 0 {
 		return a.usageErr(errors.New(`comment needs a sub-command: add, list, or rm`))
@@ -68,27 +56,6 @@ func (a *app) cmdComment(args []string) int {
 	return a.usageErr(fmt.Errorf("unknown comment sub-command %q (want add, list, or rm)", sub))
 }
 
-// withLocalStore refuses remote mode, opens the store, and hands fn the
-// sanitized user.
-func (a *app) withLocalStore(user, data string, fn func(st *store.Store, user string) error) int {
-	if strings.TrimSpace(os.Getenv("KB_SERVER")) != "" {
-		return a.fail(errors.New("comments are local-only for now; unset KB_SERVER (the server API has no comment endpoints yet)"))
-	}
-	u, err := resolveLocalUser(user)
-	if err != nil {
-		return a.fail(err)
-	}
-	st, err := openLocalStore(data, a.stderr)
-	if err != nil {
-		return a.fail(err)
-	}
-	defer st.Close()
-	if err := fn(st, u); err != nil {
-		return a.fail(err)
-	}
-	return 0
-}
-
 func (a *app) cmdCommentAdd(args []string) int {
 	fs, user, data := a.newFlagSet("comment add")
 	jsonF := fs.Bool("json", false, "print the comment as JSON")
@@ -102,10 +69,10 @@ func (a *app) cmdCommentAdd(args []string) int {
 	if strings.TrimSpace(pos[1]) == "" {
 		return a.usageErr(errors.New("comment text must not be empty"))
 	}
-	return a.withLocalStore(*user, *data, func(st *store.Store, u string) error {
-		c, err := st.AddComment(u, pos[0], u, pos[1])
+	return a.withBackend(*user, *data, func(be backend) error {
+		c, err := be.commentAdd(pos[0], pos[1])
 		if err != nil {
-			return friendlyIDErr(err, pos[0])
+			return err
 		}
 		if *jsonF {
 			return writeSingleJSON(a.stdout, commentToJSON(c))
@@ -125,10 +92,10 @@ func (a *app) cmdCommentList(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("comment list needs exactly one <id> argument"))
 	}
-	return a.withLocalStore(*user, *data, func(st *store.Store, u string) error {
-		comments, err := st.Comments(u, pos[0])
+	return a.withBackend(*user, *data, func(be backend) error {
+		comments, err := be.comments(pos[0])
 		if err != nil {
-			return friendlyIDErr(err, pos[0])
+			return err
 		}
 		if *jsonF {
 			out := make([]commentJSON, 0, len(comments))
@@ -166,8 +133,8 @@ func (a *app) cmdCommentRm(args []string) int {
 	if !*yes {
 		return a.fail(fmt.Errorf("refusing to delete comment c%d; re-run with --yes", id))
 	}
-	return a.withLocalStore(*user, *data, func(st *store.Store, u string) error {
-		c, err := st.DeleteComment(u, id)
+	return a.withBackend(*user, *data, func(be backend) error {
+		c, err := be.commentRm(id)
 		if errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("no comment matches id c%d", id)
 		}

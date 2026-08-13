@@ -477,13 +477,13 @@ func TestUpdateMoveDelete(t *testing.T) {
 	callOK(t, cs, "add_task", map[string]any{"title": "Ship it"}, &created)
 
 	var updated taskJSON
-	callOK(t, cs, "update_task", map[string]any{"id": created.ID[:8], "prio": 1, "tags": []string{"release"}}, &updated)
+	callOK(t, cs, "update_task", map[string]any{"id": created.ID[:9], "prio": 1, "tags": []string{"release"}}, &updated)
 	if updated.Prio != 1 || len(updated.Tags) != 1 || updated.Tags[0] != "release" {
 		t.Errorf("update mismatch: %+v", updated)
 	}
 
 	var moved taskJSON
-	callOK(t, cs, "move_task", map[string]any{"id": created.ID[:8], "status": "done"}, &moved)
+	callOK(t, cs, "move_task", map[string]any{"id": created.ID[:9], "status": "done"}, &moved)
 	if moved.Status != "done" {
 		t.Errorf("move mismatch: %+v", moved)
 	}
