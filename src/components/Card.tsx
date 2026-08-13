@@ -7,7 +7,7 @@ import { tagColor } from '../lib/labels';
 import type { InlineTok } from '../lib/inlineMd';
 import { parseDesc, tokenizeInline } from '../lib/inlineMd';
 
-function InlineText({ toks }: Readonly<{ toks: InlineTok[] }>) {
+export function InlineText({ toks }: Readonly<{ toks: InlineTok[] }>) {
   return (
     <>
       {toks.map((t, i) => {

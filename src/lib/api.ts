@@ -758,3 +758,55 @@ export async function getSimilar(
     return [];
   }
 }
+
+/** One comment on a task, from GET /api/tasks/{id}/comments. */
+export interface TaskComment {
+  id: number;
+  author: string;
+  body: string;
+  createdAt: string;
+}
+
+function coerceTaskComment(item: unknown): TaskComment | null {
+  if (typeof item !== 'object' || item === null) return null;
+  const rec = item as Record<string, unknown>;
+  if (typeof rec.id !== 'number' || typeof rec.body !== 'string') return null;
+  return {
+    id: rec.id,
+    author: typeof rec.author === 'string' ? rec.author : '',
+    body: rec.body,
+    createdAt: typeof rec.createdAt === 'string' ? rec.createdAt : '',
+  };
+}
+
+export function coerceTaskComments(body: unknown): TaskComment[] {
+  return Array.isArray(body)
+    ? body.flatMap((item) => {
+        const coerced = coerceTaskComment(item);
+        return coerced === null ? [] : [coerced];
+      })
+    : [];
+}
+
+/**
+ * Comments for one task by its canonical server id. Comments are advisory
+ * context, so like getSimilar any failure degrades to an empty list rather
+ * than blocking the card.
+ */
+export async function getTaskComments(
+  identity: Identity,
+  taskId: string,
+  signal?: AbortSignal,
+): Promise<TaskComment[]> {
+  try {
+    const res = await authedFetch(
+      identity,
+      `/api/tasks/${encodeURIComponent(taskId)}/comments`,
+      { signal },
+    );
+    if (!res.ok) return [];
+    return coerceTaskComments(await res.json());
+  } catch {
+    return [];
+  }
+}

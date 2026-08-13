@@ -8,6 +8,7 @@ import type {
   ImportProvenance,
   SimilarItem,
   StoryDraft,
+  TaskComment,
 } from '../lib/api';
 import {
   acceptDrift,
@@ -15,11 +16,14 @@ import {
   DriftConflictError,
   getImportProvenance,
   getSimilar,
+  getTaskComments,
   isAbortError,
 } from '../lib/api';
 import { useDialogFocus } from '../lib/focus';
+import { parseDesc } from '../lib/inlineMd';
 import { shouldQuery } from '../lib/similar';
 import { CardEditor } from './CardEditor';
+import { InlineText } from './Card';
 
 export type ModalState =
   | { mode: 'add'; status: Status }
@@ -291,6 +295,53 @@ function DriftDetails({
   );
 }
 
+const COMMENT_DATE_FORMAT = new Intl.DateTimeFormat('en-US', {
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+  timeZone: 'UTC',
+});
+
+/** Comment timestamp for display; malformed dates render as nothing. */
+export function commentDateText(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? '' : COMMENT_DATE_FORMAT.format(date);
+}
+
+/**
+ * Read-only comments on the edited task, fetched from the per-task API.
+ * Bodies reuse the card description's XSS-safe inline markdown; there is no
+ * add or edit UI here — comments are written from the CLI and MCP.
+ */
+function CommentsSection({ comments }: Readonly<{ comments: readonly TaskComment[] }>) {
+  if (comments.length === 0) return null;
+  return (
+    <section className="comments" aria-label="Comments">
+      <h3>
+        {comments.length} {comments.length === 1 ? 'comment' : 'comments'}
+      </h3>
+      {comments.map((comment) => (
+        <article key={comment.id} className="comment">
+          <div className="comment-head">
+            <span className="comment-author">{comment.author}</span>
+            <span className="comment-date">{commentDateText(comment.createdAt)}</span>
+          </div>
+          <div className="comment-body">
+            {parseDesc(comment.body).map((line, i) => (
+              <div key={i} className={line.bullet ? 'dline bullet' : 'dline'}>
+                {line.bullet && <span className="bdot">•</span>}
+                <span>
+                  <InlineText toks={line.toks} />
+                </span>
+              </div>
+            ))}
+          </div>
+        </article>
+      ))}
+    </section>
+  );
+}
+
 function driftNotice(result: DriftResult | null, acceptedAt: string): string {
   if (result || acceptedAt !== '') {
     return 'kb does not sync. This was a one-time check you asked for; nothing was written to the forge.';
@@ -402,6 +453,7 @@ export function CardModal({
     () => new Set(),
   );
   const [lastQ, setLastQ] = useState('');
+  const [comments, setComments] = useState<TaskComment[]>([]);
   const importLinks = useMemo(
     () => (state.mode === 'edit' ? taskImportLinks(state.task) : []),
     [state],
@@ -479,6 +531,18 @@ export function CardModal({
       ctrl.abort();
     };
   }, [excludeId, identity, importLinks, lastQ, title]);
+
+  // Comments need the canonical server id; a card the server has not yet
+  // acknowledged (or a brand-new one) simply shows none.
+  const isEdit = state.mode === 'edit';
+  useEffect(() => {
+    if (!isEdit || !canonicalTaskId) return;
+    const ctrl = new AbortController();
+    void getTaskComments(identity, canonicalTaskId, ctrl.signal).then((next) => {
+      if (!ctrl.signal.aborted) setComments(next);
+    });
+    return () => ctrl.abort();
+  }, [isEdit, canonicalTaskId, identity]);
 
   const selectedProvenance = provenance.find(
     (item) => item.external_key === selectedExternalKey,
@@ -674,6 +738,7 @@ export function CardModal({
           onDelete={onDelete}
           onClose={close}
         />
+        <CommentsSection comments={comments} />
       </div>
     </div>
   );
