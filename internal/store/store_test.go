@@ -230,7 +230,9 @@ func TestTaskCRUD(t *testing.T) {
 	}
 
 	time.Sleep(2 * time.Millisecond)
-	mv, err := s.MoveTask("u", t1.ID[:8], board.StatusDoing)
+	// The 9-char prefix includes the UUID's first hyphen, so it can never
+	// parse as an all-digit sequence reference (the ID[:8] form flaked).
+	mv, err := s.MoveTask("u", t1.ID[:9], board.StatusDoing)
 	if err != nil {
 		t.Fatalf("MoveTask: %v", err)
 	}
