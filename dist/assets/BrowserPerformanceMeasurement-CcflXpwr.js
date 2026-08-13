@@ -1,0 +1,1 @@
+import{BrowserPerformanceMeasurement as e}from"./dist-BQDcVm4M.js";export{e as BrowserPerformanceMeasurement};
