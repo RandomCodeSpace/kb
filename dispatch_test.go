@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -155,6 +156,45 @@ func TestRunVersion(t *testing.T) {
 	}
 	if err := runVersion([]string{"extra"}); err == nil {
 		t.Fatal("runVersion with arguments should refuse")
+	}
+	if err := runVersion([]string{"--nope"}); err == nil {
+		t.Fatal("runVersion with an unknown flag should refuse")
+	}
+
+	out.Reset()
+	readBuildInfo = func() (*debug.BuildInfo, bool) {
+		return &debug.BuildInfo{
+			Main: debug.Module{Version: "v1.2.3"},
+			Settings: []debug.BuildSetting{
+				{Key: "vcs.revision", Value: "0123456789abcdef"},
+				{Key: "vcs.modified", Value: "true"},
+			},
+		}, true
+	}
+	if err := runVersion([]string{"--json"}); err != nil {
+		t.Fatalf("runVersion --json: %v", err)
+	}
+	var decoded struct {
+		Version  string `json:"version"`
+		Revision string `json:"revision"`
+		Modified bool   `json:"modified"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("version --json output not JSON: %v\n%s", err, out.String())
+	}
+	if decoded.Version != "v1.2.3" || decoded.Revision != "0123456789ab" || !decoded.Modified {
+		t.Fatalf("version --json = %+v", decoded)
+	}
+
+	out.Reset()
+	readBuildInfo = func() (*debug.BuildInfo, bool) { return nil, false }
+	if err := runVersion([]string{"--json"}); err != nil {
+		t.Fatalf("runVersion --json unknown build: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != `{
+  "version": "unknown"
+}` {
+		t.Fatalf("unknown-build --json = %q", got)
 	}
 }
 
