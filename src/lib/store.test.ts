@@ -380,11 +380,33 @@ describe('local persistence result', () => {
 	  });
 	  expect(mem.get(markerKey)).toBe('1');
 	});
-	it('fails closed when Web Locks are unavailable', async () => {
+	it('persists without Web Locks through the serial fallback', async () => {
 	  const storeModule = await freshStore();
 	  const local = new storeModule.LocalStore('no-locks', { locks: null });
-	  expect(await local.save(storeModule.seedBoard())).toMatchObject({ ok: false });
-	  expect(local.load()).toBeNull();
+	  expect(await local.save(storeModule.seedBoard())).toMatchObject({ ok: true });
+	  expect(local.load()).not.toBeNull();
+	});
+
+	it('serial lock fallback keeps writes ordered and survives a thrown callback', async () => {
+	  const storeModule = await freshStore();
+	  const locks = storeModule.serialLockFallback();
+	  const order: number[] = [];
+	  const slow = locks.request('n', { mode: 'exclusive' }, async () => {
+	    await new Promise((resolve) => setTimeout(resolve, 10));
+	    order.push(1);
+	  });
+	  const fast = locks.request('n', { mode: 'exclusive' }, () => {
+	    order.push(2);
+	  });
+	  await Promise.all([slow, fast]);
+	  expect(order).toEqual([1, 2]);
+	  await expect(
+	    locks.request('n', { mode: 'exclusive' }, () => {
+	      throw new Error('boom');
+	    }),
+	  ).rejects.toThrow('boom');
+	  // The queue recovers: a later request still runs.
+	  expect(await locks.request('n', { mode: 'exclusive' }, () => 'after')).toBe('after');
 	});
 
 	it('does not overwrite malformed durable state inside a locked mutation', async () => {

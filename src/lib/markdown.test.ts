@@ -409,4 +409,29 @@ describe('escaping', () => {
     expect(again.tasks[0].desc).toBe('first\n- [ ] buy milk\n- [x] paid');
     expect(again.tasks[0].checks).toEqual([]);
   });
+
+  it('parses single-line, multi-line, and bullet descriptions from a server payload', () => {
+    // Captured verbatim from a live kb server's GET /api/board.
+    const wire = `# Board
+
+## To Do
+
+- [ ] Multi
+  para one
+  para two
+- [ ] Bullets
+  - item one
+  - item two
+
+## Doing
+
+
+## Done
+`;
+    const board = parse(wire);
+    expect(board.tasks.map((t) => [t.title, t.desc, t.checks.length])).toEqual([
+      ['Multi', 'para one\npara two', 0],
+      ['Bullets', '- item one\n- item two', 0],
+    ]);
+  });
 });

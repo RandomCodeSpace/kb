@@ -1,6 +1,7 @@
 import type { Identity } from './auth';
 import { ReauthRequiredError } from './auth';
 import type { Board } from './model';
+import { newId } from './model';
 import type { ImportLinkItem, RecordImportLinksRequest } from './api';
 import { recordImportLinks, recordTombstone } from './api';
 import {
@@ -322,7 +323,7 @@ export class MetadataOutbox {
     } else {
       this.locks = options.locks ?? undefined;
     }
-    this.nextGeneration = options.generation ?? (() => crypto.randomUUID());
+    this.nextGeneration = options.generation ?? newId;
     this.sendTombstone = options.sendTombstone ?? recordTombstone;
     this.sendImport = options.sendImport ?? recordImportLinks;
     this.onStatus = options.onStatus ?? (() => {});

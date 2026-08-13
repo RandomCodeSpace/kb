@@ -111,10 +111,24 @@ export function seedBoard(
   };
 }
 
+/**
+ * crypto.randomUUID is a secure-context API, so a board served over plain
+ * HTTP on a LAN host does not have it. getRandomValues is available in every
+ * context kb runs in; fall back to a spec-shaped v4 built from it.
+ */
+export function newId(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export function newTask(partial: Partial<Task> & { title: string }): Task {
   const now = new Date().toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: newId(),
     emoji: '',
     desc: '',
     status: 'todo',
