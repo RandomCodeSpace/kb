@@ -38,6 +38,17 @@ type localBackend struct {
 // secret and seeds it from any legacy per-user markdown boards in dataDir
 // (idempotent; the store never reimports a user).
 func openLocal(user, dataDir string, stderr io.Writer) (backend, error) {
+	st, err := openLocalStore(dataDir, stderr)
+	if err != nil {
+		return nil, err
+	}
+	return &localBackend{st: st, user: user}, nil
+}
+
+// openLocalStore opens the SQLite store itself for commands that are not
+// scoped to one board owner (users). Same resolution and legacy markdown
+// seeding as openLocal.
+func openLocalStore(dataDir string, stderr io.Writer) (*store.Store, error) {
 	if dataDir == "" {
 		d, err := defaultDataDir()
 		if err != nil {
@@ -59,7 +70,7 @@ func openLocal(user, dataDir string, stderr io.Writer) (backend, error) {
 	if _, err := st.ImportMarkdownDir(dataDir); err != nil {
 		fmt.Fprintf(stderr, "kb: warning: legacy markdown import: %v\n", err)
 	}
-	return &localBackend{st: st, user: user}, nil
+	return st, nil
 }
 
 func (l *localBackend) close() error { return l.st.Close() }

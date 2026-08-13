@@ -38,6 +38,8 @@ commands:
   restore <id>           move a cancelled task back to todo
   rm <id>                hard delete: erase a task for good, no undo
                          (requires --yes)
+  users                  list board owners and their task counts (local
+                         database only; --json for machine output)
   help                   show this help
 
 other modes (not task commands):
@@ -46,7 +48,7 @@ other modes (not task commands):
   kb mcp                 serve the board to AI agents over MCP stdio
 
 common flags (every command):
-  --user name    board owner (default "default")
+  --user name    board owner (default $KB_USER or "default")
   --data dir     data directory (default $KB_DATA or ~/.local/share/kb)
 
 card flags (add and update):
@@ -92,6 +94,7 @@ remote mode:
   KB_SERVER=http://host:port operates over the HTTP API instead of the
   local database; KB_SERVER_TOKEN adds a bearer token. Task ids are then
   ephemeral listing indexes (i1, i2, ...) valid against the current board.
+  users is local-only: the server API serves one board per identity.
 `
 
 // Run executes one kb CLI invocation. args starts with the subcommand,
@@ -124,6 +127,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return a.cmdRestore(rest)
 	case "rm":
 		return a.cmdRm(rest)
+	case "users":
+		return a.cmdUsers(rest)
 	}
 	fmt.Fprintf(stderr, "kb: unknown command %q\n\n%s", cmd, usageText)
 	return 2
@@ -220,11 +225,21 @@ type stringList []string
 func (s *stringList) String() string     { return strings.Join(*s, ",") }
 func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 
+// envUser resolves the default board owner: KB_USER if set, else "default" —
+// the same environment contract kb mcp honors, so both agent surfaces land
+// on the same board without per-command flags.
+func envUser() string {
+	if v := strings.TrimSpace(os.Getenv("KB_USER")); v != "" {
+		return v
+	}
+	return "default"
+}
+
 // newFlagSet builds a silent FlagSet with the common --user/--data flags.
 func (a *app) newFlagSet(name string) (fs *flag.FlagSet, user, data *string) {
 	fs = flag.NewFlagSet("kb "+name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	user = fs.String("user", "default", `board owner`)
+	user = fs.String("user", envUser(), `board owner (env KB_USER)`)
 	data = fs.String("data", "", "data directory (default $KB_DATA or ~/.local/share/kb)")
 	return fs, user, data
 }
@@ -475,6 +490,54 @@ func outputList(be backend, st board.Status, all, asJSON bool, stdout io.Writer)
 	}
 	writeTable(stdout, items)
 	return nil
+}
+
+// cmdUsers lists every board owner in the local database with their task
+// count. It deliberately has no --user flag: the listing is global. Remote
+// mode is refused because the wire API serves exactly one board per
+// authenticated identity.
+func (a *app) cmdUsers(args []string) int {
+	fs := flag.NewFlagSet("kb users", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	data := fs.String("data", "", "data directory (default $KB_DATA or ~/.local/share/kb)")
+	jsonF := fs.Bool("json", false, "print users as JSON")
+	pos, err := parseInterleaved(fs, args)
+	if code, done := a.parseResult(err); done {
+		return code
+	}
+	if len(pos) != 0 {
+		return a.usageErr(fmt.Errorf("users takes no arguments, got %q", pos[0]))
+	}
+	if strings.TrimSpace(os.Getenv("KB_SERVER")) != "" {
+		return a.fail(errors.New("users reads the local database only; unset KB_SERVER (the server API serves one board per identity)"))
+	}
+	st, err := openLocalStore(*data, a.stderr)
+	if err != nil {
+		return a.fail(err)
+	}
+	defer st.Close()
+	users, err := st.Users()
+	if err != nil {
+		return a.fail(err)
+	}
+	if *jsonF {
+		enc := json.NewEncoder(a.stdout)
+		enc.SetIndent("", "  ")
+		if users == nil {
+			users = []store.UserTasks{}
+		}
+		if err := enc.Encode(users); err != nil {
+			return a.fail(err)
+		}
+		return 0
+	}
+	tw := tabwriter.NewWriter(a.stdout, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "USER\tTASKS")
+	for _, u := range users {
+		fmt.Fprintf(tw, "%s\t%d\n", u.User, u.Tasks)
+	}
+	tw.Flush()
+	return 0
 }
 
 func (a *app) cmdList(args []string) int {
