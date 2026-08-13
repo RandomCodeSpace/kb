@@ -2,7 +2,8 @@
 // update, move, done, cancel, restore, and rm against either the local
 // SQLite store or, when KB_SERVER is set, a remote kb server over the
 // markdown wire API (GET/PUT /api/board). In remote mode task ids are
-// ephemeral listing indexes ("i1", "i2", ...); in local mode they are UUIDs
+// ephemeral listing indexes ("i1", "i2", ...); in local mode they are stable
+// per-board sequence numbers ("#12", bare "12" works too) with UUIDs still
 // addressable by unique prefix.
 package cliapp
 
@@ -14,6 +15,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -89,6 +91,13 @@ rm flags:
   --yes          confirm the delete. rm erases the row: the task leaves the
                  board and restore cannot bring it back. cancel is the
                  reversible alternative and is not a synonym for rm.
+
+task ids:
+  Tasks carry stable numbers: #1, #2, ... per board, assigned once and
+  never reused. Commands take the number with or without the # (kb done 12
+  and kb done '#12' are the same task). UUID prefixes still work, but a
+  digits-only id always means the number. --json exposes both ("seq" and
+  "id").
 
 remote mode:
   KB_SERVER=http://host:port operates over the HTTP API instead of the
@@ -352,7 +361,7 @@ func doneGuardErr(ref string, t board.Task) error {
 	if warn == "" {
 		return nil
 	}
-	return fmt.Errorf("%s on %s %q; re-run with --force to finish it anyway", warn, displayRef(ref), t.Title)
+	return fmt.Errorf("%s on %s %q; re-run with --force to finish it anyway", warn, displayID(item{ref: ref, task: t}), t.Title)
 }
 
 // parseCheckFlag decodes one --check value with the convention the card
@@ -464,7 +473,7 @@ func (a *app) cmdAdd(args []string) int {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.stdout, "added %s %s\n", displayRef(it.ref), it.task.Title)
+		fmt.Fprintf(a.stdout, "added %s %s\n", displayID(it), it.task.Title)
 		return nil
 	})
 }
@@ -671,7 +680,7 @@ func (a *app) cmdUpdate(args []string) int {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.stdout, "updated %s %s\n", displayRef(it.ref), it.task.Title)
+		fmt.Fprintf(a.stdout, "updated %s %s\n", displayID(it), it.task.Title)
 		return nil
 	})
 }
@@ -743,7 +752,7 @@ func (a *app) moveTo(user, data, ref string, to board.Status, force bool) int {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.stdout, "moved %s -> %s\n", displayRef(it.ref), it.task.Status)
+		fmt.Fprintf(a.stdout, "moved %s -> %s\n", displayID(it), it.task.Status)
 		return nil
 	})
 }
@@ -769,13 +778,13 @@ func (a *app) cmdRm(args []string) int {
 			if err != nil {
 				return err
 			}
-			return fmt.Errorf("refusing to delete %s %q; re-run with --yes", displayRef(it.ref), it.task.Title)
+			return fmt.Errorf("refusing to delete %s %q; re-run with --yes", displayID(it), it.task.Title)
 		}
 		it, err := be.remove(ref)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.stdout, "deleted %s %s\n", displayRef(it.ref), it.task.Title)
+		fmt.Fprintf(a.stdout, "deleted %s %s\n", displayID(it), it.task.Title)
 		return nil
 	})
 }
@@ -813,6 +822,16 @@ func findItem(items []item, ref string) (item, error) {
 
 // --- output ---
 
+// displayID renders the id agents type back: the stable #n when the task
+// carries one, else the shortened ref (an i-N index in remote mode, where
+// tasks have no sequence number).
+func displayID(it item) string {
+	if it.task.Seq > 0 {
+		return "#" + strconv.Itoa(it.task.Seq)
+	}
+	return displayRef(it.ref)
+}
+
 // displayRef shortens local UUIDs to 8 characters; remote refs pass through.
 func displayRef(ref string) string {
 	if len(ref) > 8 {
@@ -832,7 +851,7 @@ func writeTable(w io.Writer, items []item) {
 			blocked = "yes"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n",
-			displayRef(it.ref), it.task.Status, it.task.Prio, blocked, it.task.Title, strings.Join(it.task.Tags, ","))
+			displayID(it), it.task.Status, it.task.Prio, blocked, it.task.Title, strings.Join(it.task.Tags, ","))
 	}
 	tw.Flush()
 }
@@ -844,6 +863,7 @@ type checkJSON struct {
 
 type taskJSON struct {
 	ID        string      `json:"id"`
+	Seq       int         `json:"seq,omitempty"`
 	Emoji     string      `json:"emoji,omitempty"`
 	Title     string      `json:"title"`
 	Desc      string      `json:"desc,omitempty"`
@@ -866,7 +886,7 @@ func writeJSON(w io.Writer, items []item) error {
 	for _, it := range items {
 		t := it.task
 		j := taskJSON{
-			ID: t.ID, Emoji: t.Emoji, Title: t.Title, Desc: t.Desc,
+			ID: t.ID, Seq: t.Seq, Emoji: t.Emoji, Title: t.Title, Desc: t.Desc,
 			Status: string(t.Status), Blocked: t.Blocked, Prio: t.Prio, Due: t.Due,
 			Effort: t.Effort, Tags: t.Tags, Position: t.Position,
 		}

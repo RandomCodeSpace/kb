@@ -286,7 +286,7 @@ type coverageTaskScanner struct {
 }
 
 func (s coverageTaskScanner) Scan(dest ...any) error {
-	values := []any{"id", "", "title", "", "todo", 0, 3, "", "", s.tags, s.checks, 0, s.created, s.moved}
+	values := []any{"id", 1, "", "title", "", "todo", 0, 3, "", "", s.tags, s.checks, 0, s.created, s.moved}
 	for i, value := range values {
 		d := reflect.ValueOf(dest[i])
 		d.Elem().Set(reflect.ValueOf(value).Convert(d.Elem().Type()))

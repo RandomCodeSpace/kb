@@ -43,7 +43,10 @@ blocked flag, status moves).
 
 ## Task ids
 
-- Local mode: UUIDs, addressable by unique prefix (first 8 chars shown).
+- Local mode: stable per-board numbers `#1`, `#2`, ... assigned once and
+  never reused, exactly like gh issue numbers. Address tasks by bare
+  number (`kb done 12`) or `#12`; UUIDs remain in `--json` (`id`) with
+  the number as `seq`, and UUID prefixes still resolve.
 - Remote mode (`KB_SERVER`): ephemeral listing indexes `i1`, `i2`, ...
   valid only against the current listing — re-run `kb list` after writes
   and never store these ids.

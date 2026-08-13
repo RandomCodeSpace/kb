@@ -133,7 +133,7 @@ func TestUpdateClearsScalarFieldsWithoutChangingIdentity(t *testing.T) {
 	id := before.Board.Tasks[0].ID
 
 	stdout, stderr, code := runCmd(t, "update", id[:8], "--desc", "", "--due", "", "--effort", "", "--emoji", "", "--data", dir)
-	if code != 0 || stderr != "" || stdout != "updated "+id[:8]+" Clear me\n" {
+	if code != 0 || stderr != "" || stdout != "updated #1 Clear me\n" {
 		t.Fatalf("clear update: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	after := readLocalSnapshot(t, dir)
@@ -158,7 +158,7 @@ func TestUpdateCompletionRefusalLeavesRevisionUnchanged(t *testing.T) {
 	id := before.Board.Tasks[0].ID
 
 	stdout, stderr, code := runCmd(t, "update", id[:8], "--status", "done", "--title", "Should not persist", "--data", dir)
-	wantError := "kb: 1 of 1 checklist items are still open on " + id[:8] + " \"Should not persist\"; re-run with --force to finish it anyway\n"
+	wantError := "kb: 1 of 1 checklist items are still open on #1 \"Should not persist\"; re-run with --force to finish it anyway\n"
 	if code != 1 || stdout != "" || stderr != wantError {
 		t.Fatalf("guarded update: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -312,7 +313,7 @@ func isSQLiteBusy(err error) bool {
 }
 
 // taskCols is the canonical select list matched by scanTask.
-const taskCols = `id, emoji, title, "desc", status, blocked, prio, due, effort, tags, checks, position, created_at, moved_at`
+const taskCols = `id, seq, emoji, title, "desc", status, blocked, prio, due, effort, tags, checks, position, created_at, moved_at`
 
 // statusRank orders rows by board column order (todo, doing, done,
 // cancelled).
@@ -789,6 +790,13 @@ func (s *Store) writeReplacementTasksTx(tx *sql.Tx, user string, tasks []board.T
 		if err != nil {
 			return nil, err
 		}
+		if prepared.Seq == 0 {
+			seq, err := nextSeq(tx, user)
+			if err != nil {
+				return nil, err
+			}
+			prepared.Seq = seq
+		}
 		if err := insertTask(tx, user, prepared); err != nil {
 			return nil, err
 		}
@@ -813,10 +821,13 @@ func prepareReplacementTask(task board.Task, match *exTask, positions map[board.
 	task.Position = positions[task.Status]
 	positions[task.Status]++
 	if match == nil {
+		// Seq stays 0 here; writeReplacementTasksTx allocates a fresh number
+		// for tasks with no preserved identity.
 		task.ID, task.CreatedAt, task.MovedAt = uuid.NewString(), now, now
+		task.Seq = 0
 		return task, nil
 	}
-	task.ID, task.CreatedAt = match.id, match.created
+	task.ID, task.Seq, task.CreatedAt = match.id, match.seq, match.created
 	if match.status == task.Status {
 		task.MovedAt = match.moved
 	} else {
@@ -842,6 +853,7 @@ func reconcileBoardTombstonesTx(tx *sql.Tx, user string) error {
 // matching.
 type exTask struct {
 	id      string
+	seq     int
 	status  board.Status
 	created time.Time
 	moved   time.Time
@@ -852,7 +864,7 @@ type exTask struct {
 // them by (status, title) and by title.
 func loadExisting(tx *sql.Tx, user string) (byStatusTitle, byTitle map[string][]*exTask, err error) {
 	rows, err := tx.Query(
-		`SELECT id, title, status, created_at, moved_at FROM tasks WHERE user = ? ORDER BY `+statusRank+`, position`,
+		`SELECT id, seq, title, status, created_at, moved_at FROM tasks WHERE user = ? ORDER BY `+statusRank+`, position`,
 		user,
 	)
 	if err != nil {
@@ -864,7 +876,7 @@ func loadExisting(tx *sql.Tx, user string) (byStatusTitle, byTitle map[string][]
 	for rows.Next() {
 		var e exTask
 		var title, status, created, moved string
-		if err := rows.Scan(&e.id, &title, &status, &created, &moved); err != nil {
+		if err := rows.Scan(&e.id, &e.seq, &title, &status, &created, &moved); err != nil {
 			return nil, nil, fmt.Errorf("store: scan existing task: %w", err)
 		}
 		e.status = board.Status(status)
@@ -885,7 +897,7 @@ func loadExisting(tx *sql.Tx, user string) (byStatusTitle, byTitle map[string][]
 }
 
 func loadExistingByID(tx *sql.Tx, user string) (map[string]*exTask, error) {
-	rows, err := tx.Query(`SELECT id, status, created_at, moved_at FROM tasks WHERE user = ?`, user)
+	rows, err := tx.Query(`SELECT id, seq, status, created_at, moved_at FROM tasks WHERE user = ?`, user)
 	if err != nil {
 		return nil, fmt.Errorf("store: load canonical tasks: %w", err)
 	}
@@ -894,7 +906,7 @@ func loadExistingByID(tx *sql.Tx, user string) (map[string]*exTask, error) {
 	for rows.Next() {
 		var e exTask
 		var status, created, moved string
-		if err := rows.Scan(&e.id, &status, &created, &moved); err != nil {
+		if err := rows.Scan(&e.id, &e.seq, &status, &created, &moved); err != nil {
 			return nil, fmt.Errorf("store: scan canonical task: %w", err)
 		}
 		e.status = board.Status(status)
@@ -939,6 +951,11 @@ func (s *Store) AddTask(user string, t board.Task) (board.Task, error) {
 			return err
 		}
 		t.Position = pos
+		seq, err := nextSeq(tx, user)
+		if err != nil {
+			return err
+		}
+		t.Seq = seq
 		if err := insertTask(tx, user, t); err != nil {
 			return err
 		}
@@ -1188,11 +1205,24 @@ func (s *Store) upsertLabels(q dbtx, user string, tags []string) error {
 	return nil
 }
 
-// resolveID resolves an ID prefix to the full task ID for user. An exact
-// match always wins; otherwise the prefix must match exactly one task.
+// resolveID resolves a task reference to the full task ID for user. A
+// digits-only reference (with or without a leading '#') is a stable sequence
+// number and never falls through to UUID-prefix matching — an all-digit hex
+// prefix is reachable only via a longer, non-ambiguous form. Otherwise an
+// exact match always wins and the prefix must match exactly one task.
 func resolveID(q dbtx, user, prefix string) (string, error) {
 	if prefix == "" {
 		return "", ErrNotFound
+	}
+	if seq, ok := parseSeqRef(prefix); ok {
+		var id string
+		switch err := q.QueryRow(`SELECT id FROM tasks WHERE user = ? AND seq = ?`, user, seq).Scan(&id); {
+		case errors.Is(err, sql.ErrNoRows):
+			return "", ErrNotFound
+		case err != nil:
+			return "", fmt.Errorf("store: resolve seq: %w", err)
+		}
+		return id, nil
 	}
 	rows, err := q.Query(`SELECT id FROM tasks WHERE user = ?`, user)
 	if err != nil {
@@ -1223,6 +1253,25 @@ func resolveID(q dbtx, user, prefix string) (string, error) {
 		return match, nil
 	}
 	return "", ErrAmbiguous
+}
+
+// parseSeqRef reports whether ref addresses a task by stable sequence
+// number: all digits, optionally after one leading '#'.
+func parseSeqRef(ref string) (int, bool) {
+	ref = strings.TrimPrefix(ref, "#")
+	if ref == "" {
+		return 0, false
+	}
+	for _, r := range ref {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(ref)
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	return n, true
 }
 
 // getTask fetches one task by exact ID.
@@ -1260,13 +1309,28 @@ func insertTask(q dbtx, user string, t board.Task) error {
 	if err != nil {
 		return fmt.Errorf("store: marshal checks: %w", err)
 	}
-	if _, err := q.Exec(`INSERT INTO tasks (id, user, emoji, title, "desc", status, blocked, prio, due, effort, tags, checks, position, created_at, moved_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, user, t.Emoji, t.Title, t.Desc, string(t.Status), boolToInt(t.Blocked), t.Prio, t.Due, t.Effort, string(tags), string(checks), t.Position,
+	if _, err := q.Exec(`INSERT INTO tasks (id, seq, user, emoji, title, "desc", status, blocked, prio, due, effort, tags, checks, position, created_at, moved_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.Seq, user, t.Emoji, t.Title, t.Desc, string(t.Status), boolToInt(t.Blocked), t.Prio, t.Due, t.Effort, string(tags), string(checks), t.Position,
 		t.CreatedAt.UTC().Format(time.RFC3339Nano), t.MovedAt.UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("store: insert task %s: %w", t.ID, err)
 	}
 	return nil
+}
+
+// nextSeq allocates the next per-board sequence number for user inside the
+// caller's transaction. The counter only ever advances, so a number is never
+// reused — deleting the newest task does not resurrect its #n.
+func nextSeq(q dbtx, user string) (int, error) {
+	if _, err := q.Exec(`INSERT INTO board_sequences(user, next) VALUES (?, 2)
+		ON CONFLICT(user) DO UPDATE SET next = next + 1`, user); err != nil {
+		return 0, fmt.Errorf("store: advance board sequence: %w", err)
+	}
+	var next int
+	if err := q.QueryRow(`SELECT next FROM board_sequences WHERE user = ?`, user).Scan(&next); err != nil {
+		return 0, fmt.Errorf("store: read board sequence: %w", err)
+	}
+	return next - 1, nil
 }
 
 // scanTask decodes one row produced with taskCols.
@@ -1274,7 +1338,7 @@ func scanTask(row interface{ Scan(dest ...any) error }) (board.Task, error) {
 	var t board.Task
 	var status, tags, checks, created, moved string
 	var blocked int
-	if err := row.Scan(&t.ID, &t.Emoji, &t.Title, &t.Desc, &status, &blocked, &t.Prio, &t.Due, &t.Effort, &tags, &checks, &t.Position, &created, &moved); err != nil {
+	if err := row.Scan(&t.ID, &t.Seq, &t.Emoji, &t.Title, &t.Desc, &status, &blocked, &t.Prio, &t.Due, &t.Effort, &tags, &checks, &t.Position, &created, &moved); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return board.Task{}, ErrNotFound
 		}

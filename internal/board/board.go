@@ -50,10 +50,13 @@ type Check struct {
 // Blocked marks a task as blocked and rides the wire as the "%blocked"
 // title-line token (written only when true). Tags are plain ("backend") or
 // scoped ("type::bug"). Position is the 0-based ordinal within the task's
-// column and, like ID, CreatedAt, and MovedAt, is metadata not carried by
-// the wire format.
+// column and, like ID, Seq, CreatedAt, and MovedAt, is metadata not carried
+// by the wire format. Seq is the task's stable per-board sequence number
+// (#n): assigned once on creation, never reused, 0 when unknown (tasks
+// parsed from the wire or served by a remote board).
 type Task struct {
 	ID        string
+	Seq       int
 	Emoji     string
 	Title     string
 	Desc      string
