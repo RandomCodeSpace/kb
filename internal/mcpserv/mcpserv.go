@@ -446,7 +446,7 @@ func (k *kb) updateTask(_ context.Context, _ *mcp.CallToolRequest, in updateTask
 			return nil
 		}
 	}
-	t, err := k.st.UpdateAndMoveTask(k.user, in.ID, patch, moveTo, guard)
+	t, err := k.st.UpdateAndMoveTask(k.user, in.ID, patch, moveTo, nil, guard)
 	if err != nil {
 		return nil, taskJSON{}, k.idError(err, in.ID)
 	}
@@ -470,7 +470,7 @@ func (k *kb) moveTask(_ context.Context, _ *mcp.CallToolRequest, in moveTaskInpu
 			return nil
 		}
 	}
-	t, err := k.st.UpdateAndMoveTask(k.user, in.ID, store.TaskPatch{}, &st, guard)
+	t, err := k.st.UpdateAndMoveTask(k.user, in.ID, store.TaskPatch{}, &st, nil, guard)
 	if err != nil {
 		return nil, taskJSON{}, k.idError(err, in.ID)
 	}

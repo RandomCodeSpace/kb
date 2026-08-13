@@ -695,7 +695,7 @@ func TestDoneGuardCannotRaceConcurrentBlock(t *testing.T) {
 	done := board.StatusDone
 	var firstGuard sync.Once
 	go func() {
-		_, err := a.UpdateAndMoveTask("u", task.ID, TaskPatch{}, &done, func(task board.Task) error {
+		_, err := a.UpdateAndMoveTask("u", task.ID, TaskPatch{}, &done, nil, func(task board.Task) error {
 			firstGuard.Do(func() {
 				// The first attempt pauses at the former read/move race boundary.
 				close(guardEntered)

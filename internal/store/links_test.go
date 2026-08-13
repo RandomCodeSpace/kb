@@ -70,23 +70,23 @@ func TestOpenBlockersGateDone(t *testing.T) {
 
 	guard := func(board.Task) error { return nil }
 	to := board.StatusDone
-	if _, err := s.UpdateAndMoveTask("u", "2", TaskPatch{}, &to, guard); err == nil ||
+	if _, err := s.UpdateAndMoveTask("u", "2", TaskPatch{}, &to, nil, guard); err == nil ||
 		!strings.Contains(err.Error(), "1 open blocker (#1) still blocks #2") {
 		t.Fatalf("blocked done = %v", err)
 	}
 	// A nil guard is a forced move: the gate does not apply.
-	if _, err := s.UpdateAndMoveTask("u", "2", TaskPatch{}, &to, nil); err != nil {
+	if _, err := s.UpdateAndMoveTask("u", "2", TaskPatch{}, &to, nil, nil); err != nil {
 		t.Fatalf("forced done = %v", err)
 	}
 
 	// Once the blocker is done (or cancelled), the gate opens.
-	if _, err := s.UpdateAndMoveTask("u", "3", TaskPatch{}, &to, nil); err != nil {
+	if _, err := s.UpdateAndMoveTask("u", "3", TaskPatch{}, &to, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := s.Link("u", "3", "1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateAndMoveTask("u", "1", TaskPatch{}, &to, guard); err != nil {
+	if _, err := s.UpdateAndMoveTask("u", "1", TaskPatch{}, &to, nil, guard); err != nil {
 		t.Fatalf("done with completed blocker = %v", err)
 	}
 }
