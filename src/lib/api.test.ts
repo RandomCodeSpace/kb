@@ -9,12 +9,14 @@ import {
   coerceImportProvenanceItems,
   coerceImportPreview,
   coerceStoryDraft,
+  coerceTaskComments,
   deleteIntegration,
   DriftConflictError,
   forgeTest,
   getImportProvenance,
   getIntegrations,
   getSettings,
+  getTaskComments,
   importPreview,
   isAbortError,
   killReasonRequest,
@@ -802,5 +804,60 @@ describe('isAbortError', () => {
     expect(isAbortError(new Error('upstream 500'))).toBe(false);
     expect(isAbortError(null)).toBe(false);
     expect(isAbortError('AbortError')).toBe(false);
+  });
+});
+
+describe('task comments API', () => {
+  function stubFetchResponse(body: unknown, status = 200) {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  it('coerces valid comments and drops malformed rows', () => {
+    expect(
+      coerceTaskComments([
+        { id: 1, author: 'alice', body: 'first', createdAt: '2026-08-13T08:00:00Z' },
+        { id: 2, author: 7, body: 'no author', createdAt: null },
+        { id: 'three', author: 'bob', body: 'bad id' },
+        { id: 4, author: 'bob' },
+        null,
+        'text',
+      ]),
+    ).toEqual([
+      { id: 1, author: 'alice', body: 'first', createdAt: '2026-08-13T08:00:00Z' },
+      { id: 2, author: '', body: 'no author', createdAt: '' },
+    ]);
+    expect(coerceTaskComments({ items: [] })).toEqual([]);
+    expect(coerceTaskComments(null)).toEqual([]);
+  });
+
+  it('fetches comments by encoded task id with auth headers', async () => {
+    const fetchMock = stubFetchResponse([
+      { id: 1, author: 'alice', body: 'note', createdAt: '2026-08-13T08:00:00Z' },
+    ]);
+    const comments = await getTaskComments(identity, 'id/with slash');
+    expect(comments).toEqual([
+      { id: 1, author: 'alice', body: 'note', createdAt: '2026-08-13T08:00:00Z' },
+    ]);
+    const call = fetchMock.mock.calls[0];
+    if (!call) throw new Error('expected comments fetch');
+    expect(call[0]).toBe('/api/tasks/id%2Fwith%20slash/comments');
+    expect(call[1]?.headers).toMatchObject({ 'X-KB-User': 'alice' });
+  });
+
+  it('degrades to an empty list on server errors and network failures', async () => {
+    stubFetchResponse('task not found', 404);
+    expect(await getTaskComments(identity, 'missing')).toEqual([]);
+
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))));
+    expect(await getTaskComments(identity, 'any')).toEqual([]);
   });
 });

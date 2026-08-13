@@ -4,10 +4,10 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CardModal } from './CardModal';
 
-const api = vi.hoisted(() => ({ similar: vi.fn(), provenance: vi.fn(), drift: vi.fn(), accept: vi.fn(), draftCancel: vi.fn() }));
+const api = vi.hoisted(() => ({ similar: vi.fn(), provenance: vi.fn(), drift: vi.fn(), accept: vi.fn(), draftCancel: vi.fn(), comments: vi.fn() }));
 vi.mock('../lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/api')>();
-  return { ...actual, getSimilar: api.similar, getImportProvenance: api.provenance, checkDrift: api.drift, acceptDrift: api.accept };
+  return { ...actual, getSimilar: api.similar, getImportProvenance: api.provenance, checkDrift: api.drift, acceptDrift: api.accept, getTaskComments: api.comments };
 });
 vi.mock('./CardEditor', () => ({
   CardEditor: (props: { title: string; onTitleChange: (s: string) => void; onBusyChange: (busy: boolean) => void; cancelRef: { current: (() => void) | null }; titleExtras: React.ReactNode; onClose: () => void }) => <div>{props.titleExtras}<span>{props.title}</span><button onClick={() => props.onTitleChange('duplicate title')}>type title</button><button onClick={() => { props.cancelRef.current = api.draftCancel; props.onBusyChange(true); }}>draft busy</button><button onClick={() => props.onBusyChange(false)}>draft idle</button><button onClick={props.onClose}>editor close</button></div>,
@@ -18,7 +18,44 @@ const provenance = { source: 'work', external_key: 'gitlab:org/repo#1', link: 'g
 const drift = { state: 'drifted' as const, link: 'gitlab#1', url: 'https://gitlab/x/1', title_changed: true, upstream_title: 'New title', baseline_title: 'Old title', baseline_at: '2026-01-01T00:00:00Z', checked_at: '2026-08-01T00:00:00Z', summary: 'changed', revision: 'rev-1' };
 
 describe('CardModal DOM', () => {
-  beforeEach(() => { vi.clearAllMocks(); api.similar.mockResolvedValue([]); api.provenance.mockResolvedValue([provenance]); api.drift.mockResolvedValue(drift); api.accept.mockResolvedValue({ baseline_at: '2026-08-01T00:00:00Z' }); });
+  beforeEach(() => { vi.clearAllMocks(); api.similar.mockResolvedValue([]); api.provenance.mockResolvedValue([provenance]); api.drift.mockResolvedValue(drift); api.accept.mockResolvedValue({ baseline_at: '2026-08-01T00:00:00Z' }); api.comments.mockResolvedValue([]); });
+
+  it('renders read-only comments for an acknowledged task', async () => {
+    api.comments.mockResolvedValue([
+      { id: 1, author: 'alice', body: 'shipped in **v2**', createdAt: '2026-08-13T08:00:00Z' },
+      { id: 2, author: 'bob', body: '- follow up', createdAt: 'garbage' },
+    ]);
+    render(<CardModal state={{ mode: 'edit', task }} identity={identity} canonicalTaskId="server-id" labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={vi.fn()} />);
+    const section = await screen.findByRole('region', { name: 'Comments' });
+    await waitFor(() => expect(api.comments).toHaveBeenCalledWith(identity, 'server-id', expect.any(AbortSignal)));
+    expect(section.querySelector('h3')?.textContent).toBe('2 comments');
+    expect(screen.getByText('alice')).toBeTruthy();
+    expect(screen.getByText('Aug 13, 2026')).toBeTruthy();
+    // Markdown renders through the safe tokenizer, never raw HTML.
+    expect(section.querySelector('strong')?.textContent).toBe('v2');
+    expect(section.querySelector('.bullet')?.textContent).toContain('follow up');
+    // A malformed timestamp renders as nothing rather than "Invalid Date".
+    expect(section.textContent).not.toContain('Invalid');
+  });
+
+  it('shows no comments section for empty lists and never fetches without a canonical id', async () => {
+    const withoutId = render(<CardModal state={{ mode: 'edit', task }} identity={identity} labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.queryByRole('region', { name: 'Comments' })).toBeNull();
+    withoutId.unmount();
+
+    render(<CardModal state={{ mode: 'add', status: 'todo' }} identity={identity} canonicalTaskId="server-id" labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Comments' })).toBeNull());
+    expect(api.comments).not.toHaveBeenCalled();
+  });
+
+  it('renders a singular comment heading', async () => {
+    api.comments.mockResolvedValue([
+      { id: 1, author: 'alice', body: 'only one', createdAt: '2026-08-13T08:00:00Z' },
+    ]);
+    render(<CardModal state={{ mode: 'edit', task }} identity={identity} canonicalTaskId="server-id" labels={[]} onSave={vi.fn()} onDelete={vi.fn()} onClose={vi.fn()} />);
+    const section = await screen.findByRole('region', { name: 'Comments' });
+    expect(section.querySelector('h3')?.textContent).toBe('1 comment');
+  });
 
   it('debounces deterministic similarity lookup and dismisses rows and panel', async () => {
     const user = userEvent.setup();
