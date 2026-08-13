@@ -226,3 +226,70 @@ func TestUpdateAndMoveTaskIndexGuardRollsBack(t *testing.T) {
 		t.Fatalf("done = %v, want empty", got)
 	}
 }
+
+// TestPositionHelpersReportReadFailures drops the tasks table inside a
+// transaction so the position helpers' read paths surface database errors.
+func TestPositionHelpersReportReadFailures(t *testing.T) {
+	s := seedPositionBoard(t)
+	target := taskByTitle(t, s, "A")
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DROP TABLE tasks`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := columnTaskIDs(tx, "u", board.StatusTodo, ""); err == nil || !strings.Contains(err.Error(), "list column") {
+		t.Fatalf("columnTaskIDs err = %v, want list column failure", err)
+	}
+	if _, err := repositionTask(tx, "u", board.StatusTodo, target.ID, 0); err == nil || !strings.Contains(err.Error(), "list column") {
+		t.Fatalf("repositionTask err = %v, want list column failure", err)
+	}
+	if err := compactColumn(tx, "u", board.StatusTodo); err == nil || !strings.Contains(err.Error(), "list column") {
+		t.Fatalf("compactColumn err = %v, want list column failure", err)
+	}
+	if _, err := moveTask(tx, "u", target, board.StatusDoing); err == nil {
+		t.Fatal("moveTask succeeded without a tasks table")
+	}
+}
+
+// TestPositionHelpersReportWriteFailures installs a trigger that refuses
+// UPDATEs on tasks, so reads succeed while the write half of each helper
+// fails.
+func TestPositionHelpersReportWriteFailures(t *testing.T) {
+	s := seedPositionBoard(t)
+	target := taskByTitle(t, s, "A")
+	mustExecCoverage(t, s, `CREATE TRIGGER refuse_task_updates BEFORE UPDATE ON tasks BEGIN SELECT RAISE(ABORT, 'update refused'); END`)
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writePositions(tx, "u", []string{target.ID}); err == nil || !strings.Contains(err.Error(), "set position") {
+		t.Fatalf("writePositions err = %v, want set position failure", err)
+	}
+	if _, err := repositionTask(tx, "u", board.StatusTodo, target.ID, 0); err == nil || !strings.Contains(err.Error(), "set position") {
+		t.Fatalf("repositionTask err = %v, want set position failure", err)
+	}
+	if err := compactColumn(tx, "u", board.StatusTodo); err == nil || !strings.Contains(err.Error(), "set position") {
+		t.Fatalf("compactColumn err = %v, want set position failure", err)
+	}
+	if _, err := moveTask(tx, "u", target, board.StatusDoing); err == nil || !strings.Contains(err.Error(), "move task") {
+		t.Fatalf("moveTask err = %v, want move task failure", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	doing, index := board.StatusDoing, 0
+	if _, err := s.UpdateAndMoveTask("u", target.ID, TaskPatch{}, &doing, &index, nil); err == nil {
+		t.Fatal("UpdateAndMoveTask succeeded with updates refused")
+	}
+	index = 1
+	if _, err := s.UpdateAndMoveTask("u", target.ID, TaskPatch{}, nil, &index, nil); err == nil {
+		t.Fatal("same-column reorder succeeded with updates refused")
+	}
+}
