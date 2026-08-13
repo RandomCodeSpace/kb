@@ -210,6 +210,29 @@ CREATE TABLE board_write_receipts (
   PRIMARY KEY (user, operation_id)
 );
 `,
+	// v7: stable per-board task sequence numbers (#n). seq is a user-facing
+	// alias for the UUID identity: assigned once from board_sequences on
+	// creation, preserved across ReplaceBoard's delete-and-reinsert, and never
+	// reused (a MAX-based scheme would resurrect the number of the newest task
+	// after its deletion). Backfill numbers existing tasks oldest-first
+	// (created_at, then rowid), the order gh-style numbering would have
+	// produced had it existed from the start.
+	`
+ALTER TABLE tasks ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
+UPDATE tasks SET seq = (
+  SELECT COUNT(*) FROM tasks t2
+  WHERE t2.user = tasks.user
+    AND (t2.created_at < tasks.created_at
+         OR (t2.created_at = tasks.created_at AND t2.rowid <= tasks.rowid))
+);
+CREATE TABLE board_sequences (
+  user TEXT PRIMARY KEY,
+  next INTEGER NOT NULL
+);
+INSERT INTO board_sequences(user, next)
+SELECT user, MAX(seq) + 1 FROM tasks GROUP BY user;
+CREATE UNIQUE INDEX tasks_user_seq ON tasks (user, seq);
+`,
 }
 
 // migrate creates the meta table and applies any pending schema versions.

@@ -79,8 +79,8 @@ func TestMigrateV4FromV3(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if schemaVersion != "6" {
-		t.Fatalf("schema version = %q, want 6", schemaVersion)
+	if schemaVersion != "7" {
+		t.Fatalf("schema version = %q, want 7", schemaVersion)
 	}
 
 	var tombstonesTable string
@@ -200,8 +200,8 @@ func TestMigrateV4FromV3(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version after no-op migration: %v", err)
 	}
-	if schemaVersion != "6" {
-		t.Errorf("schema version after no-op migrate = %q, want 6", schemaVersion)
+	if schemaVersion != "7" {
+		t.Errorf("schema version after no-op migrate = %q, want 7", schemaVersion)
 	}
 }
 

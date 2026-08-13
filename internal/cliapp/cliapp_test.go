@@ -83,6 +83,7 @@ func localEnv(t *testing.T) string {
 // jsonTask mirrors the CLI's --json output shape.
 type jsonTask struct {
 	ID      string   `json:"id"`
+	Seq     int      `json:"seq"`
 	Emoji   string   `json:"emoji"`
 	Title   string   `json:"title"`
 	Desc    string   `json:"desc"`
@@ -114,7 +115,7 @@ func listJSON(t *testing.T, extra ...string) []jsonTask {
 	return tasks
 }
 
-var addedRe = regexp.MustCompile(`^added [0-9a-f]{8} Write the docs\n$`)
+var addedRe = regexp.MustCompile(`^added #1 Write the docs\n$`)
 
 func TestLocalLifecycle(t *testing.T) {
 	dir := localEnv(t)
@@ -156,9 +157,9 @@ func TestLocalLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("list failed: code %d", code)
 	}
-	want := "ID        STATUS  PRIO  BLOCKED  TITLE           TAGS\n" +
-		t1.ID[:8] + "  todo    2     -        Write the docs  docs,cli\n" +
-		t2.ID[:8] + "  doing   3     -        Fix login bug   bug\n"
+	want := "ID  STATUS  PRIO  BLOCKED  TITLE           TAGS\n" +
+		"#1  todo    2     -        Write the docs  docs,cli\n" +
+		"#2  doing   3     -        Fix login bug   bug\n"
 	if out != want {
 		t.Errorf("list table:\n%q\nwant:\n%q", out, want)
 	}
@@ -168,7 +169,7 @@ func TestLocalLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("update failed (code %d): %s", code, errS)
 	}
-	if want := "updated " + t1.ID[:8] + " Write the docs v2\n"; out != want {
+	if want := "updated #1 Write the docs v2\n"; out != want {
 		t.Errorf("update output = %q, want %q", out, want)
 	}
 	got := listJSON(t, "--data", dir)[0]
@@ -189,12 +190,12 @@ func TestLocalLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("move failed (code %d): %s", code, errS)
 	}
-	if want := "moved " + t2.ID[:8] + " -> done\n"; out != want {
+	if want := "moved #2 -> done\n"; out != want {
 		t.Errorf("move output = %q, want %q", out, want)
 	}
 	// t1 still has an open checklist item, so done needs --force (see
-	// TestDoneRefusesOpenWork).
-	if out, _, code = runCmd(t, "done", t1.ID[:8], "--force", "--data", dir); code != 0 || out != "moved "+t1.ID[:8]+" -> done\n" {
+	// TestDoneRefusesOpenWork). Addressing by stable number works too.
+	if out, _, code = runCmd(t, "done", "1", "--force", "--data", dir); code != 0 || out != "moved #1 -> done\n" {
 		t.Errorf("done: code %d output %q", code, out)
 	}
 	if n := len(listJSON(t, "--data", dir, "--status", "done")); n != 2 {
@@ -213,7 +214,7 @@ func TestLocalLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("rm --yes failed (code %d): %s", code, errS)
 	}
-	if want := "deleted " + t2.ID[:8] + " Fix login bug\n"; out != want {
+	if want := "deleted #2 Fix login bug\n"; out != want {
 		t.Errorf("rm output = %q, want %q", out, want)
 	}
 	if n := len(listJSON(t, "--data", dir)); n != 1 {
@@ -233,24 +234,29 @@ func TestLocalPrefixErrors(t *testing.T) {
 		t.Errorf("unknown prefix: code %d stderr %q", code, errS)
 	}
 
-	// 17 more tasks guarantee two ids share a first hex char (16 possible).
-	for i := 0; i < 17; i++ {
+	// Digits-only refs mean sequence numbers now, so the ambiguity probe must
+	// use a letter prefix (a-f). Keep adding tasks until two UUIDs share a
+	// first letter; 6 buckets make this fast in practice.
+	prefix := ""
+	for i := 0; prefix == "" && i < 100; i++ {
 		if _, errS, code := runCmd(t, "add", fmt.Sprintf("Task %d", i), "--data", dir); code != 0 {
 			t.Fatalf("add %d failed (code %d): %s", i, code, errS)
 		}
-	}
-	seen := map[byte]bool{}
-	prefix := ""
-	for _, task := range listJSON(t, "--data", dir) {
-		c := task.ID[0]
-		if seen[c] {
-			prefix = string(c)
-			break
+		seen := map[byte]bool{}
+		for _, task := range listJSON(t, "--data", dir) {
+			c := task.ID[0]
+			if c >= '0' && c <= '9' {
+				continue
+			}
+			if seen[c] {
+				prefix = string(c)
+				break
+			}
+			seen[c] = true
 		}
-		seen[c] = true
 	}
 	if prefix == "" {
-		t.Fatal("no shared first hex char across 18 UUIDs (impossible)")
+		t.Fatal("no shared first letter across 100 UUIDs (vanishingly unlikely)")
 	}
 	_, errS, code = runCmd(t, "move", prefix, "done", "--data", dir)
 	if code != 1 || !strings.Contains(errS, "ambiguous") {
@@ -511,8 +517,8 @@ func TestBlockedFlag(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("list failed: code %d", code)
 	}
-	want := "ID        STATUS  PRIO  BLOCKED  TITLE             TAGS\n" +
-		task.ID[:8] + "  todo    3     yes      Waiting on legal  \n"
+	want := "ID  STATUS  PRIO  BLOCKED  TITLE             TAGS\n" +
+		"#1  todo    3     yes      Waiting on legal  \n"
 	if out != want {
 		t.Errorf("blocked list table:\n%q\nwant:\n%q", out, want)
 	}
@@ -550,7 +556,7 @@ func TestCancelRestore(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cancel failed (code %d): %s", code, errS)
 	}
-	if want := "moved " + drop[:8] + " -> cancelled\n"; out != want {
+	if want := "moved #2 -> cancelled\n"; out != want {
 		t.Errorf("cancel output = %q, want %q", out, want)
 	}
 

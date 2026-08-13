@@ -104,6 +104,11 @@ func (s *Store) insertImportedBoard(tx *sql.Tx, user string, imported board.Boar
 		task.CreatedAt, task.MovedAt = now, now
 		task.Position = positions[task.Status]
 		positions[task.Status]++
+		seq, err := nextSeq(tx, user)
+		if err != nil {
+			return err
+		}
+		task.Seq = seq
 		if err := insertTask(tx, user, task); err != nil {
 			return err
 		}
