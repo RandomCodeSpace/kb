@@ -121,9 +121,9 @@ func callOK(t *testing.T, cs *mcp.ClientSession, name string, args map[string]an
 	}
 }
 
-// TestListToolsExposesExactlyTen keeps both advisory tools discoverable and
+// TestListToolsExposesExactlyTwelve keeps both advisory tools discoverable and
 // preserves the rationale that tells an agent when to prefer their cheap stubs.
-func TestListToolsExposesExactlyTen(t *testing.T) {
+func TestListToolsExposesExactlyTwelve(t *testing.T) {
 	cs := connect(t)
 	res, err := cs.ListTools(context.Background(), &mcp.ListToolsParams{})
 	if err != nil {
@@ -140,6 +140,8 @@ func TestListToolsExposesExactlyTen(t *testing.T) {
 		"get_task":        true,
 		"add_comment":     true,
 		"list_comments":   true,
+		"link_tasks":      true,
+		"unlink_tasks":    true,
 	}
 	got := map[string]string{}
 	for _, tool := range res.Tools {
@@ -153,8 +155,8 @@ func TestListToolsExposesExactlyTen(t *testing.T) {
 			t.Errorf("tool %q missing; got %v", name, res.Tools)
 		}
 	}
-	if len(res.Tools) != 10 {
-		t.Errorf("got %d tools, want 10", len(res.Tools))
+	if len(res.Tools) != 12 {
+		t.Errorf("got %d tools, want 12", len(res.Tools))
 	}
 	const why = "check before creating a card to avoid duplicating existing work; returns cheap stubs, fetch details only if needed"
 	for _, name := range []string{"search_similar", "duplicate_check"} {

@@ -255,6 +255,20 @@ CREATE TABLE comment_sequences (
   next INTEGER NOT NULL
 );
 `,
+	// v9: typed cross-references. task_links holds directed "blocker blocks
+	// blocked" edges, keyed on task UUIDs so links survive ReplaceBoard when
+	// task identity is preserved. Validation (self-references, dangling ids,
+	// cycles) happens in code; the primary key deduplicates. No foreign keys
+	// for the same reason comments and tombstones have none.
+	`
+CREATE TABLE task_links (
+  scope      TEXT NOT NULL,
+  blocker_id TEXT NOT NULL,
+  blocked_id TEXT NOT NULL,
+  PRIMARY KEY (scope, blocker_id, blocked_id)
+);
+CREATE INDEX task_links_blocked ON task_links (scope, blocked_id);
+`,
 }
 
 // migrate creates the meta table and applies any pending schema versions.

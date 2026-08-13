@@ -718,6 +718,9 @@ func (s *Store) replaceBoardTx(tx *sql.Tx, user string, b board.Board, canonical
 	if err := reconcileCommentsTx(tx, user); err != nil {
 		return nil, err
 	}
+	if err := reconcileLinksTx(tx, user); err != nil {
+		return nil, err
+	}
 	return taskIDs, nil
 }
 
@@ -1013,6 +1016,20 @@ func (s *Store) updateAndMoveTaskTx(tx *sql.Tx, user, idPrefix string, patch Tas
 		return board.Task{}, err
 	}
 	if guard != nil {
+		// A non-nil guard means the caller did not force the move, so the
+		// blocker gate applies alongside the caller's checklist/flag guard.
+		// Judged inside the transaction, like the rest of the guard, so a
+		// refusal persists nothing.
+		if moveTo != nil && *moveTo == board.StatusDone {
+			open, err := openBlockersTx(tx, user, id)
+			if err != nil {
+				return board.Task{}, err
+			}
+			if len(open) > 0 {
+				return board.Task{}, fmt.Errorf("%s still blocks %s %q; re-run with --force to finish it anyway",
+					describeBlockers(open), displayTaskRef(task), task.Title)
+			}
+		}
 		if err := guard(task); err != nil {
 			return board.Task{}, err
 		}
@@ -1144,6 +1161,9 @@ func (s *Store) DeleteTask(user, idPrefix string) (board.Task, error) {
 		}
 		if _, err := tx.Exec(`DELETE FROM comments WHERE scope = ? AND task_id = ?`, user, id); err != nil {
 			return fmt.Errorf("store: delete task comments: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM task_links WHERE scope = ? AND (blocker_id = ? OR blocked_id = ?)`, user, id, id); err != nil {
+			return fmt.Errorf("store: delete task links: %w", err)
 		}
 		out = t
 		return nil

@@ -8,13 +8,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
-// viewJSON is the --json shape of kb view: the task plus its comments.
+// viewJSON is the --json shape of kb view: the task plus its comments and
+// cross-references (as stable task numbers).
 type viewJSON struct {
 	taskJSON
-	Comments []commentJSON `json:"comments,omitempty"`
+	Blocks    []int         `json:"blocks,omitempty"`
+	BlockedBy []int         `json:"blockedBy,omitempty"`
+	Comments  []commentJSON `json:"comments,omitempty"`
 }
 
 // cmdView shows one task in full, with its comments inline. Task fields work
@@ -42,7 +46,7 @@ func (a *app) cmdView(args []string) int {
 			if err != nil {
 				return err
 			}
-			return a.renderView(it, nil, false, *jsonF)
+			return a.renderView(it, nil, store.TaskLinks{}, false, *jsonF)
 		})
 	}
 
@@ -55,24 +59,34 @@ func (a *app) cmdView(args []string) int {
 		if err != nil {
 			return err
 		}
-		return a.renderView(item{ref: t.ID, task: t}, comments, true, *jsonF)
+		links, err := st.TaskLinks(u, t.ID)
+		if err != nil {
+			return err
+		}
+		return a.renderView(item{ref: t.ID, task: t}, comments, links, true, *jsonF)
 	})
 }
 
-func (a *app) renderView(it item, comments []store.Comment, commentsAvailable, asJSON bool) error {
+func (a *app) renderView(it item, comments []store.Comment, links store.TaskLinks, commentsAvailable, asJSON bool) error {
 	if asJSON {
 		out := viewJSON{taskJSON: itemJSON(it)}
+		for _, t := range links.Blocks {
+			out.Blocks = append(out.Blocks, t.Seq)
+		}
+		for _, t := range links.BlockedBy {
+			out.BlockedBy = append(out.BlockedBy, t.Seq)
+		}
 		for _, c := range comments {
 			out.Comments = append(out.Comments, commentToJSON(c))
 		}
 		return writeSingleJSON(a.stdout, out)
 	}
-	writeTaskView(a.stdout, it, comments, commentsAvailable)
+	writeTaskView(a.stdout, it, comments, links, commentsAvailable)
 	return nil
 }
 
 // writeTaskView renders the human form of one task.
-func writeTaskView(w io.Writer, it item, comments []store.Comment, commentsAvailable bool) {
+func writeTaskView(w io.Writer, it item, comments []store.Comment, links store.TaskLinks, commentsAvailable bool) {
 	t := it.task
 	title := t.Title
 	if t.Emoji != "" {
@@ -89,6 +103,12 @@ func writeTaskView(w io.Writer, it item, comments []store.Comment, commentsAvail
 	}
 	if len(t.Tags) > 0 {
 		fmt.Fprintf(w, "tags: %s\n", strings.Join(t.Tags, ", "))
+	}
+	if len(links.Blocks) > 0 {
+		fmt.Fprintf(w, "blocks: %s\n", linkRefs(links.Blocks))
+	}
+	if len(links.BlockedBy) > 0 {
+		fmt.Fprintf(w, "blocked by: %s\n", linkRefs(links.BlockedBy))
 	}
 	if t.ID != it.ref || len(t.ID) > 8 {
 		fmt.Fprintf(w, "id: %s\n", t.ID)
@@ -131,4 +151,13 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// linkRefs renders linked tasks as "#4 (todo), #7 (done)".
+func linkRefs(tasks []board.Task) string {
+	refs := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		refs = append(refs, fmt.Sprintf("#%d (%s)", t.Seq, t.Status))
+	}
+	return strings.Join(refs, ", ")
 }

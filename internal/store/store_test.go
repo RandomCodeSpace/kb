@@ -340,8 +340,8 @@ func TestMigrateV3FromV2(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != "8" {
-		t.Fatalf("schema version = %q, want 8", version)
+	if version != "9" {
+		t.Fatalf("schema version = %q, want 9", version)
 	}
 	for _, table := range []string{"tasks_fts", "import_links_fts"} {
 		var definition string
@@ -677,7 +677,7 @@ func TestOpenRepairsLegacyCredentialURLSuffixes(t *testing.T) {
 	if _, baseURL, _ := mustForgePAT(t, s, "bob", "loaded"); strings.ContainsAny(baseURL, "?#") {
 		t.Fatal("scoped forge load returned a suffix")
 	}
-	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil || version != "8" {
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil || version != "9" {
 		t.Fatalf("schema version changed during repair err=%v", err)
 	}
 }

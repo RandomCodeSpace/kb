@@ -32,6 +32,25 @@ func TestCommentToolsRoundTrip(t *testing.T) {
 		t.Fatalf("get_task = %+v", got)
 	}
 
+	// Link tools: create an edge, see it in get_task, remove it.
+	if _, err := st.AddTask("tester", board.Task{Title: "Downstream"}); err != nil {
+		t.Fatal(err)
+	}
+	var linked linkTasksOutput
+	callOK(t, cs, "link_tasks", map[string]any{"blocker": "1", "blocked": "2"}, &linked)
+	if linked.Blocker.Seq != 1 || linked.Blocked.Seq != 2 {
+		t.Fatalf("link_tasks = %+v", linked)
+	}
+	callOK(t, cs, "get_task", map[string]any{"id": "2"}, &got)
+	if len(got.BlockedBy) != 1 || got.BlockedBy[0] != 1 {
+		t.Fatalf("get_task blockedBy = %+v", got)
+	}
+	var removed unlinkTasksOutput
+	callOK(t, cs, "unlink_tasks", map[string]any{"a": "2", "b": "1"}, &removed)
+	if !removed.Removed {
+		t.Fatalf("unlink_tasks = %+v", removed)
+	}
+
 	// Errors surface as tool errors: missing task, empty body.
 	for name, args := range map[string]map[string]any{
 		"add_comment on missing task": {"id": "9", "body": "text"},
