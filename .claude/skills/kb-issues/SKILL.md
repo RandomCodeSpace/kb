@@ -65,6 +65,9 @@ blocked flag, status moves).
 - Comments are append-only with delete (`kb comment rm`); there is no
   comment editing — delete and re-post instead. Comments are local-only
   (no remote/`KB_SERVER` support yet).
-- There are no milestones and no cross-references between tasks yet.
+- Cross-references are typed blocks edges: `kb link <a> blocks <b>`
+  (or `blocked-by`), `kb unlink <a> <b>`, shown in `kb view`. Finishing
+  a task with open blockers is refused unless `--force`. Local-only.
+- There are no milestones.
 - `kb rm` is a hard delete with no undo; `kb cancel` is the reversible
   close and almost always the right choice.

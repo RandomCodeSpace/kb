@@ -44,6 +44,11 @@ commands:
                          (requires --yes)
   users                  list board owners and their task counts (local
                          database only; --json for machine output)
+  link <a> blocks <b>    record that task a blocks task b (also accepts
+                         blocked-by for the reverse direction). Finishing
+                         a task with open blockers is refused like open
+                         checklist items; --force overrides.
+  unlink <a> <b>         remove the link between two tasks
   comment add <id> "text"
                          append a comment to a task
   comment list <id>      list a task's comments oldest-first
@@ -112,8 +117,8 @@ remote mode:
   KB_SERVER=http://host:port operates over the HTTP API instead of the
   local database; KB_SERVER_TOKEN adds a bearer token. Task ids are then
   ephemeral listing indexes (i1, i2, ...) valid against the current board.
-  users and comment are local-only: the server API serves one board per
-  identity and has no comment endpoints yet.
+  users, comment, link, and unlink are local-only: the server API serves
+  one board per identity and has no comment or link endpoints yet.
 `
 
 // Run executes one kb CLI invocation. args starts with the subcommand,
@@ -152,6 +157,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return a.cmdComment(rest)
 	case "view":
 		return a.cmdView(rest)
+	case "link":
+		return a.cmdLink(rest)
+	case "unlink":
+		return a.cmdUnlink(rest)
 	}
 	fmt.Fprintf(stderr, "kb: unknown command %q\n\n%s", cmd, usageText)
 	return 2

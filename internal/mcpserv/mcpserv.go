@@ -88,7 +88,7 @@ type kb struct {
 	beforeDoneGuard func()
 }
 
-// newServer builds the MCP server with all ten board tools registered.
+// newServer builds the MCP server with all twelve board tools registered.
 func newServer(st *store.Store, user string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "kb", Title: "kb kanban board", Version: "1.0.0"}, nil)
 	k := &kb{st: st, user: user}
@@ -132,6 +132,14 @@ func newServer(st *store.Store, user string) *mcp.Server {
 		Name:        "list_comments",
 		Description: "List a task's comments oldest-first. The task is identified by its stable number (12 or #12), UUID, or unique UUID prefix. Returns each comment's id, author, body, and creation time.",
 	}, k.listComments)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "link_tasks",
+		Description: "Record that one task blocks another. Self-references, duplicate links, and links that would create a cycle are rejected. Finishing a task with open blockers fails like open checklist items do, unless forced.",
+	}, k.linkTasks)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "unlink_tasks",
+		Description: "Remove the blocks link between two tasks, whichever direction it points.",
+	}, k.unlinkTasks)
 	return srv
 }
 

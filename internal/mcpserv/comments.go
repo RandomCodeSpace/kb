@@ -49,8 +49,10 @@ type getTaskInput struct {
 }
 
 type getTaskOutput struct {
-	Task     taskJSON      `json:"task"`
-	Comments []commentJSON `json:"comments,omitempty"`
+	Task      taskJSON      `json:"task"`
+	Blocks    []int         `json:"blocks,omitempty" jsonschema:"stable numbers of tasks this task blocks"`
+	BlockedBy []int         `json:"blockedBy,omitempty" jsonschema:"stable numbers of tasks blocking this task"`
+	Comments  []commentJSON `json:"comments,omitempty"`
 }
 
 func (k *kb) getTask(_ context.Context, _ *mcp.CallToolRequest, in getTaskInput) (*mcp.CallToolResult, getTaskOutput, error) {
@@ -62,11 +64,55 @@ func (k *kb) getTask(_ context.Context, _ *mcp.CallToolRequest, in getTaskInput)
 	if err != nil {
 		return nil, getTaskOutput{}, err
 	}
+	links, err := k.st.TaskLinks(k.user, t.ID)
+	if err != nil {
+		return nil, getTaskOutput{}, err
+	}
 	out := getTaskOutput{Task: toTaskJSON(t)}
+	for _, lt := range links.Blocks {
+		out.Blocks = append(out.Blocks, lt.Seq)
+	}
+	for _, lt := range links.BlockedBy {
+		out.BlockedBy = append(out.BlockedBy, lt.Seq)
+	}
 	for _, c := range comments {
 		out.Comments = append(out.Comments, toCommentJSON(c))
 	}
 	return nil, out, nil
+}
+
+type linkTasksInput struct {
+	Blocker string `json:"blocker" jsonschema:"task doing the blocking: stable number (12 or #12), UUID, or unique prefix"`
+	Blocked string `json:"blocked" jsonschema:"task being blocked: stable number (12 or #12), UUID, or unique prefix"`
+}
+
+type linkTasksOutput struct {
+	Blocker taskJSON `json:"blocker"`
+	Blocked taskJSON `json:"blocked"`
+}
+
+func (k *kb) linkTasks(_ context.Context, _ *mcp.CallToolRequest, in linkTasksInput) (*mcp.CallToolResult, linkTasksOutput, error) {
+	blocker, blocked, err := k.st.Link(k.user, in.Blocker, in.Blocked)
+	if err != nil {
+		return nil, linkTasksOutput{}, err
+	}
+	return nil, linkTasksOutput{Blocker: toTaskJSON(blocker), Blocked: toTaskJSON(blocked)}, nil
+}
+
+type unlinkTasksInput struct {
+	A string `json:"a" jsonschema:"one linked task: stable number, UUID, or unique prefix"`
+	B string `json:"b" jsonschema:"the other linked task: stable number, UUID, or unique prefix"`
+}
+
+type unlinkTasksOutput struct {
+	Removed bool `json:"removed"`
+}
+
+func (k *kb) unlinkTasks(_ context.Context, _ *mcp.CallToolRequest, in unlinkTasksInput) (*mcp.CallToolResult, unlinkTasksOutput, error) {
+	if err := k.st.Unlink(k.user, in.A, in.B); err != nil {
+		return nil, unlinkTasksOutput{}, err
+	}
+	return nil, unlinkTasksOutput{Removed: true}, nil
 }
 
 func (k *kb) addComment(_ context.Context, _ *mcp.CallToolRequest, in addCommentInput) (*mcp.CallToolResult, addCommentOutput, error) {

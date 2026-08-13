@@ -1,0 +1,72 @@
+package cliapp
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestLinkUnlinkCLI(t *testing.T) {
+	dir := localEnv(t)
+	for _, title := range []string{"Blocker", "Blocked"} {
+		if _, errS, code := runCmd(t, "add", title, "--data", dir); code != 0 {
+			t.Fatalf("add failed: %s", errS)
+		}
+	}
+
+	out, errS, code := runCmd(t, "link", "1", "blocks", "2", "--data", dir)
+	if code != 0 || out != "linked: #1 blocks #2\n" {
+		t.Fatalf("link: code=%d out=%q stderr=%q", code, out, errS)
+	}
+
+	// Finishing the blocked task refuses; --force overrides.
+	if _, errS, code = runCmd(t, "done", "2", "--data", dir); code != 1 ||
+		!strings.Contains(errS, "1 open blocker (#1) still blocks #2") {
+		t.Fatalf("gated done: code=%d stderr=%q", code, errS)
+	}
+	if _, _, code = runCmd(t, "done", "2", "--force", "--data", dir); code != 0 {
+		t.Fatal("forced done failed")
+	}
+
+	// view shows both directions.
+	out, _, _ = runCmd(t, "view", "1", "--data", dir)
+	if !strings.Contains(out, "blocks: #2 (done)") {
+		t.Errorf("view blocker missing edge:\n%s", out)
+	}
+	out, _, _ = runCmd(t, "view", "2", "--json", "--data", dir)
+	if !strings.Contains(out, `"blockedBy": [`) {
+		t.Errorf("view --json missing blockedBy:\n%s", out)
+	}
+
+	// Reversing while the original edge exists would close a cycle: refused.
+	if _, errS, code = runCmd(t, "link", "1", "blocked-by", "2", "--data", dir); code != 1 || !strings.Contains(errS, "cycle") {
+		t.Fatalf("cycle link: code=%d stderr=%q", code, errS)
+	}
+
+	// After unlinking, blocked-by reverses the direction; unlink works in
+	// either argument order.
+	if _, _, code = runCmd(t, "unlink", "1", "2", "--data", dir); code != 0 {
+		t.Fatal("unlink 1 2 failed")
+	}
+	if out, _, code = runCmd(t, "link", "1", "blocked-by", "2", "--data", dir); code != 0 || out != "linked: #2 blocks #1\n" {
+		t.Fatalf("blocked-by link: code=%d out=%q", code, out)
+	}
+	if _, _, code = runCmd(t, "unlink", "2", "1", "--data", dir); code != 0 {
+		t.Fatal("unlink 2 1 failed")
+	}
+	if _, errS, code = runCmd(t, "unlink", "1", "2", "--data", dir); code != 1 || !strings.Contains(errS, "no link") {
+		t.Fatalf("unlink absent: code=%d stderr=%q", code, errS)
+	}
+
+	// Usage errors.
+	for _, args := range [][]string{
+		{"link", "1", "2", "--data", dir},           // missing relation
+		{"link", "1", "needs", "2", "--data", dir},  // bad relation
+		{"unlink", "1", "--data", dir},              // one id
+		{"link", "1", "blocks", "1", "--data", dir}, // self (runtime, but check code)
+	} {
+		_, _, code := runCmd(t, args...)
+		if code == 0 {
+			t.Errorf("kb %s succeeded, want failure", strings.Join(args, " "))
+		}
+	}
+}
