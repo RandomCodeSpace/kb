@@ -111,14 +111,14 @@ task ids:
   never reused. Commands take the number with or without the # (kb done 12
   and kb done '#12' are the same task). UUID prefixes still work, but a
   digits-only id always means the number. --json exposes both ("seq" and
-  "id").
+  "id"). The same ids work locally and against a server.
 
 remote mode:
   KB_SERVER=http://host:port operates over the HTTP API instead of the
-  local database; KB_SERVER_TOKEN adds a bearer token. Task ids are then
-  ephemeral listing indexes (i1, i2, ...) valid against the current board.
-  users, comment, link, and unlink are local-only: the server API serves
-  one board per identity and has no comment or link endpoints yet.
+  local database; KB_SERVER_TOKEN adds a bearer token. Every command works
+  remotely except users, which reads the local database (the server API
+  serves one board per identity). The old ephemeral i-N indexes are gone;
+  use the stable #n numbers.
 `
 
 // Run executes one kb CLI invocation. args starts with the subcommand,
@@ -220,6 +220,13 @@ type backend interface {
 	update(ref string, p store.TaskPatch, moveTo *board.Status, force bool) (item, error)
 	move(ref string, to board.Status, force bool) (item, error)
 	remove(ref string) (item, error)
+	// view fetches one task with its comments and links.
+	view(ref string) (item, []store.Comment, store.TaskLinks, error)
+	commentAdd(ref, body string) (store.Comment, error)
+	comments(ref string) ([]store.Comment, error)
+	commentRm(id int) (store.Comment, error)
+	link(blockerRef, blockedRef string) (blocker, blocked board.Task, err error)
+	unlink(aRef, bRef string) error
 	close() error
 }
 
@@ -354,37 +361,18 @@ func parseStatus(s string) (board.Status, error) {
 	return st, nil
 }
 
-// doneWarning explains why finishing t deserves a second look — open
-// checklist items, a blocked flag, or both — and returns "" when the task is
-// clear to ship. The CLI never prompts: it refuses and points at --force.
-func doneWarning(t board.Task) string {
-	open := 0
-	for _, c := range t.Checks {
-		if !c.Done {
-			open++
-		}
-	}
-	var parts []string
-	if open > 0 {
-		parts = append(parts, fmt.Sprintf("%d of %d checklist items are still open", open, len(t.Checks)))
-	}
-	if t.Blocked {
-		parts = append(parts, "the task is flagged blocked")
-	}
-	return strings.Join(parts, " and ")
-}
-
 // doneGuardErr is the refusal for finishing t under ref, or nil when the task
 // is clear to ship. Callers evaluate it against the *post-patch* task and
 // inside whatever transaction persists the change, so a refusal leaves
 // nothing written — and so a patch that closes the last checklist item on its
-// way to done is allowed rather than refused.
+// way to done is allowed rather than refused. The warning text lives in
+// store.CompletionWarning so every surface phrases the refusal identically.
 func doneGuardErr(ref string, t board.Task) error {
-	warn := doneWarning(t)
+	warn := store.CompletionWarning(t)
 	if warn == "" {
 		return nil
 	}
-	return fmt.Errorf("%s on %s %q; re-run with --force to finish it anyway", warn, displayID(item{ref: ref, task: t}), t.Title)
+	return store.NewCompletionBlockedError(warn, displayID(item{ref: ref, task: t}), t.Title)
 }
 
 // parseCheckFlag decodes one --check value with the convention the card

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -36,38 +35,16 @@ func (a *app) cmdView(args []string) int {
 	}
 	ref := pos[0]
 
-	if strings.TrimSpace(os.Getenv("KB_SERVER")) != "" {
-		return a.withBackend(*user, *data, func(be backend) error {
-			items, err := be.list("")
-			if err != nil {
-				return err
-			}
-			it, err := findItem(items, ref)
-			if err != nil {
-				return err
-			}
-			return a.renderView(it, nil, store.TaskLinks{}, false, *jsonF)
-		})
-	}
-
-	return a.withLocalStore(*user, *data, func(st *store.Store, u string) error {
-		t, err := st.Task(u, ref)
-		if err != nil {
-			return friendlyIDErr(err, ref)
-		}
-		comments, err := st.Comments(u, t.ID)
+	return a.withBackend(*user, *data, func(be backend) error {
+		it, comments, links, err := be.view(ref)
 		if err != nil {
 			return err
 		}
-		links, err := st.TaskLinks(u, t.ID)
-		if err != nil {
-			return err
-		}
-		return a.renderView(item{ref: t.ID, task: t}, comments, links, true, *jsonF)
+		return a.renderView(it, comments, links, *jsonF)
 	})
 }
 
-func (a *app) renderView(it item, comments []store.Comment, links store.TaskLinks, commentsAvailable, asJSON bool) error {
+func (a *app) renderView(it item, comments []store.Comment, links store.TaskLinks, asJSON bool) error {
 	if asJSON {
 		out := viewJSON{taskJSON: itemJSON(it)}
 		for _, t := range links.Blocks {
@@ -81,12 +58,12 @@ func (a *app) renderView(it item, comments []store.Comment, links store.TaskLink
 		}
 		return writeSingleJSON(a.stdout, out)
 	}
-	writeTaskView(a.stdout, it, comments, links, commentsAvailable)
+	writeTaskView(a.stdout, it, comments, links)
 	return nil
 }
 
 // writeTaskView renders the human form of one task.
-func writeTaskView(w io.Writer, it item, comments []store.Comment, links store.TaskLinks, commentsAvailable bool) {
+func writeTaskView(w io.Writer, it item, comments []store.Comment, links store.TaskLinks) {
 	t := it.task
 	title := t.Title
 	if t.Emoji != "" {
@@ -131,8 +108,6 @@ func writeTaskView(w io.Writer, it item, comments []store.Comment, links store.T
 		}
 	}
 	switch {
-	case !commentsAvailable:
-		fmt.Fprintf(w, "\ncomments: unavailable in remote mode (see kb help)\n")
 	case len(comments) == 0:
 		fmt.Fprintf(w, "\ncomments: none\n")
 	default:

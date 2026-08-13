@@ -1,13 +1,14 @@
 package cliapp
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,26 +17,19 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
-// remoteBackend speaks the server's markdown wire API: every mutation is a
-// GET /api/board, an in-memory edit, and a PUT /api/board round-trip. The
-// wire format carries no task ids, so tasks are addressed by ephemeral
-// listing indexes ("i1", "i2", ...) over the canonical listing order (todo,
-// doing, done, cancelled; document order within a column) — valid only
-// against the board as currently listed.
+// remoteBackend speaks the server's per-task JSON API (/api/tasks and
+// friends), giving remote mode the same granularity and the same stable #n
+// addressing as the local store. The old ephemeral i-N listing indexes are
+// gone: they were documented as never-store, and the server now resolves
+// stable numbers, UUIDs, and unique prefixes itself.
 type remoteBackend struct {
 	base, token, user string
 	client            *http.Client
 }
 
-type remoteBoardSnapshot struct {
-	board board.Board
-	etag  string
-}
-
-// newRemote builds the client for `KB_SERVER` mode. Every request carries the
-// server token and replays the whole board, so a redirect to another host
-// would hand both to that host. Redirects therefore cannot change host or
-// downgrade an HTTPS connection to HTTP.
+// newRemote builds the client for `KB_SERVER` mode. Every request carries
+// the server token, so a redirect to another host would hand it to that
+// host. Redirects therefore cannot change host or downgrade HTTPS to HTTP.
 func newRemote(base, token, user string) backend {
 	return &remoteBackend{base: base, token: token, user: user, client: &http.Client{
 		Timeout:       30 * time.Second,
@@ -77,92 +71,199 @@ func normalizeRemoteRedirectHost(host string) string {
 
 func (r *remoteBackend) close() error { return nil }
 
+// checkRemoteRef rejects the retired i-N indexes with a pointer at their
+// replacement. Everything else passes through for the server to resolve.
+func checkRemoteRef(ref string) error {
+	rest := strings.TrimPrefix(ref, "i")
+	if rest == ref || rest == "" {
+		return nil
+	}
+	if _, err := strconv.Atoi(rest); err == nil {
+		return fmt.Errorf("ephemeral i-N task ids are gone; use the stable number instead (kb list shows #n)")
+	}
+	return nil
+}
+
+// --- wire shapes (matching the server's /api/tasks API) ---
+
+type wireCheck struct {
+	Text string `json:"text"`
+	Done bool   `json:"done"`
+}
+
+type wireTask struct {
+	ID        string      `json:"id"`
+	Seq       int         `json:"seq"`
+	Emoji     string      `json:"emoji"`
+	Title     string      `json:"title"`
+	Desc      string      `json:"desc"`
+	Status    string      `json:"status"`
+	Blocked   bool        `json:"blocked"`
+	Prio      int         `json:"prio"`
+	Due       string      `json:"due"`
+	Effort    string      `json:"effort"`
+	Tags      []string    `json:"tags"`
+	Checks    []wireCheck `json:"checks"`
+	Position  int         `json:"position"`
+	CreatedAt string      `json:"createdAt"`
+	MovedAt   string      `json:"movedAt"`
+}
+
+type wireComment struct {
+	ID        int    `json:"id"`
+	TaskSeq   int    `json:"task"`
+	TaskID    string `json:"taskId"`
+	Author    string `json:"author"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"createdAt"`
+}
+
+type wireTaskDetail struct {
+	wireTask
+	Blocks    []int         `json:"blocks"`
+	BlockedBy []int         `json:"blockedBy"`
+	Comments  []wireComment `json:"comments"`
+}
+
+type wireWrite struct {
+	Title   *string      `json:"title,omitempty"`
+	Desc    *string      `json:"desc,omitempty"`
+	Emoji   *string      `json:"emoji,omitempty"`
+	Status  *string      `json:"status,omitempty"`
+	Prio    *int         `json:"prio,omitempty"`
+	Due     *string      `json:"due,omitempty"`
+	Effort  *string      `json:"effort,omitempty"`
+	Blocked *bool        `json:"blocked,omitempty"`
+	Tags    *[]string    `json:"tags,omitempty"`
+	Checks  *[]wireCheck `json:"checks,omitempty"`
+	Force   bool         `json:"force,omitempty"`
+}
+
+func fromWireTask(wt wireTask) board.Task {
+	t := board.Task{
+		ID: wt.ID, Seq: wt.Seq, Emoji: wt.Emoji, Title: wt.Title, Desc: wt.Desc,
+		Status: board.Status(wt.Status), Blocked: wt.Blocked, Prio: wt.Prio,
+		Due: wt.Due, Effort: wt.Effort, Tags: wt.Tags, Position: wt.Position,
+	}
+	for _, c := range wt.Checks {
+		t.Checks = append(t.Checks, board.Check{Text: c.Text, Done: c.Done})
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, wt.CreatedAt); err == nil {
+		t.CreatedAt = ts
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, wt.MovedAt); err == nil {
+		t.MovedAt = ts
+	}
+	return t
+}
+
+func fromWireComment(wc wireComment) store.Comment {
+	c := store.Comment{ID: wc.ID, TaskSeq: wc.TaskSeq, TaskID: wc.TaskID, Author: wc.Author, Body: wc.Body}
+	if ts, err := time.Parse(time.RFC3339Nano, wc.CreatedAt); err == nil {
+		c.CreatedAt = ts
+	}
+	return c
+}
+
+func taskToWrite(t board.Task) wireWrite {
+	w := wireWrite{Title: &t.Title}
+	if t.Desc != "" {
+		w.Desc = &t.Desc
+	}
+	if t.Emoji != "" {
+		w.Emoji = &t.Emoji
+	}
+	if t.Status != "" {
+		s := string(t.Status)
+		w.Status = &s
+	}
+	if t.Prio != 0 {
+		w.Prio = &t.Prio
+	}
+	if t.Due != "" {
+		w.Due = &t.Due
+	}
+	if t.Effort != "" {
+		w.Effort = &t.Effort
+	}
+	if t.Blocked {
+		w.Blocked = &t.Blocked
+	}
+	if len(t.Tags) > 0 {
+		tags := t.Tags
+		w.Tags = &tags
+	}
+	if len(t.Checks) > 0 {
+		checks := make([]wireCheck, 0, len(t.Checks))
+		for _, c := range t.Checks {
+			checks = append(checks, wireCheck{Text: c.Text, Done: c.Done})
+		}
+		w.Checks = &checks
+	}
+	return w
+}
+
+func patchToWrite(p store.TaskPatch, moveTo *board.Status, force bool) wireWrite {
+	w := wireWrite{
+		Title: p.Title, Desc: p.Desc, Emoji: p.Emoji,
+		Prio: p.Prio, Due: p.Due, Effort: p.Effort, Blocked: p.Blocked,
+		Force: force,
+	}
+	if p.Tags != nil {
+		w.Tags = p.Tags
+	}
+	if p.Checks != nil {
+		checks := make([]wireCheck, 0, len(*p.Checks))
+		for _, c := range *p.Checks {
+			checks = append(checks, wireCheck{Text: c.Text, Done: c.Done})
+		}
+		w.Checks = &checks
+	}
+	if moveTo != nil {
+		s := string(*moveTo)
+		w.Status = &s
+	}
+	return w
+}
+
+// --- backend interface ---
+
 func (r *remoteBackend) list(status board.Status) ([]item, error) {
-	b, err := r.fetchBoard()
-	if err != nil {
+	path := "/api/tasks"
+	if status != "" {
+		path += "?status=" + url.QueryEscape(string(status))
+	}
+	var tasks []wireTask
+	if err := r.call(http.MethodGet, path, nil, &tasks); err != nil {
 		return nil, err
 	}
-	items := r.items(b)
-	if status == "" {
-		return items, nil
+	items := make([]item, 0, len(tasks))
+	for _, wt := range tasks {
+		t := fromWireTask(wt)
+		items = append(items, item{ref: t.ID, task: t})
 	}
-	out := make([]item, 0, len(items))
-	for _, it := range items {
-		if it.task.Status == status {
-			out = append(out, it)
-		}
-	}
-	return out, nil
+	return items, nil
 }
 
 func (r *remoteBackend) add(t board.Task) (item, error) {
-	snapshot, err := r.fetchBoardSnapshot(true)
-	if err != nil {
+	var created wireTask
+	if err := r.call(http.MethodPost, "/api/tasks", taskToWrite(t), &created); err != nil {
 		return item{}, err
 	}
-	b := snapshot.board
-	// Mirror the store defaults so both modes behave alike.
-	if t.Status == "" {
-		t.Status = board.StatusTodo
-	}
-	if t.Prio < 1 || t.Prio > 4 {
-		t.Prio = 3
-	}
-	// Remote mode builds the wire markdown itself instead of going through
-	// the store, so it must run the same field validation the store applies:
-	// without it a newline in a title or checklist item serializes as extra
-	// board lines and re-parses as forged tasks.
-	if err := store.ValidateTaskFields(t); err != nil {
-		return item{}, err
-	}
-	b.Tasks = append(b.Tasks, t)
-	renumber(b.Tasks)
-	if err := r.putBoard(b, snapshot.etag); err != nil {
-		return item{}, err
-	}
-	return itemAt(b, len(b.Tasks)-1), nil
+	out := fromWireTask(created)
+	return item{ref: out.ID, task: out}, nil
 }
 
 func (r *remoteBackend) update(ref string, p store.TaskPatch, moveTo *board.Status, force bool) (item, error) {
-	snapshot, err := r.fetchBoardSnapshot(true)
-	if err != nil {
+	if err := checkRemoteRef(ref); err != nil {
 		return item{}, err
 	}
-	b := snapshot.board
-	ti, _, err := resolveRef(b, ref)
-	if err != nil {
+	var updated wireTask
+	if err := r.call(http.MethodPatch, "/api/tasks/"+url.PathEscape(ref), patchToWrite(p, moveTo, force), &updated); err != nil {
 		return item{}, err
 	}
-	// Only a real field write is validated, mirroring the local backend
-	// (store.patchTask returns early on an empty patch, so MoveTask never
-	// validates). ValidateTaskFields is deliberately stricter than board.Parse,
-	// so validating here too would make a parse-tolerant task — an odd due date
-	// or an empty title that arrived via the SPA's whole-board PUT or a legacy
-	// import — impossible to move, cancel or restore from remote mode while the
-	// local CLI handles it fine.
-	if p != (store.TaskPatch{}) {
-		applyPatch(&b.Tasks[ti], p)
-		if err := store.ValidateTaskFields(b.Tasks[ti]); err != nil {
-			return item{}, err
-		}
-	}
-	if moveTo != nil {
-		// The guard runs on the patched task and before the PUT, matching the
-		// local backend: the whole mutation is one board round-trip, so
-		// returning here leaves the server's board untouched.
-		if *moveTo == board.StatusDone && !force {
-			if err := doneGuardErr(itemAt(b, ti).ref, b.Tasks[ti]); err != nil {
-				return item{}, err
-			}
-		}
-		b.Tasks = moveTaskToEnd(b.Tasks, ti, *moveTo)
-		ti = len(b.Tasks) - 1
-	}
-	renumber(b.Tasks)
-	if err := r.putBoard(b, snapshot.etag); err != nil {
-		return item{}, err
-	}
-	return itemAt(b, ti), nil
+	out := fromWireTask(updated)
+	return item{ref: out.ID, task: out}, nil
 }
 
 func (r *remoteBackend) move(ref string, to board.Status, force bool) (item, error) {
@@ -170,201 +271,156 @@ func (r *remoteBackend) move(ref string, to board.Status, force bool) (item, err
 }
 
 func (r *remoteBackend) remove(ref string) (item, error) {
-	snapshot, err := r.fetchBoardSnapshot(true)
-	if err != nil {
+	if err := checkRemoteRef(ref); err != nil {
 		return item{}, err
 	}
-	b := snapshot.board
-	ti, norm, err := resolveRef(b, ref)
-	if err != nil {
+	var deleted wireTask
+	if err := r.call(http.MethodDelete, "/api/tasks/"+url.PathEscape(ref), nil, &deleted); err != nil {
 		return item{}, err
 	}
-	removed := b.Tasks[ti]
-	b.Tasks = append(b.Tasks[:ti], b.Tasks[ti+1:]...)
-	renumber(b.Tasks)
-	if err := r.putBoard(b, snapshot.etag); err != nil {
-		return item{}, err
-	}
-	return item{ref: norm, task: removed}, nil
+	out := fromWireTask(deleted)
+	return item{ref: out.ID, task: out}, nil
 }
 
-// --- listing-order bookkeeping ---
-
-var columnRank = map[board.Status]int{
-	board.StatusTodo: 0, board.StatusDoing: 1, board.StatusDone: 2, board.StatusCancelled: 3,
+func (r *remoteBackend) view(ref string) (item, []store.Comment, store.TaskLinks, error) {
+	if err := checkRemoteRef(ref); err != nil {
+		return item{}, nil, store.TaskLinks{}, err
+	}
+	var detail wireTaskDetail
+	if err := r.call(http.MethodGet, "/api/tasks/"+url.PathEscape(ref), nil, &detail); err != nil {
+		return item{}, nil, store.TaskLinks{}, err
+	}
+	t := fromWireTask(detail.wireTask)
+	comments := make([]store.Comment, 0, len(detail.Comments))
+	for _, wc := range detail.Comments {
+		comments = append(comments, fromWireComment(wc))
+	}
+	links := store.TaskLinks{}
+	for _, seq := range detail.Blocks {
+		links.Blocks = append(links.Blocks, board.Task{Seq: seq})
+	}
+	for _, seq := range detail.BlockedBy {
+		links.BlockedBy = append(links.BlockedBy, board.Task{Seq: seq})
+	}
+	return item{ref: t.ID, task: t}, comments, links, nil
 }
 
-// listingOrder returns the indexes of ts permuted into listing order:
-// status column order, then position within the column.
-func listingOrder(ts []board.Task) []int {
-	idx := make([]int, len(ts))
-	for i := range idx {
-		idx[i] = i
+func (r *remoteBackend) commentAdd(ref, body string) (store.Comment, error) {
+	if err := checkRemoteRef(ref); err != nil {
+		return store.Comment{}, err
 	}
-	sort.SliceStable(idx, func(a, b int) bool {
-		ta, tb := ts[idx[a]], ts[idx[b]]
-		if columnRank[ta.Status] != columnRank[tb.Status] {
-			return columnRank[ta.Status] < columnRank[tb.Status]
-		}
-		return ta.Position < tb.Position
-	})
-	return idx
-}
-
-// renumber recomputes Position per column from slice order, exactly as
-// board.Parse does, keeping listing order consistent with what Serialize
-// will write.
-func renumber(ts []board.Task) {
-	pos := map[board.Status]int{}
-	for i := range ts {
-		ts[i].Position = pos[ts[i].Status]
-		pos[ts[i].Status]++
-	}
-}
-
-// items pairs every task with its ephemeral listing id.
-func (r *remoteBackend) items(b board.Board) []item {
-	perm := listingOrder(b.Tasks)
-	out := make([]item, 0, len(perm))
-	for j, ti := range perm {
-		out = append(out, item{ref: "i" + strconv.Itoa(j+1), task: b.Tasks[ti]})
-	}
-	return out
-}
-
-// itemAt returns the item for b.Tasks[ti] with its current listing id.
-func itemAt(b board.Board, ti int) item {
-	for j, idx := range listingOrder(b.Tasks) {
-		if idx == ti {
-			return item{ref: "i" + strconv.Itoa(j+1), task: b.Tasks[ti]}
-		}
-	}
-	return item{ref: "?", task: b.Tasks[ti]} // unreachable: perm covers all indexes
-}
-
-// resolveRef maps an ephemeral id ("i3"; a bare "3" is also accepted) to a
-// task index in b.Tasks, returning the normalized id alongside.
-func resolveRef(b board.Board, ref string) (ti int, norm string, err error) {
-	n, aerr := strconv.Atoi(strings.TrimPrefix(ref, "i"))
-	if aerr != nil || n < 1 {
-		return 0, "", fmt.Errorf("invalid remote task id %q (remote ids are listing indexes: i1, i2, ...)", ref)
-	}
-	perm := listingOrder(b.Tasks)
-	if n > len(perm) {
-		return 0, "", fmt.Errorf("no task i%d (the board has %d tasks)", n, len(perm))
-	}
-	return perm[n-1], "i" + strconv.Itoa(n), nil
-}
-
-// applyPatch mirrors store.UpdateTask's patch semantics in memory.
-func applyPatch(t *board.Task, p store.TaskPatch) {
-	if p.Emoji != nil {
-		t.Emoji = *p.Emoji
-	}
-	if p.Title != nil {
-		t.Title = *p.Title
-	}
-	if p.Desc != nil {
-		t.Desc = *p.Desc
-	}
-	if p.Due != nil {
-		t.Due = *p.Due
-	}
-	if p.Effort != nil {
-		t.Effort = *p.Effort
-	}
-	if p.Blocked != nil {
-		t.Blocked = *p.Blocked
-	}
-	if p.Prio != nil {
-		t.Prio = *p.Prio
-	}
-	if p.Tags != nil {
-		t.Tags = *p.Tags
-	}
-	if p.Checks != nil {
-		t.Checks = *p.Checks
-	}
-}
-
-// moveTaskToEnd reassigns ts[ti] to status to and moves it to the end of
-// the slice, so it serializes (and therefore lists) at the bottom of its
-// new column.
-func moveTaskToEnd(ts []board.Task, ti int, to board.Status) []board.Task {
-	t := ts[ti]
-	t.Status = to
-	ts = append(ts[:ti], ts[ti+1:]...)
-	return append(ts, t)
-}
-
-// --- HTTP wire ---
-
-const maxWireBody = 4 << 20 // generous read cap; the server itself caps PUTs at 1 MiB
-
-func (r *remoteBackend) newRequest(method, path string, body io.Reader) (*http.Request, error) {
-	req, err := http.NewRequest(method, r.base+path, body)
+	var created wireComment
+	err := r.call(http.MethodPost, "/api/tasks/"+url.PathEscape(ref)+"/comments",
+		struct {
+			Body string `json:"body"`
+		}{body}, &created)
 	if err != nil {
+		return store.Comment{}, err
+	}
+	return fromWireComment(created), nil
+}
+
+func (r *remoteBackend) comments(ref string) ([]store.Comment, error) {
+	if err := checkRemoteRef(ref); err != nil {
 		return nil, err
+	}
+	var listed []wireComment
+	if err := r.call(http.MethodGet, "/api/tasks/"+url.PathEscape(ref)+"/comments", nil, &listed); err != nil {
+		return nil, err
+	}
+	out := make([]store.Comment, 0, len(listed))
+	for _, wc := range listed {
+		out = append(out, fromWireComment(wc))
+	}
+	return out, nil
+}
+
+func (r *remoteBackend) commentRm(id int) (store.Comment, error) {
+	var deleted wireComment
+	if err := r.call(http.MethodDelete, "/api/comments/"+strconv.Itoa(id), nil, &deleted); err != nil {
+		return store.Comment{}, err
+	}
+	return fromWireComment(deleted), nil
+}
+
+func (r *remoteBackend) link(blockerRef, blockedRef string) (board.Task, board.Task, error) {
+	if err := checkRemoteRef(blockerRef); err != nil {
+		return board.Task{}, board.Task{}, err
+	}
+	if err := checkRemoteRef(blockedRef); err != nil {
+		return board.Task{}, board.Task{}, err
+	}
+	var out struct {
+		Blocker wireTask `json:"blocker"`
+		Blocked wireTask `json:"blocked"`
+	}
+	err := r.call(http.MethodPost, "/api/links",
+		struct {
+			Blocker string `json:"blocker"`
+			Blocked string `json:"blocked"`
+		}{blockerRef, blockedRef}, &out)
+	if err != nil {
+		return board.Task{}, board.Task{}, err
+	}
+	return fromWireTask(out.Blocker), fromWireTask(out.Blocked), nil
+}
+
+func (r *remoteBackend) unlink(aRef, bRef string) error {
+	if err := checkRemoteRef(aRef); err != nil {
+		return err
+	}
+	if err := checkRemoteRef(bRef); err != nil {
+		return err
+	}
+	return r.call(http.MethodDelete,
+		"/api/links?a="+url.QueryEscape(aRef)+"&b="+url.QueryEscape(bRef), nil, nil)
+}
+
+// --- HTTP plumbing ---
+
+const maxWireBody = 4 << 20
+
+// call performs one JSON round-trip. A nil out discards the response body;
+// a nil body sends none.
+func (r *remoteBackend) call(method, path string, body, out any) error {
+	var reader io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("encode request: %w", err)
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequest(method, r.base+path, reader)
+	if err != nil {
+		return err
 	}
 	if r.token != "" {
 		req.Header.Set("Authorization", "Bearer "+r.token)
 	}
 	req.Header.Set("X-KB-User", r.user)
-	return req, nil
-}
-
-// fetchBoard GETs and parses the wire markdown; a 404 (no board saved yet)
-// is an empty board, not an error.
-func (r *remoteBackend) fetchBoard() (board.Board, error) {
-	snapshot, err := r.fetchBoardSnapshot(false)
-	return snapshot.board, err
-}
-
-func (r *remoteBackend) fetchBoardSnapshot(requireETag bool) (remoteBoardSnapshot, error) {
-	req, err := r.newRequest(http.MethodGet, "/api/board", nil)
-	if err != nil {
-		return remoteBoardSnapshot{}, err
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return remoteBoardSnapshot{}, fmt.Errorf("GET %s/api/board: %w", r.base, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		return remoteBoardSnapshot{}, httpError("GET /api/board", resp)
-	}
-	etag := strings.TrimSpace(resp.Header.Get("ETag"))
-	if requireETag && etag == "" {
-		return remoteBoardSnapshot{}, errors.New("GET /api/board: server returned no ETag; refusing an unconditional write")
-	}
-	switch {
-	case resp.StatusCode == http.StatusNotFound:
-		return remoteBoardSnapshot{board: board.Board{Title: "Board"}, etag: etag}, nil
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxWireBody))
-	if err != nil {
-		return remoteBoardSnapshot{}, fmt.Errorf("read board: %w", err)
-	}
-	return remoteBoardSnapshot{board: board.Parse(string(data)), etag: etag}, nil
-}
-
-// putBoard serializes and conditionally PUTs the exact snapshot mutation.
-func (r *remoteBackend) putBoard(b board.Board, etag string) error {
-	req, err := r.newRequest(http.MethodPut, "/api/board", strings.NewReader(board.Serialize(b)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "text/markdown; charset=utf-8")
-	req.Header.Set("If-Match", etag)
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("PUT %s/api/board: %w", r.base, err)
+		return fmt.Errorf("%s %s%s: %w", method, r.base, path, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return httpError("PUT /api/board", resp)
+		return httpError(method+" "+path, resp)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
+	if out == nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxWireBody))
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
 	return nil
 }
 
