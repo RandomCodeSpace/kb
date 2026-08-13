@@ -22,6 +22,7 @@ import {
 import { useDialogFocus } from '../lib/focus';
 import { shouldQuery } from '../lib/similar';
 import { CardEditor } from './CardEditor';
+import type { CardSave } from './CardEditor';
 import { RichDesc } from './RichText';
 
 export type ModalState =
@@ -31,8 +32,6 @@ export type ModalState =
 export interface CardModalProps {
   state: ModalState;
   identity: Identity;
-  /** Canonical server id acknowledged for the edited browser task. */
-  canonicalTaskId?: string;
   /** Suggestions for the labels combobox (server labels ∪ board tags). */
   labels: string[];
   /**
@@ -41,7 +40,7 @@ export interface CardModalProps {
    * hiding the busy state.
    */
   aiDraft?: (req: AIStoryRequest, signal?: AbortSignal) => Promise<StoryDraft>;
-  onSave: (task: Task) => void;
+  onSave: (save: CardSave) => void;
   onDelete: (taskId: string) => void;
   onClose: () => void;
 }
@@ -427,14 +426,13 @@ function DriftReview(props: Readonly<DriftReviewProps>) {
 export function CardModal({
   state,
   identity,
-  canonicalTaskId,
   labels,
   aiDraft,
   onSave,
   onDelete,
   onClose,
 }: Readonly<CardModalProps>) {
-  const excludeId = state.mode === 'edit' ? canonicalTaskId : undefined;
+  const excludeId = state.mode === 'edit' ? state.task.id : undefined;
   const [title, setTitle] = useState(state.mode === 'edit' ? state.task.title : '');
   const [aiBusy, setAiBusy] = useState(false);
   const [items, setItems] = useState<SimilarItem[]>([]);
@@ -522,17 +520,17 @@ export function CardModal({
     };
   }, [excludeId, identity, importLinks, lastQ, title]);
 
-  // Comments need the canonical server id; a card the server has not yet
-  // acknowledged (or a brand-new one) simply shows none.
-  const isEdit = state.mode === 'edit';
+  // Every card on the board carries its server id, so an edited card always
+  // has comments to ask for; a card being added has no id and no comments yet.
+  const editedTaskId = state.mode === 'edit' ? state.task.id : null;
   useEffect(() => {
-    if (!isEdit || !canonicalTaskId) return;
+    if (editedTaskId === null) return;
     const ctrl = new AbortController();
-    void getTaskComments(identity, canonicalTaskId, ctrl.signal).then((next) => {
+    void getTaskComments(identity, editedTaskId, ctrl.signal).then((next) => {
       if (!ctrl.signal.aborted) setComments(next);
     });
     return () => ctrl.abort();
-  }, [isEdit, canonicalTaskId, identity]);
+  }, [editedTaskId, identity]);
 
   const selectedProvenance = provenance.find(
     (item) => item.external_key === selectedExternalKey,

@@ -338,17 +338,8 @@ describe('legacy Azure namespace claim', () => {
   }
 
   it('serializes same-email different-account claims and copies all namespace shapes once', async () => {
-    mem.set('kb.board.v1.same@example.com', 'board');
-    mem.set('kb.dirty.v1.same@example.com', '1');
-    const outboxSuffix = encodeURIComponent('tombstone:client-1');
-    mem.set(`kb.outbox.v1.same@example.com.${outboxSuffix}`, JSON.stringify({
-      version: 1,
-      generation: 'g1',
-      kind: 'tombstone',
-      state: 'awaiting_canonical',
-      clientTaskId: 'client-1',
-      reason: 'obsolete',
-    }));
+    mem.set('kb.streak.v1.same@example.com', 'streak');
+    mem.set(namespaceStorageKey('kb.migrated.v1', 'same@example.com'), '1');
     const locks = serialLocks();
     vi.stubGlobal('navigator', { locks });
 
@@ -360,27 +351,24 @@ describe('legacy Azure namespace claim', () => {
     expect(mem.get(namespaceStorageKey(
       'kb.azure-namespace-claim.v1', 'same@example.com',
     ))).toBe('home-one');
-    expect(mem.get(namespaceStorageKey('kb.board.v1', 'azure.home-one'))).toBe('board');
-    expect(mem.get(namespaceStorageKey('kb.dirty.v1', 'azure.home-one'))).toBe('1');
-    expect(mem.get(namespaceStorageKey(
-      'kb.outbox.v1', 'azure.home-one', outboxSuffix,
-    ))).not.toBeNull();
-    expect(mem.has(namespaceStorageKey('kb.board.v1', 'azure.home-two'))).toBe(false);
-    expect(mem.get('kb.board.v1.same@example.com')).toBe('board');
+    expect(mem.get(namespaceStorageKey('kb.streak.v1', 'azure.home-one'))).toBe('streak');
+    expect(mem.get(namespaceStorageKey('kb.migrated.v1', 'azure.home-one'))).toBe('1');
+    expect(mem.has(namespaceStorageKey('kb.streak.v1', 'azure.home-two'))).toBe(false);
+    expect(mem.get('kb.streak.v1.same@example.com')).toBe('streak');
   });
 
   it('persists the owner before copy and resumes an interrupted same-owner claim', async () => {
-    mem.set('kb.board.v1.alice@example.com', 'board');
-    mem.set('kb.dirty.v1.alice@example.com', '1');
+    mem.set('kb.streak.v1.alice@example.com', 'streak');
+    mem.set(namespaceStorageKey('kb.migrated.v1', 'alice@example.com'), '1');
     const writes: string[] = [];
-    let failDirty = true;
+    let failMigrated = true;
     const storage = stubStorage(mem);
     vi.stubGlobal('localStorage', {
       ...storage,
       setItem(key: string, value: string) {
         writes.push(key);
-        if (failDirty && key === namespaceStorageKey('kb.dirty.v1', 'azure.home-alice')) {
-          failDirty = false;
+        if (failMigrated && key === namespaceStorageKey('kb.migrated.v1', 'azure.home-alice')) {
+          failMigrated = false;
           throw new Error('interrupted');
         }
         mem.set(key, String(value));
@@ -397,50 +385,34 @@ describe('legacy Azure namespace claim', () => {
     await expect(
       claimLegacyAzureNamespace('alice@example.com', 'home-alice'),
     ).resolves.toBeUndefined();
-    expect(mem.get(namespaceStorageKey('kb.board.v1', 'azure.home-alice'))).toBe('board');
-    expect(mem.get(namespaceStorageKey('kb.dirty.v1', 'azure.home-alice'))).toBe('1');
-    expect(mem.get('kb.board.v1.alice@example.com')).toBe('board');
+    expect(mem.get(namespaceStorageKey('kb.streak.v1', 'azure.home-alice'))).toBe('streak');
+    expect(mem.get(namespaceStorageKey('kb.migrated.v1', 'azure.home-alice'))).toBe('1');
+    expect(mem.get('kb.streak.v1.alice@example.com')).toBe('streak');
   });
 
   it('fails closed without Web Locks and leaves legacy data untouched', async () => {
-    mem.set('kb.board.v1.alice@example.com', 'board');
+    mem.set('kb.streak.v1.alice@example.com', 'streak');
     vi.stubGlobal('navigator', {});
     await expect(
       claimLegacyAzureNamespace('alice@example.com', 'home-alice'),
     ).rejects.toThrow(/import it manually/);
-    expect(mem.get('kb.board.v1.alice@example.com')).toBe('board');
-    expect(mem.has(namespaceStorageKey('kb.board.v1', 'azure.home-alice'))).toBe(false);
+    expect(mem.get('kb.streak.v1.alice@example.com')).toBe('streak');
+    expect(mem.has(namespaceStorageKey('kb.streak.v1', 'azure.home-alice'))).toBe(false);
     expect(mem.has(namespaceStorageKey(
       'kb.azure-namespace-claim.v1', 'alice@example.com',
     ))).toBe(false);
   });
 
-  it('does not claim dotted-prefix legacy keys or adversarial outbox records', async () => {
-    mem.set('kb.board.v1.alice', 'alice-board');
-    mem.set('kb.board.v1.alice.work', 'work-board');
-    const aliceSuffix = encodeURIComponent('tombstone:alice-task');
-    const workSuffix = encodeURIComponent('tombstone:work-task');
-    const record = (clientTaskId: string) => JSON.stringify({
-      version: 1, generation: clientTaskId, kind: 'tombstone',
-      state: 'awaiting_canonical', clientTaskId, reason: 'obsolete',
-    });
-    mem.set(`kb.outbox.v1.alice.${aliceSuffix}`, record('alice-task'));
-    mem.set(`kb.outbox.v1.alice.work.${workSuffix}`, record('work-task'));
-    // Looks like alice by prefix, but its payload proves it belongs elsewhere.
-    mem.set(`kb.outbox.v1.alice.${workSuffix}`, record('different-task'));
+  it('does not claim dotted-prefix legacy keys', async () => {
+    mem.set('kb.streak.v1.alice', 'alice-streak');
+    mem.set('kb.streak.v1.alice.work', 'work-streak');
     vi.stubGlobal('navigator', { locks: serialLocks() });
 
     await claimLegacyAzureNamespace('alice', 'home-alice');
 
-    expect(mem.get(namespaceStorageKey('kb.board.v1', 'azure.home-alice')))
-      .toBe('alice-board');
-    expect(mem.get(namespaceStorageKey(
-      'kb.outbox.v1', 'azure.home-alice', aliceSuffix,
-    ))).toBe(record('alice-task'));
-    expect(mem.has(namespaceStorageKey(
-      'kb.outbox.v1', 'azure.home-alice', workSuffix,
-    ))).toBe(false);
-    expect(mem.get('kb.board.v1.alice.work')).toBe('work-board');
+    expect(mem.get(namespaceStorageKey('kb.streak.v1', 'azure.home-alice')))
+      .toBe('alice-streak');
+    expect(mem.get('kb.streak.v1.alice.work')).toBe('work-streak');
   });
 });
 

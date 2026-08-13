@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { emptyFilter, filterBoard, isFilterActive, taskMatchesFilter, toggleTag } from './filter';
-import { newTask } from './model';
+import { makeTask } from '../test/task';
 import type { Board } from './model';
 
-const login = newTask({ title: 'Fix login timeout', desc: 'auth token expires', tags: ['bug', 'auth'] });
-const landing = newTask({ title: 'Design landing page', desc: '', tags: ['ui'] });
-const rotate = newTask({ title: 'Rotate keys', desc: 'quarterly', tags: ['auth', 'env::prod'] });
+const login = makeTask({ title: 'Fix login timeout', desc: 'auth token expires', tags: ['bug', 'auth'] });
+const landing = makeTask({ title: 'Design landing page', desc: '', tags: ['ui'] });
+const rotate = makeTask({ title: 'Rotate keys', desc: 'quarterly', tags: ['auth', 'env::prod'] });
 const board: Board = { title: 'B', tasks: [login, landing, rotate] };
 
 describe('board filter', () => {

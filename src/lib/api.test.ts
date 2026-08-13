@@ -5,12 +5,17 @@ import {
   aiStories,
   acceptDrift,
   checkDrift,
+  coerceApiTask,
+  coerceApiTasks,
   coerceDriftResult,
   coerceImportProvenanceItems,
   coerceImportPreview,
   coerceStoryDraft,
   coerceTaskComments,
+  createTask,
   deleteIntegration,
+  deleteTask,
+  detect,
   DriftConflictError,
   forgeTest,
   getImportProvenance,
@@ -20,14 +25,17 @@ import {
   importPreview,
   isAbortError,
   killReasonRequest,
+  listTasks,
+  patchTask,
   putIntegration,
   putSettings,
   recordImportLinks,
   recordTombstone,
+  replaceBoard,
 } from './api';
 import type { ForgeSource } from './api';
 import { parse, serialize } from './markdown';
-import { newTask } from './model';
+import { makeTask } from '../test/task';
 
 const identity: Identity = { kind: 'manual', id: 'alice' };
 
@@ -740,7 +748,7 @@ describe('coerceStoryDraft', () => {
       desc: 'note\n- [ ] not a check',
       checks: [{ text: 'real check', done: false }],
     });
-    const board = { title: 'kb', tasks: [newTask({ ...d, effort: undefined })] };
+    const board = { title: 'kb', tasks: [makeTask({ ...d, effort: undefined })] };
     const round = parse(serialize(board));
     expect(round.tasks).toHaveLength(1);
     expect(round.tasks[0]!.title).toBe(d.title);
@@ -859,5 +867,287 @@ describe('task comments API', () => {
 
     vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))));
     expect(await getTaskComments(identity, 'any')).toEqual([]);
+  });
+});
+
+describe('per-task board API', () => {
+  function stubJSON(body: unknown, status = 200) {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(
+        new Response(status === 204 ? null : JSON.stringify(body), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  function stubText(body: string, status: number) {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(body, { status })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  const wire = {
+    id: 'uuid-1',
+    seq: 7,
+    title: 'Ship it',
+    status: 'doing',
+    prio: 2,
+    position: 0,
+  };
+
+  describe('detect', () => {
+    it('is true only for an ok health payload', async () => {
+      stubJSON({ ok: true });
+      expect(await detect()).toBe(true);
+
+      stubJSON({ ok: false });
+      expect(await detect()).toBe(false);
+
+      stubJSON('no board saved', 404);
+      expect(await detect()).toBe(false);
+
+      vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))));
+      expect(await detect()).toBe(false);
+    });
+
+    it('sends no credential, so it answers before the token is known', async () => {
+      const fetchMock = stubJSON({ ok: true });
+      await detect();
+      expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/health');
+      expect(fetchMock.mock.calls[0]?.[1]?.headers).toBeUndefined();
+    });
+  });
+
+  describe('coerceApiTask', () => {
+    it('fills in every field the server omits when empty', () => {
+      expect(coerceApiTask(wire)).toEqual({
+        id: 'uuid-1',
+        emoji: '',
+        title: 'Ship it',
+        desc: '',
+        status: 'doing',
+        blocked: false,
+        prio: 2,
+        tags: [],
+        checks: [],
+        createdAt: '',
+        movedAt: '',
+      });
+    });
+
+    it('keeps the optional fields the server did send', () => {
+      expect(coerceApiTask({
+        ...wire,
+        emoji: '🐛',
+        desc: 'details',
+        blocked: true,
+        due: '2026-08-13',
+        effort: 'L',
+        tags: ['type::bug', 7],
+        checks: [
+          { text: 'one', done: true },
+          { text: 'two' },
+          { done: true },
+          null,
+        ],
+        createdAt: '2026-08-01T00:00:00Z',
+        movedAt: '2026-08-02T00:00:00Z',
+      })).toEqual({
+        id: 'uuid-1',
+        emoji: '🐛',
+        title: 'Ship it',
+        desc: 'details',
+        status: 'doing',
+        blocked: true,
+        prio: 2,
+        due: '2026-08-13',
+        effort: 'L',
+        tags: ['type::bug'],
+        checks: [{ text: 'one', done: true }, { text: 'two', done: false }],
+        createdAt: '2026-08-01T00:00:00Z',
+        movedAt: '2026-08-02T00:00:00Z',
+      });
+    });
+
+    it('falls back to normal priority and drops unusable rows', () => {
+      expect(coerceApiTask({ ...wire, prio: 9 })?.prio).toBe(3);
+      expect(coerceApiTask({ ...wire, effort: 'XL' })?.effort).toBeUndefined();
+      expect(coerceApiTask({ ...wire, checks: 'none' })?.checks).toEqual([]);
+      expect(coerceApiTask({ ...wire, id: '  ' })).toBeNull();
+      expect(coerceApiTask({ ...wire, title: 7 })).toBeNull();
+      expect(coerceApiTask({ ...wire, status: 'archived' })).toBeNull();
+      expect(coerceApiTask(null)).toBeNull();
+    });
+
+    it('drops unusable rows from a list and rejects a non-array body', () => {
+      expect(coerceApiTasks([wire, { ...wire, status: 'archived' }])).toHaveLength(1);
+      expect(coerceApiTasks({ tasks: [wire] })).toEqual([]);
+    });
+  });
+
+  describe('listTasks', () => {
+    it('returns the board in the order the server sent it', async () => {
+      const fetchMock = stubJSON([wire, { ...wire, id: 'uuid-2', status: 'todo' }]);
+      const tasks = await listTasks(identity);
+      expect(tasks.map((t) => t.id)).toEqual(['uuid-1', 'uuid-2']);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/tasks');
+      expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({
+        'X-KB-User': 'alice',
+      });
+    });
+
+    it('raises the server text with its status', async () => {
+      stubText('storage error', 500);
+      await expect(listTasks(identity)).rejects.toMatchObject({
+        name: 'TaskRequestError',
+        message: 'storage error',
+        status: 500,
+      });
+    });
+  });
+
+  describe('createTask', () => {
+    it('posts the whole draft as JSON and returns the created task', async () => {
+      const fetchMock = stubJSON({ ...wire, status: 'todo' }, 201);
+      const created = await createTask(identity, {
+        emoji: '',
+        title: 'Ship it',
+        desc: '',
+        status: 'todo',
+        blocked: false,
+        prio: 3,
+        tags: ['a'],
+        checks: [{ text: 'one', done: false }],
+      });
+      expect(created.id).toBe('uuid-1');
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(url).toBe('/api/tasks');
+      expect(init?.method).toBe('POST');
+      // The CSRF guard rejects a state-changing request without this header.
+      expect(init?.headers).toMatchObject({ 'Content-Type': 'application/json' });
+      expect(JSON.parse(String(init?.body))).toEqual({
+        title: 'Ship it',
+        emoji: '',
+        desc: '',
+        status: 'todo',
+        blocked: false,
+        prio: 3,
+        due: '',
+        effort: '',
+        tags: ['a'],
+        checks: [{ text: 'one', done: false }],
+      });
+    });
+
+    it('sends a due date and effort through unchanged', async () => {
+      const fetchMock = stubJSON(wire, 201);
+      await createTask(identity, {
+        emoji: '', title: 'x', desc: '', status: 'todo', blocked: false,
+        prio: 3, due: '2026-08-13', effort: 'S', tags: [], checks: [],
+      });
+      expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toMatchObject({
+        due: '2026-08-13',
+        effort: 'S',
+      });
+    });
+
+    it('raises a validation refusal verbatim', async () => {
+      stubText('store: title must not be empty', 400);
+      await expect(createTask(identity, {
+        emoji: '', title: ' ', desc: '', status: 'todo', blocked: false,
+        prio: 3, tags: [], checks: [],
+      })).rejects.toMatchObject({
+        message: 'store: title must not be empty',
+        status: 400,
+      });
+    });
+  });
+
+  describe('patchTask', () => {
+    it('sends only the named fields, encoded id, as JSON', async () => {
+      const fetchMock = stubJSON(wire);
+      const patched = await patchTask(identity, 'id/with slash', {
+        status: 'done',
+        index: 2,
+        force: true,
+      });
+      expect(patched.status).toBe('doing');
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(url).toBe('/api/tasks/id%2Fwith%20slash');
+      expect(init?.method).toBe('PATCH');
+      expect(init?.headers).toMatchObject({ 'Content-Type': 'application/json' });
+      expect(JSON.parse(String(init?.body))).toEqual({
+        status: 'done', index: 2, force: true,
+      });
+    });
+
+    it('surfaces the completion guard as a 409 carrying the server sentence', async () => {
+      stubText('1 open blocker (#1) still blocks #2 "Beta"', 409);
+      await expect(patchTask(identity, 'uuid-1', { status: 'done' }))
+        .rejects.toMatchObject({
+          message: '1 open blocker (#1) still blocks #2 "Beta"',
+          status: 409,
+        });
+    });
+
+    it('refuses a success body that is not a task', async () => {
+      stubJSON({ id: '', title: 'nameless' });
+      await expect(patchTask(identity, 'uuid-1', { prio: 1 }))
+        .rejects.toThrow('save task returned an unusable task');
+    });
+
+    it('falls back to a generic message when the body is empty', async () => {
+      stubText('', 500);
+      await expect(patchTask(identity, 'uuid-1', { prio: 1 }))
+        .rejects.toThrow('save task failed: 500');
+    });
+  });
+
+  describe('deleteTask', () => {
+    it('sends no body, so the method guard cannot reject it as untyped', async () => {
+      const fetchMock = stubJSON(wire);
+      const deleted = await deleteTask(identity, 'uuid-1');
+      expect(deleted.id).toBe('uuid-1');
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(url).toBe('/api/tasks/uuid-1');
+      expect(init?.method).toBe('DELETE');
+      expect(init?.body).toBeUndefined();
+    });
+
+    it('raises a missing task as a 404', async () => {
+      stubText('task not found', 404);
+      await expect(deleteTask(identity, 'gone')).rejects.toMatchObject({
+        message: 'task not found',
+        status: 404,
+      });
+    });
+  });
+
+  describe('replaceBoard', () => {
+    it('puts the markdown document as text/markdown', async () => {
+      const fetchMock = stubJSON(null, 204);
+      await replaceBoard(identity, '# Board\n');
+      const [url, init] = fetchMock.mock.calls[0]!;
+      expect(url).toBe('/api/board');
+      expect(init?.method).toBe('PUT');
+      expect(init?.headers).toMatchObject({
+        'Content-Type': 'text/markdown; charset=utf-8',
+      });
+      expect(init?.body).toBe('# Board\n');
+    });
+
+    it('raises a refused replacement', async () => {
+      stubText('invalid board payload', 400);
+      await expect(replaceBoard(identity, 'junk')).rejects.toMatchObject({
+        message: 'invalid board payload',
+        status: 400,
+      });
+    });
   });
 });

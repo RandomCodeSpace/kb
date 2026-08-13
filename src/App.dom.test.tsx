@@ -3,24 +3,14 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Board, Task } from './lib/model';
+import type { Status, Task, TaskDraft } from './lib/model';
 import type { Identity } from './lib/auth';
-import type { DurableSnapshot, DurableVersion, PendingBoardWrite } from './lib/store';
-import appSource from './App.tsx?raw';
 
-type SaveAcknowledgementFixture = {
-  pushed: Board;
-  taskIDs: ReadonlyMap<string, string>;
-  conflicts?: readonly string[];
-  operationID?: string;
-  isCurrent?: () => boolean;
-  generation?: number;
-  durableVersion?: DurableVersion;
-  durableSnapshot?: DurableSnapshot;
-};
-
-type SaveAcknowledgementCallback = (acknowledgement: SaveAcknowledgementFixture) => unknown;
-
+/**
+ * The server, in memory. Every test drives the real App against it, so the
+ * assertions are about what the SPA sends and what it does with what comes
+ * back — there is no local board left to assert against.
+ */
 const state = vi.hoisted(() => ({
   identity: null as Identity | null,
   authMode: 'unknown' as 'open' | 'token' | 'entra' | 'unknown',
@@ -29,59 +19,36 @@ const state = vi.hoisted(() => ({
   resolveError: null as unknown,
   resolveDeferred: null as Promise<Identity> | null,
   resolveCalls: 0,
-  board: null as Board | null,
-  importBoard: null as Board | null,
-  importError: false,
-  dirty: false,
-  detect: false,
-  detectDeferred: false,
-  detectResolve: null as null | ((value: boolean) => void),
-  remoteBoard: null as Board | null,
-  migratedRaw: false,
-  pendingWrite: null as Partial<PendingBoardWrite> | null,
-  startupMode: 'normal' as 'normal' | 'merged' | 'throw' | 'callbacks',
-  pendingMode: 'clean' as 'clean' | 'push' | 'retry' | 'throw',
-  legacyMode: 'clean' as 'clean' | 'push' | 'failed' | 'throw',
-  sameSemantics: false,
-  commitMode: 'normal' as 'normal' | 'recovery' | 'conflict' | 'stopped',
-  omitAckSnapshot: false,
-  ackCurrent: true,
-  omitIsCurrent: false,
-  persistenceFails: false,
-  persistenceConflicts: [] as string[],
-  remoteSaveError: null as Error | null,
-  prepareError: null as Error | null,
-  remoteSaveConflicts: [] as string[],
+  present: true,
+  tasks: [] as Task[],
+  created: 0,
+  calls: [] as string[],
+  listError: null as unknown,
+  writeError: null as unknown,
+  // Per-draft create failures, by title. Unlike writeError these are not
+  // consumed on the first throw, so one create in a batch can fail while the
+  // rest are watched for.
+  createErrors: {} as Record<string, unknown>,
+  tombstoneError: null as unknown,
+  linksError: null as unknown,
+  tombstones: [] as Array<{ taskId: string; reason: string }>,
   labels: [] as string[],
   settings: { has_key: false, ai_base_url: '' },
-  sources: [] as Array<{ id: string; name: string; kind: 'github' | 'gitlab' }>,
-  outboxStatus: null as null | { kind: 'idle' | 'blocked' | 'retry' | 'reauth'; message?: string },
-  outboxReject: false,
+  sources: [] as Array<{ name: string; kind: 'github' | 'gitlab' }>,
   savedIdentities: [] as Identity[],
   clearedIdentity: 0,
-  dirtyWrites: [] as boolean[],
   exported: [] as string[],
-  remoteAcknowledgement: null as SaveAcknowledgementFixture | null,
-  saveAcknowledgements: [] as Array<{
-    surface: 'immediate' | 'debounced';
-    sent: Board;
-    payload: SaveAcknowledgementFixture;
-  }>,
-  acknowledgementPersists: [] as Array<{
-    board: Board;
-    taskIDs: ReadonlyMap<string, string>;
-    expectedVersion: DurableVersion;
-    operationID: string | undefined;
-    current: boolean;
-  }>,
-  remoteInstances: [] as Array<{ flush: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn> }>,
-  outboxInstances: [] as Array<{ cancel: ReturnType<typeof vi.fn> }>,
+  imported: [] as string[],
+  importText: '# Imported\n\n## To Do\n\n- [ ] Imported markdown\n',
+  importError: false,
   bursts: [] as Array<[number, number, number]>,
 }));
 
 const manual: Identity = { kind: 'manual', id: 'alice' };
+const STATUS_ORDER: Status[] = ['todo', 'doing', 'done', 'cancelled'];
+const MOVED_AT = '2026-08-13T00:00:00.000Z';
 
-function task(overrides: Partial<Task> = {}): Task {
+function seed(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
     emoji: 'x',
@@ -96,71 +63,6 @@ function task(overrides: Partial<Task> = {}): Task {
     movedAt: '2026-08-01T00:00:00.000Z',
     ...overrides,
   };
-}
-
-function board(tasks: Task[] = [task()]): Board {
-  return { title: 'Test board', tasks };
-}
-
-function snapshot(
-  nextBoard: Board = state.board ?? board(),
-  generation = 0,
-): DurableSnapshot {
-  return {
-    board: nextBoard,
-    seeded: false,
-    canonicalTaskIDs: state.migratedRaw
-      ? new Map<string, string>()
-      : new Map(nextBoard.tasks.map((item) => [item.id, `canonical-${item.id}`])),
-    deletedCanonicalIDs: new Set<string>(),
-    migratedRaw: state.migratedRaw,
-    pendingBoardWrite: state.pendingWrite as PendingBoardWrite | null,
-    generation,
-    version: { present: true, generation },
-  };
-}
-
-function acknowledgementFixture(
-  pushed: Board,
-  canonicalID: string,
-  durableGeneration: number,
-  overrides: Partial<SaveAcknowledgementFixture> = {},
-): SaveAcknowledgementFixture {
-  const taskIDs = new Map(pushed.tasks.map((item) => [item.id, canonicalID]));
-  return {
-    pushed,
-    taskIDs,
-    conflicts: [],
-    operationID: 'ack-operation',
-    isCurrent: () => true,
-    generation: durableGeneration - 2,
-    durableVersion: { present: true, generation: durableGeneration - 1 },
-    durableSnapshot: {
-      ...snapshot(pushed, durableGeneration),
-      canonicalTaskIDs: taskIDs,
-    },
-    ...overrides,
-  };
-}
-
-function expectSaveDelivery(
-  surface: 'immediate' | 'debounced',
-  sent: Board,
-  payload: SaveAcknowledgementFixture,
-): void {
-  expect(state.saveAcknowledgements).toHaveLength(1);
-  const delivery = state.saveAcknowledgements[0]!;
-  expect(delivery.surface).toBe(surface);
-  expect(delivery.sent).toEqual(sent);
-  expect({
-    ...delivery.payload,
-    taskIDs: [...delivery.payload.taskIDs],
-    isCurrent: delivery.payload.isCurrent?.(),
-  }).toEqual({
-    ...payload,
-    taskIDs: [...payload.taskIDs],
-    isCurrent: payload.isCurrent?.(),
-  });
 }
 
 vi.mock('./lib/auth', () => {
@@ -200,410 +102,181 @@ vi.mock('./lib/auth', () => {
   };
 });
 
-vi.mock('./lib/store', () => {
-  class LocalStore {
-    private current = snapshot();
-    loadOrSeed() { return this.current; }
-    loadSnapshot() { return this.current; }
-    private async persist(
-      nextBoard: Board,
-      ids: ReadonlyMap<string, string>,
-      deleted: ReadonlySet<string>,
-      ...rest: unknown[]
-    ) {
-      const guard = [...rest].reverse().find((value) => typeof value === 'function') as
-        | (() => boolean)
-        | undefined;
-      guard?.();
-      if (state.persistenceFails) return { ok: false as const, error: new Error('quota exceeded') };
-      this.current = {
-        ...this.current,
-        board: nextBoard,
-        canonicalTaskIDs: new Map(ids),
-        deletedCanonicalIDs: new Set(deleted),
-        generation: this.current.generation + 1,
-        version: { present: true, generation: this.current.generation + 1 },
-      };
-      state.board = nextBoard;
-      return { ok: true as const, generation: this.current.generation, snapshot: this.current };
-    }
-    saveIfGeneration(nextBoard: Board, ids: ReadonlyMap<string, string>, deleted: ReadonlySet<string>, ...rest: unknown[]) {
-      return this.persist(nextBoard, ids, deleted, ...rest);
-    }
-    saveAcknowledgement(nextBoard: Board, ids: ReadonlyMap<string, string>, deleted: ReadonlySet<string>, ...rest: unknown[]) {
-      const expectedVersion = rest[0] as DurableVersion;
-      const operationID = rest[1] as string | undefined;
-      const guard = rest[2] as () => boolean;
-      state.acknowledgementPersists.push({
-        board: nextBoard,
-        taskIDs: new Map(ids),
-        expectedVersion,
-        operationID,
-        current: guard(),
-      });
-      return this.persist(nextBoard, ids, deleted, ...rest);
-    }
-    completeIdentityRecovery(nextBoard: Board, ids: ReadonlyMap<string, string>, deleted: ReadonlySet<string>, ...rest: unknown[]) {
-      return this.persist(nextBoard, ids, deleted, ...rest);
+vi.mock('./lib/api', async () => {
+  const { ReauthRequiredError } = await import('./lib/auth');
+  class TaskRequestError extends Error {
+    constructor(message: string, readonly status: number) {
+      super(message);
     }
   }
-  return {
-    LocalStore,
-    loadDirty: () => state.dirty,
-    setDirty: (_ns: string, value: boolean) => {
-      state.dirty = value;
-      state.dirtyWrites.push(value);
-    },
-    continueAfterLocalPersistence: (
-      result: { ok: boolean },
-      gate: { current: boolean },
-      next: { warn: () => void; markDirty: () => void; scheduleRemote: () => void },
-    ) => {
-      if (!result.ok && !gate.current) {
-        gate.current = true;
-        next.warn();
-      }
-      next.markDirty();
-      next.scheduleRemote();
-    },
-    shippedToday: () => 0,
-    shipKey: (item: Task) => item.id,
-    bumpShipped: () => 1,
-    unshipToday: () => 0,
+  const find = (id: string): Task => {
+    const task = state.tasks.find((t) => t.id === id);
+    if (!task) throw new TaskRequestError('task not found', 404);
+    return task;
   };
-});
-
-vi.mock('./lib/remote', () => {
-  class RemoteStore {
-    flush = vi.fn();
-    cancel = vi.fn();
-    constructor() { state.remoteInstances.push(this); }
-    detect = vi.fn(async () => {
-      if (!state.detectDeferred) return state.detect;
-      return new Promise<boolean>((resolve) => { state.detectResolve = resolve; });
+  const place = (moving: Task, to: Status, index: number | undefined) => {
+    const rest = state.tasks.filter((t) => t.id !== moving.id);
+    const column = rest.filter((t) => t.status === to);
+    const slot = Math.max(0, Math.min(index ?? column.length, column.length));
+    const at = slot === column.length ? rest.length : rest.indexOf(column[slot]!);
+    rest.splice(at, 0, {
+      ...moving,
+      status: to,
+      movedAt: moving.status === to ? moving.movedAt : MOVED_AT,
     });
-    prepareDirtyMapped = vi.fn(async (
-      _identity: Identity,
-      nextBoard: Board,
-      ids: ReadonlyMap<string, string>,
-      deleted: ReadonlySet<string>,
-    ) => {
-      if (state.prepareError) throw state.prepareError;
-      return { board: nextBoard, taskIDs: ids, deletedCanonicalIDs: deleted };
-    });
-    private save(
-      surface: 'immediate' | 'debounced',
-      _identity: Identity,
-      nextBoard: Board,
-      onError: (error: unknown) => void,
-      onSaved: SaveAcknowledgementCallback,
-      options: {
-        durableSnapshot?: DurableSnapshot;
-        isLiveCurrent?: () => boolean;
-      } = {},
-    ) {
-      options.isLiveCurrent?.();
-      if (state.remoteSaveError) return onError(state.remoteSaveError);
-      const payload = state.remoteAcknowledgement ?? {
-        pushed: nextBoard,
-        taskIDs: new Map(nextBoard.tasks.map((item) => [item.id, `canonical-${item.id}`])),
-        conflicts: state.remoteSaveConflicts,
-        operationID: 'operation-1',
-        isCurrent: state.omitIsCurrent ? undefined : () => state.ackCurrent,
-        generation: 1,
-        durableVersion: { present: true, generation: 0 },
-        durableSnapshot: state.omitAckSnapshot
-          ? undefined
-          : options.durableSnapshot ?? snapshot(nextBoard),
-      } satisfies SaveAcknowledgementFixture;
-      state.saveAcknowledgements.push({
-        surface,
-        sent: nextBoard,
-        payload,
-      });
-      return void onSaved(payload);
-    }
-    saveRemote = vi.fn((
-      identity: Identity,
-      nextBoard: Board,
-      onError: (error: unknown) => void,
-      onSaved: SaveAcknowledgementCallback,
-      options?: {
-        durableSnapshot?: DurableSnapshot;
-        isLiveCurrent?: () => boolean;
-      },
-    ) => this.save('immediate', identity, nextBoard, onError, onSaved, options));
-    saveRemoteDebounced = vi.fn((
-      identity: Identity,
-      nextBoard: Board,
-      onError: (error: unknown) => void,
-      onSaved: SaveAcknowledgementCallback,
-      options?: {
-        durableSnapshot?: DurableSnapshot;
-        isLiveCurrent?: () => boolean;
-      },
-    ) => this.save('debounced', identity, nextBoard, onError, onSaved, options));
-  }
-  return {
-    RemoteStore,
-    sameBoardSemantics: () => state.sameSemantics,
-    recomputeDeletedCanonicalIDs: () => new Set<string>(),
-    mergeAcknowledgedState: (
-      _current: Board,
-      _currentIDs: ReadonlyMap<string, string>,
-      _sent: Board,
-      _sentIDs: ReadonlyMap<string, string>,
-      pushed: Board,
-      committedIDs: ReadonlyMap<string, string>,
-    ) => ({ board: pushed, canonicalTaskIDs: committedIDs, conflicts: state.persistenceConflicts }),
-    commitLiveCandidate: async (options: {
-      candidate: { board: Board; canonicalTaskIDs: ReadonlyMap<string, string>; deletedCanonicalIDs: ReadonlySet<string> };
-      sourceLive: { durableBase: ReturnType<typeof snapshot> };
-      persist: (...args: unknown[]) => Promise<{ ok: boolean; snapshot?: ReturnType<typeof snapshot>; error?: unknown }>;
-      repairPersist?: (...args: unknown[]) => Promise<unknown>;
-      readLive?: () => unknown;
-      readDurable?: () => unknown;
-      cancelled?: () => boolean;
-    }) => {
-      options.readLive?.();
-      options.readDurable?.();
-      if (options.cancelled?.()) {
-        return {
-          candidate: options.candidate, conflicts: [], persisted: false,
-          recoveryPending: false, writes: 0,
-        };
-      }
-      if (state.commitMode === 'recovery') {
-        return {
-          candidate: options.candidate, conflicts: ['live board'], persisted: false,
-          snapshot: options.sourceLive.durableBase, recoveryPending: true, writes: 2,
-        };
-      }
-      if (state.commitMode === 'conflict') {
-        return {
-          candidate: options.candidate, conflicts: [], persisted: false, recoveryPending: false,
-          writes: 1, failure: { ok: false, error: new Error('stale'), conflict: true },
-        };
-      }
-      if (state.commitMode === 'stopped') {
-        return {
-          candidate: options.candidate, conflicts: [], persisted: false, recoveryPending: false,
-          writes: 0,
-        };
-      }
-      const result = await options.persist(
-        options.candidate,
-        options.sourceLive.durableBase.version,
-        () => true,
-      );
-      await options.repairPersist?.(
-        options.candidate,
-        result.snapshot?.version ?? options.sourceLive.durableBase.version,
-        () => true,
-      );
-      return {
-        candidate: options.candidate,
-        conflicts: state.persistenceConflicts,
-        persisted: result.ok,
-        snapshot: result.snapshot,
-        recoveryPending: false,
-        writes: 1,
-        ...(!result.ok ? { failure: result } : {}),
-      };
-    },
-    reconcileStartupBoardFetch: async (options: Record<string, (...args: unknown[]) => unknown>) => {
-      if (state.startupMode === 'throw') throw new Error('startup fetch failed');
-      const remoteBoard = state.remoteBoard;
-      const ids = new Map((remoteBoard?.tasks ?? []).map((item) => [item.id, `canonical-${item.id}`]));
-      if (state.startupMode === 'callbacks' && remoteBoard) {
-        options.readLive();
-        options.readSnapshot();
-        await options.persist(remoteBoard, ids, new Set(), { present: true, generation: 0 }, () => true);
-        options.apply(snapshot(remoteBoard, 1));
-        options.push(snapshot(remoteBoard, 1), remoteBoard, ids, 0);
-        options.cancelled();
-      }
-      return {
-        remoteBoard,
-        remoteTaskIDs: ids,
-        merged: state.startupMode === 'merged'
-          ? { conflicts: ['startup title'] }
-          : null,
-        persisted: state.startupMode === 'merged',
-      };
-    },
-    reconcilePendingBoardWrite: async (options: Record<string, (...args: unknown[]) => unknown>) => {
-      if (state.pendingMode === 'throw') throw new Error('pending recovery failed');
-      const live = options.readLive() as { board: Board; canonicalTaskIDs: ReadonlyMap<string, string> };
-      const durable = options.readSnapshot() as ReturnType<typeof snapshot>;
-      const saved = await options.persistAcknowledgement(
-        live.board, live.canonicalTaskIDs, new Set(), durable.version, 'pending-op', () => true,
-      ) as { snapshot?: ReturnType<typeof snapshot> };
-      await options.repairPersist(
-        live.board, live.canonicalTaskIDs, new Set(), durable.version, () => true,
-      );
-      const recovered = { needsPush: state.pendingMode === 'push', conflicts: ['pending title'] };
-      options.apply(recovered, saved.snapshot ?? durable);
-      if (state.pendingMode === 'push') options.queuePush(saved.snapshot ?? durable);
-      options.cancelled();
-      return {
-        recoveryPending: state.pendingMode === 'retry',
-        recovered,
-        persisted: state.pendingMode !== 'retry',
-      };
-    },
-    reconcileLegacyBootstrap: async (options: Record<string, (...args: unknown[]) => unknown>) => {
-      if (state.legacyMode === 'throw') throw new Error('legacy recovery failed');
-      const live = options.readLive() as { board: Board; canonicalTaskIDs: ReadonlyMap<string, string> };
-      const durable = options.readSnapshot() as ReturnType<typeof snapshot>;
-      const saved = await options.persist(
-        live.board, live.canonicalTaskIDs, new Set(), durable.version, () => true,
-      ) as { snapshot?: ReturnType<typeof snapshot> };
-      await options.repairPersist(
-        live.board, live.canonicalTaskIDs, new Set(), durable.version, () => true,
-      );
-      const needsPush = state.legacyMode === 'push';
-      const recovered = { needsPush, conflicts: ['legacy title'] };
-      options.apply(recovered, needsPush, saved.snapshot ?? durable);
-      if (needsPush) options.queuePush(saved.snapshot ?? durable);
-      options.cancelled();
-      return { recovered, persisted: state.legacyMode !== 'failed' };
-    },
+    state.tasks = rest;
   };
-});
-
-vi.mock('./lib/outbox', () => {
-  class MetadataOutbox {
-    cancel = vi.fn();
-    private onStatus: (status: unknown) => void;
-    constructor(_ns: string, options: { onStatus: (status: unknown) => void }) {
-      this.onStatus = options.onStatus;
-      state.outboxInstances.push(this);
-    }
-    surfaceStoredStatus() { if (state.outboxStatus) this.onStatus(state.outboxStatus); }
-    reconcile = vi.fn(async () => undefined);
-    drain = vi.fn(async () => undefined);
-    enqueueTombstone = vi.fn(async () => {
-      if (state.outboxReject) throw new Error('storage denied');
-    });
-    removeTombstone = vi.fn(async () => {
-      if (state.outboxReject) throw new Error('storage denied');
-    });
-    enqueueImportLinks = vi.fn(async () => {
-      if (state.outboxReject) throw new Error('storage denied');
-    });
-  }
-  const report = async (
-    outbox: { drain: (identity: Identity) => Promise<void> },
-    identity: Identity,
-    onStatus: (status: unknown) => void,
-  ) => {
-    try { await outbox.drain(identity); return true; }
-    catch (error) { onStatus({ kind: 'blocked', message: String(error) }); return false; }
+  const raise = (error: unknown) => {
+    state.writeError = null;
+    throw error;
   };
   return {
-    MetadataOutbox,
-    drainAndReport: report,
-    reconcileAndDrain: async (
-      outbox: { reconcile: () => Promise<void>; drain: (identity: Identity) => Promise<void> },
-      identity: Identity,
-      _board: Board,
-      _ids: ReadonlyMap<string, string>,
-      onStatus: (status: unknown) => void,
-    ) => { await outbox.reconcile(); return report(outbox, identity, onStatus); },
-    enqueueIntentBeforeMutation: async (
-      enqueue: () => Promise<unknown>, mutate: () => void, fail: (error: unknown) => void,
-    ) => { try { await enqueue(); mutate(); return true; } catch (error) { fail(error); return false; } },
-    removeIntentBeforeMutation: async (
-      remove: () => Promise<unknown>, mutate: () => void, fail: (error: unknown) => void,
-    ) => { try { await remove(); mutate(); return true; } catch (error) { fail(error); return false; } },
+    TaskRequestError,
+    detect: async () => state.present,
+    listTasks: async () => {
+      state.calls.push('list');
+      if (state.listError) {
+        const error = state.listError;
+        state.listError = null;
+        throw error;
+      }
+      return STATUS_ORDER.flatMap((status) =>
+        state.tasks.filter((t) => t.status === status).map((t) => ({ ...t })),
+      );
+    },
+    createTask: async (_identity: Identity, draft: TaskDraft) => {
+      state.calls.push(`create:${draft.title}`);
+      const refused = state.createErrors[draft.title];
+      if (refused) throw refused;
+      if (state.writeError) raise(state.writeError);
+      state.created += 1;
+      const created: Task = {
+        ...draft,
+        id: `server-${state.created}`,
+        createdAt: MOVED_AT,
+        movedAt: MOVED_AT,
+      };
+      state.tasks = [...state.tasks, created];
+      place(created, created.status, undefined);
+      return created;
+    },
+    patchTask: async (_identity: Identity, id: string, patch: Record<string, unknown>) => {
+      state.calls.push(`patch:${id}:${JSON.stringify(patch)}`);
+      if (state.writeError) raise(state.writeError);
+      const current = find(id);
+      const next: Task = { ...current };
+      for (const key of ['title', 'emoji', 'desc', 'blocked', 'prio', 'tags', 'checks'] as const) {
+        if (patch[key] !== undefined) Object.assign(next, { [key]: patch[key] });
+      }
+      const status = patch.status as Status | undefined;
+      if (status === 'done' && patch.force !== true) {
+        const open = next.checks.some((c) => !c.done);
+        if (open || next.blocked) {
+          throw new TaskRequestError('checklist items are still open', 409);
+        }
+      }
+      state.tasks = state.tasks.map((t) => (t.id === id ? next : t));
+      if (status !== undefined || patch.index !== undefined) {
+        place(next, status ?? next.status, patch.index as number | undefined);
+      }
+      return { ...next };
+    },
+    deleteTask: async (_identity: Identity, id: string) => {
+      state.calls.push(`delete:${id}`);
+      if (state.writeError) raise(state.writeError);
+      const task = find(id);
+      state.tasks = state.tasks.filter((t) => t.id !== id);
+      return task;
+    },
+    replaceBoard: async (_identity: Identity, markdown: string) => {
+      state.calls.push('replace');
+      if (state.writeError) raise(state.writeError);
+      state.imported.push(markdown);
+      state.tasks = [seed({ id: 'replaced', title: 'Imported markdown', checks: [] })];
+    },
+    recordTombstone: async (_identity: Identity, taskId: string, reason: string) => {
+      if (state.tombstoneError) {
+        const error = state.tombstoneError;
+        state.tombstoneError = null;
+        throw error;
+      }
+      state.tombstones.push({ taskId, reason });
+    },
+    recordImportLinks: async () => {
+      if (state.linksError) {
+        const error = state.linksError;
+        state.linksError = null;
+        throw error;
+      }
+    },
+    getLabels: async () => state.labels,
+    getSettings: async () => state.settings,
+    getIntegrations: async () => state.sources,
+    aiStory: vi.fn(async () => ({ title: 'AI draft' })),
+    aiStories: vi.fn(async () => [{ title: 'AI story' }]),
+    importPreview: vi.fn(async () => ({ drafts: [] })),
+    killReasonRequest: (taskId: string, reason: string) =>
+      reason.trim() ? { taskId, reason: reason.trim() } : null,
+    ReauthRequiredError,
   };
 });
-
-vi.mock('./lib/api', () => ({
-  getLabels: async () => state.labels,
-  getSettings: async () => state.settings,
-  getIntegrations: async () => state.sources,
-  aiStory: vi.fn(async () => task({ id: 'ai-draft', title: 'AI draft' })),
-  aiStories: vi.fn(async () => [task({ id: 'ai-story', title: 'AI story' })]),
-  importPreview: vi.fn(async () => []),
-  killReasonRequest: (taskId: string, reason: string) =>
-    reason.trim() ? { taskId, reason: reason.trim() } : null,
-}));
-
-vi.mock('./lib/markdown', () => ({
-  serialize: (value: Board) => {
-    const text = `# ${value.title}`;
-    state.exported.push(text);
-    return text;
-  },
-  parse: () => {
-    if (state.importError || !state.importBoard) throw new Error('invalid markdown');
-    return state.importBoard;
-  },
-}));
 
 vi.mock('./lib/confetti', () => ({
   burst: (x: number, y: number, count: number) => state.bursts.push([x, y, count]),
 }));
 
-vi.mock('./components/Board', () => ({
-  showCancelledFlag: false,
-  setShowCancelledFlag: vi.fn(),
-  movedAnnouncement: (title: string, status: string) => `${title} moved to ${status}`,
-  moveTask: (tasks: Task[], id: string, status: Task['status'], index: number, movedAt: string) => {
-    const moving = tasks.find((item) => item.id === id);
-    if (!moving) return tasks;
-    const rest = tasks.filter((item) => item.id !== id);
-    const next = moving.status === status ? moving : { ...moving, status, movedAt };
-    const positions = rest.reduce<number[]>((all, item, i) => {
-      if (item.status === status) all.push(i);
-      return all;
-    }, []);
-    const at = index >= positions.length ? rest.length : positions[index];
-    return [...rest.slice(0, at), next, ...rest.slice(at)];
-  },
-  BoardView: ({
-    board: value,
-    onMove,
-    onTick,
-    onEdit,
-    onAdd,
-    onRestore,
-    onPurge,
-    onTagClick,
-  }: {
-    board: Board;
-    onMove: (id: string, status: Task['status'], index?: number) => void;
-    onTick: (id: string, index: number, pos: { x: number; y: number }) => void;
-    onEdit: (id: string) => void;
-    onAdd: (status: Task['status']) => void;
-    onRestore: (id: string) => void;
-    onPurge: (id: string) => void;
-    onTagClick?: (tag: string) => void;
-  }) => (
-    <section aria-label="board-double">
-      <button onClick={() => onAdd('todo')}>add todo</button>
-      <button onClick={() => onEdit('missing')}>edit missing</button>
-      <button onClick={() => onMove('missing', 'done')}>move missing</button>
-      <button onClick={() => onTick('missing', 0, { x: 0, y: 0 })}>tick missing</button>
-      {value.tasks.map((item) => (
-        <div key={item.id} data-testid={`task-${item.id}`} data-task={item.id}>
-          <span>{item.title}:{item.status}:{item.checks.map((check) => String(check.done)).join(',')}</span>
-          <button onClick={() => onEdit(item.id)}>edit {item.id}</button>
-          <button onClick={() => onMove(item.id, 'doing')}>move doing {item.id}</button>
-          <button onClick={() => onMove(item.id, 'done')}>move done {item.id}</button>
-          <button onClick={() => onMove(item.id, item.status, 0)}>keep {item.id} in same slot</button>
-          <button onClick={() => onTick(item.id, 0, { x: 2, y: 3 })}>tick {item.id}</button>
-          <button onClick={() => onTick(item.id, 99, { x: 2, y: 3 })}>tick invalid {item.id}</button>
-          <button onClick={() => onRestore(item.id)}>restore {item.id}</button>
-          <button onClick={() => onPurge(item.id)}>purge {item.id}</button>
-          <button onClick={() => onTagClick?.(item.tags[0] ?? '')}>tag {item.id}</button>
-        </div>
-      ))}
-    </section>
-  ),
-}));
+vi.mock('./components/Board', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./components/Board')>();
+  return {
+    ...actual,
+    BoardView: ({
+      board: value,
+      onMove,
+      onTick,
+      onEdit,
+      onAdd,
+      onRestore,
+      onPurge,
+      onTagClick,
+    }: {
+      board: { tasks: Task[] };
+      onMove: (id: string, status: Status, index: number) => void;
+      onTick: (id: string, index: number, pos: { x: number; y: number }) => void;
+      onEdit: (id: string) => void;
+      onAdd: (status: Status) => void;
+      onRestore: (id: string) => void;
+      onPurge: (id: string) => void;
+      onTagClick?: (tag: string) => void;
+    }) => (
+      <section aria-label="board-double">
+        <button onClick={() => onAdd('todo')}>add todo</button>
+        <button onClick={() => onEdit('missing')}>edit missing</button>
+        <button onClick={() => onMove('missing', 'done', 0)}>move missing</button>
+        <button onClick={() => onTick('missing', 0, { x: 0, y: 0 })}>tick missing</button>
+        {value.tasks.map((item, position) => (
+          <div
+            key={item.id}
+            data-testid={`task-${item.id}`}
+            // A card with no DOM node is the case the confetti origin has to
+            // survive; 'ghost' stands in for one scrolled out of the tree.
+            {...(item.id === 'ghost' ? {} : { 'data-task': item.id })}
+          >
+            <span>{item.title}:{item.status}:{item.checks.map((check) => String(check.done)).join(',')}</span>
+            <button onClick={() => onEdit(item.id)}>edit {item.id}</button>
+            <button onClick={() => onMove(item.id, 'doing', 0)}>move doing {item.id}</button>
+            <button onClick={() => onMove(item.id, 'done', 0)}>move done {item.id}</button>
+            <button onClick={() => onMove(item.id, item.status, position)}>keep {item.id} in place</button>
+            <button onClick={() => onTick(item.id, 0, { x: 2, y: 3 })}>tick {item.id}</button>
+            <button onClick={() => onTick(item.id, 99, { x: 2, y: 3 })}>tick invalid {item.id}</button>
+            <button onClick={() => onRestore(item.id)}>restore {item.id}</button>
+            <button onClick={() => onPurge(item.id)}>purge {item.id}</button>
+            <button onClick={() => onTagClick?.(item.tags[0] ?? '')}>tag {item.id}</button>
+          </div>
+        ))}
+      </section>
+    ),
+  };
+});
 
 vi.mock('./components/IdentityGate', () => ({
   IdentityGate: ({ onIdentity }: { onIdentity: (identity: Identity) => void }) => (
@@ -613,8 +286,8 @@ vi.mock('./components/IdentityGate', () => ({
 
 vi.mock('./components/CardModal', () => ({
   CardModal: ({ state: modal, onSave, onDelete, onClose, aiDraft }: {
-    state: { mode: 'add'; status: Task['status'] } | { mode: 'edit'; task: Task };
-    onSave: (item: Task) => void;
+    state: { mode: 'add'; status: Status } | { mode: 'edit'; task: Task };
+    onSave: (save: import('./components/CardEditor').CardSave) => void;
     onDelete: (id: string) => void;
     onClose: () => void;
     aiDraft?: unknown;
@@ -624,8 +297,14 @@ vi.mock('./components/CardModal', () => ({
       {typeof aiDraft === 'function' && <button onClick={() => void aiDraft({ title: 'draft' })}>request ai draft</button>}
       <button onClick={() => onSave(
         modal.mode === 'edit'
-          ? { ...modal.task, title: `${modal.task.title} edited` }
-          : task({ id: 'added', title: 'Added task', status: modal.status, checks: [] }),
+          ? { mode: 'edit', taskId: modal.task.id, patch: { title: `${modal.task.title} edited` } }
+          : {
+            mode: 'add',
+            draft: {
+              emoji: '', title: 'Added task', desc: '', status: modal.status,
+              blocked: false, prio: 3, tags: [], checks: [],
+            },
+          },
       )}>save card</button>
       {modal.mode === 'edit' && <button onClick={() => onDelete(modal.task.id)}>delete card</button>}
       <button onClick={onClose}>close card</button>
@@ -657,19 +336,25 @@ vi.mock('./components/SettingsModal', () => ({
   }) => <div role="dialog" aria-label="settings"><span>{String(serverPresent)}</span><span>name:{displayNameValue}</span><button onClick={() => onSaved({ has_key: true, ai_base_url: '' })}>enable ai</button><button onClick={() => onDebugChange(true)}>enable debug</button><button onClick={() => onDisplayNameChange('Amit K')}>set display name</button><button onClick={onClose}>close settings</button></div>,
 }));
 
+const draft = (title: string): TaskDraft => ({
+  emoji: '', title, desc: '', status: 'todo', blocked: false, prio: 3, tags: [], checks: [],
+});
+
 vi.mock('./components/AdrModal', () => ({
   AdrModal: ({ onSplit, onAdd, onClose }: {
-    onSplit: (request: unknown, signal?: AbortSignal) => Promise<Task[]>;
-    onAdd: (tasks: Task[]) => void;
+    onSplit: (request: unknown, signal?: AbortSignal) => Promise<unknown>;
+    onAdd: (drafts: TaskDraft[]) => Promise<ReadonlySet<string>>;
     onClose: () => void;
-  }) => <div role="dialog" aria-label="adr"><button onClick={() => void onSplit({ text: 'adr' }, new AbortController().signal)}>split adr request</button><button onClick={() => onAdd([])}>add no adr stories</button><button onClick={() => onAdd([task({ id: 'adr-added', title: 'ADR story', checks: [] })])}>add adr stories</button><button onClick={onClose}>close adr</button></div>,
+  }) => <div role="dialog" aria-label="adr"><button onClick={() => void onSplit({ text: 'adr' }, new AbortController().signal)}>split adr request</button><button onClick={() => onAdd([])}>add no adr stories</button><button onClick={() => onAdd([draft('ADR story'), draft('ADR story two')])}>add adr stories</button><button onClick={onClose}>close adr</button></div>,
 }));
 
 vi.mock('./components/ImportModal', () => ({
   ImportModal: ({ onPreview, onAdd, onCommitLinks, onClose }: {
     onPreview: (request: unknown, signal?: AbortSignal) => Promise<unknown>;
-    onAdd: (tasks: Task[]) => void; onCommitLinks: (request: unknown) => void; onClose: () => void;
-  }) => <div role="dialog" aria-label="issue import"><button onClick={() => void onPreview({ source: 'github' }, new AbortController().signal)}>preview issues</button><button onClick={() => onAdd([])}>add no issues</button><button onClick={() => onAdd([task({ id: 'issue-added', title: 'Imported issue', checks: [] })])}>add issues</button><button onClick={() => onCommitLinks({ source: 'github', items: [] })}>commit links</button><button onClick={onClose}>close issue import</button></div>,
+    onAdd: (drafts: TaskDraft[]) => Promise<ReadonlySet<string>>;
+    onCommitLinks: (request: unknown) => void;
+    onClose: () => void;
+  }) => <div role="dialog" aria-label="issue import"><button onClick={() => void onPreview({ source: 'github' }, new AbortController().signal)}>preview issues</button><button onClick={() => onAdd([draft('Imported issue')])}>add issues</button><button onClick={() => onCommitLinks({ source: 'github', items: [] })}>commit links</button><button onClick={onClose}>close issue import</button></div>,
 }));
 
 vi.mock('./components/ReconnectModal', () => ({
@@ -685,10 +370,28 @@ vi.mock('./components/DebugOverlay', () => ({
 }));
 vi.mock('./components/Confetti', () => ({ Confetti: () => <div data-testid="confetti" /> }));
 
-import App, { LOCAL_PERSISTENCE_NOTICE } from './App';
+vi.mock('./lib/markdown', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/markdown')>();
+  return {
+    ...actual,
+    serialize: (value: { title: string }) => {
+      const text = `# ${value.title}`;
+      state.exported.push(text);
+      return text;
+    },
+    parse: (text: string) => {
+      if (state.importError) throw new Error('invalid markdown');
+      return actual.parse(text);
+    },
+  };
+});
+
+import App from './App';
+import { CARD_GONE_NOTICE, NO_SERVER_NOTICE } from './App';
 
 beforeEach(() => {
   vi.useRealTimers();
+  localStorage.clear();
   state.identity = manual;
   state.authMode = 'unknown';
   state.localDisplayName = '';
@@ -696,105 +399,38 @@ beforeEach(() => {
   state.resolveError = null;
   state.resolveDeferred = null;
   state.resolveCalls = 0;
-  state.board = board();
-  state.importBoard = null;
-  state.importError = false;
-  state.dirty = false;
-  state.detect = false;
-  state.detectDeferred = false;
-  state.detectResolve = null;
-  state.remoteBoard = null;
-  state.migratedRaw = false;
-  state.pendingWrite = null;
-  state.startupMode = 'normal';
-  state.pendingMode = 'clean';
-  state.legacyMode = 'clean';
-  state.sameSemantics = false;
-  state.commitMode = 'normal';
-  state.omitAckSnapshot = false;
-  state.ackCurrent = true;
-  state.omitIsCurrent = false;
-  state.persistenceFails = false;
-  state.persistenceConflicts = [];
-  state.remoteSaveError = null;
-  state.prepareError = null;
-  state.remoteSaveConflicts = [];
+  state.present = true;
+  state.tasks = [seed()];
+  state.created = 0;
+  state.calls = [];
+  state.listError = null;
+  state.writeError = null;
+  state.createErrors = {};
+  state.tombstoneError = null;
+  state.linksError = null;
+  state.tombstones = [];
   state.labels = [];
   state.settings = { has_key: false, ai_base_url: '' };
   state.sources = [];
-  state.outboxStatus = null;
-  state.outboxReject = false;
   state.savedIdentities = [];
   state.clearedIdentity = 0;
-  state.dirtyWrites = [];
   state.exported = [];
-  state.remoteAcknowledgement = null;
-  state.saveAcknowledgements = [];
-  state.acknowledgementPersists = [];
-  state.remoteInstances = [];
-  state.outboxInstances = [];
+  state.imported = [];
+  state.importError = false;
   state.bursts = [];
   vi.clearAllMocks();
   vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('unexpected network request'); }));
 });
 
-describe('App DOM orchestration', () => {
-  it('forwards generation, durable version, and durable snapshot at both save callback boundaries', () => {
-    const source = appSource;
-    const cases = [
-      {
-        surface: 'immediate',
-        start: 'remote.saveRemote(',
-        end: 'canonicalTaskIDs: localTaskIDs',
-      },
-      {
-        surface: 'debounced',
-        start: 'remote.saveRemoteDebounced(',
-        end: 'canonicalTaskIDs: sentIDs',
-      },
-    ] as const;
+/** The board as it is rendered: "title:status:checks". */
+function shown(): string[] {
+  return [...document.querySelectorAll('[data-testid^="task-"] span')].map(
+    (node) => node.textContent ?? '',
+  );
+}
 
-    for (const { surface, start, end } of cases) {
-      const startAt = source.indexOf(start);
-      const endAt = source.indexOf(end, startAt);
-      expect(startAt, `${surface} save callback exists`).toBeGreaterThan(-1);
-      expect(endAt, `${surface} save options exist`).toBeGreaterThan(startAt);
-      const callbackSource = source.slice(startAt, endAt);
-      const parameters = callbackSource.match(/async\s*\(\s*([\s\S]*?)\s*\)\s*=>/)?.[1];
-      const acknowledgementFields = callbackSource
-        .match(/acknowledgeRemote\(\{\s*([\s\S]*?)\s*\}\);/)?.[1];
-      expect(parameters, `${surface} callback parameters`).toBeDefined();
-      expect(acknowledgementFields, `${surface} acknowledgement call`).toBeDefined();
-
-      let metadataBindings: string[];
-      if (parameters!.trimStart().startsWith('{')) {
-        metadataBindings = ['generation', 'durableVersion', 'durableSnapshot'].map((field) => {
-          const binding = parameters!.match(
-            new RegExp(`(?:^|,)\\s*${field}\\s*(?::\\s*([A-Za-z_$][\\w$]*))?\\s*(?:,|})`),
-          );
-          expect(binding, `${surface} binds ${field}`).not.toBeNull();
-          return binding?.[1] ?? field;
-        });
-      } else {
-        metadataBindings = parameters!.split(',').map((value) => value.trim()).slice(5, 8);
-      }
-
-      expect(metadataBindings, `${surface} callback metadata order`).toHaveLength(3);
-      const acknowledgementNames = [
-        'expectedGeneration',
-        'expectedVersion',
-        'acknowledgementBase',
-      ];
-      for (const [index, name] of acknowledgementNames.entries()) {
-        expect(
-          acknowledgementFields,
-          `${surface} acknowledgement metadata forwarding`,
-        ).toMatch(new RegExp(`${name}:\\s*${metadataBindings[index]}`));
-      }
-    }
-  });
-
-  it('adopts a manual identity and signs out without network access', async () => {
+describe('identity shell', () => {
+  it('adopts a manual identity and signs out', async () => {
     state.identity = null;
     const user = userEvent.setup();
     render(<App />);
@@ -807,7 +443,6 @@ describe('App DOM orchestration', () => {
     await user.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(screen.getByRole('button', { name: 'use manual identity' })).not.toBeNull();
     expect(state.clearedIdentity).toBe(1);
-    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('opens the board directly as "default" in open mode, with no gate', async () => {
@@ -815,11 +450,9 @@ describe('App DOM orchestration', () => {
     state.authMode = 'open';
     render(<App />);
 
-    // The header identity appears without any gate interaction.
     expect((await screen.findByTitle('default')).textContent).toBe('default');
     expect(screen.queryByRole('button', { name: 'use manual identity' })).toBeNull();
     expect(state.savedIdentities).toEqual([{ kind: 'manual', id: 'default' }]);
-    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('sign-out in open mode still reaches the gate to pick another board', async () => {
@@ -841,7 +474,6 @@ describe('App DOM orchestration', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    // Overrides the identity label; the id stays as the tooltip.
     expect((await screen.findByTitle('alice')).textContent).toBe('Board Goblin');
 
     await user.click(screen.getByRole('button', { name: 'Settings' }));
@@ -882,13 +514,8 @@ describe('App DOM orchestration', () => {
     );
   });
 
-  it('ignores resolved Azure identity after unmount', async () => {
+  it('ignores a resolved Azure identity after unmount', async () => {
     const azureIdentity: Identity = { kind: 'azure', id: 'alice@example.com' };
-    const resolvedIdentity: Identity = {
-      ...azureIdentity,
-      name: 'Alice Azure',
-      homeAccountId: 'home-1',
-    };
     let resolveIdentity!: (identity: Identity) => void;
     state.identity = azureIdentity;
     state.resolveDeferred = new Promise((resolve) => { resolveIdentity = resolve; });
@@ -896,606 +523,642 @@ describe('App DOM orchestration', () => {
     const resolved = render(<App />);
     expect(state.resolveCalls).toBe(1);
     resolved.unmount();
-    await act(async () => { resolveIdentity(resolvedIdentity); });
+    await act(async () => {
+      resolveIdentity({ ...azureIdentity, homeAccountId: 'home-1' });
+    });
     expect(state.savedIdentities).toEqual([]);
   });
+});
 
-  it('adds, edits, moves, checks, ships, cancels, restores, and purges cards', async () => {
+describe('loading the board', () => {
+  it('reads the board from the server on mount', async () => {
+    render(<App />);
+    expect(await screen.findByText('First task:todo:false')).not.toBeNull();
+    await waitFor(() => {
+      expect(screen.getByRole('img', { name: 'synced to server' })).not.toBeNull();
+    });
+    expect(state.calls).toEqual(['list']);
+  });
+
+  it('says so, and shows nothing, when no server answers', async () => {
+    state.present = false;
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelector('.notice')?.textContent).toContain(NO_SERVER_NOTICE);
+    });
+    expect(screen.queryByTestId('task-task-1')).toBeNull();
+    expect(screen.getByRole('img', { name: 'no server — nothing loaded' })).not.toBeNull();
+    expect(state.calls).toEqual([]);
+  });
+
+  it('reports a failed load and keeps the board empty', async () => {
+    state.listError = new Error('storage error');
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelector('.notice')?.textContent).toContain('storage error');
+    });
+    expect(screen.getByRole('img', { name: /did not reach the server/ })).not.toBeNull();
+    expect(screen.queryByTestId('task-task-1')).toBeNull();
+  });
+
+  it('opens the reconnect dialog on an expired session and reloads after reconnecting', async () => {
+    const { ReauthRequiredError } = await import('./lib/auth');
+    state.listError = new ReauthRequiredError('expired');
     const user = userEvent.setup();
     render(<App />);
 
+    expect(await screen.findByRole('dialog', { name: 'reconnect' })).not.toBeNull();
+    expect(screen.getByRole('img', { name: /session expired/ })).not.toBeNull();
+    await user.click(screen.getByRole('button', { name: 'reconnect now' }));
+    expect(state.savedIdentities.at(-1)).toMatchObject({ serverToken: 'fresh' });
+    // The new identity re-runs the load effect, which reads the board again.
+    expect(await screen.findByText('First task:todo:false')).not.toBeNull();
+    await waitFor(() => {
+      expect(screen.getByRole('img', { name: 'synced to server' })).not.toBeNull();
+    });
+  });
+
+  it('keeps an explicit reconnect and sign-out reachable after dismissal', async () => {
+    const { ReauthRequiredError } = await import('./lib/auth');
+    state.listError = new ReauthRequiredError('expired');
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'close reconnect' }));
+    await user.click(screen.getByRole('button', { name: 'Reconnect' }));
+    await user.click(screen.getByRole('button', { name: 'reconnect signout' }));
+    expect(screen.getByRole('button', { name: 'use manual identity' })).not.toBeNull();
+  });
+});
+
+describe('writing through the task API', () => {
+  it('creates, edits, moves, ticks, ships, cancels, restores, and deletes', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+
     await user.click(screen.getByRole('button', { name: 'add todo' }));
     await user.click(within(screen.getByRole('dialog', { name: 'card modal' })).getByRole('button', { name: 'save card' }));
-    expect(await screen.findByText(/Added task:todo/)).not.toBeNull();
+    expect(await screen.findByText('Added task:todo:')).not.toBeNull();
+    expect(state.calls).toContain('create:Added task');
 
-    await user.click(screen.getByRole('button', { name: 'edit added' }));
+    await user.click(screen.getByRole('button', { name: 'edit server-1' }));
     await user.click(screen.getByRole('button', { name: 'save card' }));
-    expect(await screen.findByText(/Added task edited:todo/)).not.toBeNull();
+    expect(await screen.findByText('Added task edited:todo:')).not.toBeNull();
 
-    await user.click(screen.getByRole('button', { name: 'move doing added' }));
-    expect(await screen.findByText(/Added task edited:doing/)).not.toBeNull();
+    await user.click(screen.getByRole('button', { name: 'move doing server-1' }));
+    expect(await screen.findByText('Added task edited:doing:')).not.toBeNull();
+    expect(state.calls).toContain('patch:server-1:{"status":"doing","index":0}');
 
+    // A card with an open checklist item stops at the ship confirmation, and
+    // ticking everything there goes out as one forced patch.
     await user.click(screen.getByRole('button', { name: 'move done task-1' }));
     expect(screen.getByRole('dialog', { name: 'ship' })).not.toBeNull();
     await user.click(screen.getByRole('button', { name: 'tick all' }));
-    expect(await screen.findByText(/First task:done:true/)).not.toBeNull();
+    expect(await screen.findByText('First task:done:true')).not.toBeNull();
+    expect(state.calls).toContain(
+      'patch:task-1:{"checks":[{"text":"verify","done":true}],"status":"done","index":0,"force":true}',
+    );
     expect(state.bursts.some((burst) => burst[2] === 70)).toBe(true);
+    expect(screen.getByText('×1 shipped today')).not.toBeNull();
 
-    await user.click(screen.getByRole('button', { name: 'edit added' }));
+    await user.click(screen.getByRole('button', { name: 'edit server-1' }));
     await user.click(screen.getByRole('button', { name: 'delete card' }));
     await user.clear(screen.getByRole('textbox', { name: 'confirm input' }));
     await user.type(screen.getByRole('textbox', { name: 'confirm input' }), 'superseded');
     await user.click(screen.getByRole('button', { name: 'confirm action' }));
-    expect(await screen.findByText(/Added task edited:cancelled/)).not.toBeNull();
+    expect(await screen.findByText('Added task edited:cancelled:')).not.toBeNull();
+    expect(state.tombstones).toEqual([{ taskId: 'server-1', reason: 'superseded' }]);
 
-    await user.click(screen.getByRole('button', { name: 'restore added' }));
-    expect(await screen.findByText(/Added task edited:todo/)).not.toBeNull();
-    await user.click(screen.getByRole('button', { name: 'purge added' }));
+    await user.click(screen.getByRole('button', { name: 'restore server-1' }));
+    expect(await screen.findByText('Added task edited:todo:')).not.toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'purge server-1' }));
     await user.click(screen.getByRole('button', { name: 'confirm action' }));
-    await waitFor(() => expect(screen.queryByTestId('task-added')).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId('task-server-1')).toBeNull());
+    expect(state.calls).toContain('delete:server-1');
   });
 
-  it('handles ship cancellation/override, cancellation without a reason, and cancelled visibility', async () => {
+  it('kills without a reason from the secondary action and from a blank one', async () => {
     const user = userEvent.setup();
     render(<App />);
-
-    await user.click(screen.getByRole('button', { name: 'move done task-1' }));
-    await user.click(screen.getByRole('button', { name: 'cancel ship' }));
-    expect(screen.queryByRole('dialog', { name: 'ship' })).toBeNull();
-    expect(screen.getByText(/First task:todo:false/)).not.toBeNull();
-
-    await user.click(screen.getByRole('button', { name: 'move done task-1' }));
-    await user.click(screen.getByRole('button', { name: 'ship anyway' }));
-    expect(await screen.findByText(/First task:done:false/)).not.toBeNull();
-    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
-    expect(await screen.findByText(/First task:doing:false/)).not.toBeNull();
-    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
-    expect(screen.getByText(/First task:doing:false/)).not.toBeNull();
+    await screen.findByText('First task:todo:false');
 
     await user.click(screen.getByRole('button', { name: 'edit task-1' }));
     await user.click(screen.getByRole('button', { name: 'delete card' }));
     await user.click(screen.getByRole('button', { name: 'secondary action' }));
-    expect(await screen.findByText(/First task:cancelled:false/)).not.toBeNull();
-    await user.click(screen.getByRole('button', { name: /Cancelled/ }));
-    expect(screen.getByRole('button', { name: /Cancelled/ }).getAttribute('aria-pressed')).toBe('true');
+    expect(await screen.findByText('First task:cancelled:false')).not.toBeNull();
+    expect(state.tombstones).toEqual([]);
+
+    await user.click(screen.getByRole('button', { name: 'restore task-1' }));
+    await screen.findByText('First task:todo:false');
+    await user.click(screen.getByRole('button', { name: 'edit task-1' }));
+    await user.click(screen.getByRole('button', { name: 'delete card' }));
+    await user.clear(screen.getByRole('textbox', { name: 'confirm input' }));
+    await user.click(screen.getByRole('button', { name: 'confirm action' }));
+    expect(await screen.findByText('First task:cancelled:false')).not.toBeNull();
+    expect(state.tombstones).toEqual([]);
   });
 
-  it('ignores missing task/check callbacks, unticks completed checks, and handles a blank kill reason', async () => {
-    state.board = board([task({ checks: [
-      { text: 'done', done: true },
-      { text: 'other', done: false },
-    ] })]);
+  it('reports a refused kill reason after the card has already moved', async () => {
+    state.tombstoneError = new Error('tombstone target changed');
     const user = userEvent.setup();
     render(<App />);
+    await screen.findByText('First task:todo:false');
+
+    await user.click(screen.getByRole('button', { name: 'edit task-1' }));
+    await user.click(screen.getByRole('button', { name: 'delete card' }));
+    await user.click(screen.getByRole('button', { name: 'confirm action' }));
+    await waitFor(() => {
+      expect(document.querySelector('.notice')?.textContent).toContain(
+        'tombstone target changed',
+      );
+    });
+    // The move itself landed: the reason is what was lost.
+    expect(screen.getByText('First task:cancelled:false')).not.toBeNull();
+  });
+
+  it('ships a warned card as it stands, and cancels the confirmation', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+
+    await user.click(screen.getByRole('button', { name: 'move done task-1' }));
+    await user.click(screen.getByRole('button', { name: 'cancel ship' }));
+    expect(screen.queryByRole('dialog', { name: 'ship' })).toBeNull();
+    expect(screen.getByText('First task:todo:false')).not.toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'move done task-1' }));
+    await user.click(screen.getByRole('button', { name: 'ship anyway' }));
+    expect(await screen.findByText('First task:done:false')).not.toBeNull();
+    expect(state.calls).toContain(
+      'patch:task-1:{"status":"done","index":0,"force":true}',
+    );
+
+    // Reopening takes it back off today's tally.
+    expect(screen.getByText('×1 shipped today')).not.toBeNull();
+    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
+    await screen.findByText('First task:doing:false');
+    expect(screen.queryByText(/shipped today/)).toBeNull();
+  });
+
+  it('ships straight through when nothing warrants a warning', async () => {
+    state.tasks = [seed({ checks: [{ text: 'verify', done: true }] })];
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:true');
+
+    await user.click(screen.getByRole('button', { name: 'move done task-1' }));
+    expect(await screen.findByText('First task:done:true')).not.toBeNull();
+    expect(state.calls).toContain('patch:task-1:{"status":"done","index":0}');
+  });
+
+  it('falls back to the viewport centre when the shipped card has no DOM node', async () => {
+    state.tasks = [seed({ id: 'ghost', checks: [] })];
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:');
+
+    await user.click(screen.getByRole('button', { name: 'move done ghost' }));
+    await screen.findByText('First task:done:');
+    expect(state.bursts.at(-1)).toEqual([
+      window.innerWidth / 2,
+      window.innerHeight / 2,
+      70,
+    ]);
+  });
+
+  it('ignores moves, edits, and ticks of cards that are not on the board', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+    state.calls = [];
 
     await user.click(screen.getByRole('button', { name: 'edit missing' }));
     await user.click(screen.getByRole('button', { name: 'move missing' }));
     await user.click(screen.getByRole('button', { name: 'tick missing' }));
     await user.click(screen.getByRole('button', { name: 'tick invalid task-1' }));
     expect(screen.queryByRole('dialog', { name: 'card modal' })).toBeNull();
-    expect(screen.getByText(/First task:todo:true,false/)).not.toBeNull();
-
-    await user.click(screen.getByRole('button', { name: 'tick task-1' }));
-    expect(await screen.findByText(/First task:todo:false,false/)).not.toBeNull();
-    await user.click(screen.getByRole('button', { name: 'edit task-1' }));
-    await user.click(screen.getByRole('button', { name: 'delete card' }));
-    await user.clear(screen.getByRole('textbox', { name: 'confirm input' }));
-    await user.click(screen.getByRole('button', { name: 'confirm action' }));
-    expect(await screen.findByText(/First task:cancelled:false,false/)).not.toBeNull();
+    expect(state.calls).toEqual([]);
   });
 
-  it('filters the board by text and label toggles without touching stored tasks', async () => {
-    state.board = board([
-      task({ id: 't1', title: 'Fix login', desc: 'auth expiry', tags: ['bug', 'auth'] }),
-      task({ id: 't2', title: 'Landing page', desc: '', tags: ['ui'] }),
-    ]);
+  it('sends no patch for a same-column drop that names no slot', async () => {
     const user = userEvent.setup();
     render(<App />);
-    expect(screen.getByTestId('task-t1')).toBeTruthy();
-    expect(screen.getByTestId('task-t2')).toBeTruthy();
+    await screen.findByText('First task:todo:false');
+    state.calls = [];
 
-    // Free text narrows by title/desc/tags, case-insensitively.
-    const input = screen.getByRole('searchbox', { name: 'Filter cards by text' });
-    await user.type(input, 'LOGIN');
-    expect(screen.queryByTestId('task-t2')).toBeNull();
-    expect(screen.getByTestId('task-t1')).toBeTruthy();
-    expect(screen.getByText('1 of 2 cards')).toBeTruthy();
-
-    // Clear restores everything.
-    await user.click(screen.getByRole('button', { name: 'Clear' }));
-    expect(screen.getByTestId('task-t2')).toBeTruthy();
-    expect(screen.queryByText(/of 2 cards/)).toBeNull();
-
-    // A label click narrows; clicking its chip in the bar releases it.
-    await user.click(screen.getByRole('button', { name: 'tag t1' }));
-    expect(screen.queryByTestId('task-t2')).toBeNull();
-    const chip = screen.getByRole('button', { name: 'Stop filtering by label bug' });
-    await user.click(chip);
-    expect(screen.getByTestId('task-t2')).toBeTruthy();
-
-    // Filtering is display-only: the stored board still has both tasks.
-    expect(state.board?.tasks).toHaveLength(2);
+    // The mock's "keep in place" hands back the card's own slot, which is a
+    // real reorder request; a status-only repeat of the current column is the
+    // one thing applyMove drops.
+    await user.click(screen.getByRole('button', { name: 'keep task-1 in place' }));
+    await waitFor(() => expect(state.calls).toContain('patch:task-1:{"status":"todo","index":0}'));
   });
 
-  it('does not persist an indexed same-slot move', async () => {
-    const user = userEvent.setup();
-    render(<App />);
-
-    await user.click(screen.getByRole('button', { name: 'keep task-1 in same slot' }));
-
-    expect(state.dirtyWrites).toEqual([]);
-    expect(screen.getByText(/First task:todo:false/)).not.toBeNull();
-  });
-
-  it('blocks restore when its durable tombstone cannot be removed', async () => {
-    state.board = board([task({ status: 'cancelled' })]);
-    state.outboxReject = true;
-    render(<App />);
-    await userEvent.setup().click(screen.getByRole('button', { name: 'restore task-1' }));
-    await waitFor(() => {
-      expect(document.querySelector('.notice')?.textContent).toContain(
-        'card remains cancelled',
-      );
-    });
-    expect(screen.getByText(/First task:cancelled/)).not.toBeNull();
-  });
-
-  it('auto-ships a completed checklist but never resurrects a cancelled card', async () => {
+  it('ticks a checklist item, unticks it, and auto-ships a finished one', async () => {
     vi.useFakeTimers();
-    state.board = board([
-      task({ id: 'active', checks: [{ text: 'last', done: false }] }),
-      task({ id: 'cancelled', status: 'cancelled', checks: [{ text: 'last', done: false }] }),
-    ]);
+    state.tasks = [
+      seed({ id: 'active', checks: [{ text: 'last', done: false }] }),
+      seed({ id: 'dropped', status: 'cancelled', checks: [{ text: 'last', done: false }] }),
+    ];
     try {
       render(<App />);
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { await Promise.resolve(); });
       fireEvent.click(screen.getByRole('button', { name: 'tick active' }));
-      fireEvent.click(screen.getByRole('button', { name: 'tick cancelled' }));
+      fireEvent.click(screen.getByRole('button', { name: 'tick dropped' }));
       await act(async () => { vi.advanceTimersByTime(351); });
-      expect(screen.getByText(/First task moved to done/)).not.toBeNull();
-      expect(screen.getByText(/First task:cancelled:true/)).not.toBeNull();
+      await act(async () => { await Promise.resolve(); });
+      expect(shown()).toContain('First task:done:true');
+      // Finishing a cancelled card's checklist must not resurrect it.
+      expect(shown()).toContain('First task:cancelled:true');
       expect(state.bursts.some((burst) => burst[2] === 14)).toBe(true);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('surfaces persistence and outbox failures, deduplicates notices, and re-arms after dismissal', async () => {
-    state.persistenceFails = true;
-    state.outboxStatus = { kind: 'blocked', message: 'journal corrupt' };
+  it('does not auto-ship when the tick is undone before the timer fires', async () => {
+    vi.useFakeTimers();
+    state.tasks = [seed({ id: 'active', checks: [{ text: 'last', done: false }] })];
+    try {
+      render(<App />);
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { await Promise.resolve(); });
+      fireEvent.click(screen.getByRole('button', { name: 'tick active' }));
+      await act(async () => { await Promise.resolve(); });
+      fireEvent.click(screen.getByRole('button', { name: 'tick active' }));
+      await act(async () => { vi.advanceTimersByTime(351); });
+      await act(async () => { await Promise.resolve(); });
+      expect(shown()).toContain('First task:todo:false');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('surfaces a refused write and snaps the board back to the server', async () => {
     const user = userEvent.setup();
     render(<App />);
+    await screen.findByText('First task:todo:false');
 
+    state.writeError = new Error('store: invalid effort "XL"');
+    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
     await waitFor(() => {
       expect(document.querySelector('.notice')?.textContent).toContain(
-        'Metadata delivery is blocked: journal corrupt',
+        'store: invalid effort "XL"',
       );
     });
-    await user.click(screen.getByRole('button', { name: 'tick task-1' }));
-    await waitFor(() => {
-      expect(document.querySelector('.notice')?.textContent).toContain(LOCAL_PERSISTENCE_NOTICE);
-    });
-    expect(document.querySelector('.notice')?.textContent?.match(/journal corrupt/g)).toHaveLength(1);
+    // The optimistic move is undone by the refetch that follows.
+    expect(screen.getByText('First task:todo:false')).not.toBeNull();
+    expect(state.bursts).toEqual([]);
 
     await user.click(screen.getByRole('button', { name: 'Dismiss' }));
     expect(document.querySelector('.notice')).toBeNull();
-    state.outboxStatus = { kind: 'retry', message: 'offline' };
-    fireEvent(window, new Event('online'));
-    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
-    await waitFor(() => {
-      expect(document.querySelector('.notice')?.textContent).toContain(LOCAL_PERSISTENCE_NOTICE);
-    });
   });
 
-  it('ignores idle outbox status and renders retry status distinctly', async () => {
-    state.outboxStatus = { kind: 'idle' };
-    const idle = render(<App />);
-    await waitFor(() => expect(state.outboxInstances.length).toBeGreaterThan(0));
-    expect(document.querySelector('.notice')).toBeNull();
-    idle.unmount();
-
-    state.outboxStatus = { kind: 'retry', message: 'network offline' };
-    render(<App />);
-    await waitFor(() => {
-      expect(document.querySelector('.notice')?.textContent).toContain(
-        'Metadata delivery will retry: network offline',
-      );
-    });
-  });
-
-  it('bootstraps a remote board and gates AI/source actions from server settings', async () => {
-    state.detect = true;
-    state.remoteBoard = board([task({ id: 'remote', title: 'Remote task', checks: [] })]);
-    state.labels = ['server-label'];
-    state.settings = { has_key: true, ai_base_url: '' };
-    state.sources = [{ id: 'github', name: 'GitHub', kind: 'github' }];
+  it('undoes an optimistic move when the write and the re-read both fail', async () => {
     const user = userEvent.setup();
     render(<App />);
+    await screen.findByText('First task:todo:false');
 
-    expect(await screen.findByText(/Remote task:todo/)).not.toBeNull();
-    await user.click(screen.getByRole('button', { name: 'edit remote' }));
+    // The server is unreachable in both directions: the refetch that normally
+    // corrects the board never arrives.
+    state.writeError = new Error('network down');
+    state.listError = new Error('network down');
+    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
+    await waitFor(() => {
+      expect(document.querySelector('.notice')?.textContent).toContain('network down');
+    });
+
+    // The notice may not claim more than the screen shows, and the screen may
+    // not show a move the server refused.
+    expect(shown()).toEqual(['First task:todo:false']);
+    expect(state.tasks[0]!.status).toBe('todo');
+    expect(document.querySelector('.notice')?.textContent).toContain(
+      'The board below is the last one the server confirmed',
+    );
+  });
+
+  it('keeps an optimistic move that was saved but could not be read back', async () => {
+    const user = userEvent.setup();
+    state.tasks = [seed({ checks: [] })];
+    render(<App />);
+    await screen.findByText('First task:todo:');
+
+    // The write landed; only the refetch failed, so the change is real and
+    // stays on screen — and the notice says the board may be stale rather
+    // than claiming nothing was saved.
+    state.listError = new Error('network down');
+    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
+    await waitFor(() => {
+      expect(document.querySelector('.notice')?.textContent).toContain(
+        'The board could not be read from the server: network down',
+      );
+    });
+    expect(shown()).toEqual(['First task:doing:']);
+    expect(state.tasks[0]!.status).toBe('doing');
+  });
+
+  it('undoes a move the expired session refused, and says the session expired', async () => {
+    const { ReauthRequiredError } = await import('./lib/auth');
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+
+    state.writeError = new ReauthRequiredError('expired');
+    state.listError = new ReauthRequiredError('expired');
+    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
+
+    // Silence plus a card sitting in its new column is the combination that
+    // reads as "saved". Neither is allowed here.
+    await waitFor(() => {
+      expect(document.querySelector('.notice')?.textContent).toContain(
+        'That change was not saved: the session expired',
+      );
+    });
+    expect(shown()).toEqual(['First task:todo:false']);
+    expect(state.tasks[0]!.status).toBe('todo');
+    expect(await screen.findByRole('dialog', { name: 'reconnect' })).not.toBeNull();
+  });
+
+  it('announces recovery once a write lands again', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+
+    // The refetch fails alongside the write, so the failed state is on screen
+    // rather than passed through inside one commit.
+    state.writeError = new Error('store: invalid effort "XL"');
+    state.listError = new Error('storage error');
+    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
+    await waitFor(() => {
+      expect(screen.getByRole('img', { name: /did not reach the server/ })).not.toBeNull();
+    });
+
+    // The move's own announcement lands after the recovery one, which is why
+    // only the dot is asserted here.
+    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
+    await waitFor(() => {
+      expect(screen.getByRole('img', { name: 'synced to server' })).not.toBeNull();
+    });
+  });
+
+  it('drops a stale refetch when a newer write is already in flight', async () => {
+    state.tasks = [seed({ checks: [] })];
+    render(<App />);
+    await screen.findByText('First task:todo:');
+    state.calls = [];
+
+    // Two moves without awaiting between them: the first refetch resolves
+    // against a generation the second has already superseded, so the board
+    // never flashes back through the intermediate column.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'move doing task-1' }));
+      fireEvent.click(screen.getByRole('button', { name: 'move done task-1' }));
+    });
+    await waitFor(() => expect(state.calls.filter((c) => c === 'list')).toHaveLength(2));
+    expect(shown()).toEqual(['First task:done:']);
+  });
+
+  it('closes an open card the server no longer has', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+
+    await user.click(screen.getByRole('button', { name: 'edit task-1' }));
+    expect(screen.getByRole('dialog', { name: 'card modal' })).not.toBeNull();
+    // Something else deleted it; the next refetch is what notices.
+    state.tasks = [];
+    await user.click(screen.getByRole('button', { name: 'close card' }));
+    await user.click(screen.getByRole('button', { name: 'edit task-1' }));
+    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
+    await waitFor(() => {
+      expect(document.querySelector('.notice')?.textContent).toContain(CARD_GONE_NOTICE);
+    });
+    expect(screen.queryByRole('dialog', { name: 'card modal' })).toBeNull();
+  });
+});
+
+describe('filtering', () => {
+  it('narrows by text and label without changing what a move sends', async () => {
+    state.tasks = [
+      seed({ id: 't1', title: 'Fix login', desc: 'auth expiry', tags: ['bug', 'auth'], checks: [] }),
+      seed({ id: 't2', title: 'Landing page', desc: '', tags: ['ui'], checks: [] }),
+      seed({ id: 't3', title: 'Fix billing', desc: '', tags: ['bug'], checks: [] }),
+    ];
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('Fix login:todo:');
+
+    const input = screen.getByRole('searchbox', { name: 'Filter cards by text' });
+    await user.type(input, 'FIX');
+    expect(screen.queryByTestId('task-t2')).toBeNull();
+    expect(screen.getByText('2 of 3 cards')).toBeTruthy();
+
+    // Slot 1 of the *rendered* column is Fix billing, which sits at slot 2 of
+    // the real column — the index that goes to the server.
+    state.calls = [];
+    await user.click(screen.getByRole('button', { name: 'keep t3 in place' }));
+    await waitFor(() => expect(state.calls).toContain('patch:t3:{"status":"todo","index":2}'));
+
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(screen.getByTestId('task-t2')).toBeTruthy();
+    expect(screen.queryByText(/of 3 cards/)).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'tag t1' }));
+    expect(screen.queryByTestId('task-t2')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Stop filtering by label bug' }));
+    expect(screen.getByTestId('task-t2')).toBeTruthy();
+
+    // Filtering is display-only: the server still holds all three.
+    expect(state.tasks).toHaveLength(3);
+  });
+
+  it('appends a drop past the last visible card', async () => {
+    state.tasks = [
+      seed({ id: 't1', title: 'Fix login', tags: ['bug'], checks: [] }),
+      seed({ id: 't2', title: 'Landing page', tags: ['ui'], checks: [] }),
+    ];
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('Fix login:todo:');
+    await user.type(
+      screen.getByRole('searchbox', { name: 'Filter cards by text' }),
+      'Landing',
+    );
+    state.calls = [];
+    // Only one card is rendered, so its own slot index is past the end of the
+    // filtered column once the dragged card is excluded.
+    await user.click(screen.getByRole('button', { name: 'keep t2 in place' }));
+    await waitFor(() => expect(state.calls).toContain('patch:t2:{"status":"todo","index":1}'));
+  });
+
+  it('remembers the cancelled column toggle', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+    await user.click(screen.getByRole('button', { name: /Cancelled/ }));
+    expect(screen.getByRole('button', { name: /Cancelled/ }).getAttribute('aria-pressed')).toBe('true');
+    expect(localStorage.getItem('kb.showCancelled.v1')).toBe('1');
+  });
+});
+
+describe('server-backed panels', () => {
+  it('gates AI and import actions on server settings, and creates from both', async () => {
+    state.labels = ['server-label'];
+    state.settings = { has_key: true, ai_base_url: '' };
+    state.sources = [{ name: 'GitHub', kind: 'github' }];
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+
+    await user.click(screen.getByRole('button', { name: 'edit task-1' }));
     expect(screen.getByText('ai enabled')).not.toBeNull();
     await user.click(screen.getByRole('button', { name: 'request ai draft' }));
     await user.click(screen.getByRole('button', { name: 'close card' }));
+
     await user.click(await screen.findByRole('button', { name: /Split ADR/ }));
     await user.click(screen.getByRole('button', { name: 'split adr request' }));
     await user.click(screen.getByRole('button', { name: 'add no adr stories' }));
     expect(screen.queryByRole('dialog', { name: 'adr' })).toBeNull();
+
     await user.click(screen.getByRole('button', { name: /Split ADR/ }));
     await user.click(screen.getByRole('button', { name: 'close adr' }));
     await user.click(screen.getByRole('button', { name: /Split ADR/ }));
     await user.click(screen.getByRole('button', { name: 'add adr stories' }));
-    expect(await screen.findByText(/ADR story:todo/)).not.toBeNull();
+    expect(await screen.findByText('ADR story:todo:')).not.toBeNull();
+    expect(await screen.findByText('ADR story two:todo:')).not.toBeNull();
+    // Two creates, one refetch.
+    expect(state.calls.filter((c) => c.startsWith('create:'))).toHaveLength(2);
 
     await user.click(screen.getByRole('button', { name: /Import issues/ }));
     await user.click(screen.getByRole('button', { name: 'preview issues' }));
-    await user.click(screen.getByRole('button', { name: 'add no issues' }));
-    expect(screen.queryByRole('dialog', { name: 'issue import' })).toBeNull();
-    await user.click(screen.getByRole('button', { name: /Import issues/ }));
-    state.outboxReject = true;
+    state.linksError = new Error('provenance rejected');
     await user.click(screen.getByRole('button', { name: 'commit links' }));
     await waitFor(() => {
       expect(document.querySelector('.notice')?.textContent).toContain(
-        'import provenance could not be stored locally',
+        'Import provenance was not recorded: provenance rejected',
       );
     });
-    state.outboxReject = false;
+    state.linksError = 'not an Error';
+    await user.click(screen.getByRole('button', { name: 'commit links' }));
+    await waitFor(() => {
+      expect(document.querySelector('.notice')?.textContent).toContain(
+        'Import provenance was not recorded: the request failed',
+      );
+    });
     await user.click(screen.getByRole('button', { name: 'close issue import' }));
     await user.click(screen.getByRole('button', { name: /Import issues/ }));
     await user.click(screen.getByRole('button', { name: 'add issues' }));
-    expect(await screen.findByText(/Imported issue:todo/)).not.toBeNull();
-    expect(fetch).not.toHaveBeenCalled();
+    expect(await screen.findByText('Imported issue:todo:')).not.toBeNull();
   });
 
-  it('executes startup reconciliation callbacks and recognizes unchanged server state', async () => {
-    state.detect = true;
-    state.remoteBoard = board([task({ id: 'same', title: 'Same remote', checks: [] })]);
-    state.startupMode = 'callbacks';
-    state.sameSemantics = true;
-    render(<App />);
-
-    expect(await screen.findByText(/Same remote:todo/)).not.toBeNull();
-    await waitFor(() => {
-      expect(screen.getByRole('img', { name: 'synced to server' })).not.toBeNull();
-    });
-    expect(state.remoteInstances[0].flush).not.toHaveBeenCalled();
-  });
-
-  it('takes the unchanged remote-board fast path without writing local state', async () => {
-    state.detect = true;
-    state.remoteBoard = board([task({ id: 'same', title: 'Same remote', checks: [] })]);
-    state.sameSemantics = true;
-    render(<App />);
-    await waitFor(() => {
-      expect(screen.getByRole('img', { name: 'synced to server' })).not.toBeNull();
-    });
-    expect(screen.getByText(/First task:todo/)).not.toBeNull();
-    expect(state.dirtyWrites).not.toContain(true);
-  });
-
-  it('closes open card work and reports it when a delayed remote board is adopted', async () => {
-    state.detect = true;
-    state.detectDeferred = true;
-    state.remoteBoard = board([task({ id: 'late', title: 'Late remote', checks: [] })]);
+  it('still creates the drafts behind a refused one, and names the one that was missed', async () => {
+    state.settings = { has_key: true, ai_base_url: 'https://ai.example' };
+    state.createErrors = { 'ADR story': new Error('store: title must not be empty') };
     const user = userEvent.setup();
     render(<App />);
-    await user.click(screen.getByRole('button', { name: 'edit task-1' }));
-    expect(screen.getByRole('dialog', { name: 'card modal' })).not.toBeNull();
-    await act(async () => { state.detectResolve?.(true); });
-    expect(await screen.findByText(/Late remote:todo/)).not.toBeNull();
-    expect(screen.queryByRole('dialog', { name: 'card modal' })).toBeNull();
+    await screen.findByText('First task:todo:false');
+
+    await user.click(await screen.findByRole('button', { name: /Split ADR/ }));
+    await user.click(screen.getByRole('button', { name: 'add adr stories' }));
+
+    // The modal holding the reviewed selection is already closed, so a draft
+    // the run never attempted is a draft nobody can get back.
+    expect(await screen.findByText('ADR story two:todo:')).not.toBeNull();
+    expect(state.calls.filter((c) => c.startsWith('create:'))).toEqual([
+      'create:ADR story',
+      'create:ADR story two',
+    ]);
+    const notice = document.querySelector('.notice')?.textContent ?? '';
+    expect(notice).toContain('One card was not created: store: title must not be empty');
+    expect(notice).toContain('Not saved: ADR story.');
+    // One card did land, so the blanket refusal wording would be a lie.
+    expect(notice).not.toContain('That change was not saved');
+  });
+
+  it('names every draft when a whole batch is refused', async () => {
+    state.settings = { has_key: true, ai_base_url: 'https://ai.example' };
+    state.createErrors = {
+      'ADR story': new Error('store: title must not be empty'),
+      'ADR story two': new Error('store: still no'),
+    };
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+
+    await user.click(await screen.findByRole('button', { name: /Split ADR/ }));
+    await user.click(screen.getByRole('button', { name: 'add adr stories' }));
+    await waitFor(() => {
+      expect(document.querySelector('.notice')?.textContent).toContain(
+        '2 cards were not created: store: title must not be empty',
+      );
+    });
+    // The first refusal is the one quoted; every title is still listed.
     expect(document.querySelector('.notice')?.textContent).toContain(
-      'card you had open was closed',
+      'Not saved: ADR story; ADR story two.',
     );
   });
 
-  it('reports a merged startup and a failed startup fetch without overwriting local state', async () => {
-    state.detect = true;
-    state.remoteBoard = board([task({ id: 'merged', title: 'Merged remote', checks: [] })]);
-    state.startupMode = 'merged';
-    const merged = render(<App />);
-    await waitFor(() => {
-      expect(document.querySelector('.notice')?.textContent).toContain(
-        'Concurrent edits conflicted in startup title',
-      );
-    });
-    expect(screen.getByText(/First task:todo/)).not.toBeNull();
-    merged.unmount();
-
-    state.startupMode = 'throw';
-    state.remoteBoard = null;
+  it('stops a batch at an expired session, names the rest, and asks to reconnect', async () => {
+    const { ReauthRequiredError } = await import('./lib/auth');
+    state.settings = { has_key: true, ai_base_url: 'https://ai.example' };
+    state.createErrors = { 'ADR story': new ReauthRequiredError('expired') };
+    const user = userEvent.setup();
+    // A session the server has stopped accepting rejects the read back too.
+    const expireReads = () => { state.listError = new ReauthRequiredError('expired'); };
     render(<App />);
-    await waitFor(() => {
-      expect(screen.getByRole('img', { name: 'last save to server failed' })).not.toBeNull();
-    });
-    expect(screen.getByText(/First task:todo/)).not.toBeNull();
+    await screen.findByText('First task:todo:false');
+
+    await user.click(await screen.findByRole('button', { name: /Split ADR/ }));
+    expireReads();
+    await user.click(screen.getByRole('button', { name: 'add adr stories' }));
+
+    expect(await screen.findByRole('dialog', { name: 'reconnect' })).not.toBeNull();
+    // Nothing would be accepted until the session is restored, so the rest go
+    // into the notice rather than through more 401s.
+    expect(state.calls.filter((c) => c.startsWith('create:'))).toEqual(['create:ADR story']);
+    expect(document.querySelector('.notice')?.textContent).toContain(
+      '2 cards were not created: the session expired. Not saved: ADR story; ADR story two.',
+    );
   });
 
-  it('keeps local data dirty when remote adoption cannot persist', async () => {
-    state.detect = true;
-    state.remoteBoard = board([task({ id: 'remote-fail', title: 'Remote failed', checks: [] })]);
-    state.persistenceFails = true;
-    render(<App />);
-    await waitFor(() => expect(state.dirtyWrites).toContain(true));
-    expect(screen.getByText(/First task:todo/)).not.toBeNull();
-    expect(screen.queryByText(/Remote failed/)).toBeNull();
-  });
-
-  it('recovers a clean pending write and exposes its merge result', async () => {
-    state.detect = true;
-    state.pendingWrite = { operation_id: 'pending-op' };
-    state.pendingMode = 'clean';
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.getByRole('img', { name: 'synced to server' })).not.toBeNull();
-      expect(document.querySelector('.notice')?.textContent).toContain(
-        'Concurrent edits conflicted in pending title',
-      );
-    });
-    expect(state.dirtyWrites).toContain(false);
-  });
-
-  it('queues pending-write push recovery and retries a deferred recovery after persistence', async () => {
-    state.detect = true;
-    state.pendingWrite = { operation_id: 'pending-op' };
-    state.pendingMode = 'push';
-    const pushed = render(<App />);
-    await waitFor(() => expect(state.dirtyWrites).toContain(true));
-    expect(state.remoteSaveConflicts).toEqual([]);
-    pushed.unmount();
-
-    state.pendingMode = 'retry';
-    state.dirtyWrites = [];
-    render(<App />);
-    await waitFor(() => expect(state.dirtyWrites).toContain(true));
-    state.pendingMode = 'clean';
-    await userEvent.setup().click(screen.getByRole('button', { name: 'move doing task-1' }));
-    await waitFor(() => expect(state.dirtyWrites).toContain(false));
-  });
-
-  it('surfaces pending-write recovery failures as save errors', async () => {
-    state.detect = true;
-    state.pendingWrite = { operation_id: 'pending-op' };
-    state.pendingMode = 'throw';
-    render(<App />);
-    await waitFor(() => {
-      expect(screen.getByRole('img', { name: 'last save to server failed' })).not.toBeNull();
-    });
-  });
-
-  it('completes legacy identity recovery for clean, push, failed, and thrown outcomes', async () => {
-    state.detect = true;
-    state.dirty = true;
-    state.migratedRaw = true;
-    state.board = board([task({ id: 'legacy', title: 'Legacy local', checks: [] })]);
-    state.legacyMode = 'clean';
-    const clean = render(<App />);
-    await waitFor(() => {
-      expect(document.querySelector('.notice')?.textContent).toContain(
-        'recovered from older local data',
-      );
-      expect(state.dirtyWrites).toContain(false);
-    });
-    clean.unmount();
-
-    state.dirty = true;
-    state.dirtyWrites = [];
-    state.legacyMode = 'push';
-    const pushed = render(<App />);
-    await waitFor(() => expect(state.dirtyWrites).toContain(true));
-    pushed.unmount();
-
-    state.dirty = true;
-    state.dirtyWrites = [];
-    state.legacyMode = 'failed';
-    const failed = render(<App />);
-    await waitFor(() => expect(state.dirtyWrites).toContain(true));
-    failed.unmount();
-
-    state.dirty = true;
-    state.legacyMode = 'throw';
-    render(<App />);
-    await waitFor(() => {
-      expect(screen.getByRole('img', { name: 'last save to server failed' })).not.toBeNull();
-    });
-  });
-
-  it('keeps dirty on local commit conflicts, recovery-pending commits, and stopped commits', async () => {
-    const run = async (mode: 'recovery' | 'conflict' | 'stopped') => {
-      state.commitMode = mode;
-      state.dirtyWrites = [];
-      const rendered = render(<App />);
-      await userEvent.setup().click(screen.getByRole('button', { name: 'move doing task-1' }));
-      await waitFor(() => expect(state.dirtyWrites).toContain(true));
-      rendered.unmount();
-      state.board = board();
-    };
-    await run('recovery');
-    await run('conflict');
-    await run('stopped');
-  });
-
-  it('does not accept remote acknowledgements without a durable base or current epoch', async () => {
-    state.detect = true;
-    state.dirty = true;
-    state.omitAckSnapshot = true;
-    const missingBase = render(<App />);
-    await waitFor(() => expect(state.remoteInstances[0]).toBeDefined());
-    expect(state.dirtyWrites).not.toContain(false);
-    missingBase.unmount();
-
-    state.board = board();
-    state.dirty = true;
-    state.omitAckSnapshot = false;
-    state.ackCurrent = false;
-    render(<App />);
-    await waitFor(() => expect(state.remoteInstances.length).toBeGreaterThan(1));
-    expect(state.dirtyWrites.at(-1)).not.toBe(false);
-  });
-
-  it('passes the exact named acknowledgement payload through the immediate save surface', async () => {
-    state.detect = true;
-    state.dirty = true;
-    const sent = state.board!;
-    const pushed = board([task({
-      id: 'ack-immediate',
-      title: 'Immediate acknowledgement',
-      status: 'done',
-    })]);
-    const payload = acknowledgementFixture(pushed, 'canonical-immediate', 23, {
-      conflicts: ['remote title'],
-      operationID: 'immediate-operation',
-      generation: 17,
-      durableVersion: { present: true, generation: 19 },
-    });
-    state.remoteAcknowledgement = payload;
-    render(<App />);
-
-    await waitFor(() => expect(state.acknowledgementPersists).toHaveLength(1));
-    expectSaveDelivery('immediate', sent, payload);
-    expect(state.acknowledgementPersists).toEqual([{
-      board: pushed,
-      taskIDs: new Map([['ack-immediate', 'canonical-immediate']]),
-      expectedVersion: { present: true, generation: 23 },
-      operationID: 'immediate-operation',
-      current: true,
-    }]);
-    expect(state.board).toEqual(pushed);
-    expect(screen.getByText('Immediate acknowledgement:done:false')).not.toBeNull();
-    expect(await screen.findAllByText(/Concurrent edits conflicted in remote title/))
-      .toHaveLength(2);
-    await waitFor(() => {
-      expect(state.dirtyWrites.at(-1)).toBe(false);
-      expect(screen.getByRole('img', { name: 'synced to server' })).not.toBeNull();
-    });
-  });
-
-  it('passes the exact named acknowledgement payload through the debounced save surface', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date('2026-08-02T12:00:00.000Z'));
-    state.detect = true;
-    const sent = board([task({ status: 'doing', movedAt: '2026-08-02T12:00:00.000Z' })]);
-    const pushed = board([task({
-      id: 'ack-debounced',
-      title: 'Debounced acknowledgement',
-      status: 'doing',
-    })]);
-    const payload = acknowledgementFixture(pushed, 'canonical-debounced', 31, {
-      operationID: 'debounced-operation',
-      generation: 29,
-      durableVersion: { present: true, generation: 30 },
-    });
-    state.remoteAcknowledgement = payload;
+  it('raises the reconnect prompt when the session expires on the provenance write', async () => {
+    const { ReauthRequiredError } = await import('./lib/auth');
+    state.settings = { has_key: true, ai_base_url: '' };
+    state.sources = [{ name: 'GitHub', kind: 'github' }];
     const user = userEvent.setup();
     render(<App />);
-    await waitFor(() => expect(state.remoteInstances).toHaveLength(1));
+    await screen.findByText('First task:todo:false');
 
-    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
-    await waitFor(() => expect(state.acknowledgementPersists).toHaveLength(1));
-    expectSaveDelivery('debounced', sent, payload);
-    expect(state.acknowledgementPersists).toEqual([{
-      board: pushed,
-      taskIDs: new Map([['ack-debounced', 'canonical-debounced']]),
-      expectedVersion: { present: true, generation: 31 },
-      operationID: 'debounced-operation',
-      current: true,
-    }]);
-    expect(state.board).toEqual(pushed);
-    expect(screen.getByText('Debounced acknowledgement:doing:false')).not.toBeNull();
-    await waitFor(() => {
-      expect(state.dirtyWrites.at(-1)).toBe(false);
-      expect(screen.getByRole('img', { name: 'synced to server' })).not.toBeNull();
-    });
+    await user.click(await screen.findByRole('button', { name: /Import issues/ }));
+    state.linksError = new ReauthRequiredError('expired');
+    await user.click(screen.getByRole('button', { name: 'commit links' }));
+
+    // Every other write raises this; a dead session found here is the same
+    // dead session, not a provenance quirk.
+    expect(await screen.findByRole('dialog', { name: 'reconnect' })).not.toBeNull();
+    expect(screen.getByRole('img', { name: /session expired/ })).not.toBeNull();
+    expect(document.querySelector('.notice')?.textContent).toContain(
+      'Import provenance was not recorded: the session expired',
+    );
   });
 
-  it('rejects a stale debounced acknowledgement before persistence or adoption', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date('2026-08-02T12:00:00.000Z'));
-    state.detect = true;
-    const original = state.board!;
-    const pushed = board([task({ id: 'stale-task', title: 'Stale acknowledgement' })]);
-    const payload = acknowledgementFixture(pushed, 'canonical-stale', 41, {
-      operationID: 'stale-operation',
-      isCurrent: () => false,
-    });
-    state.remoteAcknowledgement = payload;
-    const user = userEvent.setup();
+  it('hides the import action when the server offers no sources', async () => {
+    state.settings = { has_key: true, ai_base_url: '' };
     render(<App />);
-    await waitFor(() => expect(state.remoteInstances).toHaveLength(1));
-
-    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
-    await waitFor(() => expect(state.saveAcknowledgements).toHaveLength(1));
-    expectSaveDelivery('debounced', board([task({
-      status: 'doing',
-      movedAt: '2026-08-02T12:00:00.000Z',
-    })]), payload);
-    expect(state.acknowledgementPersists).toEqual([]);
-    expect(state.board).not.toEqual(pushed);
-    expect(state.board?.tasks[0]?.id).toBe(original.tasks[0]?.id);
-    expect(screen.queryByText(/Stale acknowledgement/)).toBeNull();
-    expect(state.dirtyWrites.at(-1)).toBe(true);
+    await screen.findByText('First task:todo:false');
+    expect(await screen.findByRole('button', { name: /Split ADR/ })).not.toBeNull();
+    expect(screen.queryByRole('button', { name: /Import issues/ })).toBeNull();
   });
 
-  it('keeps an immediate acknowledgement with omitted optional fields unapplied', async () => {
-    state.detect = true;
-    state.dirty = true;
-    const sent = state.board!;
-    const pushed = board([task({ id: 'optional-task', title: 'Missing optional fields' })]);
-    const payload: SaveAcknowledgementFixture = {
-      pushed,
-      taskIDs: new Map([['optional-task', 'canonical-optional']]),
-      conflicts: [],
-    };
-    state.remoteAcknowledgement = payload;
-    render(<App />);
-
-    await waitFor(() => expect(state.saveAcknowledgements).toHaveLength(1));
-    expectSaveDelivery('immediate', sent, payload);
-    expect(state.acknowledgementPersists).toEqual([]);
-    expect(state.board).toEqual(sent);
-    expect(screen.queryByText(/Missing optional fields/)).toBeNull();
-    expect(state.dirtyWrites).not.toContain(false);
-    expect(screen.getByRole('img', { name: 'sync off — local only' })).not.toBeNull();
-  });
-
-  it('uses the acknowledgement currentness default when the adapter omits the callback', async () => {
-    state.detect = true;
-    state.dirty = true;
-    state.omitIsCurrent = true;
-    render(<App />);
-    await waitFor(() => expect(state.remoteInstances.length).toBeGreaterThan(0));
-    expect(state.dirtyWrites).not.toContain(false);
-    expect(screen.getByRole('img', { name: 'sync off — local only' })).not.toBeNull();
-  });
-
-  it('handles dirty-map preparation and persistence failures without discarding the board', async () => {
-    state.detect = true;
-    state.dirty = true;
-    state.prepareError = new Error('mapping failed');
-    const preparation = render(<App />);
-    await waitFor(() => {
-      expect(screen.getByRole('img', { name: 'last save to server failed' })).not.toBeNull();
-    });
-    expect(screen.getByText(/First task:todo/)).not.toBeNull();
-    preparation.unmount();
-
-    state.board = board();
-    state.prepareError = null;
-    state.persistenceFails = true;
-    state.dirty = true;
-    state.dirtyWrites = [];
-    render(<App />);
-    await waitFor(() => expect(state.dirtyWrites).toContain(true));
-    expect(screen.getByText(/First task:todo/)).not.toBeNull();
-  });
-
-  it('opens settings offline, updates AI/debug state, and closes modal gates', async () => {
+  it('opens settings, toggles the debug overlay, and closes both', async () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     const settings = screen.getByRole('dialog', { name: 'settings' });
-    expect(within(settings).getByText('false')).not.toBeNull();
     expect(document.querySelector('.app-shell')?.hasAttribute('inert')).toBe(true);
+    await user.click(within(settings).getByRole('button', { name: 'enable ai' }));
     await user.click(within(settings).getByRole('button', { name: 'enable debug' }));
     expect(screen.getByLabelText('debug')).not.toBeNull();
     await user.click(within(settings).getByRole('button', { name: 'close settings' }));
@@ -1503,120 +1166,62 @@ describe('App DOM orchestration', () => {
     expect(screen.queryByLabelText('debug')).toBeNull();
   });
 
-  it('exports, imports, confirms replacement, and reports malformed imports', async () => {
+  it('tells settings there is no server when detection failed', async () => {
+    state.present = false;
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(within(screen.getByRole('dialog', { name: 'settings' })).getByText('false'))
+      .not.toBeNull();
+  });
+});
+
+describe('markdown file exchange', () => {
+  it('exports the board and replaces it from a file in one write', async () => {
     const user = userEvent.setup();
     const { container } = render(<App />);
+    await screen.findByText('First task:todo:false');
+
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
     await user.click(screen.getByRole('button', { name: 'Export' }));
-    expect(state.exported).toEqual(['# Test board']);
+    expect(state.exported).toEqual(['# kb']);
     expect(click).toHaveBeenCalledOnce();
 
-    state.importBoard = board([
-      task({ id: 'imported', title: 'Imported markdown', checks: [] }),
-      task({ id: 'imported-2', title: 'Second markdown task', checks: [] }),
-    ]);
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     const inputClick = vi.spyOn(input, 'click');
     await user.click(screen.getByRole('button', { name: 'Import' }));
     expect(inputClick).toHaveBeenCalledOnce();
+    // A change event with no file at all is a cancelled picker.
     fireEvent.change(input, { target: { files: [] } });
-    await user.upload(input, new File(['# imported'], 'board.md', { type: 'text/markdown' }));
-    expect(await screen.findByRole('dialog', { name: 'Replace the current board?' })).not.toBeNull();
+    await user.upload(input, new File([state.importText], 'board.md', { type: 'text/markdown' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Replace the current board?' });
+    expect(dialog).not.toBeNull();
     await user.click(screen.getByRole('button', { name: 'confirm action' }));
-    expect(await screen.findByText(/Imported markdown:todo/)).not.toBeNull();
-    expect(screen.getByText(/Second markdown task:todo/)).not.toBeNull();
+    expect(await screen.findByText('Imported markdown:todo:')).not.toBeNull();
+    expect(state.imported).toEqual([state.importText]);
+    expect(state.calls.filter((c) => c === 'replace')).toHaveLength(1);
+  });
 
+  it('reports a file it cannot read as a board and dismisses the dialog', async () => {
     state.importError = true;
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    await screen.findByText('First task:todo:false');
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     await user.upload(input, new File(['bad'], 'bad.md', { type: 'text/markdown' }));
     expect(await screen.findByRole('dialog', { name: 'Import failed' })).not.toBeNull();
     await user.click(screen.getByRole('button', { name: 'close confirm' }));
     expect(screen.queryByRole('dialog', { name: 'Import failed' })).toBeNull();
+  });
 
-    state.importError = false;
-    state.importBoard = board([task({ id: 'single-import', title: 'Single import', checks: [] })]);
-    await user.upload(input, new File(['# single'], 'single.md', { type: 'text/markdown' }));
-    expect(await screen.findByRole('dialog', { name: 'Replace the current board?' })).not.toBeNull();
+  it('counts a single-task import in the singular', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    await screen.findByText('First task:todo:false');
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(input, new File([state.importText], 'one.md', { type: 'text/markdown' }));
+    await screen.findByRole('dialog', { name: 'Replace the current board?' });
     await user.click(screen.getByRole('button', { name: 'close confirm' }));
-  });
-
-  it('surfaces reauthentication, reconnects, and announces conflict recovery', async () => {
-    const { ReauthRequiredError } = await import('./lib/auth');
-    state.detect = true;
-    state.dirty = true;
-    state.remoteSaveError = new ReauthRequiredError('expired');
-    state.persistenceConflicts = ['board title'];
-    const user = userEvent.setup();
-    render(<App />);
-
-    expect(await screen.findByRole('dialog', { name: 'reconnect' })).not.toBeNull();
-    expect(screen.getByRole('img', { name: /session expired/ })).not.toBeNull();
-    state.remoteSaveError = null;
-    await user.click(screen.getByRole('button', { name: 'reconnect now' }));
-    expect(state.savedIdentities.at(-1)).toMatchObject({ serverToken: 'fresh' });
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'reconnect' })).toBeNull());
-
-    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
-    expect(await screen.findByText(/Concurrent edits conflicted in board title/)).not.toBeNull();
-  });
-
-  it('announces recovery after an ordinary remote save error', async () => {
-    state.detect = true;
-    state.dirty = true;
-    state.remoteSaveError = new Error('server unavailable');
-    const user = userEvent.setup();
-    render(<App />);
-    await waitFor(() => {
-      expect(screen.getByRole('img', { name: 'last save to server failed' })).not.toBeNull();
-    });
-    state.remoteSaveError = null;
-    await user.click(screen.getByRole('button', { name: 'move doing task-1' }));
-    await waitFor(() => {
-      expect(screen.getByRole('img', { name: 'synced to server' })).not.toBeNull();
-      expect(screen.getByText('synced to server')).not.toBeNull();
-    });
-  });
-
-  it('surfaces stored outbox reauthentication and retains explicit reconnect/signout exits', async () => {
-    state.outboxStatus = { kind: 'reauth', message: 'token expired' };
-    const user = userEvent.setup();
-    render(<App />);
-
-    expect(await screen.findByRole('dialog', { name: 'reconnect' })).not.toBeNull();
-    await user.click(screen.getByRole('button', { name: 'close reconnect' }));
-    expect(screen.getByRole('button', { name: 'Reconnect' })).not.toBeNull();
-    await user.click(screen.getByRole('button', { name: 'Reconnect' }));
-    await user.click(screen.getByRole('button', { name: 'reconnect signout' }));
-    expect(screen.getByRole('button', { name: 'use manual identity' })).not.toBeNull();
-  });
-
-  it('keeps cancelled/purge mutations blocked when durable metadata cannot change', async () => {
-    state.outboxReject = true;
-    const user = userEvent.setup();
-    render(<App />);
-    await user.click(screen.getByRole('button', { name: 'edit task-1' }));
-    await user.click(screen.getByRole('button', { name: 'delete card' }));
-    await user.click(screen.getByRole('button', { name: 'confirm action' }));
-    await waitFor(() => {
-      expect(document.querySelector('.notice')?.textContent).toContain(
-        'cancellation reason could not be stored',
-      );
-    });
-    expect(screen.getByText(/First task:todo/)).not.toBeNull();
-    await user.click(screen.getByRole('button', { name: 'close card' }));
-    await user.click(screen.getByRole('button', { name: 'purge task-1' }));
-    await user.click(screen.getByRole('button', { name: 'confirm action' }));
-    await waitFor(() => {
-      expect(document.querySelector('.notice')?.textContent).toContain('card was not deleted');
-    });
-    expect(screen.getByTestId('task-task-1')).not.toBeNull();
-  });
-
-  it('flushes on pagehide and cancels remote/outbox work on unmount', () => {
-    const rendered = render(<App />);
-    fireEvent(window, new Event('pagehide'));
-    expect(state.remoteInstances[0].flush).toHaveBeenCalledOnce();
-    rendered.unmount();
-    expect(state.remoteInstances[0].cancel).toHaveBeenCalledOnce();
-    expect(state.outboxInstances[0].cancel).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('dialog', { name: 'Replace the current board?' })).toBeNull();
   });
 });

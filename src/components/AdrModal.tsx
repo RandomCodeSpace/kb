@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
-import type { Effort, Prio, Status, Task } from '../lib/model';
-import { newTask, STATUS_LABEL, STATUSES } from '../lib/model';
+import type { Effort, Prio, Status, TaskDraft } from '../lib/model';
+import { newDraft, STATUS_LABEL, STATUSES } from '../lib/model';
 import type { AIStoriesRequest, ForgeSource, StoryDraft } from '../lib/api';
 import { isAbortError } from '../lib/api';
 import { useDialogFocus } from '../lib/focus';
@@ -63,15 +63,18 @@ export function toRows(drafts: readonly StoryDraft[]): StoryRow[] {
 }
 
 /**
- * The tasks "Add selected" would create. Only selected rows with a non-empty
- * title become tasks — an empty title cannot round-trip through the codec.
- * Nothing here touches the board; the caller commits the result.
+ * The drafts "Add selected" would create. Only selected rows with a non-empty
+ * title become drafts — the server refuses a blank title. Nothing here touches
+ * the board; the caller creates each one.
  */
-export function rowsToTasks(rows: readonly StoryRow[], status: Status): Task[] {
+export function rowsToTasks(
+  rows: readonly StoryRow[],
+  status: Status,
+): TaskDraft[] {
   return rows
     .filter((r) => r.selected && r.title.trim() !== '')
     .map((r) =>
-      newTask({
+      newDraft({
         title: r.title.trim(),
         emoji: r.draft.emoji,
         desc: r.draft.desc,
@@ -96,7 +99,7 @@ export interface AdrModalProps {
     req: AIStoriesRequest,
     signal: AbortSignal,
   ) => Promise<StoryDraft[]>;
-  onAdd: (tasks: Task[]) => void;
+  onAdd: (drafts: TaskDraft[]) => void;
   onClose: () => void;
 }
 

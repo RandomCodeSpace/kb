@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Status, Task } from '../lib/model';
-import { cardLabel, newTask, STATUSES } from '../lib/model';
+import { cardLabel, STATUSES } from '../lib/model';
+import { makeTask } from '../test/task';
 import type { LiftPos } from './Board';
 import {
   cancelAnnouncement,
   canStartDrag,
   columnSizes,
   dropIndex,
+  fullColumnIndex,
   insertionIndex,
   isLiftKey,
   liftAnnouncement,
@@ -47,7 +49,7 @@ const T0 = '2024-01-01T00:00:00.000Z';
 const NOW = '2024-06-01T00:00:00.000Z';
 
 function task(title: string, status: Status): Task {
-  return newTask({ title, status, createdAt: T0, movedAt: T0 });
+  return makeTask({ title, status, createdAt: T0, movedAt: T0 });
 }
 
 /** Titles in each column, in the order the codec would serialize them. */
@@ -477,5 +479,73 @@ describe('pastThreshold', () => {
     const dx = 40;
     const dy = 120;
     expect(pastThreshold(dx, dy)).toBe(true);
+  });
+});
+
+describe('fullColumnIndex', () => {
+  const all = [
+    task('one', 'todo'),
+    task('two', 'todo'),
+    task('three', 'todo'),
+    task('elsewhere', 'doing'),
+  ];
+
+  it('is the identity when nothing is filtered out', () => {
+    const moving = all[2]!.id;
+    expect(fullColumnIndex(all, all, moving, 'todo', 0)).toBe(0);
+    expect(fullColumnIndex(all, all, moving, 'todo', 1)).toBe(1);
+    // Past the last other card: append.
+    expect(fullColumnIndex(all, all, moving, 'todo', 2)).toBe(2);
+  });
+
+  it('anchors a filtered slot to the card it would land in front of', () => {
+    // Only "one" and "three" are rendered; dropping in front of "three" is
+    // slot 1 of the visible column but slot 2 of the real one.
+    const visible = [all[0]!, all[2]!];
+    const moving = all[0]!.id;
+    expect(fullColumnIndex(all, visible, moving, 'todo', 0)).toBe(1);
+    expect(fullColumnIndex(all, visible, moving, 'todo', 1)).toBe(2);
+  });
+
+  it('appends when the drop is past the last rendered card', () => {
+    const visible = [all[0]!];
+    expect(fullColumnIndex(all, visible, all[0]!.id, 'todo', 0)).toBe(2);
+    expect(fullColumnIndex(all, visible, 'unknown', 'todo', 9)).toBe(3);
+  });
+
+  it('appends when the rendered anchor is not in the full column at all', () => {
+    const ghost = task('ghost', 'todo');
+    expect(fullColumnIndex(all, [ghost], all[0]!.id, 'todo', 0)).toBe(2);
+  });
+
+  it('measures against the destination column, not the source', () => {
+    expect(fullColumnIndex(all, all, all[0]!.id, 'doing', 0)).toBe(0);
+    expect(fullColumnIndex(all, all, all[0]!.id, 'doing', 5)).toBe(1);
+  });
+});
+
+describe('showCancelledFlag', () => {
+  it('reads and writes the persisted toggle', () => {
+    expect(showCancelledFlag()).toBe(false);
+    setShowCancelledFlag(true);
+    expect(showCancelledFlag()).toBe(true);
+    setShowCancelledFlag(false);
+    expect(showCancelledFlag()).toBe(false);
+  });
+
+  it('treats an unavailable storage as off rather than throwing', () => {
+    const real = (globalThis as { localStorage?: unknown }).localStorage;
+    (globalThis as { localStorage?: unknown }).localStorage = {
+      getItem() { throw new Error('denied'); },
+      setItem() { throw new Error('denied'); },
+      removeItem() { throw new Error('denied'); },
+    };
+    try {
+      expect(showCancelledFlag()).toBe(false);
+      expect(() => setShowCancelledFlag(true)).not.toThrow();
+      expect(() => setShowCancelledFlag(false)).not.toThrow();
+    } finally {
+      (globalThis as { localStorage?: unknown }).localStorage = real;
+    }
   });
 });

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { reducedMotion } from './confetti';
 import { tagColor } from './labels';
-import { cardLabel, isScoped, newTask, progress, seedBoard } from './model';
+import { cardLabel, isScoped, newDraft, progress } from './model';
 import { coerceStoryDraft } from './storyDraft';
 import { ageChip, ymd } from './urgency';
 
@@ -22,12 +22,16 @@ describe('residual deterministic utility branches', () => {
   });
 
   it('returns no checklist progress when a task has no checks', () => {
-    expect(progress(seedBoard().tasks[0]!)).toBeNull();
+    const task = { ...newDraft({ title: 'no checks' }), id: 'a', createdAt: '', movedAt: '' };
+    expect(progress(task)).toBeNull();
   });
 
   it('announces blocked checklist progress and lifted state', () => {
     const task = {
-      ...seedBoard().tasks[1]!,
+      ...newDraft({ title: 'checked' }),
+      id: 'b',
+      createdAt: '',
+      movedAt: '',
       blocked: true,
       checks: [{ text: 'one', done: true }, { text: 'two', done: false }],
     };
@@ -36,18 +40,17 @@ describe('residual deterministic utility branches', () => {
     );
   });
 
-  it('uses defaults before applying explicit new-task fields', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-08-01T01:02:03.000Z'));
-    vi.stubGlobal('crypto', { randomUUID: () => 'task-id' });
-    expect(newTask({ title: 'write tests', status: 'doing' })).toMatchObject({
-      id: 'task-id',
-      title: 'write tests',
+  it('uses defaults before applying explicit draft fields', () => {
+    expect(newDraft({ title: 'write tests', status: 'doing' })).toEqual({
+      emoji: '',
+      desc: '',
       status: 'doing',
-      createdAt: '2026-08-01T01:02:03.000Z',
-      movedAt: '2026-08-01T01:02:03.000Z',
+      blocked: false,
+      prio: 3,
+      tags: [],
+      checks: [],
+      title: 'write tests',
     });
-    vi.useRealTimers();
   });
 
   it('formats a local calendar date with padded components', () => {

@@ -126,10 +126,37 @@ export function dropIndex(
 }
 
 /**
+ * Translate a slot measured against the *rendered* column into the slot the
+ * same drop takes in the full task list.
+ *
+ * The board renders a filtered view, so a drop between two visible cards can
+ * have any number of filtered-out cards sitting between them. The visible slot
+ * is anchored to the card it would land in front of, and that card's place
+ * among the column's full set of other cards is the real slot. A drop past the
+ * last visible card appends, which is the only reading that cannot reorder
+ * cards the user cannot see.
+ */
+export function fullColumnIndex(
+  all: readonly Task[],
+  visible: readonly Task[],
+  taskId: string,
+  to: Status,
+  index: number,
+): number {
+  const others = (tasks: readonly Task[]) =>
+    tasks.filter((t) => t.status === to && t.id !== taskId);
+  const full = others(all);
+  const anchor = others(visible)[index];
+  if (anchor === undefined) return full.length;
+  const at = full.findIndex((t) => t.id === anchor.id);
+  return at === -1 ? full.length : at;
+}
+
+/**
  * Move `taskId` into `to` at slot `index`, counted over the other cards of
  * that status. Order within a status is plain array order — exactly what the
- * markdown codec writes and reads back — so the position survives the round
- * trip without a new wire field. `movedAt` is only stamped when the status
+ * server's column position means — so an optimistic local move and the
+ * `index` sent to PATCH agree. `movedAt` is only stamped when the status
  * actually changes: reordering inside a column must not reset a card's age.
  */
 export function moveTask(
@@ -527,8 +554,8 @@ export function BoardView(props: Readonly<BoardProps>) {
     return moveTask(board.tasks, lift.taskId, lift.to, lift.index, t.movedAt);
   }, [board.tasks, lift]);
 
-  // A board refresh (server adoption re-mints ids) can take the lifted card
-  // out from under the move; there is then nothing left to drop.
+  // A board refresh can take the lifted card out from under the move (deleted
+  // from the CLI, say); there is then nothing left to drop.
   useEffect(() => {
     if (lift && !board.tasks.some((t) => t.id === lift.taskId)) setLift(null);
   }, [board.tasks, lift]);

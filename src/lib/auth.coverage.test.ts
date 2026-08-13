@@ -101,43 +101,38 @@ describe('identity residual branches', () => {
   });
 
   it('requires a browser lock before copying legacy data', async () => {
-    local.set(namespaceStorageKey('kb.board.v1', 'alice@example.com'), 'board');
+    local.set(namespaceStorageKey('kb.streak.v1', 'alice@example.com'), 'streak');
     vi.stubGlobal('navigator', {});
     await expect(claimLegacyAzureNamespace('alice@example.com', 'home-1'))
       .rejects.toThrow('browser storage lock');
   });
 
-  it('claims and copies framed board and outbox keys non-destructively', async () => {
+  it('claims and copies framed namespace keys non-destructively', async () => {
     const oldNS = 'alice@example.com';
     const newNS = 'azure.home-1';
-    const boardKey = namespaceStorageKey('kb.board.v1', oldNS);
-    const outboxKey = namespaceStorageKey('kb.outbox.v1', oldNS, 'item');
-    local.set(boardKey, 'board');
-    local.set(outboxKey, JSON.stringify({ kind: 'import', item: { external_key: 'x:1' } }));
+    local.set(namespaceStorageKey('kb.streak.v1', oldNS), 'streak');
     vi.stubGlobal('navigator', {
       locks: { request: async (_name: string, callback: () => unknown) => callback() },
     });
     await claimLegacyAzureNamespace('alice@example.com', 'home-1');
-    expect(local.get(namespaceStorageKey('kb.board.v1', newNS))).toBe('board');
-    expect(local.get(namespaceStorageKey('kb.outbox.v1', newNS, 'item'))).toContain('x:1');
+    expect(local.get(namespaceStorageKey('kb.streak.v1', newNS))).toBe('streak');
+    expect(local.get(namespaceStorageKey('kb.streak.v1', oldNS))).toBe('streak');
   });
 
-  it('copies a provable legacy outbox record', async () => {
-    const oldNS = 'alice@example.com';
-    const logical = encodeURIComponent('tombstone:client-1');
-    const key = legacyNamespaceStorageKey('kb.outbox.v1', oldNS, logical);
-    local.set(key, JSON.stringify({ kind: 'tombstone', clientTaskId: 'client-1' }));
+  it('copies a pre-framing legacy key', async () => {
+    const key = legacyNamespaceStorageKey('kb.streak.v1', 'alice@example.com');
+    local.set(key, 'legacy streak');
     vi.stubGlobal('navigator', {
       locks: { request: async (_name: string, callback: () => unknown) => callback() },
     });
     await claimLegacyAzureNamespace('alice@example.com', 'home-1');
-    expect(local.get(namespaceStorageKey('kb.outbox.v1', 'azure.home-1', logical)))
-      .toContain('client-1');
+    expect(local.get(namespaceStorageKey('kb.streak.v1', 'azure.home-1')))
+      .toBe('legacy streak');
   });
 
   it('rejects a legacy namespace already claimed by another account', async () => {
     const oldNS = 'alice@example.com';
-    local.set(namespaceStorageKey('kb.board.v1', oldNS), 'board');
+    local.set(namespaceStorageKey('kb.streak.v1', oldNS), 'streak');
     local.set(namespaceStorageKey('kb.azure-namespace-claim.v1', oldNS), 'other-home');
     vi.stubGlobal('navigator', {
       locks: { request: async (_name: string, callback: () => unknown) => callback() },
@@ -155,8 +150,8 @@ describe('identity residual branches', () => {
       .rejects.toThrow('could not be inspected');
   });
 
-  it('ignores an unprovable exact outbox namespace key', async () => {
-    local.set(namespaceStorageKey('kb.outbox.v1', 'alice@example.com'), '{');
+  it('ignores a key belonging to no known namespace base', async () => {
+    local.set(namespaceStorageKey('kb.unknown.v1', 'alice@example.com'), 'x');
     await expect(claimLegacyAzureNamespace('alice@example.com', 'home-1')).resolves.toBeUndefined();
   });
 

@@ -6,7 +6,6 @@ import {
   legacyNamespaceStorageKey,
   migrateLegacyKeys,
   namespaceStorageKey,
-  namespaceStorageSuffix,
 } from './store';
 
 export type Identity = {
@@ -190,33 +189,13 @@ export function identityNamespace(identity: Identity): string {
   return sanitizeUser(identity.id);
 }
 
-const NAMESPACED_BASES = [
-  'kb.board.v1',
-  'kb.streak.v1',
-  'kb.dirty.v1',
-  'kb.migrated.v1',
-] as const;
-const OUTBOX_PREFIX = 'kb.outbox.v1';
-
-function outboxLogicalKey(raw: string | null): string | null {
-  if (raw === null) return null;
-  try {
-    const value = JSON.parse(raw) as Record<string, unknown>;
-    if (value.kind === 'tombstone' && typeof value.clientTaskId === 'string') {
-      return `tombstone:${value.clientTaskId}`;
-    }
-    if (
-      value.kind === 'import' &&
-      typeof value.item === 'object' && value.item !== null &&
-      typeof (value.item as Record<string, unknown>).external_key === 'string'
-    ) {
-      return `import:${(value.item as Record<string, unknown>).external_key as string}`;
-    }
-  } catch {
-    // Invalid records cannot prove ownership of an ambiguous legacy key.
-  }
-  return null;
-}
+/**
+ * Per-namespace local state worth carrying to an account's immutable
+ * namespace. The board is not among them: it lives on the server, keyed by
+ * the identity the API is called with, so switching accounts simply reads a
+ * different board.
+ */
+const NAMESPACED_BASES = ['kb.streak.v1', 'kb.migrated.v1'] as const;
 
 function namespaceKey(key: string, from: string, to: string): string | null {
   for (const base of NAMESPACED_BASES) {
@@ -225,17 +204,7 @@ function namespaceKey(key: string, from: string, to: string): string | null {
       key === legacyNamespaceStorageKey(base, from)
     ) return namespaceStorageKey(base, to);
   }
-
-  const framedSuffix = namespaceStorageSuffix(OUTBOX_PREFIX, from, key);
-  if (framedSuffix !== null && framedSuffix !== '') {
-    return namespaceStorageKey(OUTBOX_PREFIX, to, framedSuffix);
-  }
-  const logical = outboxLogicalKey(localStorage.getItem(key));
-  if (!logical) return null;
-  const suffix = encodeURIComponent(logical);
-  return key === legacyNamespaceStorageKey(OUTBOX_PREFIX, from, suffix)
-    ? namespaceStorageKey(OUTBOX_PREFIX, to, suffix)
-    : null;
+  return null;
 }
 
 function legacyNamespaceKeys(ns: string): string[] {

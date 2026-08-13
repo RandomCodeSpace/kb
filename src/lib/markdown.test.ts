@@ -6,8 +6,9 @@ import goldenJson from '../../internal/board/testdata/golden.json?raw';
 import phase3Md from '../../internal/board/testdata/phase3.md?raw';
 import phase3Json from '../../internal/board/testdata/phase3.json?raw';
 import { parse, serialize, wireTasks } from './markdown';
-import type { Board, Task } from './model';
-import { newTask } from './model';
+import type { DraftBoard } from './markdown';
+import type { TaskDraft } from './model';
+import { newDraft } from './model';
 
 const DOC = `# Ops Board
 
@@ -28,7 +29,7 @@ const DOC = `# Ops Board
 - [x] Provision servers
 `;
 
-function projection(board: Board) {
+function projection(board: DraftBoard) {
   return {
     title: board.title,
     tasks: board.tasks.map((t) => ({
@@ -68,10 +69,6 @@ describe('parse', () => {
       { text: 'pack boxes', done: false },
       { text: 'book truck', done: true },
     ]);
-    expect(rich.id).toBeTruthy();
-    expect(rich.createdAt).toBeTruthy();
-    expect(rich.movedAt).toBeTruthy();
-
     const doing = board.tasks[1];
     expect(doing.title).toBe('Migrate database');
     expect(doing.status).toBe('doing');
@@ -176,53 +173,23 @@ describe('parse', () => {
 describe('wireTasks', () => {
   it('matches canonical markdown order for interleaved statuses and duplicate titles', () => {
     const tasks = [
-      newTask({
-        id: 'done-1',
-        title: 'Duplicate',
-        desc: 'done first',
-        status: 'done',
-      }),
-      newTask({
-        id: 'todo-1',
-        title: 'Duplicate',
-        desc: 'todo first',
-        status: 'todo',
-      }),
-      newTask({
-        id: 'cancelled-1',
-        title: 'Cancelled',
-        desc: 'cancelled',
-        status: 'cancelled',
-      }),
-      newTask({
-        id: 'doing-1',
-        title: 'Doing',
-        desc: 'doing',
-        status: 'doing',
-      }),
-      newTask({
-        id: 'todo-2',
-        title: 'Duplicate',
-        desc: 'todo second',
-        status: 'todo',
-      }),
-      newTask({
-        id: 'done-2',
-        title: 'Duplicate',
-        desc: 'done second',
-        status: 'done',
-      }),
+      newDraft({ title: 'Duplicate', desc: 'done first', status: 'done' }),
+      newDraft({ title: 'Duplicate', desc: 'todo first', status: 'todo' }),
+      newDraft({ title: 'Cancelled', desc: 'cancelled', status: 'cancelled' }),
+      newDraft({ title: 'Doing', desc: 'doing', status: 'doing' }),
+      newDraft({ title: 'Duplicate', desc: 'todo second', status: 'todo' }),
+      newDraft({ title: 'Duplicate', desc: 'done second', status: 'done' }),
     ];
-    const board: Board = { title: 'B', tasks };
+    const board: DraftBoard = { title: 'B', tasks };
 
     const ordered = wireTasks(board);
-    expect(ordered.map((t) => t.id)).toEqual([
-      'todo-1',
-      'todo-2',
-      'doing-1',
-      'done-1',
-      'done-2',
-      'cancelled-1',
+    expect(ordered.map((t) => t.desc)).toEqual([
+      'todo first',
+      'todo second',
+      'doing',
+      'done first',
+      'done second',
+      'cancelled',
     ]);
     // parse() is a line-for-line port of the Go parser. Its task slice proves
     // the helper follows the exact order the server receives from serialize().
@@ -234,17 +201,17 @@ describe('wireTasks', () => {
 
 describe('blocked', () => {
   it('serializes %blocked only when set and parses it back', () => {
-    const board: Board = {
+    const board: DraftBoard = {
       title: 'B',
       tasks: [
-        newTask({
+        newDraft({
           title: 'Waiting on legal',
           status: 'doing',
           blocked: true,
           effort: 'M',
           tags: ['infra'],
         }),
-        newTask({ title: 'Free to go', status: 'doing' }),
+        newDraft({ title: 'Free to go', status: 'doing' }),
       ],
     };
     const wire = serialize(board);
@@ -259,7 +226,7 @@ describe('blocked', () => {
   it('keeps a literal %blocked title word out of the flag', () => {
     const titles = ['%blocked', 'Why %blocked matters', '\\%blocked', '%blockedish'];
     for (const title of titles) {
-      const again = parse(serialize({ title: 'B', tasks: [newTask({ title })] }));
+      const again = parse(serialize({ title: 'B', tasks: [newDraft({ title })] }));
       expect(again.tasks).toHaveLength(1);
       expect(again.tasks[0].title).toBe(title);
       expect(again.tasks[0].blocked).toBe(false);
@@ -269,11 +236,11 @@ describe('blocked', () => {
 
 describe('cancelled', () => {
   it('emits the Cancelled section after Done and parses it back', () => {
-    const board: Board = {
+    const board: DraftBoard = {
       title: 'B',
       tasks: [
-        newTask({ title: 'Landed', status: 'done' }),
-        newTask({ title: 'Dropped', status: 'cancelled' }),
+        newDraft({ title: 'Landed', status: 'done' }),
+        newDraft({ title: 'Dropped', status: 'cancelled' }),
       ],
     };
     const wire = serialize(board);
@@ -308,7 +275,7 @@ const SHARED_FIXTURES: { name: string; md: string; json: string }[] = [
 ];
 
 /** projection() in the shape the shared JSON fixtures use (absent = ''). */
-function fixtureProjection(board: Board) {
+function fixtureProjection(board: DraftBoard) {
   return {
     title: board.title,
     tasks: board.tasks.map((t) => ({
@@ -340,10 +307,10 @@ describe('shared Go/TS codec fixtures', () => {
 
 describe('escaping', () => {
   it('round-trips metadata-shaped title words (#tag, !prio, ~effort, @due, \\) as text', () => {
-    const board: Board = {
+    const board: DraftBoard = {
       title: 'B',
       tasks: [
-        newTask({ title: 'Fix #123 login !2 ~S @2026-01-01 \\raw', status: 'todo' }),
+        newDraft({ title: 'Fix #123 login !2 ~S @2026-01-01 \\raw', status: 'todo' }),
       ],
     };
     const again = parse(serialize(board));
@@ -362,19 +329,19 @@ describe('escaping', () => {
   // as a title is not blank, the serialized line is one parse() reads back as
   // a task rather than as description text grafted onto the task before it.
   it('serializes every non-blank task to a line parse() reads back', () => {
-    const tasks: Task[] = [
-      newTask({ title: 'plain' }),
-      newTask({ title: '0', prio: 4 }),
-      newTask({ title: '\\' }),
-      newTask({ title: '%blocked', blocked: true }),
-      newTask({ title: '- [x] forged' }),
-      newTask({
+    const tasks: TaskDraft[] = [
+      newDraft({ title: 'plain' }),
+      newDraft({ title: '0', prio: 4 }),
+      newDraft({ title: '\\' }),
+      newDraft({ title: '%blocked', blocked: true }),
+      newDraft({ title: '- [x] forged' }),
+      newDraft({
         title: '#tag !1 ~S @2026-01-01',
         status: 'doing',
         prio: 2,
         blocked: true,
       }),
-      newTask({
+      newDraft({
         title: '日本語 café 🚀',
         emoji: '🔥',
         status: 'done',
@@ -383,16 +350,16 @@ describe('escaping', () => {
         effort: 'L',
         tags: ['a', 'k::v'],
       }),
-      newTask({
+      newDraft({
         title: 'cancelled one',
         status: 'cancelled',
         checks: [{ text: 'step', done: true }],
       }),
     ];
     for (const task of tasks) {
-      const board: Board = {
+      const board: DraftBoard = {
         title: 'B',
-        tasks: [newTask({ title: 'anchor', status: task.status }), task],
+        tasks: [newDraft({ title: 'anchor', status: task.status }), task],
       };
       const again = parse(serialize(board));
       expect(again.tasks).toHaveLength(2);
@@ -401,9 +368,9 @@ describe('escaping', () => {
   });
 
   it('keeps checkbox-shaped description lines in the description', () => {
-    const board: Board = {
+    const board: DraftBoard = {
       title: 'B',
-      tasks: [newTask({ title: 'T', desc: 'first\n- [ ] buy milk\n- [x] paid' })],
+      tasks: [newDraft({ title: 'T', desc: 'first\n- [ ] buy milk\n- [x] paid' })],
     };
     const again = parse(serialize(board));
     expect(again.tasks[0].desc).toBe('first\n- [ ] buy milk\n- [x] paid');
