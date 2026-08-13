@@ -26,6 +26,8 @@ export interface BoardProps {
   showCancelled: boolean;
   onRestore: (taskId: string) => void;
   onPurge: (taskId: string) => void;
+  /** Click on a card's label chip: toggle it into the board filter. */
+  onTagClick?: (tag: string) => void;
   /**
    * Sends a sentence to the app's polite live region. A keyboard move is
    * otherwise silent: the card changes place on screen and nothing is said.
@@ -314,7 +316,7 @@ interface LiftState extends LiftPos {
 const KEYS_HINT_ID = 'kb-card-keys';
 
 export function BoardView(props: Readonly<BoardProps>) {
-  const { board, onTick, onEdit, onAdd, showCancelled, onRestore, onPurge } = props;
+  const { board, onTick, onEdit, onAdd, showCancelled, onRestore, onPurge, onTagClick } = props;
   const rootRef = useRef<HTMLElement>(null);
   const cloneRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -680,6 +682,7 @@ export function BoardView(props: Readonly<BoardProps>) {
           onCardKey={handleCardKey}
           onRestore={onRestore}
           onPurge={onPurge}
+          onTagClick={onTagClick}
         />
       ))}
       {drag && dragTask && (
@@ -721,6 +724,7 @@ interface ColumnProps {
   onCardKey: (taskId: string, e: ReactKeyboardEvent<HTMLElement>) => void;
   onRestore: (taskId: string) => void;
   onPurge: (taskId: string) => void;
+  onTagClick?: (tag: string) => void;
 }
 
 function Column({
@@ -736,6 +740,7 @@ function Column({
   onCardKey,
   onRestore,
   onPurge,
+  onTagClick,
 }: Readonly<ColumnProps>) {
   const slot =
     placeholder === null ? null : (
@@ -779,6 +784,7 @@ function Column({
                 onCardKey={onCardKey}
                 onRestore={status === 'cancelled' ? onRestore : undefined}
                 onPurge={status === 'cancelled' ? onPurge : undefined}
+                onTagClick={onTagClick}
               />
             </li>
           </Fragment>

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import type { Board, Status, Task } from './lib/model';
+import type { BoardFilter } from './lib/filter';
+import { emptyFilter, filterBoard, isFilterActive, toggleTag } from './lib/filter';
 import { parse, serialize } from './lib/markdown';
 import {
   bumpShipped,
@@ -319,6 +321,13 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
   // Seeding clears the dirty flag (see LocalStore.loadOrSeed), so a demo board
   // is never pushed over a board the server already has.
   const [board, setBoardState] = useState<Board>(() => initial.board);
+  // Display-only narrowing: the filter never touches the stored board, so
+  // moves and edits keep operating on the full task set by id.
+  const [filter, setFilter] = useState<BoardFilter>(emptyFilter);
+  const handleTagClick = useCallback(
+    (tag: string) => setFilter((current) => toggleTag(current, tag)),
+    [],
+  );
   // Browser ids stay on the local board; write acknowledgements supply the
   // canonical ids needed by server-side exclusion.
   const [canonicalTaskIDs, setCanonicalTaskIDs] = useState<
@@ -1500,6 +1509,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
     () => unionLabels(serverLabels, boardLabels(board)),
     [serverLabels, board],
   );
+  const visibleBoard = useMemo(() => filterBoard(board, filter), [board, filter]);
   const aiEnabled =
     serverPresent &&
     aiSettings !== null &&
@@ -1632,8 +1642,46 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
             </button>
           </div>
         )}
+        <div className="filterbar">
+          <input
+            type="search"
+            className="filter-text"
+            placeholder="Filter cards"
+            aria-label="Filter cards by text"
+            value={filter.text}
+            onChange={(e) => {
+              const text = e.target.value;
+              setFilter((current) => ({ ...current, text }));
+            }}
+          />
+          {filter.tags.map((tag) => (
+            <button
+              key={tag}
+              type="button"
+              className="ftag"
+              aria-label={`Stop filtering by label ${tag}`}
+              onClick={() => handleTagClick(tag)}
+            >
+              {tag} ✕
+            </button>
+          ))}
+          {isFilterActive(filter) && (
+            <>
+              <button
+                type="button"
+                className="fclear"
+                onClick={() => setFilter(emptyFilter())}
+              >
+                Clear
+              </button>
+              <output className="fcount">
+                {visibleBoard.tasks.length} of {board.tasks.length} cards
+              </output>
+            </>
+          )}
+        </div>
         <BoardView
-          board={board}
+          board={visibleBoard}
           onMove={move}
           onTick={handleTick}
           onEdit={openEdit}
@@ -1641,6 +1689,7 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
           showCancelled={showCancelled}
           onRestore={handleRestore}
           onPurge={handlePurge}
+          onTagClick={handleTagClick}
           announce={announce}
         />
         {/* In the shell's flow rather than fixed over it: the hint's height
