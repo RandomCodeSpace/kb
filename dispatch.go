@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -16,7 +17,8 @@ import (
 // subcommands is the kb subcommand dispatch table. A bare invocation (or
 // flags only) runs the web server; agents adding CLI verbs register here.
 var subcommands = map[string]func(args []string) error{
-	"mcp": runMCP,
+	"mcp":     runMCP,
+	"version": runVersion,
 }
 
 var mcpRun = mcpserv.Run
@@ -54,6 +56,53 @@ func dispatchArgs(args []string, stderr io.Writer) (handled bool, exitCode int) 
 		return true, 1
 	}
 	return true, 0
+}
+
+var readBuildInfo = debug.ReadBuildInfo
+var versionOut io.Writer = os.Stdout
+
+// runVersion prints the build's version: kb version. go-install builds carry
+// the module version; release binaries are built at the tagged commit with a
+// clean tree, so the toolchain stamps the same value there. A plain go build
+// in a checkout reports devel plus the commit it was built from.
+func runVersion(args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("version takes no arguments")
+	}
+	info, ok := readBuildInfo()
+	fmt.Fprintln(versionOut, versionString(info, ok))
+	return nil
+}
+
+func versionString(info *debug.BuildInfo, ok bool) string {
+	if !ok || info == nil {
+		return "kb (unknown build)"
+	}
+	v := info.Main.Version
+	if v == "" || v == "(devel)" {
+		v = "devel"
+	}
+	var revision, modified string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		}
+	}
+	out := "kb " + v
+	if revision != "" {
+		if len(revision) > 12 {
+			revision = revision[:12]
+		}
+		out += " (" + revision
+		if modified == "true" {
+			out += ", modified"
+		}
+		out += ")"
+	}
+	return out
 }
 
 // runMCP serves the board over MCP stdio: kb mcp [--data DIR] [--user NAME].

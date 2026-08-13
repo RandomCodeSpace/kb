@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -70,6 +71,90 @@ func TestRunMCPPassesResolvedFlags(t *testing.T) {
 	mcpRun = func(string, string) error { return errors.New("serve failed") }
 	if err := runMCP([]string{"--data", wantData}); err == nil || err.Error() != "serve failed" {
 		t.Fatalf("runMCP error = %v, want serve failed", err)
+	}
+}
+
+func TestVersionString(t *testing.T) {
+	if got := versionString(nil, false); got != "kb (unknown build)" {
+		t.Fatalf("no build info = %q", got)
+	}
+
+	settings := func(pairs ...[2]string) []debug.BuildSetting {
+		out := make([]debug.BuildSetting, 0, len(pairs))
+		for _, p := range pairs {
+			out = append(out, debug.BuildSetting{Key: p[0], Value: p[1]})
+		}
+		return out
+	}
+
+	cases := []struct {
+		name string
+		info debug.BuildInfo
+		want string
+	}{
+		{
+			name: "go install release tag",
+			info: debug.BuildInfo{Main: debug.Module{Version: "v0.8.0"}},
+			want: "kb v0.8.0",
+		},
+		{
+			name: "tag-stamped build with vcs info",
+			info: debug.BuildInfo{
+				Main: debug.Module{Version: "v0.8.0"},
+				Settings: settings(
+					[2]string{"vcs.revision", "0123456789abcdef0123"},
+					[2]string{"vcs.modified", "false"},
+				),
+			},
+			want: "kb v0.8.0 (0123456789ab)",
+		},
+		{
+			name: "dev build from a dirty checkout",
+			info: debug.BuildInfo{
+				Main: debug.Module{Version: "(devel)"},
+				Settings: settings(
+					[2]string{"vcs.revision", "abc123"},
+					[2]string{"vcs.modified", "true"},
+				),
+			},
+			want: "kb devel (abc123, modified)",
+		},
+		{
+			name: "no vcs metadata at all",
+			info: debug.BuildInfo{Main: debug.Module{Version: ""}},
+			want: "kb devel",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := versionString(&tt.info, true); got != tt.want {
+				t.Fatalf("versionString = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunVersion(t *testing.T) {
+	originalRead := readBuildInfo
+	originalOut := versionOut
+	t.Cleanup(func() {
+		readBuildInfo = originalRead
+		versionOut = originalOut
+	})
+	readBuildInfo = func() (*debug.BuildInfo, bool) {
+		return &debug.BuildInfo{Main: debug.Module{Version: "v1.2.3"}}, true
+	}
+	var out bytes.Buffer
+	versionOut = &out
+
+	if err := runVersion(nil); err != nil {
+		t.Fatalf("runVersion: %v", err)
+	}
+	if got := out.String(); got != "kb v1.2.3\n" {
+		t.Fatalf("version output = %q", got)
+	}
+	if err := runVersion([]string{"extra"}); err == nil {
+		t.Fatal("runVersion with arguments should refuse")
 	}
 }
 

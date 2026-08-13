@@ -1,0 +1,77 @@
+name: Release
+
+# Manually triggered release: builds the UI, commits it on a detached release
+# commit under the tag, cross-compiles the binaries at that commit (so the Go
+# toolchain stamps the exact version), and publishes the GitHub release.
+# Everything is delegated to scripts/release.sh — the same script a local
+# release uses — so the two paths cannot drift apart.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (vX.Y.Z)'
+        required: true
+      notes:
+        description: 'Release notes (markdown); empty generates notes from commits'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Build and validate everything, publish nothing'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.15.0
+          cache: npm
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Cut release
+        # Inputs reach the shell only through env, never by interpolation
+        # into the script text.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=("$VERSION")
+          if [ -n "$NOTES" ]; then
+            printf '%s' "$NOTES" > "$RUNNER_TEMP/notes.md"
+            args+=("$RUNNER_TEMP/notes.md")
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          bash scripts/release.sh "${args[@]}"
