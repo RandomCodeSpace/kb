@@ -13,6 +13,8 @@
 #
 # Usage: scripts/release.sh vX.Y.Z [notes-file] [--dry-run]
 # Requires: clean working tree, npm, go, and an authenticated gh CLI.
+# Run from a plain clone (or CI). In a linked git worktree the Go toolchain
+# reads VCS state from the parent checkout and stamps the wrong version.
 # --dry-run performs every build and check, creates the tag locally to prove
 # the pipeline works, then deletes it and publishes nothing.
 set -euo pipefail
