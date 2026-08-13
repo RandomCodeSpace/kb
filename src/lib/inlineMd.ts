@@ -1,7 +1,9 @@
 /**
- * Minimal, XSS-safe inline markdown for card descriptions and checklist text.
- * Tokens only — rendering maps tokens to React elements, never raw HTML.
- * Supported: `code`, **bold**, *italic*, [text](https://url), leading "- " bullets.
+ * Minimal, XSS-safe inline markdown for card descriptions, comments, and
+ * checklist text. Tokens only — rendering maps tokens to React elements,
+ * never raw HTML. Supported: `code`, **bold**, *italic*, _italic_,
+ * [text](https://url), bare http(s) URLs, leading "- " bullets, "1." lists,
+ * #/##/### headings, and ``` code fences.
  */
 export type InlineTok =
   | { kind: 'text' | 'bold' | 'italic' | 'code'; text: string }
@@ -10,6 +12,11 @@ export type InlineTok =
 const CODE_PATTERN = /`([^`\r\n]+)`/g;
 const BOLD_PATTERN = /\*\*([^*\r\n]+)\*\*/g;
 const ITALIC_PATTERN = /\*([^*\s][^*\r\n]*)\*/g;
+// Word-bounded so snake_case identifiers keep their underscores.
+const UNDERSCORE_ITALIC_PATTERN = /(?<![\w])_([^\s_](?:[^_\r\n]*[^\s_])?)_(?![\w])/g;
+const BARE_URL_PATTERN = /https?:\/\/[^\s<>()"'`]+/g;
+// Sentence punctuation after a pasted URL belongs to the prose, not the link.
+const URL_TRAILING_PUNCT = /[.,;:!?]+$/;
 const WHITESPACE_PATTERN = /\s/u;
 const HTTP_PREFIX = 'http:' + '//';
 const HTTPS_PREFIX = 'https:' + '//';
@@ -99,12 +106,26 @@ function linkMatches(line: string): InlineMatch[] {
   return found;
 }
 
+function bareURLMatches(line: string): InlineMatch[] {
+  return [...line.matchAll(BARE_URL_PATTERN)].map((match) => {
+    const url = match[0].replace(URL_TRAILING_PUNCT, '');
+    return {
+      start: match.index,
+      end: match.index + url.length,
+      priority: 4,
+      token: { kind: 'link' as const, text: url, href: url },
+    };
+  });
+}
+
 function inlineMatches(line: string): InlineMatch[] {
   return [
     ...matches(line, CODE_PATTERN, 0, (match) => ({ kind: 'code', text: match[1] })),
     ...matches(line, BOLD_PATTERN, 1, (match) => ({ kind: 'bold', text: match[1] })),
     ...matches(line, ITALIC_PATTERN, 2, (match) => ({ kind: 'italic', text: match[1] })),
+    ...matches(line, UNDERSCORE_ITALIC_PATTERN, 2, (match) => ({ kind: 'italic', text: match[1] })),
     ...linkMatches(line),
+    ...bareURLMatches(line),
   ].sort((left, right) => left.start - right.start || left.priority - right.priority);
 }
 
@@ -125,12 +146,46 @@ export function tokenizeInline(line: string): InlineTok[] {
 
 export interface DescLine {
   bullet: boolean;
+  /** List ordinal ("3") when the line is a "3. " numbered item. */
+  ordinal?: string;
+  /** Heading level 1-3 when the line is a #/##/### heading. */
+  heading?: number;
+  /** Verbatim line inside a ``` fence; toks stays empty for these. */
+  code?: string;
   toks: InlineTok[];
 }
 
+const HEADING_PATTERN = /^(#{1,3})\s+(.*)$/;
+const ORDERED_PATTERN = /^(\d{1,3})\.\s+(.*)$/;
+
+function descLine(raw: string): DescLine {
+  const heading = HEADING_PATTERN.exec(raw);
+  if (heading) {
+    return { bullet: false, heading: heading[1].length, toks: tokenizeInline(heading[2]) };
+  }
+  const ordered = ORDERED_PATTERN.exec(raw);
+  if (ordered) {
+    return { bullet: false, ordinal: ordered[1], toks: tokenizeInline(ordered[2]) };
+  }
+  const bullet = raw.startsWith('- ');
+  return { bullet, toks: tokenizeInline(bullet ? raw.slice(2) : raw) };
+}
+
 export function parseDesc(desc: string): DescLine[] {
-  return desc.split('\n').map((raw) => {
-    const bullet = raw.startsWith('- ');
-    return { bullet, toks: tokenizeInline(bullet ? raw.slice(2) : raw) };
-  });
+  const out: DescLine[] = [];
+  let inFence = false;
+  for (const raw of desc.split('\n')) {
+    // A fence delimiter line (optionally carrying a language tag on open)
+    // toggles code mode and is not rendered itself.
+    if (raw.startsWith('```')) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) {
+      out.push({ bullet: false, code: raw, toks: [] });
+      continue;
+    }
+    out.push(descLine(raw));
+  }
+  return out;
 }

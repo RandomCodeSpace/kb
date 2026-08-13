@@ -578,6 +578,25 @@ body {
   font-weight: 600;
 }
 .card .desc strong { color: var(--ink); }
+/* Rich description blocks, shared by card descriptions and comment bodies. */
+.dhead { font-weight: 800; color: var(--ink); margin-top: var(--sp-1); }
+.dcode {
+  margin: var(--sp-1) 0;
+  padding: var(--sp-1) var(--sp-2);
+  background: #e9edf2;
+  border: 1px solid #d5d9df;
+  border-radius: 5px;
+  overflow-x: auto;
+}
+.dcode code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
+  color: var(--ink);
+  background: none;
+  border: 0;
+  padding: 0;
+  white-space: pre;
+}
 .card .desc code,
 .check code {
   font-family: ui-monospace, Menlo, Consolas, monospace;
