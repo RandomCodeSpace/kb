@@ -292,7 +292,39 @@ export interface DurableSnapshot extends LoadedBoard {
 
 export interface LocalStoreOptions {
   storage?: Storage;
-  locks?: LockManager | null;
+  locks?: BoardLocks | null;
+}
+
+/** The one LockManager operation the store uses; navigator.locks satisfies it. */
+export interface BoardLocks {
+  request<T>(
+    name: string,
+    options: LockOptions,
+    callback: () => T | Promise<T>,
+  ): Promise<T>;
+}
+
+/**
+ * Web Locks are a secure-context API, so a board served over plain HTTP on a
+ * LAN host has no navigator.locks. Exclusivity then degrades to this
+ * per-instance serial queue: writes in this tab stay ordered, cross-tab
+ * exclusivity is lost. Losing that beats losing local persistence entirely,
+ * and the envelope's generation check still turns a racing tab into a
+ * reported conflict rather than silent corruption.
+ */
+export function serialLockFallback(): BoardLocks {
+  let tail: Promise<unknown> = Promise.resolve();
+  return {
+    request<T>(
+      _name: string,
+      _options: LockOptions,
+      callback: () => T | Promise<T>,
+    ): Promise<T> {
+      const run = tail.then(() => callback());
+      tail = run.catch(() => undefined);
+      return run;
+    },
+  };
 }
 
 interface StoredBoardSource {
@@ -379,18 +411,18 @@ export class LocalStore implements BoardStore {
   private readonly migrationMarkerKey: string;
   private readonly lockName: string;
   private readonly storage: Storage;
-  private readonly locks: LockManager | null;
+  private readonly locks: BoardLocks;
   private virtualSeed: Board | null = null;
 
   constructor(ns: string = 'default', options: LocalStoreOptions = {}) {
     this.ns = ns;
     this.storage = options.storage ?? localStorage;
     if (options.locks !== undefined) {
-      this.locks = options.locks;
+      this.locks = options.locks ?? serialLockFallback();
     } else if (typeof navigator === 'undefined') {
-      this.locks = null;
+      this.locks = serialLockFallback();
     } else {
-      this.locks = navigator.locks ?? null;
+      this.locks = navigator.locks ?? serialLockFallback();
     }
     this.key = nsKey(BOARD_KEY, ns);
     this.legacyKey = legacyNamespaceStorageKey(BOARD_KEY, ns);
@@ -638,9 +670,6 @@ export class LocalStore implements BoardStore {
       currentVersion?: DurableVersion;
     },
   ): Promise<PersistenceResult> {
-    if (!this.locks) {
-      return { ok: false, error: new Error('durable board storage locking unavailable') };
-    }
     try {
       return await this.locks.request(
         this.lockName,

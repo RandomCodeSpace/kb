@@ -1,4 +1,5 @@
 import type { Board, Status, Task } from './model';
+import { newId } from './model';
 import { parse, serialize, titleLine, wireTasks } from './markdown';
 import { ReauthRequiredError, type Identity } from './auth';
 import { authedFetch } from './api';
@@ -1353,7 +1354,7 @@ export class RemoteStore {
     if (save.pendingWriteStager && !expectedVersion) {
       throw new Error('board write staging requires a durable version');
     }
-    save.operationID ??= crypto.randomUUID();
+    save.operationID ??= newId();
     if (!save.pendingWriteStager) return;
     const staged = await this.awaitAtEpoch(
       save.epoch,
