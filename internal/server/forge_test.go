@@ -1481,14 +1481,12 @@ func TestImportPreviewDoesNotAuthorizeOmittedPackedSource(t *testing.T) {
 	if second := response.Drafts[1]; second.Title != "from second" || second.Link != "" || second.ExternalKey != "" || second.URL != "" {
 		t.Fatalf("omitted source received provenance: %+v", second)
 	}
-	var request struct {
-		Messages []chatMessage `json:"messages"`
-	}
-	if err := json.Unmarshal(fakeAI.reqBody, &request); err != nil {
-		t.Fatalf("decode AI request: %v", err)
-	}
+	request := decodeAIRequest(t, fakeAI.reqBody)
 	if len(request.Messages) != 2 {
 		t.Fatalf("AI messages = %d, want system and user", len(request.Messages))
+	}
+	if *request.MaxTokens != aiImportMaxTokens {
+		t.Fatalf("import preview max_tokens = %d, want %d", *request.MaxTokens, aiImportMaxTokens)
 	}
 	userMessage := request.Messages[1].Content
 	if !strings.Contains(userMessage, "Source 1\n") || strings.Contains(userMessage, "Source 2\n") {
@@ -2177,12 +2175,12 @@ func TestImportDriftAISummaryIsSingleBoundedSecretFreeCall(t *testing.T) {
 		t.Fatalf("summary length/UTF-8 = %d/%t, want %d/true",
 			len(response.Summary), utf8.ValidString(response.Summary), maxImportCommentBytes)
 	}
-	var request chatRequest
-	if err := json.Unmarshal(fakeAI.reqBody, &request); err != nil {
-		t.Fatalf("decode AI drift request: %v", err)
-	}
+	request := decodeAIRequest(t, fakeAI.reqBody)
 	if request.ResponseFormat != nil {
 		t.Fatal("drift summary requested JSON mode instead of plain text")
+	}
+	if *request.MaxTokens != aiDriftMaxTokens {
+		t.Fatalf("drift summary max_tokens = %d, want %d", *request.MaxTokens, aiDriftMaxTokens)
 	}
 	for _, secret := range []string{pat, storedURL, "https://upstream-response.invalid/secret-path", "sk-ai-secret"} {
 		if strings.Contains(string(fakeAI.reqBody), secret) {

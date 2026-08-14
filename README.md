@@ -509,7 +509,10 @@ until you press **Add selected**.
 Configure it on the gear screen (or via `PUT /api/settings`): an
 OpenAI-compatible base URL, a model name, and an API key. The base URL is
 accepted with or without `/v1`; the server appends `/v1/chat/completions`.
-A test-connection button (`POST /api/ai/test`) runs a 1-token ping. It accepts
+A test-connection button (`POST /api/ai/test`) sends a trivial `ping` tool and
+passes only if the model answers with a call to it: tool calling is a
+prerequisite for the AI features, so a model that replies with prose fails with
+"model must support tool calling". It accepts
 an optional body `{"ai_base_url","ai_model","ai_key"}` and tests those values
 instead of the stored ones, so the gear screen can check a key *before* you
 save it; a key sent this way is used for that one request and never persisted,
@@ -525,6 +528,17 @@ Examples:
 | OpenAI                    | `https://api.openai.com`     | `gpt-4o-mini`       | required |
 | ollama.com (cloud shim)   | `https://ollama.com`         | `qwen3-coder:480b`  | required |
 | Local Ollama              | `http://localhost:11434`     | `llama3.1`          | none     |
+
+**Output budget**: every request states one explicitly, sized per call site and
+never above 4096 tokens — the smallest completion cap still in wide use, so the
+budget itself is never the reason a request is rejected. Reasoning models
+(`o1`/`o3`/`o4`, `gpt-5*`) get it as `max_completion_tokens`, which is the only
+field they accept; everything else gets `max_tokens`. A reply that reaches the
+budget comes back as `422` "the model's reply hit the output limit and was cut
+off", not as a JSON parse failure. The upstream reply itself is capped at 1 MiB.
+Nothing the server's own environment happens to define (`OPENAI_API_KEY`,
+`OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, `OPENAI_CUSTOM_HEADERS`, …) travels to a
+configured endpoint.
 
 **Key handling**: the API key is write-only and masked in the UI —
 `GET /api/settings` returns only `has_key`, never the key. At rest it is
