@@ -222,28 +222,42 @@ func TestRSAKeyFromJWKRejectsMalformedComponents(t *testing.T) {
 }
 
 func TestChatMapsTransportReadAndPayloadFailures(t *testing.T) {
+	jsonResponse := func(status int, body string) *http.Response {
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
+	}
 	tests := []struct {
-		name string
-		rt   roundTripperFunc
+		name      string
+		maxTokens int64
+		rt        roundTripperFunc
 	}{
-		{name: "transport", rt: func(*http.Request) (*http.Response, error) { return nil, errors.New("offline") }},
-		{name: "read", rt: func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Body: coverageReadCloser{readErr: errors.New("read failed")}}, nil
+		{name: "transport", maxTokens: 10, rt: func(*http.Request) (*http.Response, error) { return nil, errors.New("offline") }},
+		{name: "read", maxTokens: 10, rt: func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       coverageReadCloser{readErr: errors.New("read failed")},
+			}, nil
 		}},
-		{name: "status", rt: func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusTeapot, Body: io.NopCloser(strings.NewReader("no"))}, nil
+		{name: "status", maxTokens: 10, rt: func(*http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusTeapot, `{"error":{"message":"no"}}`), nil
 		}},
-		{name: "invalid json", rt: func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{"))}, nil
+		{name: "invalid json", maxTokens: 10, rt: func(*http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusOK, "{"), nil
 		}},
+		// An unstated budget is never sent as one: the floor applies instead.
 		{name: "no choices", rt: func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[]}`))}, nil
+			return jsonResponse(http.StatusOK, `{"choices":[]}`), nil
 		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &server{aiClient: &http.Client{Transport: tt.rt}}
-			if _, err := s.chat("u", aiConfig{baseURL: "https://ai.invalid", model: "m"}, nil, 10, false); err == nil {
+			call := chatCall{msgs: []chatMessage{{Role: "user", Content: "hi"}}, maxTokens: tt.maxTokens}
+			if _, err := s.chat("u", aiConfig{baseURL: "https://ai.invalid", model: "m"}, call); err == nil {
 				t.Fatal("chat returned nil error")
 			}
 		})

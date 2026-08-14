@@ -981,7 +981,7 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 	content, err := s.chatCompletion(user, []chatMessage{
 		{Role: "system", Content: importSystemPrompt},
 		{Role: "user", Content: "Transform these numbered forge issues into kanban-card proposals:\n\n" + packed},
-	}, 0, true)
+	}, aiImportMaxTokens, true)
 	if err != nil {
 		writeAIError(w, user, "import preview", err)
 		return
@@ -1338,14 +1338,17 @@ func (s *server) importDriftSummary(user string, baseline, current store.ImportB
 		current.Excerpt,
 	)
 	prompt = truncateImportText(prompt, maxImportPackBytes)
-	content, err := s.chat(user, cfg, []chatMessage{
-		{Role: "system", Content: "Summarize an imported issue change using only the supplied titles and excerpts."},
-		{Role: "user", Content: prompt},
-	}, 0, false)
+	msg, err := s.chat(user, cfg, chatCall{
+		msgs: []chatMessage{
+			{Role: "system", Content: "Summarize an imported issue change using only the supplied titles and excerpts."},
+			{Role: "user", Content: prompt},
+		},
+		maxTokens: aiDriftMaxTokens,
+	})
 	if err != nil {
 		return ""
 	}
-	return truncateImportText(strings.TrimSpace(content), maxImportCommentBytes)
+	return truncateImportText(strings.TrimSpace(msg.Content), maxImportCommentBytes)
 }
 
 func (s *server) importDuplicates(scope string, issues []forgeIssue) ([]*importDuplicate, error) {
