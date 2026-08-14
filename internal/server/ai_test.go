@@ -1357,3 +1357,84 @@ func TestAITestSuppliedURLKeepsGuards(t *testing.T) {
 		t.Errorf("malformed body: got %d, want 400", w.Code)
 	}
 }
+
+// Some backends leave the model's chain-of-thought in the message content as
+// an inline <think> block instead of a separate field. Reasoning about a JSON
+// answer routinely contains braces, so a first-{-to-last-} extraction fails
+// intermittently — whenever the sampled reasoning happens to include one.
+func TestDecodeJSONObjectToleratesInlineReasoning(t *testing.T) {
+	tests := []struct {
+		name, content, wantTitle, wantErr string
+	}{
+		{
+			name:      "think block with braces before the reply",
+			content:   "<think>The user wants a card. Maybe {\"title\": something} — no, refine.</think>\n{\"title\":\"real\"}",
+			wantTitle: "real",
+		},
+		{
+			name:      "prose with braces around the reply",
+			content:   "Here is the card (schema: {title, desc}):\n{\"title\":\"real\"}\nLet me know!",
+			wantTitle: "real",
+		},
+		{
+			name:      "fenced reply after a think block",
+			content:   "<think>brace test {</think>```json\n{\"title\":\"real\"}\n```",
+			wantTitle: "real",
+		},
+		{
+			name:    "a draft inside the think block is not the reply",
+			content: "<think>{\"title\":\"draft\"}</think>",
+			wantErr: "assistant reply is not JSON",
+		},
+		{
+			name:    "think block with no reply at all",
+			content: "<think>still thinking</think>",
+			wantErr: "assistant reply is not JSON",
+		},
+		{
+			name:    "braces that never parse",
+			content: "reasoning { with braces } and no object",
+			wantErr: "assistant reply is not valid JSON",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, err := decodeJSONObject(tt.content)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decodeJSONObject: %v", err)
+			}
+			if got, _ := m["title"].(string); got != tt.wantTitle {
+				t.Errorf("title = %q, want %q", got, tt.wantTitle)
+			}
+		})
+	}
+}
+
+// End to end: a story draft survives a backend that inlines reasoning.
+func TestAIStoryToleratesInlineReasoning(t *testing.T) {
+	fake := &fakeOpenAI{content: "<think>They want rate limiting. Shape: {\"title\": ...}.</think>\n{\"title\":\"Add rate limiting\",\"prio\":2}"}
+	upstream := httptest.NewServer(fake.handler())
+	defer upstream.Close()
+
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1") // test upstream is on loopback
+	h, _ := newTestServer(t, Config{})
+	configureAI(t, h, upstream.URL, "test-model", "sk-test-123")
+
+	w := doReq(t, h, "POST", "/api/ai/story", `{"mode":"create","prompt":"rate limit logins"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST story: got %d (body=%s)", w.Code, w.Body)
+	}
+	var draft storyDraft
+	if err := json.Unmarshal(w.Body.Bytes(), &draft); err != nil {
+		t.Fatalf("draft JSON: %v (body=%s)", err, w.Body)
+	}
+	if draft.Title != "Add rate limiting" || draft.Prio != 2 {
+		t.Errorf("draft = %+v, want title %q prio 2", draft, "Add rate limiting")
+	}
+}

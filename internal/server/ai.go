@@ -890,21 +890,37 @@ func forgeIssueADR(issue forgeIssue) string {
 
 var draftDueRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
+// thinkBlockRe matches a closed inline reasoning block. Some backends leave
+// the model's chain-of-thought in the message content instead of a separate
+// field, and reasoning about a JSON answer routinely contains braces, which
+// would defeat the brace scan in decodeJSONObject. Reasoning drafts are also
+// not the answer: a JSON object inside a think block must never be returned
+// as the reply.
+var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
+
 // decodeJSONObject parses assistant content as a single JSON object,
-// tolerating stray prose or code fences around it.
+// tolerating inline reasoning blocks, stray prose, and code fences around it.
 func decodeJSONObject(content string) (map[string]any, error) {
-	raw := strings.TrimSpace(content)
+	raw := strings.TrimSpace(thinkBlockRe.ReplaceAllString(content, ""))
 	var m map[string]any
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}")
-		if start < 0 || end <= start {
-			return nil, errors.New("assistant reply is not JSON")
+	if err := json.Unmarshal([]byte(raw), &m); err == nil {
+		return m, nil
+	}
+	// Surrounding prose can itself contain braces, so a first-{-to-last-}
+	// slice is not enough: decode at each "{" until one yields an object.
+	for i := strings.Index(raw, "{"); i >= 0 && i < len(raw); i++ {
+		if raw[i] != '{' {
+			continue
 		}
-		if err := json.Unmarshal([]byte(raw[start:end+1]), &m); err != nil {
-			return nil, errors.New("assistant reply is not valid JSON")
+		var candidate map[string]any
+		if err := json.NewDecoder(strings.NewReader(raw[i:])).Decode(&candidate); err == nil {
+			return candidate, nil
 		}
 	}
-	return m, nil
+	if !strings.Contains(raw, "{") {
+		return nil, errors.New("assistant reply is not JSON")
+	}
+	return nil, errors.New("assistant reply is not valid JSON")
 }
 
 // coerceDraft parses assistant content as JSON and clamps every field into
