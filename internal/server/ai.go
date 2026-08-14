@@ -173,21 +173,24 @@ const (
 // card proposals, one sentence of drift prose, one tool call.
 //
 // No budget may exceed aiMaxTokensCeiling. A model is only known by the name
-// the user typed, and asking for more than the model's own completion cap is
-// rejected outright — a 400 no caller can act on, where the previous omission
-// worked. 4096 is the smallest cap still in wide use (gpt-3.5-turbo, and the
-// default of several local llama.cpp/vLLM builds), so it is the largest value
-// that cannot itself be the reason a request fails. Wanting more output than
-// that is handled the other way round: hitting the budget is detected from
-// finish_reason and reported as truncation the caller can act on.
+// the user typed, and asking for more than the model's own completion cap can
+// be rejected outright by strict servers — a 400 no caller can act on, where
+// the previous omission worked. The ceiling is 8192 rather than the safer
+// 4096: reasoning models (qwen3+, deepseek-r1 family) spend their thinking
+// tokens inside this budget, and measured against qwen3.5 a modest ADR split
+// burns ~3,600 completion tokens of which under a tenth is the JSON reply, so
+// 4096 makes the flagship flow fail on exactly the models it targets. Hitting
+// the budget is still detected from finish_reason and reported as truncation
+// the caller can act on; models capped below 8192 on strict servers fail the
+// larger flows either way.
 const (
 	aiDefaultMaxTokens = 1024
-	aiStoryMaxTokens   = 2048
-	aiStoriesMaxTokens = 4096
-	aiImportMaxTokens  = 4096
-	aiDriftMaxTokens   = 512
+	aiStoryMaxTokens   = 4096
+	aiStoriesMaxTokens = 8192
+	aiImportMaxTokens  = 8192
+	aiDriftMaxTokens   = 1024
 	aiProbeMaxTokens   = 256
-	aiMaxTokensCeiling = 4096
+	aiMaxTokensCeiling = 8192
 )
 
 // aiMaxResponseBytes caps one upstream reply. The endpoint is user-configured
