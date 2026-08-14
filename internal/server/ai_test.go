@@ -1396,6 +1396,16 @@ func TestDecodeJSONObjectToleratesInlineReasoning(t *testing.T) {
 			content: "reasoning { with braces } and no object",
 			wantErr: "assistant reply is not valid JSON",
 		},
+		{
+			name:      "reasoning with a consumed opening think tag",
+			content:   "The user wants a split. Sketch: {\"title\":\"sketch\"}. Refine it.</think>\n{\"title\":\"real\"}",
+			wantTitle: "real",
+		},
+		{
+			name:      "untagged reasoning sketch before a longer reply",
+			content:   "The shape is {\"title\":\"sketch\"}. Final answer:\n{\"title\":\"real\",\"desc\":\"the actual card\"}",
+			wantTitle: "real",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1436,5 +1446,37 @@ func TestAIStoryToleratesInlineReasoning(t *testing.T) {
 	}
 	if draft.Title != "Add rate limiting" || draft.Prio != 2 {
 		t.Errorf("draft = %+v, want title %q prio 2", draft, "Add rate limiting")
+	}
+}
+
+// Regression: leaked reasoning that sketches the schema with a one-element
+// example ({"stories":[{...}]}) must not be mistaken for the reply — that
+// returned exactly one story from every ADR split, regardless of max.
+func TestAIStoriesPreferTheReplyOverAReasoningSketch(t *testing.T) {
+	fake := &fakeOpenAI{content: "I need up to 6 stories. The shape is " +
+		`{"stories":[{"title":"example"}]}` + ". Now the real split.</think>\n" +
+		`{"stories":[{"title":"one"},{"title":"two"},{"title":"three"}]}`}
+	upstream := httptest.NewServer(fake.handler())
+	defer upstream.Close()
+
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1") // test upstream is on loopback
+	h, _ := newTestServer(t, Config{})
+	configureAI(t, h, upstream.URL, "test-model", "sk-test-123")
+
+	w := doReq(t, h, "POST", "/api/ai/stories", `{"adr":"# ADR\nSplit the monolith."}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST stories: got %d (body=%s)", w.Code, w.Body)
+	}
+	var res struct {
+		Stories []storyDraft `json:"stories"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("stories JSON: %v (body=%s)", err, w.Body)
+	}
+	if len(res.Stories) != 3 {
+		t.Fatalf("got %d stories, want 3 (body=%s)", len(res.Stories), w.Body)
+	}
+	if res.Stories[0].Title != "one" || res.Stories[2].Title != "three" {
+		t.Errorf("stories = %+v, want titles one..three", res.Stories)
 	}
 }
