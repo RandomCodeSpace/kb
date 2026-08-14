@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -170,14 +171,37 @@ const (
 // surfaces as "assistant reply is not valid JSON" — so the budgets are sized
 // per call site: one card, up to maxStoryCount cards, up to maxImportIssues
 // card proposals, one sentence of drift prose, one tool call.
+//
+// No budget may exceed aiMaxTokensCeiling. A model is only known by the name
+// the user typed, and asking for more than the model's own completion cap is
+// rejected outright — a 400 no caller can act on, where the previous omission
+// worked. 4096 is the smallest cap still in wide use (gpt-3.5-turbo, and the
+// default of several local llama.cpp/vLLM builds), so it is the largest value
+// that cannot itself be the reason a request fails. Wanting more output than
+// that is handled the other way round: hitting the budget is detected from
+// finish_reason and reported as truncation the caller can act on.
 const (
 	aiDefaultMaxTokens = 1024
 	aiStoryMaxTokens   = 2048
-	aiStoriesMaxTokens = 8192
-	aiImportMaxTokens  = 8192
+	aiStoriesMaxTokens = 4096
+	aiImportMaxTokens  = 4096
 	aiDriftMaxTokens   = 512
 	aiProbeMaxTokens   = 256
+	aiMaxTokensCeiling = 4096
 )
+
+// aiMaxResponseBytes caps one upstream reply. The endpoint is user-configured
+// and the SDK buffers the whole body with io.ReadAll before decoding it, so
+// without a ceiling a host that answers with an endless stream — or a gzip
+// bomb, since the SDK asks for gzip — exhausts the shared process. This is the
+// same 1 MiB the hand-rolled client enforced; the largest reply this server
+// asks for is orders of magnitude smaller.
+const aiMaxResponseBytes = 1 << 20
+
+// errAIResponseTooLarge stops the read past the cap. It reaches chat as a
+// transport-level failure, which is mapped to the same opaque 502 as any other
+// upstream problem.
+var errAIResponseTooLarge = errors.New("upstream response exceeds the size limit")
 
 // storyDraft is the coerced card draft returned by POST /api/ai/story.
 type storyDraft struct {
@@ -286,23 +310,92 @@ func (s *server) chatCompletion(user string, msgs []chatMessage, maxTokens int64
 	return msg.Content, nil
 }
 
+// limitedBody is a response body that fails once it has yielded more than the
+// cap. The allowance is one byte over aiMaxResponseBytes so a reply of exactly
+// the cap still reads to EOF; anything longer stops at cap+1 with
+// errAIResponseTooLarge instead of being buffered.
+type limitedBody struct {
+	rc   io.ReadCloser
+	left int64
+}
+
+func (b *limitedBody) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		return 0, errAIResponseTooLarge
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.rc.Read(p)
+	b.left -= int64(n)
+	return n, err
+}
+
+func (b *limitedBody) Close() error { return b.rc.Close() }
+
+// limitResponseBody caps what one upstream reply may hand to the SDK's
+// io.ReadAll. It runs as SDK middleware rather than in the transport because
+// the transport's gzip is transparent: by the time the response gets here the
+// body is the decompressed stream, which is what the allocation is made of.
+func limitResponseBody(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+	res, err := next(req)
+	if err != nil || res == nil || res.Body == nil {
+		return res, err
+	}
+	res.Body = &limitedBody{rc: res.Body, left: aiMaxResponseBytes + 1}
+	return res, nil
+}
+
+// aiOwnedHeaders are headers this client sets for the request to work at all.
+// A same-named value inherited from the environment is already overwritten
+// (Authorization, by the per-request key), so deleting them in the ambient
+// scrub would break the call rather than contain a leak.
+var aiOwnedHeaders = map[string]bool{"authorization": true, "content-type": true, "accept": true}
+
+// ambientHeaderNames lists the headers openai.NewClient derives from the
+// server's own environment. DefaultClientOptions is prepended unconditionally
+// and the option that would suppress it is internal to the SDK, so each header
+// it can produce is deleted by name instead: OPENAI_ORG_ID and
+// OPENAI_PROJECT_ID map to fixed names, and OPENAI_CUSTOM_HEADERS — arbitrary
+// names, and where a gateway token is most likely to sit — is parsed here the
+// way the SDK parses it so every name it declares is deleted too.
+func ambientHeaderNames() []string {
+	names := []string{"OpenAI-Organization", "OpenAI-Project"}
+	for _, line := range strings.Split(os.Getenv("OPENAI_CUSTOM_HEADERS"), "\n") {
+		name, _, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		if name = strings.TrimSpace(name); name != "" && !aiOwnedHeaders[strings.ToLower(name)] {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // aiSDKOptions builds the per-request client options for cfg. The SDK owns the
 // wire format only: transport stays ours, so the SSRF-guarded dialer, the
-// AITimeout and the same-host redirect policy hold for every AI request.
+// AITimeout and the same-host redirect policy hold for every AI request, and
+// the response body is capped on the way back because the SDK reads it whole.
 // Retries are disabled — one user action is one upstream request, and a retry
 // would multiply both the timeout and the load a probe can direct at a host.
 // The key is set explicitly on every call, and cleared explicitly when there
 // is none, so a stray OPENAI_API_KEY in the server environment can never ride
-// along to a user-configured endpoint.
+// along to a user-configured endpoint; the other credentials and identifiers
+// the SDK reads from the environment are deleted for the same reason.
 func aiSDKOptions(base string, client *http.Client, key string) []option.RequestOption {
 	opts := []option.RequestOption{
 		option.WithBaseURL(base),
 		option.WithHTTPClient(client),
 		option.WithMaxRetries(0),
+		option.WithMiddleware(limitResponseBody),
 		option.WithAPIKey(key),
 	}
 	if key == "" {
 		opts = append(opts, option.WithHeaderDel("Authorization"))
+	}
+	for _, name := range ambientHeaderNames() {
+		opts = append(opts, option.WithHeaderDel(name))
 	}
 	return opts
 }
@@ -330,7 +423,9 @@ func sdkMessages(msgs []chatMessage) []openai.ChatCompletionMessageParamUnion {
 // Failure is opaque by construction: an upstream status, an upstream body or a
 // transport reason would each turn this endpoint into a reachability oracle,
 // so callers get one 502 message and the detail goes to the log without the
-// response body, which is attacker-influenced text.
+// response body, which is attacker-influenced text. A reply that reached the
+// output budget is the one upstream outcome reported as itself (422): it says
+// nothing a successful reply would not, and it is the caller's to act on.
 func (s *server) chat(user string, cfg aiConfig, call chatCall) (openai.ChatCompletionMessage, error) {
 	var empty openai.ChatCompletionMessage
 	if strings.TrimSpace(cfg.baseURL) == "" {
@@ -341,17 +436,16 @@ func (s *server) chat(user string, cfg aiConfig, call chatCall) (openai.ChatComp
 		return empty, &aiError{http.StatusBadRequest, err.Error()}
 	}
 	client := openai.NewClient(aiSDKOptions(base, s.aiClient, cfg.key)...)
-	// No completion may leave the cap to the upstream default: an unstated
-	// budget is what truncates a JSON reply mid-object.
-	maxTokens := call.maxTokens
-	if maxTokens < 1 {
-		maxTokens = aiDefaultMaxTokens
-	}
+	maxTokens := aiBudget(call.maxTokens)
 	params := openai.ChatCompletionNewParams{
-		Model:     shared.ChatModel(cfg.model),
-		Messages:  sdkMessages(call.msgs),
-		MaxTokens: openai.Int(maxTokens),
-		Tools:     call.tools,
+		Model:    shared.ChatModel(cfg.model),
+		Messages: sdkMessages(call.msgs),
+		Tools:    call.tools,
+	}
+	if usesMaxCompletionTokens(cfg.model) {
+		params.MaxCompletionTokens = openai.Int(maxTokens)
+	} else {
+		params.MaxTokens = openai.Int(maxTokens)
 	}
 	if call.jsonMode {
 		params.ResponseFormat = openai.ChatCompletionNewParamsResponseFormatUnion{
@@ -371,8 +465,59 @@ func (s *server) chat(user string, cfg aiConfig, call chatCall) (openai.ChatComp
 	if len(completion.Choices) == 0 {
 		return empty, &aiError{http.StatusBadGateway, "upstream returned no choices"}
 	}
-	return completion.Choices[0].Message, nil
+	choice := completion.Choices[0]
+	// The budget is stated so the reply is not cut off by an unknown default,
+	// but a stated budget can still be reached. finish_reason is the only
+	// signal that says so: without it a reply cut mid-object comes back as
+	// "assistant reply is not valid JSON", which sends the caller looking for
+	// a bug in the model instead of asking for less in one request.
+	if choice.FinishReason == finishReasonLength {
+		log.Printf("ai: reply for %s was truncated at the %d-token budget", user, maxTokens)
+		return empty, &aiError{http.StatusUnprocessableEntity, truncatedReplyMessage}
+	}
+	return choice.Message, nil
 }
+
+// finishReasonLength is what an upstream reports when the reply stopped
+// because it reached the requested budget rather than a natural end.
+const finishReasonLength = "length"
+
+const truncatedReplyMessage = "the model's reply hit the output limit and was cut off — ask for less in one request"
+
+// aiBudget resolves one call's output budget. No completion may leave the cap
+// to the upstream default, which is what truncates a JSON reply mid-object,
+// and none may ask for more than a small model will accept.
+func aiBudget(maxTokens int64) int64 {
+	if maxTokens < 1 {
+		return aiDefaultMaxTokens
+	}
+	if maxTokens > aiMaxTokensCeiling {
+		return aiMaxTokensCeiling
+	}
+	return maxTokens
+}
+
+// usesMaxCompletionTokens reports whether the model needs the budget under
+// max_completion_tokens. max_tokens is deprecated and rejected outright by the
+// o-series and gpt-5 reasoning models, while many OpenAI-compatible servers
+// only ever learned max_tokens — so the field is chosen by model name, which
+// is all the server knows about the endpoint. Any vendor prefix ("openai/o3")
+// is stripped first.
+func usesMaxCompletionTokens(model string) bool {
+	name := strings.ToLower(strings.TrimSpace(model))
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	if strings.HasPrefix(name, "gpt-5") {
+		return true
+	}
+	return reasoningSeriesRe.MatchString(name)
+}
+
+// reasoningSeriesRe matches the o-series model names (o1, o3-mini, o4-mini and
+// their dated variants) without matching unrelated names that merely start
+// with an o.
+var reasoningSeriesRe = regexp.MustCompile(`^o\d+(-|$)`)
 
 // aiTestRequest is the optional body of POST /api/ai/test: the values the
 // user currently has in the settings form, which may not be saved yet. It is

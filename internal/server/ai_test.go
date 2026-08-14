@@ -61,9 +61,11 @@ func TestAIEndpoint(t *testing.T) {
 type fakeOpenAI struct {
 	auth    string
 	path    string
+	header  http.Header
 	reqBody []byte
 	content string
 	tool    string // when set, the reply calls this tool
+	finish  string // finish_reason; empty means "stop"
 	status  int    // 0 means 200
 	calls   int
 }
@@ -73,6 +75,7 @@ func (f *fakeOpenAI) handler() http.HandlerFunc {
 		f.calls++
 		f.auth = r.Header.Get("Authorization")
 		f.path = r.URL.Path
+		f.header = r.Header.Clone()
 		f.reqBody, _ = io.ReadAll(r.Body)
 		if f.status != 0 {
 			http.Error(w, "upstream boom", f.status)
@@ -86,9 +89,13 @@ func (f *fakeOpenAI) handler() http.HandlerFunc {
 				"function": map[string]any{"name": f.tool, "arguments": `{"message":"pong"}`},
 			}}
 		}
+		finish := f.finish
+		if finish == "" {
+			finish = "stop"
+		}
 		resp := map[string]any{
 			"choices": []any{
-				map[string]any{"index": 0, "message": message, "finish_reason": "stop"},
+				map[string]any{"index": 0, "message": message, "finish_reason": finish},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -99,10 +106,11 @@ func (f *fakeOpenAI) handler() http.HandlerFunc {
 // wireChatRequest is what the SDK actually puts on the wire, decoded the way
 // an OpenAI-compatible server would read it.
 type wireChatRequest struct {
-	Model          string        `json:"model"`
-	Messages       []chatMessage `json:"messages"`
-	MaxTokens      *int64        `json:"max_tokens"`
-	ResponseFormat *struct {
+	Model               string        `json:"model"`
+	Messages            []chatMessage `json:"messages"`
+	MaxTokens           *int64        `json:"max_tokens"`
+	MaxCompletionTokens *int64        `json:"max_completion_tokens"`
+	ResponseFormat      *struct {
 		Type string `json:"type"`
 	} `json:"response_format"`
 	Tools []struct {
@@ -115,18 +123,33 @@ type wireChatRequest struct {
 }
 
 // decodeAIRequest reads a recorded upstream request and asserts the one
-// invariant every AI call shares: an explicit output budget. Omitting it lets
-// the upstream default truncate a JSON reply mid-object.
+// invariant every AI call shares: an explicit output budget, stated under
+// exactly one of the two field names. Omitting it lets the upstream default
+// truncate a JSON reply mid-object; stating it twice is rejected upstream.
 func decodeAIRequest(t *testing.T, body []byte) wireChatRequest {
 	t.Helper()
 	var sent wireChatRequest
 	if err := json.Unmarshal(body, &sent); err != nil {
 		t.Fatalf("upstream request JSON: %v (body=%s)", err, body)
 	}
-	if sent.MaxTokens == nil || *sent.MaxTokens < 1 {
-		t.Fatalf("request omitted max_tokens: %s", body)
+	if (sent.MaxTokens == nil) == (sent.MaxCompletionTokens == nil) {
+		t.Fatalf("request must state exactly one output budget field: %s", body)
+	}
+	if got := sent.budget(); got < 1 || got > aiMaxTokensCeiling {
+		t.Fatalf("output budget = %d, want 1..%d: %s", got, aiMaxTokensCeiling, body)
 	}
 	return sent
+}
+
+// budget is the output budget the request states, whichever field carries it.
+func (r wireChatRequest) budget() int64 {
+	if r.MaxTokens != nil {
+		return *r.MaxTokens
+	}
+	if r.MaxCompletionTokens != nil {
+		return *r.MaxCompletionTokens
+	}
+	return 0
 }
 
 // Import source indices are accepted only as positive integral positions; bad
@@ -897,7 +920,10 @@ func TestAITestProbeRequiresAToolCall(t *testing.T) {
 // The SDK reads OPENAI_* from the process environment. A credential that
 // happens to sit in the server's environment must never ride along to a
 // user-configured endpoint, and an ambient base URL must not redirect the
-// call: what travels is the key stored for that origin, or nothing.
+// call: what travels is the key stored for that origin, or nothing. The same
+// holds for everything else the SDK derives from the environment — the org and
+// project identifiers, and the arbitrary headers of OPENAI_CUSTOM_HEADERS,
+// which is exactly where a gateway token ends up.
 func TestAIRequestsIgnoreAmbientOpenAICredentials(t *testing.T) {
 	for _, tt := range []struct{ name, stored, want string }{
 		{name: "no stored key sends none", want: ""},
@@ -912,6 +938,9 @@ func TestAIRequestsIgnoreAmbientOpenAICredentials(t *testing.T) {
 			t.Setenv("OPENAI_API_KEY", "sk-ambient")
 			t.Setenv("OPENAI_ADMIN_KEY", "sk-ambient-admin")
 			t.Setenv("OPENAI_BASE_URL", "https://ambient.invalid")
+			t.Setenv("OPENAI_ORG_ID", "org-ambient")
+			t.Setenv("OPENAI_PROJECT_ID", "proj-ambient")
+			t.Setenv("OPENAI_CUSTOM_HEADERS", "X-Gateway-Token: sk-gateway\nX-Ambient: leaked")
 			h, _ := newTestServer(t, Config{})
 			configureAI(t, h, upstream.URL, "m", tt.stored)
 
@@ -920,6 +949,216 @@ func TestAIRequestsIgnoreAmbientOpenAICredentials(t *testing.T) {
 			}
 			if fake.calls != 1 || fake.auth != tt.want {
 				t.Fatalf("upstream calls=%d Authorization=%q, want 1 and %q", fake.calls, fake.auth, tt.want)
+			}
+			for _, header := range []string{"OpenAI-Organization", "OpenAI-Project", "X-Gateway-Token", "X-Ambient"} {
+				if got := fake.header.Get(header); got != "" {
+					t.Errorf("upstream received %s: %q, want it dropped", header, got)
+				}
+			}
+		})
+	}
+}
+
+// A header the request needs is not scrubbed just because the environment
+// names it: OPENAI_CUSTOM_HEADERS is attacker-adjacent configuration, but
+// deleting Authorization or Content-Type on its say-so breaks the call
+// instead of containing anything.
+func TestAmbientHeaderScrubKeepsRequestOwnedHeaders(t *testing.T) {
+	t.Setenv("OPENAI_CUSTOM_HEADERS", "Authorization: Bearer sk-ambient\ncontent-type: text/plain\nAccept: text/plain\nX-Leak: v\nnot-a-header\n: blank")
+	got := ambientHeaderNames()
+	want := []string{"OpenAI-Organization", "OpenAI-Project", "X-Leak"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ambientHeaderNames() = %v, want %v", got, want)
+	}
+}
+
+// The key still travels when the environment also declares an Authorization
+// header: the per-request key owns that header, and the scrub must not undo it.
+func TestAmbientAuthorizationHeaderDoesNotSuppressTheStoredKey(t *testing.T) {
+	fake := &fakeOpenAI{tool: aiProbeToolName}
+	upstream := httptest.NewServer(fake.handler())
+	defer upstream.Close()
+
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	t.Setenv("OPENAI_CUSTOM_HEADERS", "Authorization: Bearer sk-ambient")
+	h, _ := newTestServer(t, Config{})
+	configureAI(t, h, upstream.URL, "m", "sk-stored")
+
+	if res := postAITest(t, h, ""); !res.OK {
+		t.Fatalf("probe = %+v, want ok:true", res)
+	}
+	if fake.auth != "Bearer sk-stored" {
+		t.Fatalf("Authorization = %q, want Bearer sk-stored", fake.auth)
+	}
+}
+
+// endlessBody is an upstream that never stops answering. Without a cap the SDK
+// buffers all of it: io.ReadAll grows by doubling, so the resident cost is a
+// multiple of what the host actually sent.
+type endlessBody struct{ read int64 }
+
+func (b *endlessBody) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'a'
+	}
+	b.read += int64(len(p))
+	return len(p), nil
+}
+
+func (b *endlessBody) Close() error { return nil }
+
+// The endpoint is user-configured, so the reply is bounded before it is
+// buffered — on the success path and on the error path alike, since both read
+// the whole body.
+func TestChatCapsUpstreamResponseBody(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusBadRequest} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			body := &endlessBody{}
+			s := &server{aiClient: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: status,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       body,
+				}, nil
+			})}}
+			call := chatCall{msgs: []chatMessage{{Role: "user", Content: "hi"}}, maxTokens: 10}
+			_, err := s.chat("u", aiConfig{baseURL: "https://ai.invalid", model: "m"}, call)
+			if err == nil {
+				t.Fatal("chat accepted an endless response body")
+			}
+			// One buffer's worth of slack over the cap: the reader stops at
+			// cap+1 bytes, the last Read may have been issued for more.
+			if body.read > 2*aiMaxResponseBytes {
+				t.Fatalf("read %d bytes from the upstream, want it stopped near %d", body.read, aiMaxResponseBytes)
+			}
+		})
+	}
+}
+
+// A reply of exactly the cap is not a failure: the limit exists to stop an
+// endless body, not to truncate a legitimate one.
+func TestChatAcceptsAReplyAtTheSizeCap(t *testing.T) {
+	content := strings.Repeat("a", aiMaxResponseBytes-256)
+	reply, _ := json.Marshal(map[string]any{"choices": []any{
+		map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": content}, "finish_reason": "stop"},
+	}})
+	if len(reply) > aiMaxResponseBytes {
+		t.Fatalf("test reply is %d bytes, want at most %d", len(reply), aiMaxResponseBytes)
+	}
+	s := &server{aiClient: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(string(reply))),
+		}, nil
+	})}}
+	msg, err := s.chat("u", aiConfig{baseURL: "https://ai.invalid", model: "m"}, chatCall{
+		msgs: []chatMessage{{Role: "user", Content: "hi"}}, maxTokens: 10,
+	})
+	if err != nil || msg.Content != content {
+		t.Fatalf("chat = %d bytes, %v; want the whole reply", len(msg.Content), err)
+	}
+}
+
+// Hitting the stated budget is the failure this phase exists to make legible:
+// it must be reported as truncation, not as the "not valid JSON" it used to
+// masquerade as, and not as the opaque upstream failure a 502 collapses to.
+func TestAIStoryReportsATruncatedReply(t *testing.T) {
+	fake := &fakeOpenAI{content: `{"title":"Ship i`, finish: "length"}
+	upstream := httptest.NewServer(fake.handler())
+	defer upstream.Close()
+
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, _ := newTestServer(t, Config{})
+	configureAI(t, h, upstream.URL, "test-model", "sk-t")
+
+	w := doReq(t, h, "POST", "/api/ai/story", `{"mode":"create","prompt":"write a card"}`, nil)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("POST story: got %d (body=%s), want 422", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), truncatedReplyMessage) {
+		t.Fatalf("body = %q, want %q", w.Body, truncatedReplyMessage)
+	}
+}
+
+// The budget is bounded on both ends: never absent (the upstream default is
+// what truncates a reply), never above what a small model accepts (a request
+// over the model's own cap is rejected outright).
+func TestAIBudgetIsFlooredAndCapped(t *testing.T) {
+	for _, tt := range []struct{ in, want int64 }{
+		{in: 0, want: aiDefaultMaxTokens},
+		{in: -1, want: aiDefaultMaxTokens},
+		{in: 1, want: 1},
+		{in: aiMaxTokensCeiling, want: aiMaxTokensCeiling},
+		{in: aiMaxTokensCeiling + 1, want: aiMaxTokensCeiling},
+		{in: 1 << 20, want: aiMaxTokensCeiling},
+	} {
+		if got := aiBudget(tt.in); got != tt.want {
+			t.Errorf("aiBudget(%d) = %d, want %d", tt.in, got, tt.want)
+		}
+	}
+	for _, budget := range []int64{aiDefaultMaxTokens, aiStoryMaxTokens, aiStoriesMaxTokens, aiImportMaxTokens, aiDriftMaxTokens, aiProbeMaxTokens} {
+		if budget > aiMaxTokensCeiling {
+			t.Errorf("call-site budget %d exceeds the ceiling %d", budget, aiMaxTokensCeiling)
+		}
+	}
+}
+
+// max_tokens is deprecated and rejected by the reasoning models; the plain
+// chat models and the OpenAI-compatible servers are the ones that only know
+// max_tokens. The model name is all the server has to choose between them.
+func TestUsesMaxCompletionTokens(t *testing.T) {
+	for _, tt := range []struct {
+		model string
+		want  bool
+	}{
+		{model: "o1", want: true},
+		{model: "o3-mini", want: true},
+		{model: "o4-mini-2025-04-16", want: true},
+		{model: "openai/o3", want: true},
+		{model: "GPT-5-mini", want: true},
+		{model: " o1 ", want: true},
+		{model: "gpt-4o", want: false},
+		{model: "gpt-4o-mini", want: false},
+		{model: "gpt-3.5-turbo", want: false},
+		{model: "openhermes", want: false},
+		{model: "olmo-7b", want: false},
+		{model: "", want: false},
+	} {
+		if got := usesMaxCompletionTokens(tt.model); got != tt.want {
+			t.Errorf("usesMaxCompletionTokens(%q) = %t, want %t", tt.model, got, tt.want)
+		}
+	}
+}
+
+// On the wire: a reasoning model gets max_completion_tokens and never the
+// deprecated field, which it would reject with a 400 no caller can act on.
+func TestAIRequestPicksTheBudgetFieldForTheModel(t *testing.T) {
+	for _, tt := range []struct {
+		model            string
+		wantCompletionTk bool
+	}{
+		{model: "o3-mini", wantCompletionTk: true},
+		{model: "gpt-4o", wantCompletionTk: false},
+	} {
+		t.Run(tt.model, func(t *testing.T) {
+			fake := &fakeOpenAI{content: `{"title":"Ship it"}`}
+			upstream := httptest.NewServer(fake.handler())
+			defer upstream.Close()
+
+			t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+			h, _ := newTestServer(t, Config{})
+			configureAI(t, h, upstream.URL, tt.model, "sk-t")
+
+			w := doReq(t, h, "POST", "/api/ai/story", `{"mode":"create","prompt":"write a card"}`, nil)
+			if w.Code != http.StatusOK {
+				t.Fatalf("POST story: got %d (body=%s)", w.Code, w.Body)
+			}
+			sent := decodeAIRequest(t, fake.reqBody)
+			gotCompletionTk := sent.MaxCompletionTokens != nil
+			if gotCompletionTk != tt.wantCompletionTk || sent.budget() != aiStoryMaxTokens {
+				t.Fatalf("budget field max_completion_tokens=%t value=%d, want %t and %d",
+					gotCompletionTk, sent.budget(), tt.wantCompletionTk, aiStoryMaxTokens)
 			}
 		})
 	}

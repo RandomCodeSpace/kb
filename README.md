@@ -529,6 +529,17 @@ Examples:
 | ollama.com (cloud shim)   | `https://ollama.com`         | `qwen3-coder:480b`  | required |
 | Local Ollama              | `http://localhost:11434`     | `llama3.1`          | none     |
 
+**Output budget**: every request states one explicitly, sized per call site and
+never above 4096 tokens — the smallest completion cap still in wide use, so the
+budget itself is never the reason a request is rejected. Reasoning models
+(`o1`/`o3`/`o4`, `gpt-5*`) get it as `max_completion_tokens`, which is the only
+field they accept; everything else gets `max_tokens`. A reply that reaches the
+budget comes back as `422` "the model's reply hit the output limit and was cut
+off", not as a JSON parse failure. The upstream reply itself is capped at 1 MiB.
+Nothing the server's own environment happens to define (`OPENAI_API_KEY`,
+`OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, `OPENAI_CUSTOM_HEADERS`, …) travels to a
+configured endpoint.
+
 **Key handling**: the API key is write-only and masked in the UI —
 `GET /api/settings` returns only `has_key`, never the key. At rest it is
 encrypted with AES-256-GCM. The encryption secret is `KB_SECRET` if that env
