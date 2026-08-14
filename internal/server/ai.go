@@ -899,23 +899,37 @@ var draftDueRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 // decodeJSONObject parses assistant content as a single JSON object,
-// tolerating inline reasoning blocks, stray prose, and code fences around it.
+// tolerating inline reasoning, stray prose, and code fences around it. When
+// several candidates parse, the longest wins: the real reply contains every
+// object nested inside it, while the schema sketches that leaked reasoning
+// tends to include ("the shape is {\"stories\": [...]}") are short. Taking
+// the first parseable candidate instead returned those sketches as the reply.
 func decodeJSONObject(content string) (map[string]any, error) {
 	raw := strings.TrimSpace(thinkBlockRe.ReplaceAllString(content, ""))
+	// Some templates consume the opening <think> tag, leaving bare reasoning
+	// that ends in </think>: everything through the last closing tag is
+	// reasoning, not reply.
+	if i := strings.LastIndex(raw, "</think>"); i >= 0 {
+		raw = strings.TrimSpace(raw[i+len("</think>"):])
+	}
 	var m map[string]any
 	if err := json.Unmarshal([]byte(raw), &m); err == nil {
 		return m, nil
 	}
-	// Surrounding prose can itself contain braces, so a first-{-to-last-}
-	// slice is not enough: decode at each "{" until one yields an object.
-	for i := strings.Index(raw, "{"); i >= 0 && i < len(raw); i++ {
+	var best map[string]any
+	var bestLen int64
+	for i := 0; i < len(raw); i++ {
 		if raw[i] != '{' {
 			continue
 		}
+		dec := json.NewDecoder(strings.NewReader(raw[i:]))
 		var candidate map[string]any
-		if err := json.NewDecoder(strings.NewReader(raw[i:])).Decode(&candidate); err == nil {
-			return candidate, nil
+		if err := dec.Decode(&candidate); err == nil && dec.InputOffset() > bestLen {
+			best, bestLen = candidate, dec.InputOffset()
 		}
+	}
+	if best != nil {
+		return best, nil
 	}
 	if !strings.Contains(raw, "{") {
 		return nil, errors.New("assistant reply is not JSON")
