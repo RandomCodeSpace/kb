@@ -1,3 +1,5 @@
+github.com/RandomCodeSpace/rig v0.1.0 h1:u7s65Sns5Q1dmYvj/pp39duxu+xsje1gggyrT4FthvM=
+github.com/RandomCodeSpace/rig v0.1.0/go.mod h1:+YcCXgc5DuA4COoaFiMBU5kNGEIk1tR7jNo9BDFUg7U=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=

@@ -183,6 +183,7 @@ func runWebServerWithFlagOutput(args []string, output io.Writer) error {
 		TenantID:     os.Getenv("KB_AZURE_TENANT_ID"),
 		ClientID:     os.Getenv("KB_AZURE_CLIENT_ID"),
 		AllowedHosts: os.Getenv("KB_ALLOWED_HOSTS"),
+		SkillsDir:    filepath.Join(*dataDir, "skills"),
 	}
 	if (cfg.TenantID != "") != (cfg.ClientID != "") {
 		return fmt.Errorf("KB_AZURE_TENANT_ID and KB_AZURE_CLIENT_ID must be set together")

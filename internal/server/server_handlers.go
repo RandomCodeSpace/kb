@@ -642,6 +642,12 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap exposes the wrapped writer to http.ResponseController, which walks
+// the chain looking for either the method it needs or this. Without it every
+// controller call from a handler reports ErrNotSupported, and a handler that
+// outlives the server-wide write timeout cannot extend its own deadline.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // withLogging logs method, path, status, and duration. Never headers/tokens.
 // The path is percent-decoded by net/http, so a request for %0A would otherwise
 // carry a raw newline into the log and let a caller forge whole entries.

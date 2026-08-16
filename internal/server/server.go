@@ -42,6 +42,11 @@ type Config struct {
 	// tests can point at a fake IdP.
 	JWKSURL string
 	Issuer  string
+
+	// SkillsDir holds user-supplied skill files that override the embedded
+	// ones by name. An absent directory means "no overrides"; a broken file
+	// in it is an error, never a silently dropped skill.
+	SkillsDir string
 }
 
 type server struct {
@@ -51,6 +56,7 @@ type server struct {
 	store        *store.Store
 	aiClient     *http.Client // injectable for tests
 	forgeClient  *http.Client // injectable for tests
+	linkClient   *http.Client // injectable for tests
 	issuer       string
 	jwks         *jwksCache
 	authenticate func(*http.Request) (string, error)
@@ -104,6 +110,7 @@ func newServer(cfg Config, static fs.FS, st *store.Store) *server {
 		store:        st,
 		aiClient:     newAIClient(),
 		forgeClient:  newForgeClient(),
+		linkClient:   newLinkClient(),
 		allowedHosts: parseAllowedHosts(cfg.AllowedHosts),
 	}
 	switch {
@@ -160,6 +167,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /api/ai/test", s.withAuth(s.handleAITest))
 	mux.HandleFunc("POST /api/ai/story", s.withAuth(s.handleAIStory))
 	mux.HandleFunc("POST /api/ai/stories", s.withAuth(s.handleAIStories))
+	mux.HandleFunc("POST /api/ai/run-skill", s.withAuth(s.handleAIRunSkill))
 	mux.HandleFunc("POST /api/import/preview", s.withAuth(s.handleImportPreview))
 	mux.HandleFunc("POST /api/import/links", s.withAuth(s.handleImportLinks))
 	mux.HandleFunc("POST /api/import/provenance", s.withAuth(s.handleImportProvenance))
