@@ -267,16 +267,14 @@ func TestAIDraftEmojiIsNormalizedNotRejected(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			content, err := json.Marshal(map[string]any{
-				"stories": []any{map[string]any{
-					"title": "Ship the draft",
-					"emoji": tt.emoji,
-				}},
-			})
+			args, err := json.Marshal(map[string]any{"title": "Ship the draft", "emoji": tt.emoji})
 			if err != nil {
-				t.Fatalf("marshal assistant reply: %v", err)
+				t.Fatalf("marshal tool arguments: %v", err)
 			}
-			fake := &fakeOpenAI{content: string(content)}
+			fake := &scriptedOpenAI{replies: []fakeReply{
+				{toolCalls: []fakeToolCall{{name: "propose_card", args: string(args)}}},
+				{content: "Proposed one story."},
+			}}
 			upstream := httptest.NewServer(fake.handler())
 			defer upstream.Close()
 
@@ -475,129 +473,10 @@ func TestAIStoryRejectsWireBreakingReply(t *testing.T) {
 	}
 }
 
+// The model round trip now runs through the skill runner and is covered in
+// ai_stories_runner_test.go; what stays here is the request validation that
+// happens before any endpoint is contacted.
 func TestAIStories(t *testing.T) {
-	const adr = "# ADR 7: adopt SQLite\n\nWe will store boards in SQLite.\n"
-
-	t.Run("splits an ADR into validated drafts", func(t *testing.T) {
-		fake := &fakeOpenAI{content: `{"stories":[
-			{"title":"Add the store package","prio":1,"effort":"s","tags":["backend"],"checks":[{"text":"open the db","done":false}]},
-			{"title":"Write migrations","prio":9,"due":"2026-13-45"},
-			{"title":"Bad\nnewline","desc":"still fine"},
-			{"title":"   "},
-			"not an object"
-		]}`}
-		upstream := httptest.NewServer(fake.handler())
-		defer upstream.Close()
-
-		t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
-		h, _ := newTestServer(t, Config{})
-		configureAI(t, h, upstream.URL, "m", "sk-t")
-
-		w := doReq(t, h, "POST", "/api/ai/stories", `{"adr":`+strconv.Quote(adr)+`}`, nil)
-		if w.Code != http.StatusOK {
-			t.Fatalf("POST stories: got %d (body=%s)", w.Code, w.Body)
-		}
-		var res struct {
-			Stories []storyDraft `json:"stories"`
-		}
-		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
-			t.Fatalf("stories JSON: %v (body=%s)", err, w.Body)
-		}
-		var raw map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
-			t.Fatalf("raw stories JSON: %v", err)
-		}
-		if _, ok := raw["link"]; ok {
-			t.Fatalf("ADR response unexpectedly has link: %v", raw)
-		}
-		if _, ok := raw["url"]; ok {
-			t.Fatalf("ADR response unexpectedly has url: %v", raw)
-		}
-		// The blank-title story and the non-object are dropped; everything
-		// returned passes the shared validation.
-		if len(res.Stories) != 3 {
-			t.Fatalf("got %d stories, want 3: %+v", len(res.Stories), res.Stories)
-		}
-		for _, d := range res.Stories {
-			if err := validateDraft(d); err != nil {
-				t.Errorf("returned story fails wire validation: %v (%+v)", err, d)
-			}
-		}
-		want := storyDraft{
-			Title: "Add the store package", Prio: 1, Effort: "S",
-			Tags: []string{"backend"}, Checks: []draftCheck{{Text: "open the db"}},
-		}
-		if !reflect.DeepEqual(res.Stories[0], want) {
-			t.Errorf("story[0] = %+v, want %+v", res.Stories[0], want)
-		}
-		if res.Stories[1].Prio != 4 || res.Stories[1].Due != "" {
-			t.Errorf("story[1] = %+v, want prio clamped to 4 and the impossible date dropped", res.Stories[1])
-		}
-		if res.Stories[2].Title != "Badnewline" {
-			t.Errorf("story[2] title = %q, want the newline stripped", res.Stories[2].Title)
-		}
-		// The ADR reached the model, and the request rode the shared proxy
-		// with the split-sized output budget.
-		if !strings.Contains(string(fake.reqBody), "adopt SQLite") {
-			t.Errorf("ADR not passed upstream: %s", fake.reqBody)
-		}
-		if sent := decodeAIRequest(t, fake.reqBody); *sent.MaxTokens != aiStoriesMaxTokens {
-			t.Errorf("max_tokens = %d, want %d", *sent.MaxTokens, aiStoriesMaxTokens)
-		}
-		if fake.auth != "Bearer sk-t" {
-			t.Errorf("Authorization = %q, want the stored key", fake.auth)
-		}
-		if fake.path != "/v1/chat/completions" {
-			t.Errorf("upstream path = %q, want /v1/chat/completions", fake.path)
-		}
-	})
-
-	t.Run("story count is clamped and capped", func(t *testing.T) {
-		fake := &fakeOpenAI{content: `{"stories":[{"title":"a"},{"title":"b"},{"title":"c"}]}`}
-		upstream := httptest.NewServer(fake.handler())
-		defer upstream.Close()
-
-		t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
-		h, _ := newTestServer(t, Config{})
-		configureAI(t, h, upstream.URL, "m", "")
-
-		asked := func(t *testing.T, max string) string {
-			t.Helper()
-			body := `{"adr":"x"` + max + `}`
-			if w := doReq(t, h, "POST", "/api/ai/stories", body, nil); w.Code != http.StatusOK {
-				t.Fatalf("POST stories: got %d (body=%s)", w.Code, w.Body)
-			}
-			sent := decodeAIRequest(t, fake.reqBody)
-			return sent.Messages[len(sent.Messages)-1].Content
-		}
-		if got := asked(t, ""); !strings.Contains(got, "at most 8 stories") {
-			t.Errorf("absent max: prompt = %q, want the default of 8", got)
-		}
-		if got := asked(t, `,"max":3`); !strings.Contains(got, "at most 3 stories") {
-			t.Errorf("max 3: prompt = %q", got)
-		}
-		if got := asked(t, `,"max":999`); !strings.Contains(got, "at most 20 stories") {
-			t.Errorf("max 999: prompt = %q, want the cap of 20", got)
-		}
-		// Only an absent max takes the default; a supplied one is clamped
-		// into 1..20, so a negative value asks for one story, not eight.
-		if got := asked(t, `,"max":-5`); !strings.Contains(got, "at most 1 stories") {
-			t.Errorf("negative max: prompt = %q, want the floor of 1", got)
-		}
-
-		// The cap also bounds what a model returning more than asked can add.
-		w := doReq(t, h, "POST", "/api/ai/stories", `{"adr":"x","max":2}`, nil)
-		var res struct {
-			Stories []storyDraft `json:"stories"`
-		}
-		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
-			t.Fatalf("stories JSON: %v", err)
-		}
-		if len(res.Stories) != 2 {
-			t.Errorf("got %d stories for max 2, want 2", len(res.Stories))
-		}
-	})
-
 	t.Run("bad requests", func(t *testing.T) {
 		h, _ := newTestServer(t, Config{})
 
@@ -643,7 +522,13 @@ func TestAIStoriesFromForgeIssue(t *testing.T) {
 			}
 		}))
 		defer upstream.Close()
-		fake := &fakeOpenAI{content: `{"stories":[{"title":"first","tags":["model","link::evil#1"]},{"title":"second","tags":["link::evil#2"]}]}`}
+		fake := &scriptedOpenAI{replies: []fakeReply{
+			{toolCalls: []fakeToolCall{
+				{name: "propose_card", args: `{"title":"first","tags":["model","link::evil#1"]}`},
+				{name: "propose_card", args: `{"title":"second","tags":["link::evil#2"]}`},
+			}},
+			{content: "Proposed two stories."},
+		}}
 		aiUpstream := httptest.NewServer(fake.handler())
 		defer aiUpstream.Close()
 
@@ -679,9 +564,9 @@ func TestAIStoriesFromForgeIssue(t *testing.T) {
 				t.Fatalf("story tags = %q, want model plus only the server link", strings.Join(story.Tags, ","))
 			}
 		}
-		sent := decodeAIRequest(t, fake.reqBody)
-		prompt := sent.Messages[len(sent.Messages)-1].Content
-		adr := strings.TrimPrefix(prompt, "Split this ADR into at most 8 stories:\n\n")
+		// The prompt is the ADR alone: no story count is stated to the model.
+		sent := decodeAIRequest(t, fake.requests()[0])
+		adr := sent.Messages[len(sent.Messages)-1].Content
 		if len(adr) > maxADRBytes || !utf8.ValidString(adr) || !strings.Contains(adr, "# Issue title\n\n") || !strings.Contains(adr, "## Discussion\n-") {
 			t.Fatalf("bounded forge ADR = %d bytes %q", len(adr), adr)
 		}
@@ -702,7 +587,7 @@ func TestAIStoriesFromForgeIssue(t *testing.T) {
 			}
 		}))
 		defer upstream.Close()
-		fake := &fakeOpenAI{content: `{"stories":[{"title":"split"}]}`}
+		fake := &scriptedOpenAI{replies: []fakeReply{{content: "The document holds no shippable work."}}}
 		aiUpstream := httptest.NewServer(fake.handler())
 		defer aiUpstream.Close()
 
@@ -719,8 +604,8 @@ func TestAIStoriesFromForgeIssue(t *testing.T) {
 		if w.Code != http.StatusOK || requests != 2 {
 			t.Fatalf("multibyte forge stories: got %d requests=%d body=%s", w.Code, requests, w.Body)
 		}
-		sent := decodeAIRequest(t, fake.reqBody)
-		adr := strings.TrimPrefix(sent.Messages[len(sent.Messages)-1].Content, "Split this ADR into at most 8 stories:\n\n")
+		sent := decodeAIRequest(t, fake.requests()[0])
+		adr := sent.Messages[len(sent.Messages)-1].Content
 		if len(adr) > maxADRBytes || !utf8.ValidString(adr) || strings.Contains(adr, "## Discussion") {
 			t.Fatalf("body-only capped ADR = %d bytes %q", len(adr), adr)
 		}
@@ -1451,32 +1336,20 @@ func TestAIStoryToleratesInlineReasoning(t *testing.T) {
 
 // Regression: leaked reasoning that sketches the schema with a one-element
 // example ({"stories":[{...}]}) must not be mistaken for the reply — that
-// returned exactly one story from every ADR split, regardless of max.
-func TestAIStoriesPreferTheReplyOverAReasoningSketch(t *testing.T) {
-	fake := &fakeOpenAI{content: "I need up to 6 stories. The shape is " +
-		`{"stories":[{"title":"example"}]}` + ". Now the real split.</think>\n" +
-		`{"stories":[{"title":"one"},{"title":"two"},{"title":"three"}]}`}
-	upstream := httptest.NewServer(fake.handler())
-	defer upstream.Close()
-
-	t.Setenv("KB_AI_ALLOW_PRIVATE", "1") // test upstream is on loopback
-	h, _ := newTestServer(t, Config{})
-	configureAI(t, h, upstream.URL, "test-model", "sk-test-123")
-
-	w := doReq(t, h, "POST", "/api/ai/stories", `{"adr":"# ADR\nSplit the monolith."}`, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("POST stories: got %d (body=%s)", w.Code, w.Body)
+// returned exactly one story from every split. /api/ai/stories no longer
+// parses the reply at all, but the same coercion still serves the import
+// preview, so the case is asserted where it survives.
+func TestCoerceDraftsPreferTheReplyOverAReasoningSketch(t *testing.T) {
+	drafts, err := coerceDrafts("I need up to 6 stories. The shape is "+
+		`{"stories":[{"title":"example"}]}`+". Now the real split.</think>\n"+
+		`{"stories":[{"title":"one"},{"title":"two"},{"title":"three"}]}`, 6)
+	if err != nil {
+		t.Fatalf("coerceDrafts: %v", err)
 	}
-	var res struct {
-		Stories []storyDraft `json:"stories"`
+	if len(drafts) != 3 {
+		t.Fatalf("got %d drafts, want 3: %+v", len(drafts), drafts)
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
-		t.Fatalf("stories JSON: %v (body=%s)", err, w.Body)
-	}
-	if len(res.Stories) != 3 {
-		t.Fatalf("got %d stories, want 3 (body=%s)", len(res.Stories), w.Body)
-	}
-	if res.Stories[0].Title != "one" || res.Stories[2].Title != "three" {
-		t.Errorf("stories = %+v, want titles one..three", res.Stories)
+	if drafts[0].Title != "one" || drafts[2].Title != "three" {
+		t.Errorf("drafts = %+v, want titles one..three", drafts)
 	}
 }

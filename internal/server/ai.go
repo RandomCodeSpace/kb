@@ -144,13 +144,6 @@ const storySystemPrompt = `You write kanban cards. Respond with a single JSON ob
 {"title":"short imperative title","emoji":"🚀","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}]}
 prio is an integer from 1 (highest) to 4 (lowest); 3 is the default. emoji is exactly one emoji character that suits the work, or an empty string when nothing fits.`
 
-// storiesSystemPrompt asks for the same card shape, many at a time, wrapped
-// in a {"stories": [...]} object because json_object mode forbids a bare
-// top-level array.
-const storiesSystemPrompt = `You split an architecture decision record into kanban cards. Respond with a single JSON object only — no prose, no code fences — of the form:
-{"stories":[{"title":"short imperative title","emoji":"🚀","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}]}]}
-prio is an integer from 1 (highest) to 4 (lowest); 3 is the default. emoji is exactly one emoji character that suits the work, or an empty string when nothing fits. Each story must be independently deliverable. Tags are single words with no spaces.`
-
 const importSystemPrompt = `You transform forge issues into kanban-card proposals. Respond with a single JSON object only — no prose, no code fences — of the form:
 {"stories":[{"title":"short imperative title","emoji":"🚀","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}],"source":1}]}
 emoji is exactly one emoji character that suits the work, or an empty string when nothing fits. source must be the positive integer Source number from the supplied forge issue. Do not copy source text verbatim; propose independently actionable work.`
@@ -826,10 +819,17 @@ func normalizeStoryCount(max int) int {
 	return max
 }
 
-// handleAIStories splits one ADR into several card drafts. It shares the
-// proxy client, timeout, SSRF guard and opaque error mapping with
-// /api/ai/story — there is deliberately no second HTTP path — and the ADR
-// text itself is never stored.
+// adrSplitSkillName is the skill /api/ai/stories runs. The endpoint predates
+// the skill runner and keeps its own request and response shape; only the way
+// the drafts are produced is shared.
+const adrSplitSkillName = "adr-split"
+
+// handleAIStories splits one ADR into several card drafts by running the
+// adr-split skill. The drafts come from propose_card, not from parsing the
+// reply, so the story count is never stated in the prompt: a count in the
+// prompt anchors the model to produce exactly that many. The skill's closing
+// commentary is dropped, because this endpoint's response shape is fixed.
+// The ADR text itself is never stored.
 func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user string) {
 	req, ok := decodeAIStoriesRequest(w, r)
 	if !ok {
@@ -839,21 +839,16 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 	if !ok {
 		return
 	}
-	max := normalizeStoryCount(req.Max)
-	msgs := []chatMessage{
-		{Role: "system", Content: storiesSystemPrompt},
-		{Role: "user", Content: fmt.Sprintf("Split this ADR into at most %d stories:\n\n%s", max, input.adr)},
-	}
-	content, err := s.chatCompletion(user, msgs, aiStoriesMaxTokens, true)
+	// The cap is clamped inside the run, where the collector enforces it. The
+	// run is read-only: the document may be a forge issue with third-party
+	// comments, so the loop that reads it gets no board write and no outbound
+	// fetch.
+	run, err := s.runSkillForRequest(w, r, user, skillScopeReadOnly, adrSplitSkillName, input.adr, req.Max)
 	if err != nil {
 		writeAIError(w, user, "stories", err)
 		return
 	}
-	stories, err := coerceDrafts(content, max)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
+	stories := run.Cards
 	if input.link != "" {
 		for i := range stories {
 			stories[i].Tags = append(stripModelLinkTags(stories[i].Tags), linkTagPrefix+input.link)

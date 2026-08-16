@@ -142,6 +142,7 @@ left unchanged.
 | POST   | `/api/ai/test`    | yes  | 1-token ping of the configured endpoint; `{"ok":true}` or error       |
 | POST   | `/api/ai/story`   | yes  | Prompt in, structured card draft out (see AI assist)                  |
 | POST   | `/api/ai/stories` | yes  | ADR or configured forge issue in, `{"stories":[…]}` out (see AI assist) |
+| POST   | `/api/ai/run-skill` | yes | Run one named skill over your board; `{"cards":[…],"commentary":"…"}` out (see Skills) |
 | GET    | `/*`              | none | Embedded SPA static files                                             |
 
 Auth applies to every `/api/*` route except `/api/health` and `/api/config`
@@ -450,7 +451,9 @@ by default. For a source on an enterprise LAN, set
 allowlist for more than one source. `1` or `*` allows every configured forge
 host to resolve privately and should be reserved for controlled environments.
 This setting belongs only to forge traffic. `KB_AI_ALLOW_PRIVATE` remains the
-separate, unchanged opt-in for the configured AI endpoint.
+separate, unchanged opt-in for the configured AI endpoint, and
+`KB_LINK_ALLOW_PRIVATE` — same syntax — is the separate opt-in for the links a
+skill run fetches.
 
 ### Importing issues
 
@@ -552,6 +555,37 @@ never follows a re-pointed endpoint.
 **Private endpoints**: the AI client refuses to connect to loopback,
 link-local, or private addresses (checked on the resolved IP). For a local
 model server such as Ollama, start kb with `KB_AI_ALLOW_PRIVATE=1`.
+
+### Skills
+
+A skill is a markdown file — YAML frontmatter with `name` and `description`,
+then instructions — that tells the model how to do one job on your board.
+`POST /api/ai/run-skill` takes `{"skill":"<name>","input":"<text>","max":
+<optional>}` and runs it as a tool loop rather than a single completion. The
+answer is `{"cards":[…],"commentary":"…"}`: `cards` are the drafts the model
+proposed, `commentary` is its closing prose. Input over 64 KiB is rejected
+(`413`), an unknown skill answers `404`, and the run is bounded at 12 upstream
+rounds and four minutes.
+
+The model reaches your board only through tools: `propose_card` (the only way
+a card leaves a run — nothing parses the reply as JSON), `find_similar`,
+`list_tasks`, `get_task`, `update_task`, and `fetch_link`, which reads one
+http(s) document through an SSRF guard of its own (`KB_LINK_ALLOW_PRIVATE`)
+and accepts only `text/*` or `application/json` up to 64 KiB. Proposals are
+capped server-side by `max` (default 8, clamped to 1..20); past the cap the
+tool returns an error the model can see instead of silently dropping the card.
+No tool can move or delete a card.
+
+`update_task` and `fetch_link` are offered only to `POST /api/ai/run-skill`,
+whose input you wrote. `POST /api/ai/stories` may be splitting a forge issue
+whose body and comments anyone can write, so its run gets the read-only set:
+it can read the board and propose drafts, and it can neither change a card nor
+make an outbound request.
+
+`adr-split` ships built in; it is what `POST /api/ai/stories` runs. Drop a
+`.md` file into `<data>/skills/` to add your own, or to replace a built-in
+skill by reusing its `name`. The directory is optional, but a file in it that
+does not parse fails the request rather than disappearing from the catalogue.
 
 ## Labels
 
@@ -919,7 +953,8 @@ You need one app registration; no client secret, no Graph permissions.
 | `KB_BIND`              | server, runtime    | unset                | Bind address; open mode defaults to `127.0.0.1`, other modes to all ifaces   |
 | `KB_AI_ALLOW_PRIVATE`  | server, runtime    | unset                | `1` lets the AI proxy reach loopback/private addresses (local Ollama)        |
 | `KB_FORGE_ALLOW_PRIVATE` | server, runtime  | unset                | Comma-separated forge hostnames allowed to resolve privately; `1` or `*` allows all |
-| `KB_DATA`              | all modes, runtime | `~/.local/share/kb`  | Data directory: `kb.db`, `secret`, legacy `.md` boards (`--data` overrides)  |
+| `KB_LINK_ALLOW_PRIVATE` | server, runtime   | unset                | Same syntax, for the links a skill run fetches; independent of the forge setting |
+| `KB_DATA`              | all modes, runtime | `~/.local/share/kb`  | Data directory: `kb.db`, `secret`, `skills/`, legacy `.md` boards (`--data` overrides) |
 | `KB_LOG_FILE`          | server, runtime    | unset                | Append logs to this file, created with mode `0600` (`--log` overrides)       |
 | `KB_TOKEN`             | server, runtime    | unset                | Shared bearer token; enables token mode when Azure vars are unset            |
 | `KB_AZURE_TENANT_ID`   | server, runtime    | unset                | Entra tenant ID; with client ID, enables Entra mode; served to the SPA by `GET /api/config` |
