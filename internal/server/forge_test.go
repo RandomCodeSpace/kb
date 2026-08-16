@@ -1206,11 +1206,16 @@ func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
 		]`)
 	}))
 	defer upstream.Close()
-	fakeAI := &fakeOpenAI{content: `{"stories":[
-		{"title":"do linked","tags":["team::auth","link::evil#1"],"source":1},
-		{"title":"do similar","source":2},
-		{"title":"unlinked","tags":["link::evil#99","team::ops"],"source":99}
-	]}`}
+	// The cards arrive through propose_card, each carrying the Source number of
+	// the issue it came from; the closing prose is the runner's and is dropped.
+	fakeAI := &scriptedOpenAI{replies: []fakeReply{
+		{toolCalls: []fakeToolCall{
+			{name: "propose_card", args: `{"title":"do linked","tags":["team::auth","link::evil#1"],"source":1}`},
+			{name: "propose_card", args: `{"title":"do similar","source":2}`},
+			{name: "propose_card", args: `{"title":"unlinked","tags":["link::evil#99","team::ops"],"source":99}`},
+		}},
+		{content: "Proposed three cards."},
+	}}
 	aiUpstream := httptest.NewServer(fakeAI.handler())
 	defer aiUpstream.Close()
 
@@ -1253,8 +1258,8 @@ func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode preview: %v", err)
 	}
-	if fakeAI.calls != 1 || response.Kind != "project" || response.TotalHint != 2 || response.Fetched != 2 || len(response.Drafts) != 3 {
-		t.Fatalf("preview metadata = %+v AI calls=%d", response, fakeAI.calls)
+	if rounds := len(fakeAI.requests()); rounds != 2 || response.Kind != "project" || response.TotalHint != 2 || response.Fetched != 2 || len(response.Drafts) != 3 {
+		t.Fatalf("preview metadata = %+v AI rounds=%d", response, len(fakeAI.requests()))
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
@@ -1264,6 +1269,10 @@ func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
 		if _, ok := draft.(map[string]any)["source"]; ok {
 			t.Fatalf("preview draft exposes deprecated source field: %v", draft)
 		}
+	}
+	// The runner's closing prose is not part of this endpoint's contract.
+	if _, ok := raw["commentary"]; ok {
+		t.Fatalf("preview response leaked the skill commentary: %v", raw)
 	}
 	host := strings.TrimPrefix(upstream.URL, "http://")
 	first, second, unlinked := response.Drafts[0], response.Drafts[1], response.Drafts[2]
@@ -1278,6 +1287,131 @@ func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
 	}
 }
 
+// A run that spends every round on tool calls still returns the cards it did
+// propose, and this endpoint drops the commentary that says so. Without the
+// note the short draft list is a 200 that reads as a complete import.
+func TestImportPreviewNotesATransformCutShort(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/forge/api/v4/projects/group%2Fproject/issues" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `[
+			{"iid":42,"title":"First issue","description":"body","web_url":"https://forge.example/issues/42"},
+			{"iid":43,"title":"Second issue","description":"body","web_url":"https://forge.example/issues/43"}
+		]`)
+	}))
+	defer upstream.Close()
+	// One card, then a model that never stops researching: the last scripted
+	// reply repeats, so the loop runs out of rounds with work already done.
+	fakeAI := &scriptedOpenAI{replies: []fakeReply{
+		{toolCalls: []fakeToolCall{{name: "propose_card", args: `{"title":"Fix the first issue","source":1}`}}},
+		{toolCalls: []fakeToolCall{{name: "find_similar", args: `{"query":"second issue"}`}}},
+	}}
+	aiUpstream := httptest.NewServer(fakeAI.handler())
+	defer aiUpstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, st := newTestServer(t, Config{})
+	configureAI(t, h, aiUpstream.URL, "test-model", "sk-import")
+	baseURL, pat := upstream.URL+"/forge", "glpat-import"
+	if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, &pat); err != nil {
+		t.Fatalf("seed forge source: %v", err)
+	}
+
+	w := doReq(t, h, http.MethodPost, "/api/import/preview", fmt.Sprintf(`{"source":"gitlab-main","ref":%q}`, upstream.URL+"/forge/group/project"), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST import preview: got %d body=%s", w.Code, w.Body)
+	}
+	var response importPreviewResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if rounds := len(fakeAI.requests()); rounds != skillMaxIterations {
+		t.Fatalf("upstream rounds = %d, want the iteration cap %d", rounds, skillMaxIterations)
+	}
+	if len(response.Drafts) != 1 || response.Drafts[0].Title != "Fix the first issue" {
+		t.Fatalf("drafts = %+v, want the one card the run managed", response.Drafts)
+	}
+	if response.Note != importPartialTransformNote {
+		t.Fatalf("note = %q, want %q", response.Note, importPartialTransformNote)
+	}
+}
+
+// A rate-limited fetch and a transform cut short are independent, so the
+// second note joins the first rather than replacing it.
+func TestAppendImportNoteKeepsWhatTheFetchReported(t *testing.T) {
+	if got := appendImportNote("", importPartialTransformNote); got != importPartialTransformNote {
+		t.Errorf("appendImportNote(empty) = %q", got)
+	}
+	got := appendImportNote("rate limited", importPartialTransformNote)
+	if !strings.Contains(got, "rate limited") || !strings.Contains(got, importPartialTransformNote) {
+		t.Errorf("appendImportNote = %q, want both notes", got)
+	}
+}
+
+// One forge issue yields at most one linked draft. Nothing stops a model from
+// proposing two cards for the same source, and handing both the same link and
+// external key would let the user accept two board cards that claim to be one
+// issue.
+func TestImportPreviewLinksEachForgeIssueOnce(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/forge/api/v4/projects/group%2Fproject/issues" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `[
+			{"iid":42,"title":"First issue","description":"body","web_url":"https://forge.example/issues/42"},
+			{"iid":43,"title":"Second issue","description":"body","web_url":"https://forge.example/issues/43"}
+		]`)
+	}))
+	defer upstream.Close()
+	fakeAI := &scriptedOpenAI{replies: []fakeReply{
+		{toolCalls: []fakeToolCall{
+			{name: "propose_card", args: `{"title":"Split the second issue, part one","source":2}`},
+			{name: "propose_card", args: `{"title":"Split the second issue, part two","source":2}`},
+		}},
+		{content: "Proposed two cards."},
+	}}
+	aiUpstream := httptest.NewServer(fakeAI.handler())
+	defer aiUpstream.Close()
+
+	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	h, st := newTestServer(t, Config{})
+	configureAI(t, h, aiUpstream.URL, "test-model", "sk-import")
+	baseURL, pat := upstream.URL+"/forge", "glpat-import"
+	if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, &pat); err != nil {
+		t.Fatalf("seed forge source: %v", err)
+	}
+	if _, err := st.AddTask("default", board.Task{Title: "Existing linked", Tags: []string{"link::gitlab#43"}}); err != nil {
+		t.Fatalf("seed linked task: %v", err)
+	}
+
+	w := doReq(t, h, http.MethodPost, "/api/import/preview", fmt.Sprintf(`{"source":"gitlab-main","ref":%q}`, upstream.URL+"/forge/group/project"), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST import preview: got %d body=%s", w.Code, w.Body)
+	}
+	var response importPreviewResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if len(response.Drafts) != 2 {
+		t.Fatalf("drafts = %+v, want both proposals", response.Drafts)
+	}
+	first, second := response.Drafts[0], response.Drafts[1]
+	if first.Link != "gitlab#43" || first.ExternalKey == "" || first.DuplicateOf == nil {
+		t.Fatalf("first draft = %+v, want the issue provenance", first)
+	}
+	if second.Link != "" || second.ExternalKey != "" || second.URL != "" || second.DuplicateOf != nil {
+		t.Fatalf("repeat draft = %+v, want no provenance", second)
+	}
+	if strings.Contains(strings.Join(second.Tags, ","), linkTagPrefix) {
+		t.Fatalf("repeat draft carries a link tag: %+v", second.Tags)
+	}
+}
+
 func TestImportPreviewReturnsEmptyDraftsWithoutAIEgressWhenForgeIsEmpty(t *testing.T) {
 	var forgeCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1289,7 +1423,7 @@ func TestImportPreviewReturnsEmptyDraftsWithoutAIEgressWhenForgeIsEmpty(t *testi
 		_, _ = io.WriteString(w, `[]`)
 	}))
 	defer upstream.Close()
-	fakeAI := &fakeOpenAI{content: `{"stories":[{"title":"unexpected"}]}`}
+	fakeAI := &scriptedOpenAI{replies: []fakeReply{{content: "unexpected"}}}
 	aiUpstream := httptest.NewServer(fakeAI.handler())
 	defer aiUpstream.Close()
 
@@ -1316,11 +1450,14 @@ func TestImportPreviewReturnsEmptyDraftsWithoutAIEgressWhenForgeIsEmpty(t *testi
 	if forgeCalls.Load() != 1 {
 		t.Fatalf("empty preview made %d forge calls, want 1", forgeCalls.Load())
 	}
-	if fakeAI.calls != 0 {
-		t.Fatalf("empty preview made %d AI calls, want 0", fakeAI.calls)
+	if rounds := len(fakeAI.requests()); rounds != 0 {
+		t.Fatalf("empty preview made %d AI calls, want 0", rounds)
 	}
 }
 
+// A card the collector refuses never becomes a draft: the model is told why and
+// the run finishes with nothing, which must still be a 200 with no provenance
+// rather than a proposal the wire contract cannot carry.
 func TestImportPreviewReturnsEmptyDraftsWithoutProvenanceWhenAllGeneratedStoriesAreInvalid(t *testing.T) {
 	var forgeCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1332,7 +1469,11 @@ func TestImportPreviewReturnsEmptyDraftsWithoutProvenanceWhenAllGeneratedStories
 		_, _ = io.WriteString(w, `[{"iid":42,"title":"Issue title","description":"body","web_url":"https://forge.example/issues/42"}]`)
 	}))
 	defer upstream.Close()
-	fakeAI := &fakeOpenAI{content: `{"stories":[{"title":"   "},"not an object"]}`}
+	fakeAI := &scriptedOpenAI{replies: []fakeReply{
+		{toolCalls: []fakeToolCall{{name: "propose_card", args: `{"title":"   ","source":1}`}}},
+		{toolCalls: []fakeToolCall{{name: "propose_card", args: `not an object`}}},
+		{content: "Nothing here merits a card."},
+	}}
 	aiUpstream := httptest.NewServer(fakeAI.handler())
 	defer aiUpstream.Close()
 
@@ -1362,8 +1503,8 @@ func TestImportPreviewReturnsEmptyDraftsWithoutProvenanceWhenAllGeneratedStories
 	if forgeCalls.Load() != 1 {
 		t.Fatalf("all-invalid preview made %d forge calls, want 1", forgeCalls.Load())
 	}
-	if fakeAI.calls != 1 {
-		t.Fatalf("all-invalid preview made %d AI calls, want 1", fakeAI.calls)
+	if rounds := len(fakeAI.requests()); rounds != 3 {
+		t.Fatalf("all-invalid preview made %d AI rounds, want 3", rounds)
 	}
 	host := strings.TrimPrefix(upstream.URL, "http://")
 	key := "gitlab:" + host + "/group/project#42"
@@ -1387,7 +1528,7 @@ func TestImportPreviewRejectsSelectedSourceMismatchBeforeEgress(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer forgeB.Close()
-	fakeAI := &fakeOpenAI{content: `{"stories":[{"title":"unexpected"}]}`}
+	fakeAI := &scriptedOpenAI{replies: []fakeReply{{content: "unexpected"}}}
 	aiUpstream := httptest.NewServer(fakeAI.handler())
 	defer aiUpstream.Close()
 
@@ -1415,8 +1556,8 @@ func TestImportPreviewRejectsSelectedSourceMismatchBeforeEgress(t *testing.T) {
 			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), test.wantBody) {
 				t.Fatalf("POST import preview: got %d body=%q, want 400 containing %q", w.Code, w.Body.String(), test.wantBody)
 			}
-			if forgeAHits.Load() != 0 || forgeBHits.Load() != 0 || fakeAI.calls != 0 {
-				t.Fatalf("rejected preview made egress: forge A=%d forge B=%d AI=%d", forgeAHits.Load(), forgeBHits.Load(), fakeAI.calls)
+			if aiRounds := len(fakeAI.requests()); forgeAHits.Load() != 0 || forgeBHits.Load() != 0 || aiRounds != 0 {
+				t.Fatalf("rejected preview made egress: forge A=%d forge B=%d AI=%d", forgeAHits.Load(), forgeBHits.Load(), aiRounds)
 			}
 			found, err := st.ImportedAs("default", []string{"unexpected"})
 			if err != nil || len(found) != 0 {
@@ -1443,7 +1584,13 @@ func TestImportPreviewDoesNotAuthorizeOmittedPackedSource(t *testing.T) {
 		]`, firstBody, secondTitle)
 	}))
 	defer upstream.Close()
-	fakeAI := &fakeOpenAI{content: `{"stories":[{"title":"from first","source":1},{"title":"from second","source":2}]}`}
+	fakeAI := &scriptedOpenAI{replies: []fakeReply{
+		{toolCalls: []fakeToolCall{
+			{name: "propose_card", args: `{"title":"from first","source":1}`},
+			{name: "propose_card", args: `{"title":"from second","source":2}`},
+		}},
+		{content: "Proposed two cards."},
+	}}
 	aiUpstream := httptest.NewServer(fakeAI.handler())
 	defer aiUpstream.Close()
 
@@ -1472,8 +1619,8 @@ func TestImportPreviewDoesNotAuthorizeOmittedPackedSource(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode preview: %v", err)
 	}
-	if fakeAI.calls != 1 || response.Fetched != 2 || len(response.Drafts) != 2 {
-		t.Fatalf("preview metadata = %+v AI calls=%d", response, fakeAI.calls)
+	if rounds := len(fakeAI.requests()); rounds != 2 || response.Fetched != 2 || len(response.Drafts) != 2 {
+		t.Fatalf("preview metadata = %+v AI rounds=%d", response, len(fakeAI.requests()))
 	}
 	if first := response.Drafts[0]; first.Title != "from first" || first.Link == "" || first.ExternalKey == "" || first.URL == "" {
 		t.Fatalf("complete packed source lost provenance: %+v", first)
@@ -1481,12 +1628,19 @@ func TestImportPreviewDoesNotAuthorizeOmittedPackedSource(t *testing.T) {
 	if second := response.Drafts[1]; second.Title != "from second" || second.Link != "" || second.ExternalKey != "" || second.URL != "" {
 		t.Fatalf("omitted source received provenance: %+v", second)
 	}
-	request := decodeAIRequest(t, fakeAI.reqBody)
+	reqs := fakeAI.requests()
+	request := decodeAIRequest(t, reqs[0])
 	if len(request.Messages) != 2 {
 		t.Fatalf("AI messages = %d, want system and user", len(request.Messages))
 	}
-	if *request.MaxTokens != aiImportMaxTokens {
-		t.Fatalf("import preview max_tokens = %d, want %d", *request.MaxTokens, aiImportMaxTokens)
+	for i, body := range reqs {
+		if got := decodeAIRequest(t, body).budget(); got != aiImportMaxTokens {
+			t.Fatalf("import preview round %d output budget = %d, want %d", i, got, aiImportMaxTokens)
+		}
+	}
+	if names := toolNames(t, reqs[0]); !hasTool(names, "propose_card") || hasTool(names, "update_task") || hasTool(names, "fetch_link") {
+		// Forge issue text is third-party input, so the run stays read-only.
+		t.Fatalf("import preview tools = %v, want propose_card without the writing tools", names)
 	}
 	userMessage := request.Messages[1].Content
 	if !strings.Contains(userMessage, "Source 1\n") || strings.Contains(userMessage, "Source 2\n") {
@@ -2179,6 +2333,12 @@ func TestImportDriftAISummaryIsSingleBoundedSecretFreeCall(t *testing.T) {
 	if request.ResponseFormat != nil {
 		t.Fatal("drift summary requested JSON mode instead of plain text")
 	}
+	// The summary compares two pieces of text the server already holds. A tool
+	// would only be another way for third-party issue text to reach the board,
+	// and offering none is also what keeps the run at a single round trip.
+	if len(request.Tools) != 0 {
+		t.Fatalf("drift summary offered %+v, want a tool-less run", request.Tools)
+	}
 	if *request.MaxTokens != aiDriftMaxTokens {
 		t.Fatalf("drift summary max_tokens = %d, want %d", *request.MaxTokens, aiDriftMaxTokens)
 	}
@@ -2201,13 +2361,18 @@ func TestImportDriftAISummaryIsSingleBoundedSecretFreeCall(t *testing.T) {
 // valid drift comparison into an error or trigger an unconfigured request.
 func TestImportDriftAIFailureDegradesAndUnconfiguredAICallsNothing(t *testing.T) {
 	for _, test := range []struct {
-		name        string
-		configure   bool
-		status      int
-		wantAICalls int
+		name          string
+		configure     bool
+		storedBaseURL string
+		status        int
+		wantAICalls   int
 	}{
 		{name: "upstream failure", configure: true, status: http.StatusInternalServerError, wantAICalls: 1},
 		{name: "unconfigured", wantAICalls: 0},
+		// A stored base URL no client can be built for is the user's own
+		// settings, not an upstream outcome: it degrades the same way, and it
+		// does so before anything is dialed.
+		{name: "unusable base URL", storedBaseURL: "ftp://ai.invalid", wantAICalls: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2235,6 +2400,12 @@ func TestImportDriftAIFailureDegradesAndUnconfiguredAICallsNothing(t *testing.T)
 			}
 			if test.configure {
 				configureAI(t, h, aiUpstream.URL, "drift-model", "")
+			}
+			if test.storedBaseURL != "" {
+				base, model := test.storedBaseURL, "drift-model"
+				if _, err := st.SetAISettings("default", &base, &model, nil); err != nil {
+					t.Fatalf("seed AI settings: %v", err)
+				}
 			}
 
 			w, response := postImportDrift(t, h, "primary", key, nil)

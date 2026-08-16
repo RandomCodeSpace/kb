@@ -129,6 +129,56 @@ func TestProposeCardTool(t *testing.T) {
 		}
 	})
 
+	// A field the model may not name is a field it never fills: source has to
+	// be declared, and the schema has to stay closed so nothing else is.
+	t.Run("declares source without opening the schema", func(t *testing.T) {
+		schema := proposeCardTool(&cardCollector{max: 1}).InputSchema
+		props, ok := schema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("schema properties = %T, want a map", schema["properties"])
+		}
+		source, ok := props["source"].(map[string]any)
+		if !ok {
+			t.Fatalf("schema has no source property: %v", props)
+		}
+		if source["type"] != "integer" {
+			t.Errorf("source type = %v, want integer", source["type"])
+		}
+		if schema["additionalProperties"] != false {
+			t.Errorf("additionalProperties = %v, want false", schema["additionalProperties"])
+		}
+	})
+
+	// Source is provenance the server resolves against the pack it built, so a
+	// number that is not a positive whole one must leave the card unsourced
+	// rather than pointing at an issue nobody packed.
+	t.Run("lifts only a usable source number", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			input string
+			want  int
+		}{
+			{name: "lifted", input: `{"title":"From an issue","source":3}`, want: 3},
+			{name: "non-integral", input: `{"title":"From an issue","source":2.5}`, want: 0},
+			{name: "zero", input: `{"title":"From an issue","source":0}`, want: 0},
+			{name: "negative", input: `{"title":"From an issue","source":-1}`, want: 0},
+			{name: "string", input: `{"title":"From an issue","source":"2"}`, want: 0},
+			{name: "absent", input: `{"title":"From an issue"}`, want: 0},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				collector := &cardCollector{max: 1}
+				mustRunTool(t, proposeCardTool(collector), tt.input)
+				if len(collector.cards) != 1 {
+					t.Fatalf("collected %d cards, want 1", len(collector.cards))
+				}
+				if got := collector.cards[0].Source; got != tt.want {
+					t.Errorf("source = %d, want %d", got, tt.want)
+				}
+			})
+		}
+	})
+
 	t.Run("rejects an unusable card and keeps the count", func(t *testing.T) {
 		tests := []struct {
 			name  string

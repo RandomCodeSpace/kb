@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -240,8 +241,32 @@ func TestRunSkillProposesCardsAcrossRounds(t *testing.T) {
 }
 
 // The one skill being run is not also loadable, so a catalogue of one leaves
-// nothing to advertise and no load_skill tool to call.
+// nothing to advertise and no load_skill tool to call. The embedded catalogue
+// now carries several skills, so the single-skill case is exercised on the two
+// helpers the run composes rather than through a request.
 func TestRunSkillWithoutOtherSkillsOmitsLoadSkill(t *testing.T) {
+	only := rig.Skill{Name: "solo", Description: "the only skill", Body: "Do the thing."}
+	skill, others, found := splitSkills([]rig.Skill{only}, "solo")
+	if !found {
+		t.Fatal("splitSkills did not find the only skill")
+	}
+	if len(others) != 0 {
+		t.Fatalf("others = %v, want the invoked skill to be the whole catalogue", others)
+	}
+	// runSkill appends rig.LoadSkillTool only for a non-empty others, and an
+	// empty advertisement is what leaves the model nothing to load.
+	if advertisement := rig.Advertise(others); advertisement != "" {
+		t.Errorf("Advertise(none) = %q, want empty", advertisement)
+	}
+	if system := runnerSystem(skill, others); strings.Contains(system, "Available skills") {
+		t.Errorf("skills advertised with no other skills: %s", system)
+	}
+}
+
+// A run advertises every other skill and never the one it is running: the
+// invoked skill is force-injected, so a model that ignores load_skill cannot
+// lose its own instructions.
+func TestRunSkillAdvertisesOnlyTheOtherSkills(t *testing.T) {
 	fake := &scriptedOpenAI{replies: []fakeReply{{content: "Nothing to split."}}}
 	h := newSkillServer(t, fake, Config{})
 
@@ -254,11 +279,19 @@ func TestRunSkillWithoutOtherSkillsOmitsLoadSkill(t *testing.T) {
 		t.Errorf("body = %s, want an empty cards array", body)
 	}
 	reqs := fake.requests()
-	if names := toolNames(t, reqs[0]); hasTool(names, "load_skill") {
-		t.Errorf("load_skill advertised with no other skills: %v", names)
+	if names := toolNames(t, reqs[0]); !hasTool(names, "load_skill") {
+		t.Errorf("load_skill missing with other skills present: %v", names)
 	}
-	if system := systemPrompt(t, reqs[0]); strings.Contains(system, "Available skills") {
-		t.Errorf("skills advertised with no other skills: %s", system)
+	system := systemPrompt(t, reqs[0])
+	advertisement, _, ok := strings.Cut(system, "\n\nSkill: adr-split")
+	if !ok {
+		t.Fatalf("system prompt does not inject the invoked skill: %s", system)
+	}
+	if !strings.Contains(advertisement, "story-draft") || !strings.Contains(advertisement, "import-transform") {
+		t.Errorf("advertisement = %s, want the other embedded skills", advertisement)
+	}
+	if strings.Contains(advertisement, "adr-split") {
+		t.Errorf("advertisement = %s, want the invoked skill excluded", advertisement)
 	}
 }
 
@@ -651,5 +684,77 @@ func TestSplitSkills(t *testing.T) {
 				t.Fatalf("others = %v, want %v", got, tt.wantOthers)
 			}
 		})
+	}
+}
+
+// Every budget that reaches the wire is clamped to the ceiling, whatever the
+// call site asked for. The constants are all under it today; the clamp is what
+// keeps a future flow from sending a budget a strict server rejects with a 400
+// no caller can act on.
+func TestSkillRunBudgetIsClampedToTheCeiling(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		ask  int64
+		want int64
+	}{
+		{name: "over the ceiling", ask: aiMaxTokensCeiling * 4, want: aiMaxTokensCeiling},
+		{name: "unstated", ask: 0, want: 1},
+		{name: "in range", ask: aiStoryMaxTokens, want: aiStoryMaxTokens},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := skillBudget(tt.ask); got != tt.want {
+				t.Errorf("skillBudget(%d) = %d, want %d", tt.ask, got, tt.want)
+			}
+			fake := &scriptedOpenAI{replies: []fakeReply{{content: "Nothing to propose."}}}
+			upstream := httptest.NewServer(fake.handler())
+			defer upstream.Close()
+			t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+			st := newTestStore(t)
+			s := newServer(Config{}, testStatic, st)
+			configureAI(t, s.handler(), upstream.URL, "test-model", "sk-test")
+
+			if _, err := s.runSkill(context.Background(), "default", skillScopeReadOnly, "adr-split", "# ADR", 1, tt.ask); err != nil {
+				t.Fatalf("runSkill: %v", err)
+			}
+			reqs := fake.requests()
+			if len(reqs) != 1 {
+				t.Fatalf("upstream rounds = %d, want 1", len(reqs))
+			}
+			if got := decodeAIRequest(t, reqs[0]).budget(); got != tt.want {
+				t.Errorf("wire budget = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// runnerSystemPrompt is prepended to every skill body in the same system
+// message, so a skill that forbids the tools it mandates leaves the run's
+// behaviour to the model. story-draft carries the extra rule that a
+// find_similar hit never cancels the proposal: POST /api/ai/story owes its
+// caller one card, and a run that proposes none is reported as an upstream
+// failure the user reads as "connection failed".
+func TestBuiltInSkillsAgreeWithTheRunnerRules(t *testing.T) {
+	st := newTestStore(t)
+	s := newServer(Config{}, testStatic, st)
+	skills, err := s.loadSkills()
+	if err != nil {
+		t.Fatalf("loadSkills: %v", err)
+	}
+	if len(skills) == 0 {
+		t.Fatal("no built-in skills loaded")
+	}
+	for _, skill := range skills {
+		if strings.Contains(strings.ToLower(skill.Body), "any other tool") {
+			t.Errorf("skill %q forbids the tools runnerSystemPrompt mandates", skill.Name)
+		}
+	}
+	story, _, found := splitSkills(skills, storyDraftSkillName)
+	if !found {
+		t.Fatalf("skill %q is not in the built-in catalogue", storyDraftSkillName)
+	}
+	for _, want := range []string{"find_similar", "Always call it"} {
+		if !strings.Contains(story.Body, want) {
+			t.Errorf("story-draft body is missing %q: %s", want, story.Body)
+		}
 	}
 }

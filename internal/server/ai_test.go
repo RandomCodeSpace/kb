@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -56,6 +55,14 @@ func TestAIEndpoint(t *testing.T) {
 	}
 }
 
+// probeToolName and probeMaxTokens mirror the connection probe rig puts on the
+// wire. Both are unexported there, so the shape the settings form depends on is
+// restated here and asserted rather than assumed.
+const (
+	probeToolName  = "ping"
+	probeMaxTokens = 256
+)
+
 // fakeOpenAI records the last request and answers with content as the
 // assistant message, adding a tool call to tool when one is set.
 type fakeOpenAI struct {
@@ -103,13 +110,20 @@ func (f *fakeOpenAI) handler() http.HandlerFunc {
 	}
 }
 
-// wireChatRequest is what the SDK actually puts on the wire, decoded the way
+// wireChatMessage is one prompt message as an OpenAI-compatible server reads
+// it off the wire.
+type wireChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// wireChatRequest is what the client actually puts on the wire, decoded the way
 // an OpenAI-compatible server would read it.
 type wireChatRequest struct {
-	Model               string        `json:"model"`
-	Messages            []chatMessage `json:"messages"`
-	MaxTokens           *int64        `json:"max_tokens"`
-	MaxCompletionTokens *int64        `json:"max_completion_tokens"`
+	Model               string            `json:"model"`
+	Messages            []wireChatMessage `json:"messages"`
+	MaxTokens           *int64            `json:"max_tokens"`
+	MaxCompletionTokens *int64            `json:"max_completion_tokens"`
 	ResponseFormat      *struct {
 		Type string `json:"type"`
 	} `json:"response_format"`
@@ -152,23 +166,6 @@ func (r wireChatRequest) budget() int64 {
 	return 0
 }
 
-// Import source indices are accepted only as positive integral positions; bad
-// model values remain unlinked for the server-side provenance step.
-func TestCoerceDraftsTracksOnlyValidImportSources(t *testing.T) {
-	drafts, err := coerceDrafts(`{"stories":[
-		{"title":"one","source":1},
-		{"title":"fraction","source":1.5},
-		{"title":"zero","source":0},
-		{"title":"missing"}
-	]}`, 4)
-	if err != nil || len(drafts) != 4 {
-		t.Fatalf("coerceDrafts = %+v, %v", drafts, err)
-	}
-	if drafts[0].Source != 1 || drafts[1].Source != 0 || drafts[2].Source != 0 || drafts[3].Source != 0 {
-		t.Fatalf("sources = [%d %d %d %d], want [1 0 0 0]", drafts[0].Source, drafts[1].Source, drafts[2].Source, drafts[3].Source)
-	}
-}
-
 // Import packs cap each issue body, each comment, and the total prompt while
 // retaining a source index for every issue that fits into the bounded input.
 func TestPackImportIssuesBoundsForgeText(t *testing.T) {
@@ -198,40 +195,90 @@ func configureAI(t *testing.T, h http.Handler, baseURL, model, key string) {
 	}
 }
 
-func TestAIStoryHappyPath(t *testing.T) {
-	fake := &fakeOpenAI{content: `{"title":" Ship it ","emoji":"🛠️","desc":"Do the thing","prio":9,"due":"not-a-date","effort":"m","tags":["backend",42,""],"checks":[{"text":"step one","done":true},{"text":""},"junk"]}`}
-	upstream := httptest.NewServer(fake.handler())
-	defer upstream.Close()
+// recordingUpstream serves the scripted fake and remembers the credential and
+// path of the last request, which the script itself does not keep.
+type recordingUpstream struct {
+	auth string
+	path string
+}
 
-	t.Setenv("KB_AI_ALLOW_PRIVATE", "1") // test upstream is on loopback
+func newRecordingUpstream(t *testing.T, fake *scriptedOpenAI) (*httptest.Server, *recordingUpstream) {
+	t.Helper()
+	rec := &recordingUpstream{}
+	inner := fake.handler()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.auth, rec.path = r.Header.Get("Authorization"), r.URL.Path
+		inner(w, r)
+	}))
+	t.Cleanup(upstream.Close)
+	return upstream, rec
+}
+
+// draftStory configures the server against upstream and posts one story
+// request. Every story test drives the endpoint the frozen UI drives.
+func draftStory(t *testing.T, upstreamURL, model, key, body string) *httptest.ResponseRecorder {
+	t.Helper()
 	h, _ := newTestServer(t, Config{})
-	configureAI(t, h, upstream.URL, "test-model", "sk-test-123")
+	configureAI(t, h, upstreamURL, model, key)
+	return doReq(t, h, "POST", "/api/ai/story", body, nil)
+}
 
-	w := doReq(t, h, "POST", "/api/ai/story", `{"mode":"create","prompt":"write a card"}`, nil)
+// The endpoint's response is one flat draft and stays one flat draft under the
+// skill runner: the card the model proposed through propose_card, coerced and
+// clamped, with no run envelope around it.
+func TestAIStoryHappyPath(t *testing.T) {
+	fake := &scriptedOpenAI{replies: []fakeReply{
+		{toolCalls: []fakeToolCall{{name: "propose_card", args: `{"title":" Ship it ","emoji":"🛠️","desc":"Do the thing","prio":9,"due":"not-a-date","effort":"m","tags":["backend",42,""],"checks":[{"text":"step one","done":true},{"text":""},"junk"]}`}}},
+		{content: "Proposed one card."},
+	}}
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1") // test upstream is on loopback
+	upstream, rec := newRecordingUpstream(t, fake)
+
+	w := draftStory(t, upstream.URL, "test-model", "sk-test-123", `{"mode":"create","prompt":"write a card"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("POST story: got %d (body=%s)", w.Code, w.Body)
 	}
 	// The decrypted key reached the upstream, on the joined /v1 path.
-	if fake.auth != "Bearer sk-test-123" {
-		t.Errorf("upstream Authorization = %q, want Bearer sk-test-123", fake.auth)
+	if rec.auth != "Bearer sk-test-123" {
+		t.Errorf("upstream Authorization = %q, want Bearer sk-test-123", rec.auth)
 	}
-	if fake.path != "/v1/chat/completions" {
-		t.Errorf("upstream path = %q, want /v1/chat/completions", fake.path)
+	if rec.path != "/v1/chat/completions" {
+		t.Errorf("upstream path = %q, want /v1/chat/completions", rec.path)
 	}
-	// The request asked for strict JSON from the configured model, with an
-	// output budget large enough for a whole card.
-	sent := decodeAIRequest(t, fake.reqBody)
-	if sent.Model != "test-model" {
-		t.Errorf("model = %v, want test-model", sent.Model)
+	reqs := fake.requests()
+	if len(reqs) != 2 {
+		t.Fatalf("upstream rounds = %d, want 2", len(reqs))
 	}
-	if sent.ResponseFormat == nil || sent.ResponseFormat.Type != "json_object" {
-		t.Errorf("response_format = %+v, want json_object", sent.ResponseFormat)
+	// Every round goes to the configured model with the draft budget, and the
+	// request carries the prompt verbatim as the only user message.
+	for i, body := range reqs {
+		sent := decodeAIRequest(t, body)
+		if sent.Model != "test-model" {
+			t.Errorf("request %d model = %v, want test-model", i, sent.Model)
+		}
+		if sent.budget() != aiStoryMaxTokens {
+			t.Errorf("request %d output budget = %d, want %d", i, sent.budget(), aiStoryMaxTokens)
+		}
 	}
-	if *sent.MaxTokens != aiStoryMaxTokens {
-		t.Errorf("max_tokens = %d, want %d", *sent.MaxTokens, aiStoryMaxTokens)
+	sent := decodeAIRequest(t, reqs[0])
+	if len(sent.Messages) != 2 || sent.Messages[1].Role != "user" {
+		t.Fatalf("first request messages = %+v, want a system prompt and the request", sent.Messages)
 	}
-	if len(sent.Tools) != 0 {
-		t.Errorf("tools = %+v, want none on a JSON-mode draft call", sent.Tools)
+	if want := "Create a new kanban card for this request:\nwrite a card"; sent.Messages[1].Content != want {
+		t.Errorf("user message = %q, want %q", sent.Messages[1].Content, want)
+	}
+	if !strings.Contains(sent.Messages[0].Content, "Skill: story-draft") {
+		t.Errorf("system prompt does not inject the story-draft skill: %q", sent.Messages[0].Content)
+	}
+	// A card is proposed through the tool, never written as JSON in the reply,
+	// and the run stays read-only: the draft is not accepted yet.
+	if !offersTool(sent, "propose_card") {
+		t.Errorf("tools = %+v, want propose_card offered", sent.Tools)
+	}
+	for _, name := range []string{"update_task", "fetch_link"} {
+		if offersTool(sent, name) {
+			t.Errorf("story run offered %q: %+v", name, sent.Tools)
+		}
 	}
 	// The draft is coerced and clamped.
 	var draft storyDraft
@@ -250,6 +297,37 @@ func TestAIStoryHappyPath(t *testing.T) {
 	}
 	if !reflect.DeepEqual(draft, want) {
 		t.Errorf("draft = %+v, want %+v", draft, want)
+	}
+	// The frozen client reads the draft's own fields off the response root, so
+	// the run envelope must not appear.
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("raw story JSON: %v", err)
+	}
+	if _, ok := raw["title"]; !ok {
+		t.Errorf("response = %v, want a flat draft object", raw)
+	}
+	for _, key := range []string{"cards", "commentary", "stories"} {
+		if _, ok := raw[key]; ok {
+			t.Errorf("response wrapped the draft in %q: %v", key, raw)
+		}
+	}
+}
+
+// A run that never called propose_card owes the caller nothing it can render,
+// so it is an upstream failure — and, like every other 502 here, an opaque one.
+func TestAIStoryWithoutAProposalIsAnUpstreamFailure(t *testing.T) {
+	fake := &scriptedOpenAI{replies: []fakeReply{{content: "I would rather not."}}}
+	upstream := httptest.NewServer(fake.handler())
+	defer upstream.Close()
+
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	w := draftStory(t, upstream.URL, "m", "sk-t", `{"mode":"create","prompt":"write a card"}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("POST story: got %d (body=%s), want 502", w.Code, w.Body)
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != connectionFailedMessage {
+		t.Errorf("error body = %q, want the opaque %q", got, connectionFailedMessage)
 	}
 }
 
@@ -306,30 +384,37 @@ func TestAIDraftEmojiIsNormalizedNotRejected(t *testing.T) {
 	}
 }
 
+// Update mode carries the card being rewritten into the run, so the model
+// rewrites that card rather than inventing one from the prompt alone.
 func TestAIStoryUpdateModePassesTask(t *testing.T) {
-	fake := &fakeOpenAI{content: `{"title":"Updated"}`}
-	upstream := httptest.NewServer(fake.handler())
-	defer upstream.Close()
-
+	fake := &scriptedOpenAI{replies: []fakeReply{
+		{toolCalls: []fakeToolCall{{name: "propose_card", args: `{"title":"Updated"}`}}},
+		{content: "Rewrote the card."},
+	}}
 	t.Setenv("KB_AI_ALLOW_PRIVATE", "1") // test upstream is on loopback
-	h, _ := newTestServer(t, Config{})
-	// Base URL already ending in /v1 must not double the segment.
-	configureAI(t, h, upstream.URL+"/v1", "m", "")
+	upstream, rec := newRecordingUpstream(t, fake)
 
+	// Base URL already ending in /v1 must not double the segment.
 	body := `{"mode":"update","prompt":"tighten the title","task":{"title":"Old title","prio":2}}`
-	w := doReq(t, h, "POST", "/api/ai/story", body, nil)
+	w := draftStory(t, upstream.URL+"/v1", "m", "", body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("POST story update: got %d (body=%s)", w.Code, w.Body)
 	}
-	if fake.path != "/v1/chat/completions" {
-		t.Errorf("upstream path = %q, want /v1/chat/completions", fake.path)
+	if rec.path != "/v1/chat/completions" {
+		t.Errorf("upstream path = %q, want /v1/chat/completions", rec.path)
 	}
 	// No key configured -> no Authorization header.
-	if fake.auth != "" {
-		t.Errorf("Authorization = %q, want empty", fake.auth)
+	if rec.auth != "" {
+		t.Errorf("Authorization = %q, want empty", rec.auth)
 	}
-	if !strings.Contains(string(fake.reqBody), "Old title") {
-		t.Errorf("current card not passed upstream: %s", fake.reqBody)
+	sent := decodeAIRequest(t, fake.requests()[0])
+	if len(sent.Messages) != 2 {
+		t.Fatalf("messages = %+v, want a system prompt and the request", sent.Messages)
+	}
+	want := "Update the kanban card according to this request:\ntighten the title" +
+		"\n\nCurrent card JSON:\n{\"title\":\"Old title\",\"prio\":2}"
+	if sent.Messages[1].Content != want {
+		t.Errorf("user message = %q, want %q", sent.Messages[1].Content, want)
 	}
 	var draft storyDraft
 	if err := json.Unmarshal(w.Body.Bytes(), &draft); err != nil {
@@ -341,15 +426,12 @@ func TestAIStoryUpdateModePassesTask(t *testing.T) {
 }
 
 func TestAIStoryUpstreamError(t *testing.T) {
-	fake := &fakeOpenAI{status: http.StatusInternalServerError}
+	fake := &scriptedOpenAI{replies: []fakeReply{{status: http.StatusInternalServerError}}}
 	upstream := httptest.NewServer(fake.handler())
 	defer upstream.Close()
 
 	t.Setenv("KB_AI_ALLOW_PRIVATE", "1") // test upstream is on loopback
-	h, _ := newTestServer(t, Config{})
-	configureAI(t, h, upstream.URL, "m", "sk-super-secret")
-
-	w := doReq(t, h, "POST", "/api/ai/story", `{"mode":"create","prompt":"p"}`, nil)
+	w := draftStory(t, upstream.URL, "m", "sk-super-secret", `{"mode":"create","prompt":"p"}`)
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("upstream 500: got %d, want 502 (body=%s)", w.Code, w.Body)
 	}
@@ -381,7 +463,7 @@ func TestAIStoryConfigErrorsStayVisible(t *testing.T) {
 }
 
 func TestAITestBlocksPrivateUpstreamOpaquely(t *testing.T) {
-	fake := &fakeOpenAI{tool: aiProbeToolName}
+	fake := &fakeOpenAI{tool: probeToolName}
 	upstream := httptest.NewServer(fake.handler())
 	defer upstream.Close()
 
@@ -414,9 +496,10 @@ func TestAITestBlocksPrivateUpstreamOpaquely(t *testing.T) {
 	}
 }
 
-// An upstream reply is untrusted input. Every value that lands on a single
-// markdown line must come back stripped, or the reply forges board lines.
-func TestAIStoryRejectsWireBreakingReply(t *testing.T) {
+// A proposal is untrusted input: it is arguments the model chose, checked by
+// propose_card before the collector keeps it. Every value that lands on a
+// single markdown line comes back stripped, or the proposal forges board lines.
+func TestAIStoryRejectsWireBreakingProposal(t *testing.T) {
 	hostile := map[string]any{
 		"title": "Ship it\n- [x] forged !1 @2026-01-01",
 		"desc":  "line one\nline two",
@@ -426,19 +509,19 @@ func TestAIStoryRejectsWireBreakingReply(t *testing.T) {
 			map[string]any{"text": "clean step", "done": true},
 		},
 	}
-	body, err := json.Marshal(hostile)
+	args, err := json.Marshal(hostile)
 	if err != nil {
 		t.Fatalf("marshal hostile draft: %v", err)
 	}
-	fake := &fakeOpenAI{content: string(body)}
+	fake := &scriptedOpenAI{replies: []fakeReply{
+		{toolCalls: []fakeToolCall{{name: "propose_card", args: string(args)}}},
+		{content: "Proposed one card."},
+	}}
 	upstream := httptest.NewServer(fake.handler())
 	defer upstream.Close()
 
 	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
-	h, _ := newTestServer(t, Config{})
-	configureAI(t, h, upstream.URL, "m", "")
-
-	w := doReq(t, h, "POST", "/api/ai/story", `{"mode":"create","prompt":"p"}`, nil)
+	w := draftStory(t, upstream.URL, "m", "", `{"mode":"create","prompt":"p"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("POST story: got %d (body=%s)", w.Code, w.Body)
 	}
@@ -470,6 +553,39 @@ func TestAIStoryRejectsWireBreakingReply(t *testing.T) {
 	// other write path.
 	if err := validateDraft(draft); err != nil {
 		t.Errorf("coerced draft still fails wire validation: %v", err)
+	}
+}
+
+// Coercion is not a rescue for every proposal: one that still fails the shared
+// field validation is refused with an error the model reads, and only the card
+// it proposes after fixing that reaches the wire.
+func TestAIStoryRefusesAnUnusableProposal(t *testing.T) {
+	fake := &scriptedOpenAI{replies: []fakeReply{
+		{toolCalls: []fakeToolCall{{name: "propose_card", args: `{"title":"   "}`}}},
+		{toolCalls: []fakeToolCall{{name: "propose_card", args: `{"title":"Ship the fixed card"}`}}},
+		{content: "Fixed the title."},
+	}}
+	upstream := httptest.NewServer(fake.handler())
+	defer upstream.Close()
+
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+	w := draftStory(t, upstream.URL, "m", "sk-t", `{"mode":"create","prompt":"p"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST story: got %d (body=%s)", w.Code, w.Body)
+	}
+	var draft storyDraft
+	if err := json.Unmarshal(w.Body.Bytes(), &draft); err != nil {
+		t.Fatalf("draft JSON: %v (body=%s)", err, w.Body)
+	}
+	if draft.Title != "Ship the fixed card" {
+		t.Errorf("draft = %+v, want the card proposed after the refusal", draft)
+	}
+	reqs := fake.requests()
+	if len(reqs) < 2 {
+		t.Fatalf("upstream rounds = %d, want the refusal fed back", len(reqs))
+	}
+	if !strings.Contains(string(reqs[1]), "card rejected") {
+		t.Errorf("the refused proposal was not reported to the model: %s", reqs[1])
 	}
 }
 
@@ -688,7 +804,7 @@ func TestAIStoryBadRequests(t *testing.T) {
 }
 
 func TestAITestEndpoint(t *testing.T) {
-	fake := &fakeOpenAI{tool: aiProbeToolName}
+	fake := &fakeOpenAI{tool: probeToolName}
 	upstream := httptest.NewServer(fake.handler())
 	defer upstream.Close()
 
@@ -725,11 +841,11 @@ func TestAITestEndpoint(t *testing.T) {
 	}
 	// It was a tool-call probe with room to answer, not a 1-token ping.
 	sent := decodeAIRequest(t, fake.reqBody)
-	if *sent.MaxTokens != aiProbeMaxTokens {
-		t.Errorf("max_tokens = %d, want %d", *sent.MaxTokens, aiProbeMaxTokens)
+	if *sent.MaxTokens != probeMaxTokens {
+		t.Errorf("max_tokens = %d, want %d", *sent.MaxTokens, probeMaxTokens)
 	}
-	if len(sent.Tools) != 1 || sent.Tools[0].Function.Name != aiProbeToolName {
-		t.Fatalf("tools = %+v, want one %q function tool", sent.Tools, aiProbeToolName)
+	if len(sent.Tools) != 1 || sent.Tools[0].Function.Name != probeToolName {
+		t.Fatalf("tools = %+v, want one %q function tool", sent.Tools, probeToolName)
 	}
 	if sent.Tools[0].Type != "function" || sent.Tools[0].Function.Parameters["type"] != "object" {
 		t.Errorf("probe tool = %+v, want a function tool with an object schema", sent.Tools[0])
@@ -750,7 +866,7 @@ func TestAITestProbeRequiresAToolCall(t *testing.T) {
 		wantOK    bool
 		wantError string
 	}{
-		{name: "tool call passes", fake: fakeOpenAI{tool: aiProbeToolName}, wantOK: true},
+		{name: "tool call passes", fake: fakeOpenAI{tool: probeToolName}, wantOK: true},
 		{
 			name:      "text-only reply fails",
 			fake:      fakeOpenAI{content: "I would call ping."},
@@ -765,6 +881,15 @@ func TestAITestProbeRequiresAToolCall(t *testing.T) {
 			name:      "an upstream rejecting tools stays opaque",
 			fake:      fakeOpenAI{status: http.StatusBadRequest},
 			wantError: connectionFailedMessage,
+		},
+		// A reply cut off at the probe budget says nothing about tool calling:
+		// a reasoning model can spend the whole budget thinking before it emits
+		// a call. Reporting that as "no tool calling" blames the model for a
+		// budget, so it is reported as the truncation it is.
+		{
+			name:      "a truncated reply is truncation, not a missing tool",
+			fake:      fakeOpenAI{content: "thinking about it", finish: "length"},
+			wantError: truncatedReplyMessage,
 		},
 		{
 			name:      "an upstream error stays opaque",
@@ -792,7 +917,7 @@ func TestAITestProbeRequiresAToolCall(t *testing.T) {
 				t.Fatalf("upstream calls = %d, want exactly 1", fake.calls)
 			}
 			sent := decodeAIRequest(t, fake.reqBody)
-			if len(sent.Tools) != 1 || sent.Tools[0].Function.Name != aiProbeToolName {
+			if len(sent.Tools) != 1 || sent.Tools[0].Function.Name != probeToolName {
 				t.Fatalf("probe request tools = %+v", sent.Tools)
 			}
 			if sent.ResponseFormat != nil {
@@ -815,7 +940,7 @@ func TestAIRequestsIgnoreAmbientOpenAICredentials(t *testing.T) {
 		{name: "stored key wins", stored: "sk-stored", want: "Bearer sk-stored"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := &fakeOpenAI{tool: aiProbeToolName}
+			fake := &fakeOpenAI{tool: probeToolName}
 			upstream := httptest.NewServer(fake.handler())
 			defer upstream.Close()
 
@@ -844,23 +969,10 @@ func TestAIRequestsIgnoreAmbientOpenAICredentials(t *testing.T) {
 	}
 }
 
-// A header the request needs is not scrubbed just because the environment
-// names it: OPENAI_CUSTOM_HEADERS is attacker-adjacent configuration, but
-// deleting Authorization or Content-Type on its say-so breaks the call
-// instead of containing anything.
-func TestAmbientHeaderScrubKeepsRequestOwnedHeaders(t *testing.T) {
-	t.Setenv("OPENAI_CUSTOM_HEADERS", "Authorization: Bearer sk-ambient\ncontent-type: text/plain\nAccept: text/plain\nX-Leak: v\nnot-a-header\n: blank")
-	got := ambientHeaderNames()
-	want := []string{"OpenAI-Organization", "OpenAI-Project", "X-Leak"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ambientHeaderNames() = %v, want %v", got, want)
-	}
-}
-
 // The key still travels when the environment also declares an Authorization
 // header: the per-request key owns that header, and the scrub must not undo it.
 func TestAmbientAuthorizationHeaderDoesNotSuppressTheStoredKey(t *testing.T) {
-	fake := &fakeOpenAI{tool: aiProbeToolName}
+	fake := &fakeOpenAI{tool: probeToolName}
 	upstream := httptest.NewServer(fake.handler())
 	defer upstream.Close()
 
@@ -877,87 +989,16 @@ func TestAmbientAuthorizationHeaderDoesNotSuppressTheStoredKey(t *testing.T) {
 	}
 }
 
-// endlessBody is an upstream that never stops answering. Without a cap the SDK
-// buffers all of it: io.ReadAll grows by doubling, so the resident cost is a
-// multiple of what the host actually sent.
-type endlessBody struct{ read int64 }
-
-func (b *endlessBody) Read(p []byte) (int, error) {
-	for i := range p {
-		p[i] = 'a'
-	}
-	b.read += int64(len(p))
-	return len(p), nil
-}
-
-func (b *endlessBody) Close() error { return nil }
-
-// The endpoint is user-configured, so the reply is bounded before it is
-// buffered — on the success path and on the error path alike, since both read
-// the whole body.
-func TestChatCapsUpstreamResponseBody(t *testing.T) {
-	for _, status := range []int{http.StatusOK, http.StatusBadRequest} {
-		t.Run(strconv.Itoa(status), func(t *testing.T) {
-			body := &endlessBody{}
-			s := &server{aiClient: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: status,
-					Header:     http.Header{"Content-Type": []string{"application/json"}},
-					Body:       body,
-				}, nil
-			})}}
-			call := chatCall{msgs: []chatMessage{{Role: "user", Content: "hi"}}, maxTokens: 10}
-			_, err := s.chat("u", aiConfig{baseURL: "https://ai.invalid", model: "m"}, call)
-			if err == nil {
-				t.Fatal("chat accepted an endless response body")
-			}
-			// One buffer's worth of slack over the cap: the reader stops at
-			// cap+1 bytes, the last Read may have been issued for more.
-			if body.read > 2*aiMaxResponseBytes {
-				t.Fatalf("read %d bytes from the upstream, want it stopped near %d", body.read, aiMaxResponseBytes)
-			}
-		})
-	}
-}
-
-// A reply of exactly the cap is not a failure: the limit exists to stop an
-// endless body, not to truncate a legitimate one.
-func TestChatAcceptsAReplyAtTheSizeCap(t *testing.T) {
-	content := strings.Repeat("a", aiMaxResponseBytes-256)
-	reply, _ := json.Marshal(map[string]any{"choices": []any{
-		map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": content}, "finish_reason": "stop"},
-	}})
-	if len(reply) > aiMaxResponseBytes {
-		t.Fatalf("test reply is %d bytes, want at most %d", len(reply), aiMaxResponseBytes)
-	}
-	s := &server{aiClient: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(string(reply))),
-		}, nil
-	})}}
-	msg, err := s.chat("u", aiConfig{baseURL: "https://ai.invalid", model: "m"}, chatCall{
-		msgs: []chatMessage{{Role: "user", Content: "hi"}}, maxTokens: 10,
-	})
-	if err != nil || msg.Content != content {
-		t.Fatalf("chat = %d bytes, %v; want the whole reply", len(msg.Content), err)
-	}
-}
-
 // Hitting the stated budget is the failure this phase exists to make legible:
 // it must be reported as truncation, not as the "not valid JSON" it used to
 // masquerade as, and not as the opaque upstream failure a 502 collapses to.
 func TestAIStoryReportsATruncatedReply(t *testing.T) {
-	fake := &fakeOpenAI{content: `{"title":"Ship i`, finish: "length"}
+	fake := &scriptedOpenAI{replies: []fakeReply{{content: `{"title":"Ship i`, finish: "length"}}}
 	upstream := httptest.NewServer(fake.handler())
 	defer upstream.Close()
 
 	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
-	h, _ := newTestServer(t, Config{})
-	configureAI(t, h, upstream.URL, "test-model", "sk-t")
-
-	w := doReq(t, h, "POST", "/api/ai/story", `{"mode":"create","prompt":"write a card"}`, nil)
+	w := draftStory(t, upstream.URL, "test-model", "sk-t", `{"mode":"create","prompt":"write a card"}`)
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("POST story: got %d (body=%s), want 422", w.Code, w.Body)
 	}
@@ -968,23 +1009,13 @@ func TestAIStoryReportsATruncatedReply(t *testing.T) {
 
 // The budget is bounded on both ends: never absent (the upstream default is
 // what truncates a reply), never above what a small model accepts (a request
-// over the model's own cap is rejected outright).
-func TestAIBudgetIsFlooredAndCapped(t *testing.T) {
-	for _, tt := range []struct{ in, want int64 }{
-		{in: 0, want: aiDefaultMaxTokens},
-		{in: -1, want: aiDefaultMaxTokens},
-		{in: 1, want: 1},
-		{in: aiMaxTokensCeiling, want: aiMaxTokensCeiling},
-		{in: aiMaxTokensCeiling + 1, want: aiMaxTokensCeiling},
-		{in: 1 << 20, want: aiMaxTokensCeiling},
-	} {
-		if got := aiBudget(tt.in); got != tt.want {
-			t.Errorf("aiBudget(%d) = %d, want %d", tt.in, got, tt.want)
-		}
-	}
-	for _, budget := range []int64{aiDefaultMaxTokens, aiStoryMaxTokens, aiStoriesMaxTokens, aiImportMaxTokens, aiDriftMaxTokens, aiProbeMaxTokens} {
-		if budget > aiMaxTokensCeiling {
-			t.Errorf("call-site budget %d exceeds the ceiling %d", budget, aiMaxTokensCeiling)
+// over the model's own cap is rejected outright). Every request the suite
+// records is checked against the ceiling by decodeAIRequest; the call sites
+// are checked here, before one is ever sent.
+func TestCallSiteBudgetsStayUnderTheCeiling(t *testing.T) {
+	for _, budget := range []int64{aiStoryMaxTokens, aiStoriesMaxTokens, aiImportMaxTokens, aiDriftMaxTokens, probeMaxTokens} {
+		if budget < 1 || budget > aiMaxTokensCeiling {
+			t.Errorf("call-site budget %d is outside 1..%d", budget, aiMaxTokensCeiling)
 		}
 	}
 }
@@ -1027,19 +1058,19 @@ func TestAIRequestPicksTheBudgetFieldForTheModel(t *testing.T) {
 		{model: "gpt-4o", wantCompletionTk: false},
 	} {
 		t.Run(tt.model, func(t *testing.T) {
-			fake := &fakeOpenAI{content: `{"title":"Ship it"}`}
+			fake := &scriptedOpenAI{replies: []fakeReply{
+				{toolCalls: []fakeToolCall{{name: "propose_card", args: `{"title":"Ship it"}`}}},
+				{content: "Proposed one card."},
+			}}
 			upstream := httptest.NewServer(fake.handler())
 			defer upstream.Close()
 
 			t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
-			h, _ := newTestServer(t, Config{})
-			configureAI(t, h, upstream.URL, tt.model, "sk-t")
-
-			w := doReq(t, h, "POST", "/api/ai/story", `{"mode":"create","prompt":"write a card"}`, nil)
+			w := draftStory(t, upstream.URL, tt.model, "sk-t", `{"mode":"create","prompt":"write a card"}`)
 			if w.Code != http.StatusOK {
 				t.Fatalf("POST story: got %d (body=%s)", w.Code, w.Body)
 			}
-			sent := decodeAIRequest(t, fake.reqBody)
+			sent := decodeAIRequest(t, fake.requests()[0])
 			gotCompletionTk := sent.MaxCompletionTokens != nil
 			if gotCompletionTk != tt.wantCompletionTk || sent.budget() != aiStoryMaxTokens {
 				t.Fatalf("budget field max_completion_tokens=%t value=%d, want %t and %d",
@@ -1073,10 +1104,10 @@ func postAITest(t *testing.T, h http.Handler, body string) aiTestResult {
 // saved, so nobody has to store a key to find out whether it works. The
 // supplied values must reach the upstream and must not reach the store.
 func TestAITestUsesSuppliedValuesWithoutSaving(t *testing.T) {
-	stored := &fakeOpenAI{tool: aiProbeToolName}
+	stored := &fakeOpenAI{tool: probeToolName}
 	storedUp := httptest.NewServer(stored.handler())
 	defer storedUp.Close()
-	candidate := &fakeOpenAI{tool: aiProbeToolName}
+	candidate := &fakeOpenAI{tool: probeToolName}
 	candidateUp := httptest.NewServer(candidate.handler())
 	defer candidateUp.Close()
 
@@ -1132,7 +1163,7 @@ func TestAITestUsesSuppliedValuesWithoutSaving(t *testing.T) {
 // shows a blank key field. Blank therefore has to mean "use the saved key",
 // or changing only the model would force the user to retype it.
 func TestAITestBlankKeyFallsBackToStoredKey(t *testing.T) {
-	candidate := &fakeOpenAI{tool: aiProbeToolName}
+	candidate := &fakeOpenAI{tool: probeToolName}
 	candidateUp := httptest.NewServer(candidate.handler())
 	defer candidateUp.Close()
 
@@ -1159,10 +1190,10 @@ func TestAITestBlankKeyFallsBackToStoredKey(t *testing.T) {
 // connection" would hand the decrypted key to any host named in the body, and
 // nothing would be written to show it happened.
 func TestAITestBlankKeyRefusesADifferentOrigin(t *testing.T) {
-	stored := &fakeOpenAI{tool: aiProbeToolName}
+	stored := &fakeOpenAI{tool: probeToolName}
 	storedUp := httptest.NewServer(stored.handler())
 	defer storedUp.Close()
-	attacker := &fakeOpenAI{tool: aiProbeToolName}
+	attacker := &fakeOpenAI{tool: probeToolName}
 	attackerUp := httptest.NewServer(attacker.handler())
 	defer attackerUp.Close()
 
@@ -1209,7 +1240,7 @@ func TestAITestBlankKeyRefusesADifferentOrigin(t *testing.T) {
 // SSRF guard, same opaque failure. Otherwise the endpoint is a port scanner
 // that reports its findings one request at a time.
 func TestAITestSuppliedURLKeepsGuards(t *testing.T) {
-	blocked := &fakeOpenAI{tool: aiProbeToolName}
+	blocked := &fakeOpenAI{tool: probeToolName}
 	blockedUp := httptest.NewServer(blocked.handler())
 	defer blockedUp.Close()
 
@@ -1243,85 +1274,22 @@ func TestAITestSuppliedURLKeepsGuards(t *testing.T) {
 	}
 }
 
-// Some backends leave the model's chain-of-thought in the message content as
-// an inline <think> block instead of a separate field. Reasoning about a JSON
-// answer routinely contains braces, so a first-{-to-last-} extraction fails
-// intermittently — whenever the sampled reasoning happens to include one.
-func TestDecodeJSONObjectToleratesInlineReasoning(t *testing.T) {
-	tests := []struct {
-		name, content, wantTitle, wantErr string
-	}{
-		{
-			name:      "think block with braces before the reply",
-			content:   "<think>The user wants a card. Maybe {\"title\": something} — no, refine.</think>\n{\"title\":\"real\"}",
-			wantTitle: "real",
-		},
-		{
-			name:      "prose with braces around the reply",
-			content:   "Here is the card (schema: {title, desc}):\n{\"title\":\"real\"}\nLet me know!",
-			wantTitle: "real",
-		},
-		{
-			name:      "fenced reply after a think block",
-			content:   "<think>brace test {</think>```json\n{\"title\":\"real\"}\n```",
-			wantTitle: "real",
-		},
-		{
-			name:    "a draft inside the think block is not the reply",
-			content: "<think>{\"title\":\"draft\"}</think>",
-			wantErr: "assistant reply is not JSON",
-		},
-		{
-			name:    "think block with no reply at all",
-			content: "<think>still thinking</think>",
-			wantErr: "assistant reply is not JSON",
-		},
-		{
-			name:    "braces that never parse",
-			content: "reasoning { with braces } and no object",
-			wantErr: "assistant reply is not valid JSON",
-		},
-		{
-			name:      "reasoning with a consumed opening think tag",
-			content:   "The user wants a split. Sketch: {\"title\":\"sketch\"}. Refine it.</think>\n{\"title\":\"real\"}",
-			wantTitle: "real",
-		},
-		{
-			name:      "untagged reasoning sketch before a longer reply",
-			content:   "The shape is {\"title\":\"sketch\"}. Final answer:\n{\"title\":\"real\",\"desc\":\"the actual card\"}",
-			wantTitle: "real",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m, err := decodeJSONObject(tt.content)
-			if tt.wantErr != "" {
-				if err == nil || err.Error() != tt.wantErr {
-					t.Fatalf("err = %v, want %q", err, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("decodeJSONObject: %v", err)
-			}
-			if got, _ := m["title"].(string); got != tt.wantTitle {
-				t.Errorf("title = %q, want %q", got, tt.wantTitle)
-			}
-		})
-	}
-}
-
-// End to end: a story draft survives a backend that inlines reasoning.
+// End to end: a story draft survives a backend that inlines reasoning. The
+// card rides the tool call, so the leaked reasoning is prose nothing parses —
+// including the sketch of a card that used to be mistaken for the reply.
 func TestAIStoryToleratesInlineReasoning(t *testing.T) {
-	fake := &fakeOpenAI{content: "<think>They want rate limiting. Shape: {\"title\": ...}.</think>\n{\"title\":\"Add rate limiting\",\"prio\":2}"}
+	fake := &scriptedOpenAI{replies: []fakeReply{
+		{
+			content:   "<think>They want rate limiting. Shape: {\"title\": ...}.</think>",
+			toolCalls: []fakeToolCall{{name: "propose_card", args: `{"title":"Add rate limiting","prio":2}`}},
+		},
+		{content: "<think>Done.</think>\nProposed one card."},
+	}}
 	upstream := httptest.NewServer(fake.handler())
 	defer upstream.Close()
 
 	t.Setenv("KB_AI_ALLOW_PRIVATE", "1") // test upstream is on loopback
-	h, _ := newTestServer(t, Config{})
-	configureAI(t, h, upstream.URL, "test-model", "sk-test-123")
-
-	w := doReq(t, h, "POST", "/api/ai/story", `{"mode":"create","prompt":"rate limit logins"}`, nil)
+	w := draftStory(t, upstream.URL, "test-model", "sk-test-123", `{"mode":"create","prompt":"rate limit logins"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("POST story: got %d (body=%s)", w.Code, w.Body)
 	}
@@ -1331,25 +1299,5 @@ func TestAIStoryToleratesInlineReasoning(t *testing.T) {
 	}
 	if draft.Title != "Add rate limiting" || draft.Prio != 2 {
 		t.Errorf("draft = %+v, want title %q prio 2", draft, "Add rate limiting")
-	}
-}
-
-// Regression: leaked reasoning that sketches the schema with a one-element
-// example ({"stories":[{...}]}) must not be mistaken for the reply — that
-// returned exactly one story from every split. /api/ai/stories no longer
-// parses the reply at all, but the same coercion still serves the import
-// preview, so the case is asserted where it survives.
-func TestCoerceDraftsPreferTheReplyOverAReasoningSketch(t *testing.T) {
-	drafts, err := coerceDrafts("I need up to 6 stories. The shape is "+
-		`{"stories":[{"title":"example"}]}`+". Now the real split.</think>\n"+
-		`{"stories":[{"title":"one"},{"title":"two"},{"title":"three"}]}`, 6)
-	if err != nil {
-		t.Fatalf("coerceDrafts: %v", err)
-	}
-	if len(drafts) != 3 {
-		t.Fatalf("got %d drafts, want 3: %+v", len(drafts), drafts)
-	}
-	if drafts[0].Title != "one" || drafts[2].Title != "three" {
-		t.Errorf("drafts = %+v, want titles one..three", drafts)
 	}
 }

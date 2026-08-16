@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -20,9 +19,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
-	"github.com/openai/openai-go/v3/shared"
+	"github.com/RandomCodeSpace/rig"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
@@ -139,15 +136,6 @@ type aiError struct {
 
 func (e *aiError) Error() string { return e.msg }
 
-// storySystemPrompt forces a strict-JSON reply in the draft shape.
-const storySystemPrompt = `You write kanban cards. Respond with a single JSON object only — no prose, no code fences — using exactly these keys:
-{"title":"short imperative title","emoji":"🚀","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}]}
-prio is an integer from 1 (highest) to 4 (lowest); 3 is the default. emoji is exactly one emoji character that suits the work, or an empty string when nothing fits.`
-
-const importSystemPrompt = `You transform forge issues into kanban-card proposals. Respond with a single JSON object only — no prose, no code fences — of the form:
-{"stories":[{"title":"short imperative title","emoji":"🚀","desc":"markdown description","prio":3,"due":"YYYY-MM-DD or empty string","effort":"S, M, L or empty string","tags":["tag"],"checks":[{"text":"step","done":false}],"source":1}]}
-emoji is exactly one emoji character that suits the work, or an empty string when nothing fits. source must be the positive integer Source number from the supplied forge issue. Do not copy source text verbatim; propose independently actionable work.`
-
 // Bounds for POST /api/ai/stories: an ADR is prose, not a payload, and the
 // story count is clamped so one request cannot fan out unboundedly.
 const (
@@ -159,13 +147,13 @@ const (
 	maxImportPackBytes      = 48 << 10
 )
 
-// Every completion states its own output budget. Omitting it leaves the cap to
-// the upstream default, which silently truncates a JSON reply mid-object and
-// surfaces as "assistant reply is not valid JSON" — so the budgets are sized
-// per call site: one card, up to maxStoryCount cards, up to maxImportIssues
-// card proposals, one sentence of drift prose, one tool call.
+// Every run states its own output budget. Omitting it leaves the cap to the
+// upstream default, which silently cuts a reply off mid-sentence — so the
+// budgets are sized per call site: one card, up to maxStoryCount cards, up to
+// maxImportIssues card proposals, one sentence of drift prose.
 //
-// No budget may exceed aiMaxTokensCeiling. A model is only known by the name
+// No budget may exceed aiMaxTokensCeiling, which skillBudget enforces on every
+// run rather than trusting the constants below. A model is only known by the name
 // the user typed, and asking for more than the model's own completion cap can
 // be rejected outright by strict servers — a 400 no caller can act on, where
 // the previous omission worked. The ceiling is 8192 rather than the safer
@@ -177,27 +165,12 @@ const (
 // the caller can act on; models capped below 8192 on strict servers fail the
 // larger flows either way.
 const (
-	aiDefaultMaxTokens = 1024
 	aiStoryMaxTokens   = 4096
 	aiStoriesMaxTokens = 8192
 	aiImportMaxTokens  = 8192
 	aiDriftMaxTokens   = 1024
-	aiProbeMaxTokens   = 256
 	aiMaxTokensCeiling = 8192
 )
-
-// aiMaxResponseBytes caps one upstream reply. The endpoint is user-configured
-// and the SDK buffers the whole body with io.ReadAll before decoding it, so
-// without a ceiling a host that answers with an endless stream — or a gzip
-// bomb, since the SDK asks for gzip — exhausts the shared process. This is the
-// same 1 MiB the hand-rolled client enforced; the largest reply this server
-// asks for is orders of magnitude smaller.
-const aiMaxResponseBytes = 1 << 20
-
-// errAIResponseTooLarge stops the read past the cap. It reaches chat as a
-// transport-level failure, which is mapped to the same opaque 502 as any other
-// upstream problem.
-var errAIResponseTooLarge = errors.New("upstream response exceeds the size limit")
 
 // storyDraft is the coerced card draft returned by POST /api/ai/story.
 type storyDraft struct {
@@ -217,28 +190,11 @@ type draftCheck struct {
 	Done bool   `json:"done"`
 }
 
-// chatMessage is one prompt message in the shape every caller builds. The wire
-// encoding belongs to the SDK; this stays a plain struct so the prompts are
-// readable and the coercion layer is unaffected by client changes.
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-// chatCall is one completion request: what to ask, how much may come back, and
-// whether the reply is constrained to JSON or to a tool call.
-type chatCall struct {
-	msgs      []chatMessage
-	maxTokens int64
-	jsonMode  bool
-	tools     []openai.ChatCompletionToolUnionParam
-}
-
 // aiEndpoint validates the configured base URL and returns the API root the
-// SDK appends chat/completions to, accepting bases with or without a trailing
-// /v1 (and trailing slashes). The trailing slash matters: the SDK resolves
-// method paths against this URL, and a base without one would lose its last
-// segment.
+// client appends chat/completions to, accepting bases with or without a
+// trailing /v1 (and trailing slashes). The trailing slash matters: method
+// paths are resolved against this URL, and a base without one would lose its
+// last segment.
 func aiEndpoint(base string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(base))
 	if err != nil || u.Host == "" {
@@ -291,207 +247,7 @@ func (s *server) storedAIConfig(user string) (aiConfig, error) {
 	return aiConfig{baseURL: set.BaseURL, model: set.Model, key: key}, nil
 }
 
-// chatCompletion runs one chat completion against the user's configured
-// endpoint and returns the assistant content. Errors are *aiError with a
-// key-free message: 400 for configuration problems, 502 for upstream ones.
-func (s *server) chatCompletion(user string, msgs []chatMessage, maxTokens int64, jsonMode bool) (string, error) {
-	cfg, err := s.storedAIConfig(user)
-	if err != nil {
-		return "", err
-	}
-	msg, err := s.chat(user, cfg, chatCall{msgs: msgs, maxTokens: maxTokens, jsonMode: jsonMode})
-	if err != nil {
-		return "", err
-	}
-	return msg.Content, nil
-}
-
-// limitedBody is a response body that fails once it has yielded more than the
-// cap. The allowance is one byte over aiMaxResponseBytes so a reply of exactly
-// the cap still reads to EOF; anything longer stops at cap+1 with
-// errAIResponseTooLarge instead of being buffered.
-type limitedBody struct {
-	rc   io.ReadCloser
-	left int64
-}
-
-func (b *limitedBody) Read(p []byte) (int, error) {
-	if b.left <= 0 {
-		return 0, errAIResponseTooLarge
-	}
-	if int64(len(p)) > b.left {
-		p = p[:b.left]
-	}
-	n, err := b.rc.Read(p)
-	b.left -= int64(n)
-	return n, err
-}
-
-func (b *limitedBody) Close() error { return b.rc.Close() }
-
-// limitResponseBody caps what one upstream reply may hand to the SDK's
-// io.ReadAll. It runs as SDK middleware rather than in the transport because
-// the transport's gzip is transparent: by the time the response gets here the
-// body is the decompressed stream, which is what the allocation is made of.
-func limitResponseBody(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
-	res, err := next(req)
-	if err != nil || res == nil || res.Body == nil {
-		return res, err
-	}
-	res.Body = &limitedBody{rc: res.Body, left: aiMaxResponseBytes + 1}
-	return res, nil
-}
-
-// aiOwnedHeaders are headers this client sets for the request to work at all.
-// A same-named value inherited from the environment is already overwritten
-// (Authorization, by the per-request key), so deleting them in the ambient
-// scrub would break the call rather than contain a leak.
-var aiOwnedHeaders = map[string]bool{"authorization": true, "content-type": true, "accept": true}
-
-// ambientHeaderNames lists the headers openai.NewClient derives from the
-// server's own environment. DefaultClientOptions is prepended unconditionally
-// and the option that would suppress it is internal to the SDK, so each header
-// it can produce is deleted by name instead: OPENAI_ORG_ID and
-// OPENAI_PROJECT_ID map to fixed names, and OPENAI_CUSTOM_HEADERS — arbitrary
-// names, and where a gateway token is most likely to sit — is parsed here the
-// way the SDK parses it so every name it declares is deleted too.
-func ambientHeaderNames() []string {
-	names := []string{"OpenAI-Organization", "OpenAI-Project"}
-	for _, line := range strings.Split(os.Getenv("OPENAI_CUSTOM_HEADERS"), "\n") {
-		name, _, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		if name = strings.TrimSpace(name); name != "" && !aiOwnedHeaders[strings.ToLower(name)] {
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
-// aiSDKOptions builds the per-request client options for cfg. The SDK owns the
-// wire format only: transport stays ours, so the SSRF-guarded dialer, the
-// AITimeout and the same-host redirect policy hold for every AI request, and
-// the response body is capped on the way back because the SDK reads it whole.
-// Retries are disabled — one user action is one upstream request, and a retry
-// would multiply both the timeout and the load a probe can direct at a host.
-// The key is set explicitly on every call, and cleared explicitly when there
-// is none, so a stray OPENAI_API_KEY in the server environment can never ride
-// along to a user-configured endpoint; the other credentials and identifiers
-// the SDK reads from the environment are deleted for the same reason.
-func aiSDKOptions(base string, client *http.Client, key string) []option.RequestOption {
-	opts := []option.RequestOption{
-		option.WithBaseURL(base),
-		option.WithHTTPClient(client),
-		option.WithMaxRetries(0),
-		option.WithMiddleware(limitResponseBody),
-		option.WithAPIKey(key),
-	}
-	if key == "" {
-		opts = append(opts, option.WithHeaderDel("Authorization"))
-	}
-	for _, name := range ambientHeaderNames() {
-		opts = append(opts, option.WithHeaderDel(name))
-	}
-	return opts
-}
-
-// sdkMessages converts the prompt messages into the SDK's message unions.
-// Only system and user prompts are built here; anything else is sent as a user
-// message rather than dropped, because a dropped message changes the prompt.
-func sdkMessages(msgs []chatMessage) []openai.ChatCompletionMessageParamUnion {
-	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
-	for _, m := range msgs {
-		if m.Role == "system" {
-			out = append(out, openai.SystemMessage(m.Content))
-			continue
-		}
-		out = append(out, openai.UserMessage(m.Content))
-	}
-	return out
-}
-
-// chat performs one chat completion against cfg and returns the assistant
-// message. Every caller goes through here, so the SSRF-guarded client, the
-// timeout and the key-free error mapping apply to a supplied configuration
-// exactly as to a stored one; user is for logging only.
-//
-// Failure is opaque by construction: an upstream status, an upstream body or a
-// transport reason would each turn this endpoint into a reachability oracle,
-// so callers get one 502 message and the detail goes to the log without the
-// response body, which is attacker-influenced text. A reply that reached the
-// output budget is the one upstream outcome reported as itself (422): it says
-// nothing a successful reply would not, and it is the caller's to act on.
-func (s *server) chat(user string, cfg aiConfig, call chatCall) (openai.ChatCompletionMessage, error) {
-	var empty openai.ChatCompletionMessage
-	if strings.TrimSpace(cfg.baseURL) == "" {
-		return empty, &aiError{http.StatusBadRequest, "AI base URL not configured"}
-	}
-	base, err := aiEndpoint(cfg.baseURL)
-	if err != nil {
-		return empty, &aiError{http.StatusBadRequest, err.Error()}
-	}
-	client := openai.NewClient(aiSDKOptions(base, s.aiClient, cfg.key)...)
-	maxTokens := aiBudget(call.maxTokens)
-	params := openai.ChatCompletionNewParams{
-		Model:    shared.ChatModel(cfg.model),
-		Messages: sdkMessages(call.msgs),
-		Tools:    call.tools,
-	}
-	if usesMaxCompletionTokens(cfg.model) {
-		params.MaxCompletionTokens = openai.Int(maxTokens)
-	} else {
-		params.MaxTokens = openai.Int(maxTokens)
-	}
-	if call.jsonMode {
-		params.ResponseFormat = openai.ChatCompletionNewParamsResponseFormatUnion{
-			OfJSONObject: &shared.ResponseFormatJSONObjectParam{},
-		}
-	}
-	completion, err := client.Chat.Completions.New(context.Background(), params)
-	if err != nil {
-		var apiErr *openai.Error
-		if errors.As(err, &apiErr) {
-			log.Printf("ai: request for %s returned upstream status %d", user, apiErr.StatusCode)
-			return empty, &aiError{http.StatusBadGateway, fmt.Sprintf("upstream returned status %d", apiErr.StatusCode)}
-		}
-		log.Printf("ai: request for %s failed: %v", user, err)
-		return empty, &aiError{http.StatusBadGateway, "upstream request failed"}
-	}
-	if len(completion.Choices) == 0 {
-		return empty, &aiError{http.StatusBadGateway, "upstream returned no choices"}
-	}
-	choice := completion.Choices[0]
-	// The budget is stated so the reply is not cut off by an unknown default,
-	// but a stated budget can still be reached. finish_reason is the only
-	// signal that says so: without it a reply cut mid-object comes back as
-	// "assistant reply is not valid JSON", which sends the caller looking for
-	// a bug in the model instead of asking for less in one request.
-	if choice.FinishReason == finishReasonLength {
-		log.Printf("ai: reply for %s was truncated at the %d-token budget", user, maxTokens)
-		return empty, &aiError{http.StatusUnprocessableEntity, truncatedReplyMessage}
-	}
-	return choice.Message, nil
-}
-
-// finishReasonLength is what an upstream reports when the reply stopped
-// because it reached the requested budget rather than a natural end.
-const finishReasonLength = "length"
-
 const truncatedReplyMessage = "the model's reply hit the output limit and was cut off — ask for less in one request"
-
-// aiBudget resolves one call's output budget. No completion may leave the cap
-// to the upstream default, which is what truncates a JSON reply mid-object,
-// and none may ask for more than a small model will accept.
-func aiBudget(maxTokens int64) int64 {
-	if maxTokens < 1 {
-		return aiDefaultMaxTokens
-	}
-	if maxTokens > aiMaxTokensCeiling {
-		return aiMaxTokensCeiling
-	}
-	return maxTokens
-}
 
 // usesMaxCompletionTokens reports whether the model needs the budget under
 // max_completion_tokens. max_tokens is deprecated and rejected outright by the
@@ -544,60 +300,18 @@ func (c aiConfig) merge(req aiTestRequest) aiConfig {
 	return c
 }
 
-// aiProbeToolName is the tool the connection test asks the model to call.
-const aiProbeToolName = "ping"
-
 // toolCallRequiredMessage is what a reachable endpoint whose model cannot call
 // tools reports. Tool calling is a prerequisite, not a nice-to-have: the AI
 // features are built on it, so a model that only produces prose fails the test
 // rather than passing it and failing later on real work.
 const toolCallRequiredMessage = "model must support tool calling"
 
-const aiProbeSystemPrompt = `You are a connection probe. Call the ping tool. Do not answer with text.`
-
-// aiProbeCall is the connection test: a trivial tool and an instruction to
-// call it. Passing means the reply carried a call to that tool.
-func aiProbeCall() chatCall {
-	return chatCall{
-		msgs: []chatMessage{
-			{Role: "system", Content: aiProbeSystemPrompt},
-			{Role: "user", Content: `Call the ping tool with message "ping".`},
-		},
-		maxTokens: aiProbeMaxTokens,
-		tools: []openai.ChatCompletionToolUnionParam{
-			openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-				Name:        aiProbeToolName,
-				Description: openai.String("Acknowledge a connection probe."),
-				Parameters: shared.FunctionParameters{
-					"type": "object",
-					"properties": map[string]any{
-						"message": map[string]any{"type": "string", "description": "Any short string."},
-					},
-					"required": []string{"message"},
-				},
-			}),
-		},
-	}
-}
-
-// hasProbeToolCall reports whether the reply actually called the probe tool.
-// Content is ignored: a model that explains it would call ping has not called
-// it, and the features this gates need the call itself.
-func hasProbeToolCall(msg openai.ChatCompletionMessage) bool {
-	for _, call := range msg.ToolCalls {
-		if call.Function.Name == aiProbeToolName {
-			return true
-		}
-	}
-	return false
-}
-
 // handleAITest runs the tool-call probe and reports the result; failures come
 // back as ok:false, not error statuses. With no body it tests the saved
 // settings; with an aiTestRequest body it tests those values instead, so the
-// form can be validated before it is saved. Either way the request goes
-// through chat, which means the same SSRF-guarded client, timeout and opaque
-// errors: every upstream outcome (connect failure, non-2xx status, bad body)
+// form can be validated before it is saved. Either way the probe goes through
+// the same SSRF-guarded client, timeout and opaque errors: every upstream
+// outcome (connect failure, non-2xx status, bad body)
 // collapses to one message so a supplied URL cannot turn the endpoint into a
 // host/port reachability oracle; the detail goes to the server log only. That
 // is also why an endpoint that rejects the tools field reports the opaque
@@ -657,16 +371,46 @@ func (s *server) runAITest(user string, req aiTestRequest) error {
 		!store.SameAIOrigin(cfg.baseURL, supplied) {
 		return &aiError{http.StatusBadRequest, "enter the API key to test a different endpoint"}
 	}
-	msg, err := s.chat(user, cfg.merge(req), aiProbeCall())
+	cfg = cfg.merge(req)
+	client, err := s.rigClient(cfg)
 	if err != nil {
 		return err
 	}
-	if !hasProbeToolCall(msg) {
-		return &aiError{http.StatusBadRequest, toolCallRequiredMessage}
-	}
-	return nil
+	return probeError(client.ProbeToolCalling(context.Background(), cfg.model))
 }
 
+// probeError maps a probe failure onto the status the settings form sees. A
+// model that answers in prose and a reply cut off at the probe budget are the
+// caller's own configuration and are reported as themselves; everything else
+// is an upstream outcome and collapses to a 502, which handleAITest rewrites
+// to one opaque message so a supplied URL cannot become a reachability oracle.
+func probeError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, rig.ErrNoToolCalling):
+		return &aiError{http.StatusBadRequest, toolCallRequiredMessage}
+	case errors.Is(err, rig.ErrOutputLimit):
+		return &aiError{http.StatusUnprocessableEntity, truncatedReplyMessage}
+	}
+	return &aiError{http.StatusBadGateway, "upstream request failed"}
+}
+
+// storyDraftSkillName is the skill POST /api/ai/story runs. The endpoint
+// predates the skill runner and keeps its own request and response shape: one
+// request yields one card, written flat.
+const storyDraftSkillName = "story-draft"
+
+// noCardProposedMessage is the run that finished without ever calling
+// propose_card. The endpoint owes the caller a card, so an empty run is an
+// upstream failure — and writeAIError keeps 502 opaque, so the reason is
+// logged rather than returned.
+const noCardProposedMessage = "assistant proposed no card"
+
+// handleAIStory drafts one card from a request by running the story-draft
+// skill. The card comes from propose_card, never from parsing the reply, and
+// it is written flat: the frozen UI decodes the response as a draft object, not
+// as a run result. The prompt and the current card are never stored.
 func (s *server) handleAIStory(w http.ResponseWriter, r *http.Request, user string) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req struct {
@@ -693,24 +437,22 @@ func (s *server) handleAIStory(w http.ResponseWriter, r *http.Request, user stri
 			userMsg += "\n\nCurrent card JSON:\n" + string(req.Task)
 		}
 	}
-	msgs := []chatMessage{
-		{Role: "system", Content: storySystemPrompt},
-		{Role: "user", Content: userMsg},
-	}
-	content, err := s.chatCompletion(user, msgs, aiStoryMaxTokens, true)
+	// One card, so the collector caps the run at one. The run is read-only:
+	// the card being updated is board text, and a draft the user has yet to
+	// accept is no reason to hand the loop a board write or an outbound fetch.
+	run, err := s.runSkillForRequest(w, r, user, skillScopeReadOnly, storyDraftSkillName, userMsg, 1, aiStoryMaxTokens)
 	if err != nil {
 		writeAIError(w, user, "story", err)
 		return
 	}
-	draft, err := coerceDraft(content)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+	if len(run.Cards) == 0 {
+		writeAIError(w, user, "story", &aiError{http.StatusBadGateway, noCardProposedMessage})
 		return
 	}
-	writeJSON(w, draft)
+	writeJSON(w, run.Cards[0])
 }
 
-// writeAIError renders a chatCompletion failure. Every upstream outcome
+// writeAIError renders a failed AI call. Every upstream outcome
 // collapses to one opaque message, matching handleAITest: err.Error() names
 // the connect failure or the upstream status, which turns the endpoint into
 // a host/port reachability oracle for any page that reaches it. The detail
@@ -843,7 +585,7 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 	// run is read-only: the document may be a forge issue with third-party
 	// comments, so the loop that reads it gets no board write and no outbound
 	// fetch.
-	run, err := s.runSkillForRequest(w, r, user, skillScopeReadOnly, adrSplitSkillName, input.adr, req.Max)
+	run, err := s.runSkillForRequest(w, r, user, skillScopeReadOnly, adrSplitSkillName, input.adr, req.Max, aiStoriesMaxTokens)
 	if err != nil {
 		writeAIError(w, user, "stories", err)
 		return
@@ -884,101 +626,6 @@ func forgeIssueADR(issue forgeIssue) string {
 }
 
 var draftDueRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
-
-// thinkBlockRe matches a closed inline reasoning block. Some backends leave
-// the model's chain-of-thought in the message content instead of a separate
-// field, and reasoning about a JSON answer routinely contains braces, which
-// would defeat the brace scan in decodeJSONObject. Reasoning drafts are also
-// not the answer: a JSON object inside a think block must never be returned
-// as the reply.
-var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
-
-// decodeJSONObject parses assistant content as a single JSON object,
-// tolerating inline reasoning, stray prose, and code fences around it. When
-// several candidates parse, the longest wins: the real reply contains every
-// object nested inside it, while the schema sketches that leaked reasoning
-// tends to include ("the shape is {\"stories\": [...]}") are short. Taking
-// the first parseable candidate instead returned those sketches as the reply.
-func decodeJSONObject(content string) (map[string]any, error) {
-	raw := strings.TrimSpace(thinkBlockRe.ReplaceAllString(content, ""))
-	// Some templates consume the opening <think> tag, leaving bare reasoning
-	// that ends in </think>: everything through the last closing tag is
-	// reasoning, not reply.
-	if i := strings.LastIndex(raw, "</think>"); i >= 0 {
-		raw = strings.TrimSpace(raw[i+len("</think>"):])
-	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(raw), &m); err == nil {
-		return m, nil
-	}
-	var best map[string]any
-	var bestLen int64
-	for i := 0; i < len(raw); i++ {
-		if raw[i] != '{' {
-			continue
-		}
-		dec := json.NewDecoder(strings.NewReader(raw[i:]))
-		var candidate map[string]any
-		if err := dec.Decode(&candidate); err == nil && dec.InputOffset() > bestLen {
-			best, bestLen = candidate, dec.InputOffset()
-		}
-	}
-	if best != nil {
-		return best, nil
-	}
-	if !strings.Contains(raw, "{") {
-		return nil, errors.New("assistant reply is not JSON")
-	}
-	return nil, errors.New("assistant reply is not valid JSON")
-}
-
-// coerceDraft parses assistant content as JSON and clamps every field into
-// the draft contract: prio 1-4, effort S/M/L or empty, due YYYY-MM-DD or
-// empty, tags as non-empty strings, checks as {text,done}.
-func coerceDraft(content string) (storyDraft, error) {
-	m, err := decodeJSONObject(content)
-	if err != nil {
-		return storyDraft{}, err
-	}
-	return coerceDraftMap(m), nil
-}
-
-// coerceDrafts reads a {"stories":[...]} reply into at most max drafts. The
-// upstream reply is untrusted, so anything that is not an object, or that
-// cannot be made wire-safe (validateDraft), is dropped rather than returned.
-func coerceDrafts(content string, max int) ([]storyDraft, error) {
-	m, err := decodeJSONObject(content)
-	if err != nil {
-		return nil, err
-	}
-	vs, ok := m["stories"].([]any)
-	if !ok {
-		return nil, errors.New("assistant reply has no stories array")
-	}
-	out := []storyDraft{}
-	for _, v := range vs {
-		if len(out) >= max {
-			break
-		}
-		sm, ok := v.(map[string]any)
-		if !ok {
-			continue
-		}
-		d := coerceDraftMap(sm)
-		if source, ok := sm["source"].(float64); ok && source >= 1 && source == float64(int(source)) {
-			d.Source = int(source)
-		}
-		if err := validateDraft(d); err != nil {
-			// Deliberately without the error: validation quotes the offending
-			// field value, and that value is card text derived from the
-			// user's document. Board content never reaches the log.
-			log.Print("ai: dropping a story the assistant returned unusable")
-			continue
-		}
-		out = append(out, d)
-	}
-	return out, nil
-}
 
 // packImportIssues limits raw forge text before one model call while keeping
 // source numbers stable for server-owned provenance after coercion.
@@ -1046,7 +693,20 @@ func coerceDraftMap(m map[string]any) storyDraft {
 	coerceDraftEffort(m, &d)
 	coerceDraftTags(m, &d)
 	coerceDraftChecks(m, &d)
+	coerceDraftSource(m, &d)
 	return d
+}
+
+// coerceDraftSource lifts the 1-based forge issue number a card was derived
+// from. Provenance is only ever resolved against the pack the server built, so
+// anything that is not a positive whole number leaves the draft unsourced
+// rather than pointing at an issue nobody packed.
+func coerceDraftSource(m map[string]any, d *storyDraft) {
+	source, ok := m["source"].(float64)
+	if !ok || source < 1 || source != float64(int(source)) {
+		return
+	}
+	d.Source = int(source)
 }
 
 func coerceDraftTextFields(m map[string]any, d *storyDraft) {

@@ -140,10 +140,14 @@ func renameMaxTokens(body []byte) ([]byte, bool) {
 }
 
 // skillRunResult is one completed run: the cards the model proposed through
-// propose_card, and its closing prose.
+// propose_card, and its closing prose. Partial marks a run that hit a budget
+// with cards already collected — the cards are real, the set is not complete.
+// It stays off the wire: /api/ai/run-skill states the same fact in the
+// commentary, and a caller that drops the commentary has to say so itself.
 type skillRunResult struct {
 	Cards      []storyDraft `json:"cards"`
 	Commentary string       `json:"commentary"`
+	Partial    bool         `json:"-"`
 }
 
 // skillScope selects what one run is allowed to do. The input of a run is
@@ -163,8 +167,10 @@ const (
 // runSkill executes one skill against the user's configured endpoint. The
 // cards come from the collector the propose_card tool writes into, never from
 // parsing the reply, so the model cannot smuggle a card past validateDraft and
-// the count is capped server-side.
-func (s *server) runSkill(ctx context.Context, user string, scope skillScope, skillName, input string, maxCards int) (skillRunResult, error) {
+// the count is capped server-side. maxTokens is the per-flow output budget:
+// one card needs far less room than a whole ADR split, and the caller knows
+// which flow it is.
+func (s *server) runSkill(ctx context.Context, user string, scope skillScope, skillName, input string, maxCards int, maxTokens int64) (skillRunResult, error) {
 	cfg, err := s.storedAIConfig(user)
 	if err != nil {
 		return skillRunResult{}, err
@@ -207,7 +213,7 @@ func (s *server) runSkill(ctx context.Context, user string, scope skillScope, sk
 		System:        runnerSystem(skill, others),
 		Prompt:        input,
 		Tools:         tools,
-		MaxTokens:     aiStoriesMaxTokens,
+		MaxTokens:     skillBudget(maxTokens),
 		MaxIterations: skillMaxIterations,
 	})
 	cards := collector.cards
@@ -221,11 +227,27 @@ func (s *server) runSkill(ctx context.Context, user string, scope skillScope, sk
 		// failure says nothing about what the endpoint did with the run, so it
 		// stays a failure whatever the collector holds.
 		if len(cards) > 0 && partialRun(err) {
-			return skillRunResult{Cards: cards, Commentary: partialRunCommentary(err)}, nil
+			return skillRunResult{Cards: cards, Commentary: partialRunCommentary(err), Partial: true}, nil
 		}
 		return skillRunResult{Cards: cards}, runnerError(err)
 	}
 	return skillRunResult{Cards: cards, Commentary: result.Text}, nil
+}
+
+// skillBudget bounds one run's output budget to the range the endpoint is
+// known to accept. The ceiling is not advice: a model is only known by the
+// name the user typed, and asking for more than its own completion cap is
+// rejected outright by strict servers — a 400 no caller can act on. Clamping
+// on the way to the wire rather than trusting each call site means a new flow
+// cannot reintroduce that failure by passing a larger constant.
+func skillBudget(maxTokens int64) int64 {
+	if maxTokens < 1 {
+		return 1
+	}
+	if maxTokens > aiMaxTokensCeiling {
+		return aiMaxTokensCeiling
+	}
+	return maxTokens
 }
 
 // partialRun reports whether a failed loop still produced usable work: a reply
@@ -299,11 +321,11 @@ func runnerError(err error) error {
 // runSkillForRequest runs one skill on behalf of an HTTP request: the write
 // deadline is extended first, then the loop runs under the request context
 // with its own deadline.
-func (s *server) runSkillForRequest(w http.ResponseWriter, r *http.Request, user string, scope skillScope, skillName, input string, maxCards int) (skillRunResult, error) {
+func (s *server) runSkillForRequest(w http.ResponseWriter, r *http.Request, user string, scope skillScope, skillName, input string, maxCards int, maxTokens int64) (skillRunResult, error) {
 	extendWriteDeadline(w)
 	ctx, cancel := context.WithTimeout(r.Context(), skillRunDeadline)
 	defer cancel()
-	return s.runSkill(ctx, user, scope, skillName, input, maxCards)
+	return s.runSkill(ctx, user, scope, skillName, input, maxCards, maxTokens)
 }
 
 // extendWriteDeadline pushes this response past the server-wide write timeout,
@@ -347,7 +369,7 @@ func (s *server) handleAIRunSkill(w http.ResponseWriter, r *http.Request, user s
 		http.Error(w, "input too large (max 64 KiB)", http.StatusRequestEntityTooLarge)
 		return
 	}
-	result, err := s.runSkillForRequest(w, r, user, skillScopeFull, req.Skill, req.Input, req.Max)
+	result, err := s.runSkillForRequest(w, r, user, skillScopeFull, req.Skill, req.Input, req.Max, aiStoriesMaxTokens)
 	if err != nil {
 		writeAIError(w, user, "run-skill", err)
 		return
