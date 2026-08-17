@@ -37,8 +37,10 @@ type cardMoveState struct {
 }
 
 func (s *cardMoveState) begin(current board.Board, task board.Task, statuses []board.Status, fromMouse bool) bool {
-	visible := visibleTaskIDs(current, task.ID)
+	full := visibleTaskIDs(current, task.ID)
+	visible := cloneTaskColumns(full)
 	visibleSlots := taskSlots(visible)
+	fullSlots := taskSlots(full)
 	ids := visible[task.Status]
 	slot := 0
 	for _, candidate := range tasksInStatus(current, task.Status) {
@@ -58,8 +60,8 @@ func (s *cardMoveState) begin(current board.Board, task board.Task, statuses []b
 		slot:       slot,
 		visibleIDs: visible,
 		visibleAt:  visibleSlots,
-		fullIDs:    visible,
-		fullAt:     visibleSlots,
+		fullIDs:    full,
+		fullAt:     fullSlots,
 		preview:    cloneBoard(current),
 		previewAt:  boardTaskSlots(current),
 		statuses:   append([]board.Status(nil), statuses...),
@@ -190,13 +192,6 @@ func (s *cardMoveState) announcePosition(prefix string) {
 	s.notice = false
 }
 
-func previewLift(lift cardLift) board.Board {
-	index := visibleSlotToFullColumnIndex(
-		lift.canonical, lift.target, lift.taskID, lift.visibleIDs[lift.target], lift.slot,
-	)
-	return moveTaskInBoard(lift.canonical, lift.taskID, lift.target, index)
-}
-
 // repositionLiftPreview applies the current target to the lift's existing
 // preview slice. The indexes are built once at lift time; each transition then
 // rotates only the tasks between the old and new slots and allocates nothing.
@@ -239,9 +234,12 @@ func repositionPreviewTask(lift *cardLift, target board.Status, fullIndex int) {
 	if source < destination {
 		destination--
 	}
+	oldStatus := tasks[source].Status
+	oldPosition := tasks[source].Position
 	if destination == source {
 		tasks[source].Status = target
 		tasks[source].Position = fullIndex
+		updateAffectedPositions(lift, oldStatus, oldPosition, target, fullIndex)
 		return
 	}
 
@@ -251,16 +249,58 @@ func repositionPreviewTask(lift *cardLift, target board.Status, fullIndex int) {
 	if source < destination {
 		copy(tasks[source:destination], tasks[source+1:destination+1])
 		tasks[destination] = moving
-		for index := source; index <= destination; index++ {
-			lift.previewAt[tasks[index].ID] = index
-		}
+		updatePreviewIndexes(lift, source, destination)
 	} else {
 		copy(tasks[destination+1:source+1], tasks[destination:source])
 		tasks[destination] = moving
-		for index := destination; index <= source; index++ {
-			lift.previewAt[tasks[index].ID] = index
-		}
+		updatePreviewIndexes(lift, destination, source)
 	}
+	updateAffectedPositions(lift, oldStatus, oldPosition, target, fullIndex)
+}
+
+func updatePreviewIndexes(lift *cardLift, start, end int) {
+	for index := start; index <= end; index++ {
+		lift.previewAt[lift.preview.Tasks[index].ID] = index
+	}
+}
+
+func updateAffectedPositions(
+	lift *cardLift,
+	oldStatus board.Status,
+	oldPosition int,
+	target board.Status,
+	fullIndex int,
+) {
+	setPosition := func(status board.Status, ordinal, position int) {
+		id := lift.fullIDs[status][ordinal]
+		lift.preview.Tasks[lift.previewAt[id]].Position = position
+	}
+	if oldStatus == target {
+		if fullIndex < oldPosition {
+			for ordinal := fullIndex; ordinal < oldPosition; ordinal++ {
+				setPosition(target, ordinal, ordinal+1)
+			}
+		} else {
+			for ordinal := oldPosition; ordinal < fullIndex; ordinal++ {
+				setPosition(target, ordinal, ordinal)
+			}
+		}
+		return
+	}
+	for ordinal := oldPosition; ordinal < len(lift.fullIDs[oldStatus]); ordinal++ {
+		setPosition(oldStatus, ordinal, ordinal)
+	}
+	for ordinal := fullIndex; ordinal < len(lift.fullIDs[target]); ordinal++ {
+		setPosition(target, ordinal, ordinal+1)
+	}
+}
+
+func cloneTaskColumns(columns map[board.Status][]string) map[board.Status][]string {
+	clone := make(map[board.Status][]string, len(columns))
+	for status, ids := range columns {
+		clone[status] = append([]string(nil), ids...)
+	}
+	return clone
 }
 
 func taskSlots(columns map[board.Status][]string) map[board.Status]map[string]int {
@@ -321,42 +361,6 @@ func visibleTaskIDs(current board.Board, movingID string) map[board.Status][]str
 		}
 	}
 	return visible
-}
-
-func moveTaskInBoard(current board.Board, taskID string, status board.Status, index int) board.Board {
-	next := cloneBoard(current)
-	var moved board.Task
-	found := false
-	remaining := make([]board.Task, 0, len(next.Tasks))
-	for _, task := range next.Tasks {
-		if task.ID == taskID {
-			moved, found = task, true
-			continue
-		}
-		remaining = append(remaining, task)
-	}
-	if !found {
-		return next
-	}
-	moved.Status = status
-	columns := make(map[board.Status][]board.Task, len(boardStatuses))
-	for _, task := range remaining {
-		columns[task.Status] = append(columns[task.Status], task)
-	}
-	destination := columns[status]
-	index = min(max(index, 0), len(destination))
-	destination = append(destination, board.Task{})
-	copy(destination[index+1:], destination[index:])
-	destination[index] = moved
-	columns[status] = destination
-	next.Tasks = next.Tasks[:0]
-	for _, columnStatus := range boardStatuses {
-		for position, task := range columns[columnStatus] {
-			task.Position = position
-			next.Tasks = append(next.Tasks, task)
-		}
-	}
-	return next
 }
 
 func cloneBoard(current board.Board) board.Board {

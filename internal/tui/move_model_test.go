@@ -51,6 +51,14 @@ func columnNames(current board.Board, status board.Status) string {
 	return strings.Join(names, ",")
 }
 
+func taskLayout(current board.Board) string {
+	parts := make([]string, 0, len(current.Tasks))
+	for _, task := range current.Tasks {
+		parts = append(parts, fmt.Sprintf("%s:%s:%d", task.ID, task.Status, task.Position))
+	}
+	return strings.Join(parts, ",")
+}
+
 func TestCardMovePreviewIsLocalClampedAndDoesNotWrap(t *testing.T) {
 	current := moveFixture()
 	before := taskNamed(t, current, "B")
@@ -291,6 +299,30 @@ func TestMoveFailurePathsStayTruthful(t *testing.T) {
 		}
 	})
 
+	t.Run("successful write and canonical reload fails", func(t *testing.T) {
+		s := &moveTestStore{board: moveFixture(), reloadErr: errors.New("reload failed")}
+		m := loadedMoveModel(s)
+		m.boardView.rows[0] = 1 // B
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyDown})
+		preview := taskLayout(m.board)
+		const wantPreview = "a:todo:0,c:todo:1,b:todo:2,x:doing:0,y:doing:1"
+		if preview != wantPreview {
+			t.Fatalf("preview ordinals = %s, want %s", preview, wantPreview)
+		}
+		drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+		reload := updateTestModel(t, &m, drop())
+		if reload == nil || !m.loading {
+			t.Fatalf("reload failure = loading %v command %v", m.loading, reload)
+		}
+		if got := taskLayout(m.board); got != preview {
+			t.Fatalf("reload failure replaced preview\n got: %s\nwant: %s", got, preview)
+		}
+		if got := columnNames(m.board, board.StatusTodo); got != "A,C,B" {
+			t.Fatalf("reload failure preview = %q", got)
+		}
+	})
+
 	t.Run("successful write missing from canonical board", func(t *testing.T) {
 		s := &moveTestStore{board: moveFixture()}
 		m := loadedMoveModel(s)
@@ -487,12 +519,6 @@ func TestMoveModelCoverageEdges(t *testing.T) {
 	filtered := board.Board{Tasks: []board.Task{{ID: "a", Status: board.StatusTodo}}}
 	if got := visibleSlotToFullColumnIndex(filtered, board.StatusTodo, "", []string{"gone"}, 0); got != 1 {
 		t.Fatalf("missing visible anchor = %d", got)
-	}
-	if got := moveTaskInBoard(current, "gone", board.StatusDone, -5); columnNames(got, board.StatusTodo) != "A,B,C" {
-		t.Fatalf("missing move changed board = %q", columnNames(got, board.StatusTodo))
-	}
-	if got := moveTaskInBoard(current, "a", board.StatusDoing, -5); columnNames(got, board.StatusDoing) != "A,X,Y" {
-		t.Fatalf("negative preview index = %q", columnNames(got, board.StatusDoing))
 	}
 	if containsStatus(allStatuses, board.StatusCancelled) || statusIndexExact("bogus") != -1 {
 		t.Fatal("status helpers accepted unknown values")
@@ -879,6 +905,7 @@ func lastRenderLine(model Model) string {
 func TestPreviewMatchesRealSQLiteIndexedMoves(t *testing.T) {
 	for _, test := range []struct {
 		name       string
+		input      string
 		titles     []string
 		statuses   []board.Status
 		moving     string
@@ -888,19 +915,19 @@ func TestPreviewMatchesRealSQLiteIndexedMoves(t *testing.T) {
 		wantColumn string
 	}{
 		{
-			name: "same column", titles: []string{"A", "B", "C"},
+			name: "same column", input: "key-down", titles: []string{"A", "B", "C"},
 			statuses: []board.Status{board.StatusTodo, board.StatusTodo, board.StatusTodo},
 			moving:   "B", target: board.StatusTodo, visible: []string{"A", "C"}, slot: 2,
 			wantColumn: "A,C,B",
 		},
 		{
-			name: "cross column", titles: []string{"A", "X", "Y"},
+			name: "cross column", input: "key-cross", titles: []string{"A", "X", "Y"},
 			statuses: []board.Status{board.StatusTodo, board.StatusDoing, board.StatusDoing},
 			moving:   "A", target: board.StatusDoing, visible: []string{"X", "Y"}, slot: 1,
 			wantColumn: "X,A,Y",
 		},
 		{
-			name: "filtered append", titles: []string{"hidden-0", "visible-a", "hidden-1", "visible-b", "hidden-2", "moving"},
+			name: "filtered append", input: "mouse-filtered", titles: []string{"hidden-0", "visible-a", "hidden-1", "visible-b", "hidden-2", "moving"},
 			statuses: []board.Status{board.StatusTodo, board.StatusTodo, board.StatusTodo, board.StatusTodo, board.StatusTodo, board.StatusDoing},
 			moving:   "moving", target: board.StatusTodo, visible: []string{"visible-a", "visible-b"}, slot: 2,
 			wantColumn: "hidden-0,visible-a,hidden-1,visible-b,hidden-2,moving",
@@ -928,14 +955,35 @@ func TestPreviewMatchesRealSQLiteIndexedMoves(t *testing.T) {
 			for i, title := range test.visible {
 				visibleIDs[i] = ids[title]
 			}
-			lift := cardLift{
-				canonical: canonical, taskID: ids[test.moving], title: test.moving,
-				target: test.target, slot: test.slot,
-				visibleIDs: map[board.Status][]string{test.target: visibleIDs},
+			moving := taskNamed(t, canonical, test.moving)
+			var state cardMoveState
+			state.begin(canonical, moving, boardStatuses[:], test.input == "mouse-filtered")
+			var preview board.Board
+			var changed bool
+			switch test.input {
+			case "key-down":
+				preview, changed = state.previewKey("down")
+			case "key-cross":
+				if _, handled := state.previewKey("right"); !handled {
+					t.Fatal("cross-column transition was ignored")
+				}
+				preview, changed = state.previewKey("down")
+			case "mouse-filtered":
+				state.lifted.visibleIDs = cloneTaskColumns(state.lifted.fullIDs)
+				state.lifted.visibleIDs[test.target] = visibleIDs
+				state.lifted.visibleAt = taskSlots(state.lifted.visibleIDs)
+				preview, changed = state.previewMouse(test.target, "")
+			default:
+				t.Fatalf("unknown input %q", test.input)
 			}
-			preview := previewLift(lift)
-			index := visibleSlotToFullColumnIndex(canonical, test.target, lift.taskID, visibleIDs, test.slot)
-			if _, err := st.UpdateAndMoveTask("u", lift.taskID, store.TaskPatch{}, &test.target, &index, nil); err != nil {
+			if !changed || state.lifted.target != test.target || state.lifted.slot != test.slot {
+				t.Fatalf("transition = changed %v target %s slot %d", changed, state.lifted.target, state.lifted.slot)
+			}
+			index := visibleSlotToFullColumnIndex(
+				canonical, state.lifted.target, state.lifted.taskID,
+				state.lifted.visibleIDs[state.lifted.target], state.lifted.slot,
+			)
+			if _, err := st.UpdateAndMoveTask("u", state.lifted.taskID, store.TaskPatch{}, &state.lifted.target, &index, nil); err != nil {
 				t.Fatal(err)
 			}
 			persisted, err := st.Board("u")
@@ -947,6 +995,9 @@ func TestPreviewMatchesRealSQLiteIndexedMoves(t *testing.T) {
 			}
 			if got := columnNames(persisted, test.target); got != test.wantColumn {
 				t.Fatalf("persisted = %q, want %q", got, test.wantColumn)
+			}
+			if got, want := taskLayout(preview), taskLayout(persisted); got != want {
+				t.Fatalf("preview/store layout mismatch\n got: %s\nwant: %s", got, want)
 			}
 		})
 	}
