@@ -82,7 +82,10 @@ func main() {
 	write := flag.Bool("write", false, "replace the fixture instead of checking it")
 	flag.Parse()
 
-	validatedNode := validateNodeBinary(*nodeBinary)
+	validatedNode, err := resolveNodeBinary(*nodeBinary)
+	if err != nil {
+		fatalf("resolve Node binary: %v", err)
+	}
 	if cases.UnicodeVersion != baseUnicode || unicode.Version != baseUnicode {
 		fatalf("base Unicode tables changed: cases=%s stdlib=%s, want %s", cases.UnicodeVersion, unicode.Version, baseUnicode)
 	}
@@ -179,22 +182,30 @@ func configuredNodeBinary() string {
 	return defaultNodeBinary
 }
 
-func validateNodeBinary(value string) string {
+func resolveNodeBinary(value string) (string, error) {
 	if !filepath.IsAbs(value) {
-		fatalf("Node binary must be an absolute path, got %q", value)
+		return "", fmt.Errorf("path must be absolute, got %q", value)
 	}
 	value = filepath.Clean(value)
-	info, err := os.Stat(value)
+	resolved, err := filepath.EvalSymlinks(value)
 	if err != nil {
-		fatalf("stat Node binary %q: %v", value, err)
+		return "", fmt.Errorf("evaluate %q: %w", value, err)
+	}
+	if !filepath.IsAbs(resolved) {
+		return "", fmt.Errorf("resolved path must be absolute, got %q", resolved)
+	}
+	resolved = filepath.Clean(resolved)
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("stat %q: %w", resolved, err)
 	}
 	if !info.Mode().IsRegular() {
-		fatalf("Node binary %q is not a regular file", value)
+		return "", fmt.Errorf("%q is not a regular file", resolved)
 	}
 	if info.Mode().Perm()&0o111 == 0 {
-		fatalf("Node binary %q is not executable", value)
+		return "", fmt.Errorf("%q is not executable", resolved)
 	}
-	return value
+	return resolved, nil
 }
 
 func recordPropertyDelta(r rune, base bool, encoded string, add, remove *[]rune) {
