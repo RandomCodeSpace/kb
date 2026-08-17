@@ -251,6 +251,10 @@ func TestCardDetailOpenWithoutASelectedTaskIsNoop(t *testing.T) {
 
 func TestRootRoutesCreateEditorAndRefreshesAcknowledgedSave(t *testing.T) {
 	st := newSettingsTestStore(t)
+	existing, err := st.AddTask("alice", board.Task{Title: "Existing card", Status: board.StatusTodo, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
 	m := NewModel(st, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	loadLabels := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'n'})
@@ -273,8 +277,12 @@ func TestRootRoutesCreateEditorAndRefreshesAcknowledgedSave(t *testing.T) {
 		t.Fatalf("save acknowledgement = editor:%v refresh:%v loading:%v", m.editor.IsOpen(), refresh, m.loading)
 	}
 	completeBoardLoad(t, &m, refresh)
-	if len(m.board.Tasks) != 1 || m.board.Tasks[0].Title != "Root-created card" {
+	if len(m.board.Tasks) != 2 {
 		t.Fatalf("refreshed board = %+v", m.board)
+	}
+	selected, ok := m.selectedTask()
+	if !ok || selected.Title != "Root-created card" || selected.ID == "" || selected.ID == existing.ID || m.selectAfterLoad != "" {
+		t.Fatalf("created card selection = selected:%+v ok:%v pending:%q", selected, ok, m.selectAfterLoad)
 	}
 }
 

@@ -58,6 +58,7 @@ type Model struct {
 	filter          boardFilterState
 	detail          carddetail.Model
 	editor          cardeditor.Model
+	selectAfterLoad string
 	width           int
 	height          int
 	loading         bool
@@ -134,7 +135,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.editor.IsOpen() && cardeditor.IsMessage(message) {
 		command := m.editor.Update(message)
-		if m.editor.ConsumeSaved() {
+		if taskID, saved := m.editor.ConsumeSaved(); saved {
+			m.selectAfterLoad = taskID
 			return m, batchCommands(command, m.requireFreshBoard())
 		}
 		return m, command
@@ -317,7 +319,12 @@ func (m *Model) finishBoardLoad(msg boardLoadedMsg) tea.Cmd {
 	if msg.err == nil {
 		previous := m.filteredBoard()
 		m.board = msg.board
-		m.boardView.adoptBoard(previous, m.filteredBoard())
+		filtered := m.filteredBoard()
+		m.boardView.adoptBoard(previous, filtered)
+		if m.selectAfterLoad != "" {
+			m.boardView.focusTask(filtered, m.selectAfterLoad)
+			m.selectAfterLoad = ""
+		}
 		detailCmd = batchCommands(m.reconcileDetail(), m.reconcileEditor())
 	}
 	if !m.reloadPending {

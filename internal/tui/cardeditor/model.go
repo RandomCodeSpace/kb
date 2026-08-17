@@ -2,6 +2,8 @@
 package cardeditor
 
 import (
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -38,18 +40,21 @@ const (
 )
 
 type labelsLoadedMsg struct {
-	labels []string
-	err    error
+	session uint64
+	labels  []string
+	err     error
 }
 
 type similarDebounceMsg struct {
 	generation uint64
 	query      string
+	exclusions string
 }
 
 type similarLoadedMsg struct {
 	generation uint64
 	query      string
+	exclusions string
 	hits       []store.SimilarHit
 	err        error
 }
@@ -66,22 +71,29 @@ type snapshot struct {
 	tags                                    string
 }
 
+type editedFields struct {
+	title, emoji, desc, due, effort, prio, blocked, tags, checks bool
+}
+
 // Model owns every mutable editor field and all asynchronous generations.
 type Model struct {
 	store Store
 	user  string
 	now   func() time.Time
 
-	open       bool
-	mode       mode
-	status     board.Status
-	base       board.Task
-	initial    snapshot
-	focus      string
-	guardClose bool
-	saving     bool
-	saved      bool
-	stale      bool
+	open           bool
+	mode           mode
+	status         board.Status
+	base           board.Task
+	canonical      board.Task
+	canonicalFound bool
+	initial        snapshot
+	session        uint64
+	focus          string
+	guardClose     bool
+	saving         bool
+	savedTaskID    string
+	stale          bool
 
 	title   textinput.Model
 	emoji   textinput.Model
@@ -94,20 +106,22 @@ type Model struct {
 	blocked bool
 	tags    []string
 
-	labels         []string
-	labelsOpen     bool
-	labelHighlight int
-	labelsErr      error
-	similar        []store.SimilarHit
-	dismissed      map[string]struct{}
-	dismissedAll   bool
-	similarLoading bool
-	similarErr     error
-	similarQuery   string
-	similarGen     uint64
-	statusMessage  string
-	statusIsError  bool
-	scroll         int
+	labels            []string
+	labelsOpen        bool
+	labelHighlight    int
+	labelsErr         error
+	similar           []store.SimilarHit
+	similarCache      map[string][]store.SimilarHit
+	dismissed         map[string]struct{}
+	dismissedAll      bool
+	similarLoading    bool
+	similarErr        error
+	similarQuery      string
+	similarExclusions string
+	similarGen        uint64
+	statusMessage     string
+	statusIsError     bool
+	scroll            int
 }
 
 // New creates a closed editor. A nil store keeps the feature unavailable in
@@ -136,11 +150,12 @@ func (m Model) TaskID() string {
 // snapshot. Returning to the original values disarms the close guard.
 func (m Model) Dirty() bool { return m.open && m.currentSnapshot() != m.initial }
 
-// ConsumeSaved reports one acknowledged mutation to the root exactly once.
-func (m *Model) ConsumeSaved() bool {
-	saved := m.saved
-	m.saved = false
-	return saved
+// ConsumeSaved reports one acknowledged mutation and its durable task id to
+// the root exactly once.
+func (m *Model) ConsumeSaved() (string, bool) {
+	id := m.savedTaskID
+	m.savedTaskID = ""
+	return id, id != ""
 }
 
 // IsMessage identifies editor-owned asynchronous results without exporting
@@ -176,14 +191,18 @@ func (m *Model) OpenEdit(task board.Task) tea.Cmd {
 }
 
 func (m *Model) openForm(nextMode mode, task board.Task) {
-	m.mode, m.base, m.status = nextMode, task, task.Status
-	m.open, m.guardClose, m.saving, m.saved, m.stale = true, false, false, false, false
+	m.session++
+	m.mode, m.base, m.canonical, m.status = nextMode, task, task, task.Status
+	m.canonicalFound = nextMode == modeEdit
+	m.open, m.guardClose, m.saving, m.stale = true, false, false, false
+	m.savedTaskID = ""
 	m.labels, m.similar = nil, nil
 	m.dismissed = make(map[string]struct{})
 	m.dismissedAll = false
 	m.labelsOpen, m.labelHighlight = false, 0
 	m.labelsErr, m.similarErr = nil, nil
-	m.similarLoading, m.similarQuery = false, ""
+	m.similarLoading, m.similarQuery, m.similarExclusions = false, "", ""
+	m.similarCache = make(map[string][]store.SimilarHit)
 	m.statusMessage, m.statusIsError, m.scroll = "", false, 0
 	m.resetInputs()
 	m.applyTask(task)
@@ -245,6 +264,7 @@ func (m *Model) Refresh(task board.Task, found bool) tea.Cmd {
 		return nil
 	}
 	if m.Dirty() {
+		m.canonical, m.canonicalFound = task, found
 		m.stale = true
 		if found {
 			m.statusMessage = "card changed outside the editor; current edits were preserved"
@@ -255,10 +275,11 @@ func (m *Model) Refresh(task board.Task, found bool) tea.Cmd {
 		return nil
 	}
 	if !found {
+		m.canonicalFound = false
 		m.open = false
 		return nil
 	}
-	m.base = task
+	m.base, m.canonical, m.canonicalFound = task, task, true
 	m.applyTask(task)
 	m.initial = m.currentSnapshot()
 	m.stale = false
@@ -273,26 +294,32 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	}
 	switch msg := message.(type) {
 	case labelsLoadedMsg:
+		if msg.session != m.session {
+			return nil
+		}
 		m.labelsErr = msg.err
 		if msg.err == nil {
 			m.labels = unionLabels(msg.labels, m.tags)
 		}
 		return nil
 	case similarDebounceMsg:
-		if msg.generation != m.similarGen || strings.TrimSpace(m.title.Value()) != msg.query || runeCount(msg.query) < 3 {
+		if msg.generation != m.similarGen || strings.TrimSpace(m.title.Value()) != msg.query ||
+			m.currentExclusions() != msg.exclusions || runeCount(msg.query) < 3 {
 			return nil
 		}
 		m.similarLoading, m.similarErr = true, nil
-		return m.searchSimilar(msg.generation, msg.query)
+		return m.searchSimilar(msg.generation, msg.query, msg.exclusions)
 	case similarLoadedMsg:
-		if msg.generation != m.similarGen || strings.TrimSpace(m.title.Value()) != msg.query {
+		if msg.generation != m.similarGen || strings.TrimSpace(m.title.Value()) != msg.query ||
+			m.currentExclusions() != msg.exclusions {
 			return nil
 		}
 		m.similarLoading = false
 		m.similarErr = msg.err
 		if msg.err == nil {
-			m.similar = msg.hits
-			m.similarQuery = msg.query
+			m.similar = cloneHits(msg.hits)
+			m.similarCache[similarCacheKey(msg.query, msg.exclusions)] = cloneHits(msg.hits)
+			m.similarQuery, m.similarExclusions = msg.query, msg.exclusions
 			m.dismissed = make(map[string]struct{})
 			m.dismissedAll = false
 		}
@@ -304,9 +331,9 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 			m.statusIsError = true
 			return nil
 		}
-		m.base = msg.task
+		m.base, m.canonical, m.canonicalFound = msg.task, msg.task, true
 		m.initial = m.currentSnapshot()
-		m.saved, m.open = true, false
+		m.savedTaskID, m.open = msg.task.ID, false
 		return nil
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
@@ -449,6 +476,7 @@ func (m *Model) updateDuePicker(key string) (tea.Cmd, bool) {
 
 func (m *Model) updateLabels(key string, msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	suggestions := m.filteredLabels()
+	beforeExclusions := m.currentExclusions()
 	switch key {
 	case "down":
 		m.labelsOpen = len(suggestions) > 0
@@ -470,18 +498,18 @@ func (m *Model) updateLabels(key string, msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		} else {
 			return nil, false
 		}
-		return nil, true
+		return m.rescheduleIfExclusionsChanged(beforeExclusions), true
 	case "backspace":
 		if m.label.Value() == "" && len(m.tags) > 0 {
 			m.tags = m.tags[:len(m.tags)-1]
 			m.labelsOpen = true
-			return nil, true
+			return m.rescheduleIfExclusionsChanged(beforeExclusions), true
 		}
 	case "ctrl+x":
 		m.label.SetValue("")
 		m.tags = nil
 		m.labelsOpen = true
-		return nil, true
+		return m.rescheduleIfExclusionsChanged(beforeExclusions), true
 	}
 	before := m.label.Value()
 	var cmd tea.Cmd
@@ -630,6 +658,13 @@ func (m Model) buildSave() (board.Task, store.TaskPatch, error) {
 	if err := store.ValidateTaskFields(task); err != nil {
 		return board.Task{}, store.TaskPatch{}, err
 	}
+	if m.mode == modeEdit {
+		if !m.canonicalFound {
+			return board.Task{}, store.TaskPatch{}, errors.New("card disappeared outside the editor; copy the edits before closing")
+		}
+		patch, err := selectiveTaskPatch(m.base, m.canonical, task, m.changedFields())
+		return task, patch, err
+	}
 	patch := store.TaskPatch{
 		Emoji: &task.Emoji, Title: &task.Title, Desc: &task.Desc,
 		Due: &task.Due, Effort: &task.Effort, Prio: &task.Prio,
@@ -638,10 +673,112 @@ func (m Model) buildSave() (board.Task, store.TaskPatch, error) {
 	return task, patch, nil
 }
 
+func selectiveTaskPatch(original, canonical, desired board.Task, changed editedFields) (store.TaskPatch, error) {
+	var patch store.TaskPatch
+	var conflicts []string
+	if changed.emoji {
+		setStringPatch("emoji", original.Emoji, canonical.Emoji, desired.Emoji, &patch.Emoji, &conflicts)
+	}
+	if changed.title {
+		setStringPatch("title", original.Title, canonical.Title, desired.Title, &patch.Title, &conflicts)
+	}
+	if changed.desc {
+		setStringPatch("description", original.Desc, canonical.Desc, desired.Desc, &patch.Desc, &conflicts)
+	}
+	if changed.due {
+		setStringPatch("due", original.Due, canonical.Due, desired.Due, &patch.Due, &conflicts)
+	}
+	if changed.effort {
+		setStringPatch("effort", original.Effort, canonical.Effort, desired.Effort, &patch.Effort, &conflicts)
+	}
+	if changed.prio {
+		if canonical.Prio != original.Prio && desired.Prio != canonical.Prio {
+			conflicts = append(conflicts, "priority")
+		} else if desired.Prio != canonical.Prio {
+			patch.Prio = &desired.Prio
+		}
+	}
+	if changed.blocked {
+		if desired.Blocked != canonical.Blocked {
+			patch.Blocked = &desired.Blocked
+		}
+	}
+	if changed.tags {
+		if !stringSlicesEqual(canonical.Tags, original.Tags) && !stringSlicesEqual(desired.Tags, canonical.Tags) {
+			conflicts = append(conflicts, "labels")
+		} else if !stringSlicesEqual(desired.Tags, canonical.Tags) {
+			patch.Tags = &desired.Tags
+		}
+	}
+	if changed.checks {
+		if !checksEqual(canonical.Checks, original.Checks) && !checksEqual(desired.Checks, canonical.Checks) {
+			conflicts = append(conflicts, "checklist")
+		} else if !checksEqual(desired.Checks, canonical.Checks) {
+			patch.Checks = &desired.Checks
+		}
+	}
+	if len(conflicts) > 0 {
+		return store.TaskPatch{}, fmt.Errorf(
+			"card changed outside the editor in %s; match the refreshed value or reopen the editor",
+			strings.Join(conflicts, ", "),
+		)
+	}
+	return patch, nil
+}
+
+func (m Model) changedFields() editedFields {
+	current := m.currentSnapshot()
+	return editedFields{
+		title: current.title != m.initial.title, emoji: current.emoji != m.initial.emoji,
+		desc: current.desc != m.initial.desc, due: current.due != m.initial.due,
+		effort: current.effort != m.initial.effort, prio: current.prio != m.initial.prio,
+		blocked: current.blocked != m.initial.blocked, tags: current.tags != m.initial.tags,
+		checks: current.checks != m.initial.checks,
+	}
+}
+
+func setStringPatch(name, original, canonical, desired string, target **string, conflicts *[]string) {
+	if desired == original {
+		return
+	}
+	if canonical != original && desired != canonical {
+		*conflicts = append(*conflicts, name)
+		return
+	}
+	if desired != canonical {
+		*target = &desired
+	}
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func checksEqual(left, right []board.Check) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *Model) loadLabels() tea.Cmd {
+	session := m.session
 	return func() tea.Msg {
 		labels, err := m.store.Labels(m.user)
-		return labelsLoadedMsg{labels: labels, err: err}
+		return labelsLoadedMsg{session: session, labels: labels, err: err}
 	}
 }
 
@@ -649,21 +786,26 @@ func (m *Model) scheduleSimilar() tea.Cmd {
 	m.similarGen++
 	generation := m.similarGen
 	query := strings.TrimSpace(m.title.Value())
+	exclusions := m.currentExclusions()
 	if runeCount(query) < 3 {
-		m.similar, m.similarErr, m.similarQuery = nil, nil, ""
+		m.similar, m.similarErr, m.similarQuery, m.similarExclusions = nil, nil, "", ""
 		m.similarLoading, m.dismissedAll = false, false
 		m.dismissed = make(map[string]struct{})
 		return nil
 	}
-	if query == strings.TrimSpace(m.similarQuery) {
+	if cached, ok := m.similarCache[similarCacheKey(query, exclusions)]; ok {
+		m.similar = cloneHits(cached)
+		m.similarQuery, m.similarExclusions = query, exclusions
+		m.similarLoading, m.similarErr = false, nil
+		m.dismissed, m.dismissedAll = make(map[string]struct{}), false
 		return nil
 	}
 	return tea.Tick(similarDelay, func(time.Time) tea.Msg {
-		return similarDebounceMsg{generation: generation, query: query}
+		return similarDebounceMsg{generation: generation, query: query, exclusions: exclusions}
 	})
 }
 
-func (m *Model) searchSimilar(generation uint64, query string) tea.Cmd {
+func (m *Model) searchSimilar(generation uint64, query, exclusions string) tea.Cmd {
 	excludeID := ""
 	if m.mode == modeEdit {
 		excludeID = m.base.ID
@@ -671,8 +813,27 @@ func (m *Model) searchSimilar(generation uint64, query string) tea.Cmd {
 	links := importLinks(m.tags)
 	return func() tea.Msg {
 		hits, err := m.store.SearchSimilar(m.user, query, excludeID, links, similarLimit)
-		return similarLoadedMsg{generation: generation, query: query, hits: hits, err: err}
+		return similarLoadedMsg{generation: generation, query: query, exclusions: exclusions, hits: hits, err: err}
 	}
+}
+
+func (m *Model) rescheduleIfExclusionsChanged(before string) tea.Cmd {
+	if before == m.currentExclusions() {
+		return nil
+	}
+	return m.scheduleSimilar()
+}
+
+func (m Model) currentExclusions() string {
+	links := importLinks(m.tags)
+	sort.Strings(links)
+	return strings.Join(links, "\x00")
+}
+
+func similarCacheKey(query, exclusions string) string { return query + "\x00" + exclusions }
+
+func cloneHits(hits []store.SimilarHit) []store.SimilarHit {
+	return append([]store.SimilarHit(nil), hits...)
 }
 
 func (m Model) currentSnapshot() snapshot {
@@ -801,7 +962,7 @@ func unionLabels(a, b []string) []string {
 func adjustDate(raw string, days int, now time.Time) string {
 	date, err := time.Parse("2006-01-02", strings.TrimSpace(raw))
 	if err != nil {
-		date = now.UTC()
+		date = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	}
 	return date.AddDate(0, 0, days).Format("2006-01-02")
 }

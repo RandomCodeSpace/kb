@@ -98,7 +98,9 @@ func TestCreatePersistsEveryFieldAndAcknowledgesClose(t *testing.T) {
 		t.Fatalf("save state = saving:%v command:%v", model.saving, save)
 	}
 	model.Update(save())
-	if model.IsOpen() || !model.ConsumeSaved() || model.ConsumeSaved() {
+	createdID, saved := model.ConsumeSaved()
+	_, savedAgain := model.ConsumeSaved()
+	if model.IsOpen() || !saved || createdID == "" || savedAgain {
 		t.Fatalf("acknowledged state = open:%v first/second saved consumption invalid", model.IsOpen())
 	}
 	got, err := backend.Board("alice")
@@ -218,6 +220,252 @@ func TestUnsavedGuardAndWatcherRefreshNeverOverwriteDirtyFields(t *testing.T) {
 	}
 }
 
+func TestEditMergesConcurrentUnrelatedStoreChanges(t *testing.T) {
+	database := t.TempDir() + "/kb.db"
+	secret := []byte("concurrent-editor-test-key")
+	editorStore, err := store.Open(database, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = editorStore.Close() })
+	concurrentStore, err := store.Open(database, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = concurrentStore.Close() })
+
+	created, err := editorStore.AddTask("u", board.Task{
+		Title: "Original", Desc: "old description", Status: board.StatusTodo, Prio: 3,
+		Due: "2026-08-20", Tags: []string{"old"}, Checks: []board.Check{{Text: "old check"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := New(editorStore, "u")
+	model.OpenEdit(created)
+	model.title.SetValue("Local title")
+
+	remoteDescription := "remote description"
+	remoteDue := "2026-09-01"
+	remoteBlocked := true
+	remoteTags := []string{"remote", "link::github#90"}
+	remoteChecks := []board.Check{{Text: "remote check", Done: true}}
+	remote, err := concurrentStore.UpdateTask("u", created.ID, store.TaskPatch{
+		Desc: &remoteDescription, Due: &remoteDue, Blocked: &remoteBlocked,
+		Tags: &remoteTags, Checks: &remoteChecks,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.Refresh(remote, true)
+	save := model.startSave()
+	if save == nil {
+		t.Fatalf("unrelated concurrent changes blocked save: %s", model.statusMessage)
+	}
+	model.Update(save())
+
+	latest, err := concurrentStore.Board("u")
+	if err != nil || len(latest.Tasks) != 1 {
+		t.Fatalf("board = %+v, %v", latest, err)
+	}
+	got := latest.Tasks[0]
+	if got.Title != "Local title" || got.Desc != remoteDescription || got.Due != remoteDue ||
+		!got.Blocked || !stringSlicesEqual(got.Tags, remoteTags) || !checksEqual(got.Checks, remoteChecks) {
+		t.Fatalf("selective patch lost concurrent fields: %+v", got)
+	}
+}
+
+func TestEditRejectsSameFieldConflictAfterDirtyRefresh(t *testing.T) {
+	backend := newTestStore(t)
+	created, err := backend.Store.AddTask("u", board.Task{Title: "Original", Status: board.StatusTodo, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := New(backend, "u")
+	model.OpenEdit(created)
+	model.title.SetValue("Local title")
+	remoteTitle := "Remote title"
+	remote, err := backend.Store.UpdateTask("u", created.ID, store.TaskPatch{Title: &remoteTitle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.Refresh(remote, true)
+	if command := model.startSave(); command != nil || !model.IsOpen() || model.saving ||
+		!strings.Contains(model.statusMessage, "title") {
+		t.Fatalf("same-field conflict = command:%v open:%v saving:%v status:%q", command, model.IsOpen(), model.saving, model.statusMessage)
+	}
+	latest, _ := backend.Board("u")
+	if latest.Tasks[0].Title != remoteTitle || model.title.Value() != "Local title" {
+		t.Fatalf("conflict mutated store or form: stored:%q form:%q", latest.Tasks[0].Title, model.title.Value())
+	}
+}
+
+func TestSelectiveTaskPatchCoversEveryEditableField(t *testing.T) {
+	original := board.Task{
+		Emoji: "🧭", Title: "old", Desc: "old desc", Due: "2026-08-20", Effort: "S",
+		Prio: 3, Tags: []string{"old"}, Checks: []board.Check{{Text: "old"}},
+	}
+	desired := board.Task{
+		Emoji: "🧪", Title: "new", Desc: "new desc", Due: "", Effort: "L",
+		Prio: 1, Blocked: true, Tags: []string{"new"}, Checks: []board.Check{{Text: "new", Done: true}},
+	}
+	allChanged := editedFields{
+		emoji: true, title: true, desc: true, due: true, effort: true,
+		prio: true, blocked: true, tags: true, checks: true,
+	}
+	patch, err := selectiveTaskPatch(original, original, desired, allChanged)
+	if err != nil || patch.Emoji == nil || patch.Title == nil || patch.Desc == nil || patch.Due == nil ||
+		patch.Effort == nil || patch.Prio == nil || patch.Blocked == nil || patch.Tags == nil || patch.Checks == nil {
+		t.Fatalf("complete selective patch = %+v, %v", patch, err)
+	}
+
+	alreadyCanonical, err := selectiveTaskPatch(original, desired, desired, allChanged)
+	if err != nil || alreadyCanonical != (store.TaskPatch{}) {
+		t.Fatalf("already-applied changes produced patch = %+v, %v", alreadyCanonical, err)
+	}
+
+	canonical := original
+	canonical.Emoji = "🔧"
+	canonical.Title = "remote"
+	canonical.Desc = "remote desc"
+	canonical.Due = "2026-09-02"
+	canonical.Effort = "M"
+	canonical.Prio = 2
+	canonical.Tags = []string{"remote"}
+	canonical.Checks = []board.Check{{Text: "remote"}}
+	if _, err := selectiveTaskPatch(original, canonical, desired, allChanged); err == nil ||
+		!strings.Contains(err.Error(), "emoji, title, description, due, effort, priority, labels, checklist") {
+		t.Fatalf("multi-field conflict = %v", err)
+	}
+
+	if stringSlicesEqual([]string{"a"}, []string{"a", "b"}) || stringSlicesEqual([]string{"a"}, []string{"b"}) ||
+		checksEqual([]board.Check{{Text: "a"}}, []board.Check{{Text: "a"}, {Text: "b"}}) ||
+		checksEqual([]board.Check{{Text: "a"}}, []board.Check{{Text: "b"}}) {
+		t.Fatal("slice comparison accepted unequal values")
+	}
+
+	model := New(newTestStore(t), "u")
+	model.OpenEdit(board.Task{ID: "task", Title: "  untouched title  ", Desc: "old", Status: board.StatusTodo, Prio: 3})
+	model.desc.SetValue("new")
+	_, whitespacePatch, err := model.buildSave()
+	if err != nil || whitespacePatch.Title != nil || whitespacePatch.Desc == nil {
+		t.Fatalf("normalization patched untouched field: %+v, %v", whitespacePatch, err)
+	}
+}
+
+func TestSimilarCacheReturnClearsInflightLoadingAndRejectsOldResults(t *testing.T) {
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	model.title.SetValue("alpha query")
+	model.similarGen = 1
+	alpha := []store.SimilarHit{{ID: "alpha", Title: "Alpha cached"}}
+	model.Update(similarLoadedMsg{generation: 1, query: "alpha query", hits: alpha})
+
+	model.title.SetValue("beta query")
+	betaTick := model.scheduleSimilar()
+	if betaTick == nil {
+		t.Fatal("uncached beta query did not debounce")
+	}
+	betaSearch := model.Update(betaTick())
+	if betaSearch == nil || !model.similarLoading {
+		t.Fatal("beta query did not enter loading state")
+	}
+
+	model.title.SetValue("alpha query")
+	if command := model.scheduleSimilar(); command != nil || model.similarLoading || model.similarErr != nil ||
+		len(model.similar) != 1 || model.similar[0].ID != "alpha" {
+		t.Fatalf("cached alpha restore = command:%v loading:%v err:%v hits:%+v", command, model.similarLoading, model.similarErr, model.similar)
+	}
+	model.Update(similarLoadedMsg{
+		generation: 2, query: "beta query", hits: []store.SimilarHit{{ID: "beta", Title: "Late beta"}},
+	})
+	if model.similarLoading || len(model.similar) != 1 || model.similar[0].ID != "alpha" {
+		t.Fatalf("late beta displaced cached alpha: loading:%v hits:%+v", model.similarLoading, model.similar)
+	}
+}
+
+func TestLabelLoadsAreScopedToEditorSession(t *testing.T) {
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	oldSession := model.session
+	model.requestClose()
+	model.OpenAdd(board.StatusTodo)
+	currentSession := model.session
+	model.Update(labelsLoadedMsg{session: currentSession, labels: []string{"current"}})
+	model.Update(labelsLoadedMsg{session: oldSession, labels: []string{"stale"}})
+	model.Update(labelsLoadedMsg{session: oldSession, err: errors.New("stale error")})
+	if strings.Join(model.labels, ",") != "current" || model.labelsErr != nil {
+		t.Fatalf("old label result leaked into reopened editor: labels:%v err:%v", model.labels, model.labelsErr)
+	}
+}
+
+func TestDuePickerUsesInjectedLocalCalendarDay(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		now  time.Time
+		raw  string
+		want string
+	}{
+		{
+			name: "east of UTC after local midnight",
+			now:  time.Date(2026, 8, 18, 0, 15, 0, 0, time.FixedZone("UTC+14", 14*60*60)),
+			want: "2026-08-19",
+		},
+		{
+			name: "west of UTC before local midnight invalid input",
+			now:  time.Date(2026, 8, 17, 23, 45, 0, 0, time.FixedZone("UTC-10", -10*60*60)),
+			raw:  "not-a-date",
+			want: "2026-08-18",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := adjustDate(test.raw, 1, test.now); got != test.want {
+				t.Fatalf("adjustDate(%q, local %s) = %q, want %q", test.raw, test.now, got, test.want)
+			}
+		})
+	}
+}
+
+func TestLinkLabelChangesInvalidateSimilarSearchExclusions(t *testing.T) {
+	backend := newTestStore(t)
+	model := New(backend, "u")
+	model.OpenAdd(board.StatusTodo)
+	model.title.SetValue("same title")
+	model.tags = []string{"link::a"}
+	oldTick := model.scheduleSimilar()
+	oldSearch := model.Update(oldTick())
+	if oldSearch == nil || !model.similarLoading {
+		t.Fatal("old exclusion query did not start")
+	}
+
+	model.focus = "labels"
+	model.label.SetValue("")
+	model.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	model.label.SetValue("link::b")
+	newTick := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if newTick == nil || model.similarGen < 3 {
+		t.Fatalf("link label change did not invalidate search: generation:%d command:%v", model.similarGen, newTick)
+	}
+	model.Update(oldSearch())
+	if len(model.similar) != 0 {
+		t.Fatalf("old-exclusion result was adopted: %+v", model.similar)
+	}
+	newSearch := model.Update(newTick())
+	if newSearch == nil {
+		t.Fatal("new exclusion query did not start")
+	}
+	model.Update(newSearch())
+	if len(backend.queries) < 2 || strings.Join(backend.queries[len(backend.queries)-1].links, ",") != "b" {
+		t.Fatalf("latest similar exclusions = %+v", backend.queries)
+	}
+
+	generation := model.similarGen
+	model.label.SetValue("ordinary")
+	if command := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); command != nil || model.similarGen != generation {
+		t.Fatalf("non-link label needlessly reran search: generation:%d command:%v", model.similarGen, command)
+	}
+}
+
 func TestSimilarDebounceExclusionsDismissalsAndKilledContext(t *testing.T) {
 	backend := newTestStore(t)
 	edited, _ := backend.Store.AddTask("u", board.Task{Title: "Duplicate work item", Status: board.StatusTodo, Prio: 3, Tags: []string{"link::github#90"}})
@@ -229,7 +477,8 @@ func TestSimilarDebounceExclusionsDismissalsAndKilledContext(t *testing.T) {
 	model.OpenEdit(edited)
 	query := strings.TrimSpace(model.title.Value())
 	model.similarGen = 7
-	search := model.Update(similarDebounceMsg{generation: 7, query: query})
+	exclusions := model.currentExclusions()
+	search := model.Update(similarDebounceMsg{generation: 7, query: query, exclusions: exclusions})
 	if search == nil || !model.similarLoading {
 		t.Fatal("eligible title did not start direct search")
 	}
@@ -263,7 +512,7 @@ func TestSimilarDebounceExclusionsDismissalsAndKilledContext(t *testing.T) {
 	if command := model.scheduleSimilar(); command != nil || model.similar != nil || model.similarLoading {
 		t.Fatalf("short title retained search state: command:%v hits:%v loading:%v", command, model.similar, model.similarLoading)
 	}
-	model.Update(similarLoadedMsg{generation: 7, query: query, hits: []store.SimilarHit{{Title: "stale"}}})
+	model.Update(similarLoadedMsg{generation: 7, query: query, exclusions: exclusions, hits: []store.SimilarHit{{Title: "stale"}}})
 	if model.similar != nil {
 		t.Fatal("stale similar response was adopted")
 	}
@@ -272,7 +521,7 @@ func TestSimilarDebounceExclusionsDismissalsAndKilledContext(t *testing.T) {
 func TestLabelComboboxAndPickerControls(t *testing.T) {
 	model := New(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
-	model.Update(labelsLoadedMsg{labels: []string{"alpha", "alphabet", "beta"}})
+	model.Update(labelsLoadedMsg{session: model.session, labels: []string{"alpha", "alphabet", "beta"}})
 	model.focus = "labels"
 	model.applyFocus()
 	model.label.SetValue("alp")
@@ -332,7 +581,7 @@ func TestFailureLoadsBusyRoutingAndHelperEdges(t *testing.T) {
 	backend.similarErr = errors.New("similar failed")
 	model.title.SetValue("query title")
 	model.similarGen = 1
-	search := model.Update(similarDebounceMsg{generation: 1, query: "query title"})
+	search := model.Update(similarDebounceMsg{generation: 1, query: "query title", exclusions: model.currentExclusions()})
 	model.Update(search())
 	if model.similarErr == nil || model.similarLoading {
 		t.Fatalf("similar failure = err:%v loading:%v", model.similarErr, model.similarLoading)
@@ -397,7 +646,7 @@ func TestKeyboardRoutesEveryFieldAndAction(t *testing.T) {
 	model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	model.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 	model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	model.Update(labelsLoadedMsg{labels: []string{"alpha", "beta"}})
+	model.Update(labelsLoadedMsg{session: model.session, labels: []string{"alpha", "beta"}})
 	model.labelsOpen = true
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if !model.IsOpen() || model.labelsOpen {
