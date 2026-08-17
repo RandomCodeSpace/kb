@@ -186,6 +186,52 @@ func TestFocusAndRefreshPreserveTaskIdentity(t *testing.T) {
 	}
 }
 
+func TestRefreshNormalizesSelectionAfterExternalHiddenMove(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	before := boardViewFixture(now)
+
+	t.Run("clamps row in original column", func(t *testing.T) {
+		state := boardViewState{}
+		state.focusTask(before, "todo-2")
+		after := before
+		after.Tasks = append([]board.Task(nil), before.Tasks...)
+		after.Tasks[1].Status = board.StatusCancelled
+		state.adoptBoard(before, after)
+		selected, ok := state.selectedTask(after)
+		if !ok || selected.ID != "todo-1" || state.column != 0 || state.rows[0] != 0 {
+			t.Fatalf("normalized selection = %+v,%v state=%+v", selected, ok, state)
+		}
+	})
+
+	t.Run("moves to next non-empty visible column", func(t *testing.T) {
+		state := boardViewState{}
+		state.focusTask(before, "todo-2")
+		after := before
+		after.Tasks = append([]board.Task(nil), before.Tasks...)
+		for i := range after.Tasks {
+			if after.Tasks[i].Status == board.StatusTodo {
+				after.Tasks[i].Status = board.StatusCancelled
+			}
+		}
+		state.adoptBoard(before, after)
+		selected, ok := state.selectedTask(after)
+		if !ok || selected.ID != "doing-1" || state.column != 1 || state.rows[1] != 0 {
+			t.Fatalf("next visible selection = %+v,%v state=%+v", selected, ok, state)
+		}
+	})
+
+	t.Run("all visible columns empty", func(t *testing.T) {
+		state := boardViewState{}
+		state.focusTask(before, "todo-2")
+		after := board.Board{Title: before.Title, Tasks: []board.Task{before.Tasks[1]}}
+		after.Tasks[0].Status = board.StatusCancelled
+		state.adoptBoard(before, after)
+		if selected, ok := state.selectedTask(after); ok || state.column != 0 || state.rows[0] != 0 {
+			t.Fatalf("empty visible selection = %+v,%v state=%+v", selected, ok, state)
+		}
+	})
+}
+
 func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	m := NewModel(stubBoardReader{}, nil, "alice")
@@ -289,34 +335,78 @@ func TestBoardViewSmallHelpers(t *testing.T) {
 	}
 }
 
-func TestCancelledPreferenceRoundTripAndCommand(t *testing.T) {
-	config := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", config)
-	if got, err := loadCancelledPreference(); err != nil || got {
+func TestCancelledPreferencePathAndIsolation(t *testing.T) {
+	root := t.TempDir()
+	databaseA := filepath.Join(root, "board-a", "kb.db")
+	databaseB := filepath.Join(root, "board-b", "kb.db")
+	databaseAlternate := filepath.Join(root, "board-a", "alternate.db")
+	pathA, err := tuiPreferencesPath(databaseA, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{pathA}
+	for _, identity := range []struct {
+		database string
+		user     string
+	}{
+		{databaseA, "bob"},
+		{databaseB, "alice"},
+		{databaseAlternate, "alice"},
+	} {
+		path, pathErr := tuiPreferencesPath(identity.database, identity.user)
+		if pathErr != nil {
+			t.Fatal(pathErr)
+		}
+		paths = append(paths, path)
+	}
+	for i, left := range paths {
+		for j, right := range paths {
+			if i != j && left == right {
+				t.Fatalf("preference identities %d and %d share %q", i, j, left)
+			}
+		}
+	}
+	stable, err := tuiPreferencesPath(databaseA, "alice")
+	if err != nil || stable != pathA {
+		t.Fatalf("stable preference path = %q,%v, want %q", stable, err, pathA)
+	}
+	wantRoot := filepath.Join(filepath.Dir(databaseA), ".kb-tui") + string(os.PathSeparator)
+	if !strings.HasPrefix(pathA, wantRoot) {
+		t.Fatalf("preference path %q is not under board data %q", pathA, wantRoot)
+	}
+
+	if got, err := loadCancelledPreference(pathA); err != nil || got {
 		t.Fatalf("missing preference = %v,%v", got, err)
 	}
-	if err := saveCancelledPreference(true); err != nil {
+	if err := saveCancelledPreference(pathA, true); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := loadCancelledPreference(); err != nil || !got {
+	if got, err := loadCancelledPreference(pathA); err != nil || !got {
 		t.Fatalf("saved preference = %v,%v", got, err)
 	}
-	path := filepath.Join(config, "kb", "tui.json")
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+	for _, isolated := range paths[1:] {
+		if got, readErr := loadCancelledPreference(isolated); readErr != nil || got {
+			t.Fatalf("isolated preference %q = %v,%v", isolated, got, readErr)
+		}
+	}
+	if info, err := os.Stat(pathA); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("preference mode = %v,%v", info, err)
 	}
-	if err := saveCancelledPreference(false); err != nil {
+	if err := saveCancelledPreference(pathA, false); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := loadCancelledPreference(); err != nil || got {
+	if got, err := loadCancelledPreference(pathA); err != nil || got {
 		t.Fatalf("cleared preference = %v,%v", got, err)
 	}
-	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+	if err := os.WriteFile(pathA, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadCancelledPreference(); err == nil || !strings.Contains(err.Error(), "decode") {
+	if _, err := loadCancelledPreference(pathA); err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("malformed preference error = %v", err)
 	}
+}
+
+func TestCancelledPreferenceCommandFailure(t *testing.T) {
 
 	m := NewModel(stubBoardReader{}, nil, "u")
 	m.boardView.showCancelled = true
@@ -334,6 +424,79 @@ func TestCancelledPreferenceRoundTripAndCommand(t *testing.T) {
 	m.saveCancelled = nil
 	if command := m.queueCancelledPreference(); command != nil {
 		t.Fatalf("nil preference saver returned %v", command)
+	}
+}
+
+type failingPreferenceTemp struct {
+	*os.File
+	stage   string
+	failure error
+}
+
+func (f *failingPreferenceTemp) Write(data []byte) (int, error) {
+	if f.stage == "write" {
+		return 0, f.failure
+	}
+	if f.stage == "short write" {
+		return len(data) - 1, nil
+	}
+	return f.File.Write(data)
+}
+
+func (f *failingPreferenceTemp) Sync() error {
+	if f.stage == "sync" {
+		return f.failure
+	}
+	return f.File.Sync()
+}
+
+func (f *failingPreferenceTemp) Close() error {
+	err := f.File.Close()
+	if f.stage == "close" && err == nil {
+		return f.failure
+	}
+	return err
+}
+
+func TestCancelledPreferenceAtomicFailuresPreservePriorFile(t *testing.T) {
+	failure := errors.New("injected preference failure")
+	for _, stage := range []string{"write", "short write", "sync", "close", "rename"} {
+		t.Run(stage, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "prefs.json")
+			if err := saveCancelledPreference(path, false); err != nil {
+				t.Fatal(err)
+			}
+			ops := osPreferenceFileOps
+			createdIn := ""
+			ops.createTmp = func(tempDir, pattern string) (preferenceTempFile, error) {
+				createdIn = tempDir
+				file, err := os.CreateTemp(tempDir, pattern)
+				if err != nil {
+					return nil, err
+				}
+				return &failingPreferenceTemp{File: file, stage: stage, failure: failure}, nil
+			}
+			if stage == "rename" {
+				ops.rename = func(string, string) error { return failure }
+			}
+			if err := saveCancelledPreferenceWithOps(path, true, ops); err == nil {
+				t.Fatal("injected atomic write succeeded")
+			}
+			if createdIn != dir {
+				t.Fatalf("temporary file directory = %q, want %q", createdIn, dir)
+			}
+			if got, err := loadCancelledPreference(path); err != nil || got {
+				t.Fatalf("prior preference after %s = %v,%v", stage, got, err)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+				t.Fatalf("temporary file leaked after %s: %v", stage, entries)
+			}
+		})
 	}
 }
 

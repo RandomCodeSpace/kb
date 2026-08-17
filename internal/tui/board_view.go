@@ -119,22 +119,23 @@ func (s *boardViewState) focusColumn(status board.Status, current board.Board) {
 	}
 }
 
-func (s *boardViewState) focusTask(current board.Board, id string) {
+func (s *boardViewState) focusTask(current board.Board, id string) bool {
 	for _, task := range current.Tasks {
 		if task.ID != id {
 			continue
 		}
 		if task.Status == board.StatusCancelled && !s.showCancelled {
-			return
+			return false
 		}
 		for i, status := range boardStatuses {
 			if status == task.Status {
 				s.column = i
 				s.rows[i] = taskIndex(current, task.Status, id)
-				return
+				return true
 			}
 		}
 	}
+	return false
 }
 
 func (s *boardViewState) adoptBoard(previous, current board.Board) {
@@ -142,10 +143,32 @@ func (s *boardViewState) adoptBoard(previous, current board.Board) {
 	if hadSelection {
 		for _, task := range current.Tasks {
 			if task.ID == selected.ID {
-				s.focusTask(current, task.ID)
-				return
+				if s.focusTask(current, task.ID) {
+					return
+				}
+				break
 			}
 		}
+	}
+	s.normalizeSelection(current)
+}
+
+// normalizeSelection keeps refresh focus on a selectable visible card when
+// one exists. Ordinary column navigation may still focus an empty column.
+func (s *boardViewState) normalizeSelection(current board.Board) {
+	visible := s.visibleStatuses()
+	if taskCount(current, boardStatuses[s.column]) > 0 {
+		s.clampRow(current)
+		return
+	}
+	for offset := 1; offset < len(visible); offset++ {
+		column := (s.column + offset) % len(visible)
+		if taskCount(current, visible[column]) == 0 {
+			continue
+		}
+		s.column = column
+		s.clampRow(current)
+		return
 	}
 	s.clampRow(current)
 }

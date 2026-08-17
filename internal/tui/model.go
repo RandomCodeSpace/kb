@@ -225,8 +225,8 @@ func pollAfter(load tea.Cmd) tea.Cmd {
 	return tea.Batch(load, schedulePoll())
 }
 
-// View renders the board frame. Cards and editing behavior arrive in later
-// wayfinder slices; this scaffold deliberately renders only per-column counts.
+// View renders the responsive read-only board and wires view-derived mouse hit
+// regions back into the update loop. Editing behavior arrives in later slices.
 func (m Model) View() tea.View {
 	content, hits := m.renderBoard()
 	view := tea.NewView(content)

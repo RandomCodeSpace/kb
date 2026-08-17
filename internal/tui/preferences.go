@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -19,19 +22,22 @@ type cancelledPreferenceSavedMsg struct {
 	err  error
 }
 
-func tuiPreferencesPath() (string, error) {
-	dir, err := os.UserConfigDir()
+// tuiPreferencesPath keeps display state beside its SQLite board. Hashing the
+// canonical configured database path together with the sanitized board owner
+// isolates both alternate --data paths and KB_USER namespaces without putting
+// user-controlled text in a filename.
+func tuiPreferencesPath(databasePath, user string) (string, error) {
+	databasePath, err := filepath.Abs(databasePath)
 	if err != nil {
-		return "", fmt.Errorf("tui preferences: config directory: %w", err)
+		return "", fmt.Errorf("tui preferences: database path: %w", err)
 	}
-	return filepath.Join(dir, "kb", "tui.json"), nil
+	databasePath = filepath.Clean(databasePath)
+	identity := sha256.Sum256([]byte(databasePath + "\x00" + user))
+	name := hex.EncodeToString(identity[:16]) + ".json"
+	return filepath.Join(filepath.Dir(databasePath), ".kb-tui", name), nil
 }
 
-func loadCancelledPreference() (bool, error) {
-	path, err := tuiPreferencesPath()
-	if err != nil {
-		return false, err
-	}
+func loadCancelledPreference(path string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -46,12 +52,36 @@ func loadCancelledPreference() (bool, error) {
 	return preferences.ShowCancelled, nil
 }
 
-func saveCancelledPreference(show bool) error {
-	path, err := tuiPreferencesPath()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+type preferenceTempFile interface {
+	io.Writer
+	Name() string
+	Sync() error
+	Close() error
+}
+
+type preferenceFileOps struct {
+	mkdirAll  func(string, os.FileMode) error
+	createTmp func(string, string) (preferenceTempFile, error)
+	rename    func(string, string) error
+	remove    func(string) error
+}
+
+var osPreferenceFileOps = preferenceFileOps{
+	mkdirAll: os.MkdirAll,
+	createTmp: func(dir, pattern string) (preferenceTempFile, error) {
+		return os.CreateTemp(dir, pattern)
+	},
+	rename: os.Rename,
+	remove: os.Remove,
+}
+
+func saveCancelledPreference(path string, show bool) error {
+	return saveCancelledPreferenceWithOps(path, show, osPreferenceFileOps)
+}
+
+func saveCancelledPreferenceWithOps(path string, show bool, ops preferenceFileOps) error {
+	dir := filepath.Dir(path)
+	if err := ops.mkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("tui preferences: create directory: %w", err)
 	}
 	data, err := json.Marshal(tuiPreferences{ShowCancelled: show})
@@ -59,12 +89,39 @@ func saveCancelledPreference(show bool) error {
 		return fmt.Errorf("tui preferences: encode: %w", err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("tui preferences: write: %w", err)
+
+	temporary, err := ops.createTmp(dir, ".tui-preferences-*.tmp")
+	if err != nil {
+		return fmt.Errorf("tui preferences: create temporary file: %w", err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("tui preferences: permissions: %w", err)
+	temporaryPath := temporary.Name()
+	published := false
+	defer func() {
+		if !published {
+			_ = ops.remove(temporaryPath)
+		}
+	}()
+
+	written, err := temporary.Write(data)
+	if err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("tui preferences: write temporary file: %w", err)
 	}
+	if written != len(data) {
+		_ = temporary.Close()
+		return fmt.Errorf("tui preferences: write temporary file: %w", io.ErrShortWrite)
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("tui preferences: sync temporary file: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("tui preferences: close temporary file: %w", err)
+	}
+	if err := ops.rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("tui preferences: publish: %w", err)
+	}
+	published = true
 	return nil
 }
 
