@@ -434,33 +434,34 @@ func TestCancelledPreferencePathAndIsolation(t *testing.T) {
 		t.Fatalf("preference path %q is not under board data %q", pathA, wantRoot)
 	}
 
-	if got, err := loadCancelledPreference(pathA); err != nil || got {
+	if got, err := loadTUIPreferences(pathA); err != nil || got.ShowCancelled || got.Filter.Text != "" || len(got.Filter.Tags) != 0 {
 		t.Fatalf("missing preference = %v,%v", got, err)
 	}
-	if err := saveCancelledPreference(pathA, true); err != nil {
+	want := tuiPreferences{ShowCancelled: true, Filter: boardFilter{Text: "fix", Tags: []string{"bug", "auth"}}}
+	if err := saveTUIPreferences(pathA, want); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := loadCancelledPreference(pathA); err != nil || !got {
+	if got, err := loadTUIPreferences(pathA); err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("saved preference = %v,%v", got, err)
 	}
 	for _, isolated := range paths[1:] {
-		if got, readErr := loadCancelledPreference(isolated); readErr != nil || got {
+		if got, readErr := loadTUIPreferences(isolated); readErr != nil || got.ShowCancelled || got.Filter.Text != "" || len(got.Filter.Tags) != 0 {
 			t.Fatalf("isolated preference %q = %v,%v", isolated, got, readErr)
 		}
 	}
 	if info, err := os.Stat(pathA); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("preference mode = %v,%v", info, err)
 	}
-	if err := saveCancelledPreference(pathA, false); err != nil {
+	if err := saveTUIPreferences(pathA, tuiPreferences{}); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := loadCancelledPreference(pathA); err != nil || got {
+	if got, err := loadTUIPreferences(pathA); err != nil || got.ShowCancelled || got.Filter.Text != "" || len(got.Filter.Tags) != 0 {
 		t.Fatalf("cleared preference = %v,%v", got, err)
 	}
 	if err := os.WriteFile(pathA, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadCancelledPreference(pathA); err == nil || !strings.Contains(err.Error(), "decode") {
+	if _, err := loadTUIPreferences(pathA); err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("malformed preference error = %v", err)
 	}
 }
@@ -469,19 +470,19 @@ func TestCancelledPreferenceCommandFailure(t *testing.T) {
 
 	m := NewModel(stubBoardReader{}, nil, "u")
 	m.boardView.showCancelled = true
-	m.saveCancelled = func(show bool) error {
-		if !show {
+	m.savePreferences = func(preferences tuiPreferences) error {
+		if !preferences.ShowCancelled {
 			t.Fatal("saved wrong toggle")
 		}
 		return errors.New("disk full")
 	}
-	message := m.queueCancelledPreference()()
+	message := m.queuePreferences()()
 	updateTestModel(t, &m, message)
 	if m.preferenceErr == nil || !strings.Contains(m.render(), "disk full") {
 		t.Fatalf("preference failure = %+v", m.preferenceErr)
 	}
-	m.saveCancelled = nil
-	if command := m.queueCancelledPreference(); command != nil {
+	m.savePreferences = nil
+	if command := m.queuePreferences(); command != nil {
 		t.Fatalf("nil preference saver returned %v", command)
 	}
 }
@@ -523,7 +524,8 @@ func TestCancelledPreferenceAtomicFailuresPreservePriorFile(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "prefs.json")
-			if err := saveCancelledPreference(path, false); err != nil {
+			prior := tuiPreferences{Filter: boardFilter{Text: "prior", Tags: []string{"stable"}}}
+			if err := saveTUIPreferences(path, prior); err != nil {
 				t.Fatal(err)
 			}
 			ops := osPreferenceFileOps
@@ -539,13 +541,13 @@ func TestCancelledPreferenceAtomicFailuresPreservePriorFile(t *testing.T) {
 			if stage == "rename" {
 				ops.rename = func(string, string) error { return failure }
 			}
-			if err := saveCancelledPreferenceWithOps(path, true, ops); err == nil {
+			if err := saveTUIPreferencesWithOps(path, tuiPreferences{ShowCancelled: true, Filter: boardFilter{Text: "next"}}, ops); err == nil {
 				t.Fatal("injected atomic write succeeded")
 			}
 			if createdIn != dir {
 				t.Fatalf("temporary file directory = %q, want %q", createdIn, dir)
 			}
-			if got, err := loadCancelledPreference(path); err != nil || got {
+			if got, err := loadTUIPreferences(path); err != nil || !reflect.DeepEqual(got, prior) {
 				t.Fatalf("prior preference after %s = %v,%v", stage, got, err)
 			}
 			entries, err := os.ReadDir(dir)
@@ -560,20 +562,20 @@ func TestCancelledPreferenceAtomicFailuresPreservePriorFile(t *testing.T) {
 }
 
 func TestCancelledPreferenceWritesSerializeLatestToggle(t *testing.T) {
-	var saved []bool
+	var saved []tuiPreferences
 	m := NewModel(stubBoardReader{}, nil, "u")
-	m.saveCancelled = func(show bool) error {
-		saved = append(saved, show)
+	m.savePreferences = func(preferences tuiPreferences) error {
+		saved = append(saved, preferences)
 		return nil
 	}
 
 	m.boardView.handleKey("c", m.board)
-	first := m.queueCancelledPreference()
+	first := m.queuePreferences()
 	m.boardView.handleKey("c", m.board)
-	if command := m.queueCancelledPreference(); command != nil {
+	if command := m.queuePreferences(); command != nil {
 		t.Fatal("overlapping toggle started a concurrent preference write")
 	}
-	if !m.prefSaving || m.prefPending == nil || *m.prefPending {
+	if !m.prefSaving || m.prefPending == nil || m.prefPending.ShowCancelled {
 		t.Fatalf("queued preference state = %+v", m)
 	}
 	second := updateTestModel(t, &m, first())
@@ -583,7 +585,7 @@ func TestCancelledPreferenceWritesSerializeLatestToggle(t *testing.T) {
 	if next := updateTestModel(t, &m, second()); next != nil || m.prefSaving {
 		t.Fatalf("final preference state = %+v command=%v", m, next)
 	}
-	if !reflect.DeepEqual(saved, []bool{true, false}) {
+	if !reflect.DeepEqual(saved, []tuiPreferences{{ShowCancelled: true}, {ShowCancelled: false}}) {
 		t.Fatalf("saved toggles = %v", saved)
 	}
 }

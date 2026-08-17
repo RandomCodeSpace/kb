@@ -36,17 +36,36 @@ type boardViewState struct {
 
 type boardCardClickedMsg struct{ taskID string }
 type boardColumnClickedMsg struct{ status board.Status }
+type filterTextClickedMsg struct{}
+type filterLabelClickedMsg struct{ tag string }
+type filterClearClickedMsg struct{}
+
+type boardHitKind uint8
+
+const (
+	boardHitDefault boardHitKind = iota
+	boardHitFilterText
+	boardHitFilterLabel
+	boardHitFilterClear
+)
 
 type boardHit struct {
 	x0, x1 int
 	y0, y1 int
 	status board.Status
 	taskID string
+	kind   boardHitKind
+	tag    string
 }
 
 type renderedColumn struct {
 	lines []string
 	hits  []boardHit
+}
+
+type labelSpan struct {
+	x0, x1 int
+	tag    string
 }
 
 func (s boardViewState) visibleStatuses() []board.Status {
@@ -191,7 +210,7 @@ func (s boardViewState) selectedTask(current board.Board) (board.Task, bool) {
 
 // selectedTask is the narrow handoff used by the card-detail overlay.
 func (m Model) selectedTask() (board.Task, bool) {
-	return m.boardView.selectedTask(m.board)
+	return m.boardView.selectedTask(m.filteredBoard())
 }
 
 func taskCount(current board.Board, status board.Status) int {
@@ -226,12 +245,13 @@ func (m Model) renderBoard() (string, []boardHit) {
 		title = "Board"
 	}
 	header := fitLine(fmt.Sprintf("kb / %s / %s", title, m.user), width)
+	filterLine, filterHits := m.renderFilterBar(width)
 
 	statuses := m.boardView.visibleStatuses()
 	if width < wideBoardWidth {
 		statuses = statuses[m.boardView.column : m.boardView.column+1]
 	}
-	bodyHeight := height - 2
+	bodyHeight := height - 3
 	columnWidths := splitWidths(width, len(statuses))
 	columns := make([]renderedColumn, 0, len(statuses))
 	for i, status := range statuses {
@@ -239,9 +259,10 @@ func (m Model) renderBoard() (string, []boardHit) {
 	}
 	body, hits := joinColumns(columns)
 	for i := range hits {
-		hits[i].y0++
-		hits[i].y1++
+		hits[i].y0 += 2
+		hits[i].y1 += 2
 	}
+	hits = append(filterHits, hits...)
 
 	state := "ready"
 	if m.loading || (m.watcher != nil && !m.haveVersion) {
@@ -261,10 +282,77 @@ func (m Model) renderBoard() (string, []boardHit) {
 	help := "j/k cards | h/l/tab columns | 1-4 jump | c cancelled:" + cancelled + " | q quit"
 	if m.settingsNew != nil {
 		footer := settingsBoardFooter(state, cancelled, width)
-		return strings.Join([]string{header, body, footer}, "\n"), hits
+		return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
 	}
 	footer := fitLine(state+" | "+help, width)
-	return strings.Join([]string{header, body, footer}, "\n"), hits
+	return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
+}
+
+func (m Model) renderFilterBar(width int) (string, []boardHit) {
+	width = max(width, 1)
+	parts := make([]string, 0, 4+len(m.filterLabels()))
+	hits := make([]boardHit, 0, 2+len(m.filterLabels()))
+	x := 0
+	appendPart := func(part string, kind boardHitKind, tag string) {
+		if len(parts) > 0 {
+			parts = append(parts, " | ")
+			x += 3
+		}
+		start := x
+		parts = append(parts, part)
+		x += ansi.StringWidth(part)
+		if kind != boardHitDefault && start < width {
+			hits = append(hits, boardHit{x0: start, x1: min(x, width), y0: 1, y1: 2, kind: kind, tag: tag})
+		}
+	}
+
+	value := m.filter.input.Value()
+	if value == "" {
+		value = "Filter cards"
+	}
+	text := "/ " + value
+	if m.filter.focus == filterText {
+		input := m.filter.input
+		input.SetWidth(max(min(width-2, 40), 1))
+		text = "> " + input.View()
+	}
+	labels := m.filterLabels()
+	focusTag := ""
+	if m.filter.focus == filterLabels && len(labels) > 0 {
+		focusTag = labels[min(max(m.filter.labelIndex, 0), len(labels)-1)]
+	}
+	appendLabel := func(tag string) {
+		marker := "+"
+		if m.filter.hasTag(tag) {
+			marker = "x"
+		}
+		label := "[" + marker + " " + tag + "]"
+		if tag == focusTag {
+			label = ">" + label + "<"
+		}
+		appendPart(label, boardHitFilterLabel, tag)
+	}
+	if m.filter.active() {
+		appendPart(fmt.Sprintf("%d of %d cards", len(m.filteredBoard().Tasks), len(m.board.Tasks)), boardHitDefault, "")
+	}
+	if focusTag != "" {
+		appendLabel(focusTag)
+	}
+	appendPart(text, boardHitFilterText, "")
+	for _, tag := range labels {
+		if tag != focusTag && m.filter.hasTag(tag) {
+			appendLabel(tag)
+		}
+	}
+	if m.filter.active() {
+		appendPart("[clear]", boardHitFilterClear, "")
+	}
+	for _, tag := range labels {
+		if tag != focusTag && !m.filter.hasTag(tag) {
+			appendLabel(tag)
+		}
+	}
+	return fitLine(strings.Join(parts, ""), width), hits
 }
 
 func settingsBoardFooter(state, cancelled string, width int) string {
@@ -320,7 +408,7 @@ func (m Model) renderBoardColumn(status board.Status, width, height int) rendere
 		return renderedColumn{lines: lines, hits: []boardHit{{x1: width, y1: height, status: status}}}
 	}
 	inner := width - 2
-	tasks := tasksInStatus(m.board, status)
+	tasks := tasksInStatus(m.filteredBoard(), status)
 	focused := m.boardView.column == statusIndex(status)
 	heading := fmt.Sprintf("%d %s  %d", statusIndex(status)+1, statusLabel(status), len(tasks))
 	if focused {
@@ -330,7 +418,7 @@ func (m Model) renderBoardColumn(status board.Status, width, height int) rendere
 	hits := []boardHit{{x1: width, y1: height, status: status}}
 
 	contentHeight := max(height-2, 0)
-	cardLines, owners := m.renderTaskLines(tasks, status, inner)
+	cardLines, owners, labelSpans := m.renderTaskLines(tasks, status, inner)
 	start := visibleCardStart(cardLines, owners, m.boardView.rows[statusIndex(status)], contentHeight)
 	for row := 0; row < contentHeight; row++ {
 		source := start + row
@@ -342,17 +430,27 @@ func (m Model) renderBoardColumn(status board.Status, width, height int) rendere
 		if source < len(owners) && owners[source] != "" {
 			hits = append(hits, boardHit{x1: width, y0: row + 1, y1: row + 2, status: status, taskID: owners[source]})
 		}
+		if source < len(labelSpans) {
+			for _, span := range labelSpans[source] {
+				hits = append(hits, boardHit{
+					x0: 1 + span.x0, x1: min(1+span.x1, width-1),
+					y0: row + 1, y1: row + 2, status: status,
+					kind: boardHitFilterLabel, tag: span.tag,
+				})
+			}
+		}
 	}
 	lines = append(lines, "└"+strings.Repeat("─", inner)+"┘")
 	return renderedColumn{lines: lines, hits: hits}
 }
 
-func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width int) ([]string, []string) {
+func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width int) ([]string, []string, [][]labelSpan) {
 	if len(tasks) == 0 {
-		return []string{"(empty)"}, []string{""}
+		return []string{"(empty)"}, []string{""}, [][]labelSpan{nil}
 	}
 	lines := make([]string, 0, len(tasks)*3)
 	owners := make([]string, 0, len(tasks)*3)
+	spans := make([][]labelSpan, 0, len(tasks)*3)
 	selected := m.boardView.rows[statusIndex(status)]
 	for i, task := range tasks {
 		marker := "  "
@@ -367,17 +465,27 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 			}
 			lines = append(lines, prefix+line)
 			owners = append(owners, task.ID)
+			spans = append(spans, nil)
 		}
-		for _, line := range wrapTokens(cardMeta(task, m.now()), max(width-2, 1)) {
+		metaLines, metaSpans := wrapMeta(cardMetaEntries(task, m.now()), max(width-2, 1))
+		for lineIndex, line := range metaLines {
 			lines = append(lines, "  "+line)
 			owners = append(owners, task.ID)
+			lineSpans := make([]labelSpan, len(metaSpans[lineIndex]))
+			for spanIndex, span := range metaSpans[lineIndex] {
+				span.x0 += 2
+				span.x1 += 2
+				lineSpans[spanIndex] = span
+			}
+			spans = append(spans, lineSpans)
 		}
 		if i+1 < len(tasks) {
 			lines = append(lines, "")
 			owners = append(owners, "")
+			spans = append(spans, nil)
 		}
 	}
-	return lines, owners
+	return lines, owners, spans
 }
 
 func visibleCardStart(lines, owners []string, selected, height int) int {
@@ -443,6 +551,14 @@ func boardMouseHandler(hits []boardHit) func(tea.MouseMsg) tea.Cmd {
 			if mouse.X < hit.x0 || mouse.X >= hit.x1 || mouse.Y < hit.y0 || mouse.Y >= hit.y1 {
 				continue
 			}
+			switch hit.kind {
+			case boardHitFilterText:
+				return func() tea.Msg { return filterTextClickedMsg{} }
+			case boardHitFilterLabel:
+				return func() tea.Msg { return filterLabelClickedMsg{tag: hit.tag} }
+			case boardHitFilterClear:
+				return func() tea.Msg { return filterClearClickedMsg{} }
+			}
 			if hit.taskID != "" {
 				return func() tea.Msg { return boardCardClickedMsg{taskID: hit.taskID} }
 			}
@@ -493,10 +609,15 @@ func cardHeading(task board.Task, now time.Time) []string {
 	return tokens
 }
 
-func cardMeta(task board.Task, now time.Time) []string {
-	tokens := []string{priorityChip(task.Prio)}
+type metaEntry struct {
+	text string
+	tag  string
+}
+
+func cardMetaEntries(task board.Task, now time.Time) []metaEntry {
+	tokens := []metaEntry{{text: priorityChip(task.Prio)}}
 	if task.Blocked {
-		tokens = append(tokens, chip("⛔ blocked", lipgloss.Color("#ffb020")))
+		tokens = append(tokens, metaEntry{text: chip("⛔ blocked", lipgloss.Color("#ffb020"))})
 	}
 	if task.Due != "" {
 		label, overdue := dueChip(task.Due, now)
@@ -504,15 +625,54 @@ func cardMeta(task board.Task, now time.Time) []string {
 		if overdue {
 			color = lipgloss.Color("#ffe0dc")
 		}
-		tokens = append(tokens, chip(label, color))
+		tokens = append(tokens, metaEntry{text: chip(label, color)})
 	}
 	if task.Effort != "" {
-		tokens = append(tokens, "["+task.Effort+"]")
+		tokens = append(tokens, metaEntry{text: "[" + task.Effort + "]"})
 	}
 	for _, tag := range task.Tags {
-		tokens = append(tokens, labelChip(tag))
+		tokens = append(tokens, metaEntry{text: labelChip(tag), tag: tag})
 	}
 	return tokens
+}
+
+func wrapMeta(entries []metaEntry, width int) ([]string, [][]labelSpan) {
+	if width <= 0 {
+		return []string{""}, [][]labelSpan{nil}
+	}
+	lines := make([]string, 0, 2)
+	spans := make([][]labelSpan, 0, 2)
+	line := ""
+	lineSpans := make([]labelSpan, 0)
+	flush := func() {
+		lines = append(lines, line)
+		spans = append(spans, lineSpans)
+		line = ""
+		lineSpans = nil
+	}
+	for _, entry := range entries {
+		if entry.text == "" {
+			continue
+		}
+		separator := ""
+		if line != "" {
+			separator = " "
+		}
+		if line != "" && ansi.StringWidth(line+separator+entry.text) > width {
+			flush()
+			separator = ""
+		}
+		start := ansi.StringWidth(line) + ansi.StringWidth(separator)
+		visible := ansi.Truncate(entry.text, max(width-start, 0), "")
+		line += separator + visible
+		if entry.tag != "" && ansi.StringWidth(visible) > 0 {
+			lineSpans = append(lineSpans, labelSpan{x0: start, x1: start + ansi.StringWidth(visible), tag: entry.tag})
+		}
+	}
+	if line != "" || len(lines) == 0 {
+		flush()
+	}
+	return lines, spans
 }
 
 var priorityColors = map[int]color.Color{
