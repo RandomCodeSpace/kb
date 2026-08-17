@@ -56,6 +56,32 @@ func TestFilterMatchesWebSemantics(t *testing.T) {
 	}
 }
 
+func TestWebLowerMatchesFrozenJavaScriptVectors(t *testing.T) {
+	// Expected values were captured from Node 24 String.prototype.toLowerCase.
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{"İ", "i\u0307"},
+		{"Iİ", "ii\u0307"},
+		{"ΟΣ", "ος"},
+		{"Σ", "σ"},
+		{"ẞ", "ß"},
+	} {
+		if got := webLower(test.input); got != test.want {
+			t.Errorf("webLower(%q) = %q, want %q", test.input, got, test.want)
+		}
+	}
+	state := newBoardFilterState()
+	state.restore(boardFilter{Text: "İ"})
+	if state.matches(board.Task{Title: "i"}) {
+		t.Fatal("U+0130 query matched plain i unlike JavaScript")
+	}
+	if !state.matches(board.Task{Title: "i\u0307"}) {
+		t.Fatal("U+0130 query did not match JavaScript expanded lowercase")
+	}
+}
+
 func TestFilterKeyboardRoutingPersistenceAndClear(t *testing.T) {
 	m := NewModel(stubBoardReader{}, nil, "alice")
 	m.loading = false
@@ -188,10 +214,15 @@ func TestFilterCountAndNarrowLayout(t *testing.T) {
 		t.Fatalf("filtered count/view:\n%s", wide)
 	}
 	m.filter.input.SetValue(strings.Repeat("long-query-", 8))
+	m.filter.focusText()
 	m.width = 23
 	countLine, _ := m.renderFilterBar(m.width)
-	if !strings.HasPrefix(ansi.Strip(countLine), "0 of 5 cards") {
+	countLines := strings.Split(ansi.Strip(countLine), "\n")
+	if len(countLines) != 2 || !strings.HasPrefix(countLines[1], "0 of 5 cards") {
 		t.Fatalf("narrow active count was not prioritized: %q", ansi.Strip(countLine))
+	}
+	if !strings.HasPrefix(countLines[0], "> ") {
+		t.Fatalf("narrow active text focus was not visible: %q", ansi.Strip(countLine))
 	}
 	m.filter.restore(boardFilter{})
 	m.filter.focus = filterLabels
@@ -209,6 +240,40 @@ func TestFilterCountAndNarrowLayout(t *testing.T) {
 				t.Fatalf("width %d line %d rendered %d cells: %q", width, lineNumber+1, got, line)
 			}
 		}
+	}
+}
+
+func TestFilterBarSanitizesTerminalControlsWithoutChangingState(t *testing.T) {
+	hostileText := "safe\x1b[31m-red\x1b[0m\x1b]2;owned\x07\x00\x9b31m"
+	hostileTag := "tag\x1bPpayload\x1b\\\x1b]52;c;stolen\x07\x1f"
+	m := NewModel(stubBoardReader{}, nil, "u")
+	m.board = board.Board{Tasks: []board.Task{{ID: "x", Status: board.StatusTodo, Tags: []string{hostileTag}}}}
+	m.filter.restore(boardFilter{Text: hostileText, Tags: []string{hostileTag}})
+	storedText := m.filter.input.Value()
+	m.filter.focus = filterLabels
+	view, hits := m.renderFilterBar(160)
+	for _, r := range view {
+		if r == '\n' {
+			continue
+		}
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+			t.Fatalf("filter bar contains terminal control U+%04X: %q", r, view)
+		}
+	}
+	if strings.Contains(view, "payload") || strings.Contains(view, "stolen") {
+		t.Fatalf("filter bar retained control-sequence payload: %q", view)
+	}
+	if m.filter.input.Value() != storedText || !reflect.DeepEqual(m.filter.tags, []string{hostileTag}) || m.board.Tasks[0].Tags[0] != hostileTag {
+		t.Fatal("render sanitization mutated filter or board state")
+	}
+	foundOriginalHit := false
+	for _, hit := range hits {
+		if hit.kind == boardHitFilterLabel && hit.tag == hostileTag {
+			foundOriginalHit = true
+		}
+	}
+	if !foundOriginalHit {
+		t.Fatal("sanitized label lost its exact filter identity")
 	}
 }
 
@@ -443,5 +508,28 @@ func TestMixedPreferenceWritesSerializeLatestSnapshot(t *testing.T) {
 	}
 	if !reflect.DeepEqual(saved, want) {
 		t.Fatalf("serialized snapshots = %+v, want %+v", saved, want)
+	}
+}
+
+func TestFailedPreferenceWriteRetriesEqualPendingSnapshot(t *testing.T) {
+	want := tuiPreferences{ShowCancelled: true, Filter: boardFilter{Text: "same", Tags: []string{"bug"}}}
+	writes := 0
+	m := NewModel(stubBoardReader{}, nil, "u")
+	m.savePreferences = func(got tuiPreferences) error {
+		writes++
+		if !preferencesEqual(got, want) {
+			t.Fatalf("retry wrote %+v, want %+v", got, want)
+		}
+		return nil
+	}
+	m.prefSaving = true
+	pending := want
+	m.prefPending = &pending
+	retry := m.finishPreferences(preferenceSavedMsg{preferences: want, err: errors.New("disk full")})
+	if retry == nil || !m.prefSaving || m.prefPending != nil {
+		t.Fatalf("failed equal snapshot was not retried: model=%+v command=%v", m, retry)
+	}
+	if next := updateTestModel(t, &m, retry()); next != nil || m.prefSaving || m.preferenceErr != nil || writes != 1 {
+		t.Fatalf("retry completion = saving:%v err:%v writes:%d command:%v", m.prefSaving, m.preferenceErr, writes, next)
 	}
 }

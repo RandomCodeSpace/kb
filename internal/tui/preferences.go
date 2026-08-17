@@ -172,7 +172,7 @@ func (m *Model) finishPreferences(message preferenceSavedMsg) tea.Cmd {
 	}
 	preferences := *m.prefPending
 	m.prefPending = nil
-	if preferencesEqual(preferences, message.preferences) {
+	if message.err == nil && preferencesEqual(preferences, message.preferences) {
 		return nil
 	}
 	m.prefSaving = true

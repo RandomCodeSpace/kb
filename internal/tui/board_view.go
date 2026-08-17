@@ -251,7 +251,7 @@ func (m Model) renderBoard() (string, []boardHit) {
 	if width < wideBoardWidth {
 		statuses = statuses[m.boardView.column : m.boardView.column+1]
 	}
-	bodyHeight := height - 3
+	bodyHeight := height - 4
 	columnWidths := splitWidths(width, len(statuses))
 	columns := make([]renderedColumn, 0, len(statuses))
 	for i, status := range statuses {
@@ -259,8 +259,8 @@ func (m Model) renderBoard() (string, []boardHit) {
 	}
 	body, hits := joinColumns(columns)
 	for i := range hits {
-		hits[i].y0 += 2
-		hits[i].y1 += 2
+		hits[i].y0 += 3
+		hits[i].y1 += 3
 	}
 	hits = append(filterHits, hits...)
 
@@ -290,31 +290,29 @@ func (m Model) renderBoard() (string, []boardHit) {
 
 func (m Model) renderFilterBar(width int) (string, []boardHit) {
 	width = max(width, 1)
-	parts := make([]string, 0, 4+len(m.filterLabels()))
 	hits := make([]boardHit, 0, 2+len(m.filterLabels()))
-	x := 0
-	appendPart := func(part string, kind boardHitKind, tag string) {
-		if len(parts) > 0 {
-			parts = append(parts, " | ")
+	lines := [2][]string{}
+	appendPart := func(row int, part string, kind boardHitKind, tag string) {
+		x := ansi.StringWidth(strings.Join(lines[row], ""))
+		if len(lines[row]) > 0 {
+			lines[row] = append(lines[row], " | ")
 			x += 3
 		}
 		start := x
-		parts = append(parts, part)
+		lines[row] = append(lines[row], part)
 		x += ansi.StringWidth(part)
 		if kind != boardHitDefault && start < width {
-			hits = append(hits, boardHit{x0: start, x1: min(x, width), y0: 1, y1: 2, kind: kind, tag: tag})
+			hits = append(hits, boardHit{x0: start, x1: min(x, width), y0: row + 1, y1: row + 2, kind: kind, tag: tag})
 		}
 	}
 
-	value := m.filter.input.Value()
+	value := sanitizeTerminal(m.filter.input.Value())
 	if value == "" {
 		value = "Filter cards"
 	}
 	text := "/ " + value
 	if m.filter.focus == filterText {
-		input := m.filter.input
-		input.SetWidth(max(min(width-2, 40), 1))
-		text = "> " + input.View()
+		text = "> " + settingsInputDisplay(m.filter.input, false, true, max(min(width-2, 40), 1))
 	}
 	labels := m.filterLabels()
 	focusTag := ""
@@ -326,33 +324,43 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 		if m.filter.hasTag(tag) {
 			marker = "x"
 		}
-		label := "[" + marker + " " + tag + "]"
+		label := "[" + marker + " " + sanitizeTerminal(tag) + "]"
 		if tag == focusTag {
 			label = ">" + label + "<"
 		}
-		appendPart(label, boardHitFilterLabel, tag)
-	}
-	if m.filter.active() {
-		appendPart(fmt.Sprintf("%d of %d cards", len(m.filteredBoard().Tasks), len(m.board.Tasks)), boardHitDefault, "")
+		appendPart(0, label, boardHitFilterLabel, tag)
 	}
 	if focusTag != "" {
 		appendLabel(focusTag)
 	}
-	appendPart(text, boardHitFilterText, "")
+	appendPart(0, text, boardHitFilterText, "")
+	if m.filter.active() {
+		appendPart(1, fmt.Sprintf("%d of %d cards", len(m.filteredBoard().Tasks), len(m.board.Tasks)), boardHitDefault, "")
+	}
+	appendLabelOnControls := func(tag string) {
+		marker := "+"
+		if m.filter.hasTag(tag) {
+			marker = "x"
+		}
+		appendPart(1, "["+marker+" "+sanitizeTerminal(tag)+"]", boardHitFilterLabel, tag)
+	}
 	for _, tag := range labels {
 		if tag != focusTag && m.filter.hasTag(tag) {
-			appendLabel(tag)
+			appendLabelOnControls(tag)
 		}
 	}
 	if m.filter.active() {
-		appendPart("[clear]", boardHitFilterClear, "")
+		appendPart(1, "[clear]", boardHitFilterClear, "")
 	}
 	for _, tag := range labels {
 		if tag != focusTag && !m.filter.hasTag(tag) {
-			appendLabel(tag)
+			appendLabelOnControls(tag)
 		}
 	}
-	return fitLine(strings.Join(parts, ""), width), hits
+	return strings.Join([]string{
+		fitLine(strings.Join(lines[0], ""), width),
+		fitLine(strings.Join(lines[1], ""), width),
+	}, "\n"), hits
 }
 
 func settingsBoardFooter(state, cancelled string, width int) string {

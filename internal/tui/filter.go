@@ -7,6 +7,8 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 )
@@ -124,20 +126,26 @@ func (s boardFilterState) matches(task board.Task) bool {
 			return false
 		}
 	}
-	needle := strings.ToLower(strings.TrimSpace(s.input.Value()))
+	needle := webLower(strings.TrimSpace(s.input.Value()))
 	if needle == "" {
 		return true
 	}
-	if strings.Contains(strings.ToLower(task.Title), needle) ||
-		strings.Contains(strings.ToLower(task.Desc), needle) {
+	if strings.Contains(webLower(task.Title), needle) ||
+		strings.Contains(webLower(task.Desc), needle) {
 		return true
 	}
 	for _, tag := range task.Tags {
-		if strings.Contains(strings.ToLower(tag), needle) {
+		if strings.Contains(webLower(tag), needle) {
 			return true
 		}
 	}
 	return false
+}
+
+// webLower matches JavaScript String.prototype.toLowerCase: Unicode default
+// full-string lowercasing, including expanding and context-sensitive mappings.
+func webLower(value string) string {
+	return cases.Lower(language.Und).String(value)
 }
 
 func (s boardFilterState) project(current board.Board) board.Board {
