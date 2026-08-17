@@ -37,6 +37,29 @@ describe('CardEditor DOM', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it('reports dirty on the first edit, not on mount', async () => {
+    const user = userEvent.setup();
+    const onDirty = vi.fn();
+    render(
+      <CardEditor
+        state={{ mode: 'edit', task }}
+        labels={[]}
+        title={task.title}
+        onTitleChange={vi.fn()}
+        onBusyChange={vi.fn()}
+        cancelRef={{ current: null }}
+        titleExtras={null}
+        onSave={vi.fn()}
+        onDelete={vi.fn()}
+        onClose={vi.fn()}
+        onDirty={onDirty}
+      />,
+    );
+    expect(onDirty).not.toHaveBeenCalled();
+    await user.type(screen.getByLabelText('Description'), '!');
+    expect(onDirty).toHaveBeenCalled();
+  });
+
   it('requires a title and creates a task in the requested column', async () => {
     const user = userEvent.setup();
     const onSave = vi.fn();

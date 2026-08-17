@@ -98,6 +98,13 @@ export const NO_SERVER_NOTICE =
 export const CARD_GONE_NOTICE =
   'The card you had open is no longer on the server, so it was closed. Any unsaved text in it was not kept.';
 
+// Without these, a failed config load just makes the AI/import buttons vanish
+// from the header with nothing saying why.
+export const SETTINGS_LOAD_NOTICE =
+  'AI settings could not be loaded, so AI actions are hidden. Open Settings or reload to retry.';
+export const INTEGRATIONS_LOAD_NOTICE =
+  'Forge sources could not be loaded, so issue import is hidden. Open Settings or reload to retry.';
+
 /**
  * Why a request failed, in the terms the person can act on. The server's own
  * words are kept — they name the field it would not take, or the guard that
@@ -552,16 +559,46 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
       .then((s) => {
         if (!cancelled) setAiSettings(s);
       })
-      .catch(() => {});
+      .catch((err) => {
+        if (!cancelled && !(err instanceof ReauthRequiredError)) {
+          reportNotice(SETTINGS_LOAD_NOTICE);
+        }
+      });
     getIntegrations(identity)
       .then((nextSources) => {
         if (!cancelled) setSources(nextSources);
       })
-      .catch(() => {});
+      .catch((err) => {
+        if (!cancelled && !(err instanceof ReauthRequiredError)) {
+          reportNotice(INTEGRATIONS_LOAD_NOTICE);
+        }
+      });
     return () => {
       cancelled = true;
     };
-  }, [serverPresent, identity, showSettings]);
+  }, [serverPresent, identity, showSettings, reportNotice]);
+
+  // The board refreshes on mount and after every local mutation, which leaves
+  // CLI/MCP/other-tab writes invisible until the user touches something. A
+  // return to the tab is the natural moment to catch up; throttled so focus
+  // flapping between windows does not hammer the server.
+  const lastWake = useRef(0);
+  useEffect(() => {
+    if (!serverPresent) return;
+    const wake = () => {
+      if (document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      if (now - lastWake.current < 5000) return;
+      lastWake.current = now;
+      void refresh();
+    };
+    window.addEventListener('focus', wake);
+    document.addEventListener('visibilitychange', wake);
+    return () => {
+      window.removeEventListener('focus', wake);
+      document.removeEventListener('visibilitychange', wake);
+    };
+  }, [serverPresent, refresh]);
 
   // A save that failed is the one thing the dot could never tell anyone who is
   // not looking at it. Recovery is announced too, so "it broke" is not the last
@@ -755,14 +792,48 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
     if (task) setModal({ mode: 'edit', task });
   }, []);
 
+  // The editor closes only after the write lands: a refused save keeps the
+  // typed content on screen with the notice, instead of destroying it.
+  const saving = useRef(false);
   const handleSave = useCallback((save: CardSave) => {
-    setModal(null);
-    void mutate(() =>
-      save.mode === 'add'
-        ? createTask(identity, save.draft)
-        : patchTask(identity, save.taskId, save.patch),
-    );
+    if (saving.current) return;
+    saving.current = true;
+    void (async () => {
+      try {
+        const ok = await mutate(() =>
+          save.mode === 'add'
+            ? createTask(identity, save.draft)
+            : patchTask(identity, save.taskId, save.patch),
+        );
+        if (ok) setModal(null);
+      } finally {
+        saving.current = false;
+      }
+    })();
   }, [identity, mutate]);
+
+  // Escape, backdrop, and Cancel all land here: an edited card asks before
+  // its typing is discarded; an untouched one just closes.
+  const editorDirty = useRef(false);
+  const markEditorDirty = useCallback(() => {
+    editorDirty.current = true;
+  }, []);
+  useEffect(() => {
+    editorDirty.current = false;
+  }, [modal]);
+  const requestCloseEditor = useCallback(() => {
+    if (!editorDirty.current) {
+      setModal(null);
+      return;
+    }
+    setConfirm({
+      title: 'Discard unsaved changes?',
+      body: 'This card was edited but not saved. Closing it throws the edits away.',
+      confirmLabel: 'Discard changes',
+      destructive: true,
+      onConfirm: () => setModal(null),
+    });
+  }, []);
 
   /**
    * Soft delete (F11): the card moves to Cancelled, never a row delete. The
@@ -1147,7 +1218,8 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
           aiDraft={aiDraft}
           onSave={handleSave}
           onDelete={handleDelete}
-          onClose={() => setModal(null)}
+          onClose={requestCloseEditor}
+          onDirty={markEditorDirty}
         />
       )}
       {ship && (
