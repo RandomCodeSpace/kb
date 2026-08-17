@@ -43,6 +43,8 @@ func run(
 		err = errors.Join(err, watcher.Close())
 	}()
 	model := newModel(st, watcher, user, ctx)
+	model.boardView.showCancelled, model.preferenceErr = loadCancelledPreference()
+	model.saveCancelled = saveCancelledPreference
 	if _, err := tea.NewProgram(model, options...).Run(); err != nil {
 		return fmt.Errorf("tui: run: %w", err)
 	}

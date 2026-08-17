@@ -116,7 +116,7 @@ func TestModelLoadsRoutesAndRenders(t *testing.T) {
 	if !wide.AltScreen || wide.MouseMode != tea.MouseModeCellMotion {
 		t.Fatalf("view terminal modes = alt:%v mouse:%v", wide.AltScreen, wide.MouseMode)
 	}
-	for _, want := range []string{"kb / Work / alice", "[TO DO]", "1 card(s)", "DOING", "DONE", "ready"} {
+	for _, want := range []string{"kb / Work / alice", "[1 TO DO  1]", "one", "DOING", "DONE", "ready"} {
 		if !strings.Contains(wide.Content, want) {
 			t.Errorf("wide view missing %q:\n%s", want, wide.Content)
 		}
@@ -127,24 +127,24 @@ func TestModelLoadsRoutesAndRenders(t *testing.T) {
 	updated, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 0})
 	m = updated.(Model)
 	narrow := m.View().Content
-	if !strings.Contains(narrow, "[DOING]") || strings.Contains(narrow, "TO DO") {
+	if !strings.Contains(narrow, "[2 DOING  0]") || strings.Contains(narrow, "TO DO") {
 		t.Fatalf("narrow focused view:\n%s", narrow)
 	}
 
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
 	m = updated.(Model)
-	if m.focus != 0 {
-		t.Fatalf("left focus = %d, want 0", m.focus)
+	if m.boardView.column != 0 {
+		t.Fatalf("left focus = %d, want 0", m.boardView.column)
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: 'h'})
 	m = updated.(Model)
-	if m.focus != 2 {
-		t.Fatalf("wrapped focus = %d, want 2", m.focus)
+	if m.boardView.column != 2 {
+		t.Fatalf("wrapped focus = %d, want 2", m.boardView.column)
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: 'l'})
 	m = updated.(Model)
-	if m.focus != 0 {
-		t.Fatalf("l focus = %d, want 0", m.focus)
+	if m.boardView.column != 0 {
+		t.Fatalf("l focus = %d, want 0", m.boardView.column)
 	}
 
 	_, quit := m.Update(tea.KeyPressMsg{Code: 'q'})
@@ -432,7 +432,7 @@ func TestEmptyBoardGolden(t *testing.T) {
 	t.Cleanup(func() { _ = tm.Quit() })
 	var captured bytes.Buffer
 	teatest.WaitFor(t, io.TeeReader(tm.Output(), &captured), func(output []byte) bool {
-		return bytes.Contains(output, []byte("ready | q quit"))
+		return bytes.Contains(output, []byte("ready | j/k cards"))
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	teatest.RequireEqualOutput(t, captured.Bytes())
 	tm.Send(tea.KeyPressMsg{Code: 'q'})
