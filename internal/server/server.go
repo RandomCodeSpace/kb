@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	kbai "github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -48,6 +49,8 @@ type Config struct {
 	// in it is an error, never a silently dropped skill.
 	SkillsDir string
 }
+
+func newLinkClient() *http.Client { return kbai.NewLinkClient() }
 
 type server struct {
 	cfg          Config

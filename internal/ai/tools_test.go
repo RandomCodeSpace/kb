@@ -1,4 +1,4 @@
-package server
+package ai
 
 import (
 	"context"
@@ -17,10 +17,10 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
-func newToolServer(t *testing.T) (*server, *store.Store) {
+func newToolServer(t *testing.T) (*Runner, *store.Store) {
 	t.Helper()
 	st := newTestStore(t)
-	return newServer(Config{}, testStatic, st), st
+	return NewRunner(st, "", nil, nil), st
 }
 
 func runTool(t *testing.T, tool rig.Tool, input string) (string, error) {
@@ -284,7 +284,7 @@ func TestFindSimilarTool(t *testing.T) {
 
 	t.Run("reports a storage failure opaquely", func(t *testing.T) {
 		st := newTestStore(t)
-		s := newServer(Config{}, testStatic, st)
+		s := NewRunner(st, "", nil, nil)
 		if err := st.Close(); err != nil {
 			t.Fatalf("close store: %v", err)
 		}
@@ -298,7 +298,7 @@ func TestFindSimilarTool(t *testing.T) {
 func TestFetchLinkTool(t *testing.T) {
 	// The client is built at newServer time, so the guard override has to be
 	// in place before the server exists.
-	newAllowingServer := func(t *testing.T) *server {
+	newAllowingServer := func(t *testing.T) *Runner {
 		t.Helper()
 		t.Setenv("KB_LINK_ALLOW_PRIVATE", "1")
 		s, _ := newToolServer(t)
@@ -537,7 +537,7 @@ func TestListTasksTool(t *testing.T) {
 
 	t.Run("reports a storage failure opaquely", func(t *testing.T) {
 		closed := newTestStore(t)
-		other := newServer(Config{}, testStatic, closed)
+		other := NewRunner(closed, "", nil, nil)
 		if err := closed.Close(); err != nil {
 			t.Fatalf("close store: %v", err)
 		}

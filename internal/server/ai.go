@@ -12,17 +12,13 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/RandomCodeSpace/rig"
-
-	"github.com/RandomCodeSpace/kb/internal/board"
-	"github.com/RandomCodeSpace/kb/internal/store"
+	kbai "github.com/RandomCodeSpace/kb/internal/ai"
 )
 
 // AITimeout bounds one upstream chat-completion round trip. It is exported so
@@ -173,22 +169,8 @@ const (
 )
 
 // storyDraft is the coerced card draft returned by POST /api/ai/story.
-type storyDraft struct {
-	Title  string       `json:"title"`
-	Emoji  string       `json:"emoji"`
-	Desc   string       `json:"desc"`
-	Prio   int          `json:"prio"`
-	Due    string       `json:"due"`
-	Effort string       `json:"effort"`
-	Tags   []string     `json:"tags"`
-	Checks []draftCheck `json:"checks"`
-	Source int          `json:"-"`
-}
-
-type draftCheck struct {
-	Text string `json:"text"`
-	Done bool   `json:"done"`
-}
+type storyDraft = kbai.Draft
+type draftCheck = kbai.DraftCheck
 
 // aiEndpoint validates the configured base URL and returns the API root the
 // client appends chat/completions to, accepting bases with or without a
@@ -362,38 +344,8 @@ func (s *server) handleAITest(w http.ResponseWriter, r *http.Request, user strin
 // without writing anything, so without leaving a trace. The SSRF guard does
 // not help here; it only blocks private targets.
 func (s *server) runAITest(user string, req aiTestRequest) error {
-	cfg, err := s.storedAIConfig(user)
-	if err != nil {
-		return err
-	}
-	supplied := strings.TrimSpace(req.BaseURL)
-	if strings.TrimSpace(req.Key) == "" && supplied != "" && cfg.key != "" &&
-		!store.SameAIOrigin(cfg.baseURL, supplied) {
-		return &aiError{http.StatusBadRequest, "enter the API key to test a different endpoint"}
-	}
-	cfg = cfg.merge(req)
-	client, err := s.rigClient(cfg)
-	if err != nil {
-		return err
-	}
-	return probeError(client.ProbeToolCalling(context.Background(), cfg.model))
-}
-
-// probeError maps a probe failure onto the status the settings form sees. A
-// model that answers in prose and a reply cut off at the probe budget are the
-// caller's own configuration and are reported as themselves; everything else
-// is an upstream outcome and collapses to a 502, which handleAITest rewrites
-// to one opaque message so a supplied URL cannot become a reachability oracle.
-func probeError(err error) error {
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, rig.ErrNoToolCalling):
-		return &aiError{http.StatusBadRequest, toolCallRequiredMessage}
-	case errors.Is(err, rig.ErrOutputLimit):
-		return &aiError{http.StatusUnprocessableEntity, truncatedReplyMessage}
-	}
-	return &aiError{http.StatusBadGateway, "upstream request failed"}
+	err := s.aiRunner().Probe(context.Background(), user, kbai.Config{BaseURL: req.BaseURL, Model: req.Model, Key: req.Key})
+	return serverAIError(err)
 }
 
 // storyDraftSkillName is the skill POST /api/ai/story runs. The endpoint
@@ -548,19 +500,6 @@ func (s *server) resolveAIStoriesInput(w http.ResponseWriter, r *http.Request, u
 	return aiStoriesInput{adr: forgeIssueADR(issue), link: link, issueURL: issue.URL}, true
 }
 
-func normalizeStoryCount(max int) int {
-	if max == 0 {
-		max = defaultStoryCount
-	}
-	if max < 1 {
-		max = 1
-	}
-	if max > maxStoryCount {
-		max = maxStoryCount
-	}
-	return max
-}
-
 // adrSplitSkillName is the skill /api/ai/stories runs. The endpoint predates
 // the skill runner and keeps its own request and response shape; only the way
 // the drafts are produced is shared.
@@ -625,8 +564,6 @@ func forgeIssueADR(issue forgeIssue) string {
 	return adr
 }
 
-var draftDueRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
-
 // packImportIssues limits raw forge text before one model call while keeping
 // source numbers stable for server-owned provenance after coercion.
 func packImportIssues(issues []forgeIssue) (string, int) {
@@ -666,131 +603,6 @@ func truncateImportText(text string, max int) string {
 	return text
 }
 
-// validateDraft runs a coerced draft through the same field rules every
-// other write path uses, so a hostile reply cannot reach the board even if
-// coerceDraftMap ever loosens. A draft that fails is dropped, not repaired.
-func validateDraft(d storyDraft) error {
-	return store.ValidateTaskFields(board.Task{
-		Title:  d.Title,
-		Emoji:  d.Emoji,
-		Desc:   d.Desc,
-		Due:    d.Due,
-		Effort: d.Effort,
-		Prio:   d.Prio,
-		Tags:   d.Tags,
-	})
-}
-
-// coerceDraftMap clamps one decoded object into the draft contract. Every
-// string that lands on a single markdown line is stripped of control
-// characters first: an upstream reply is untrusted, and a title of
-// "x\n- [x] forged !1" would otherwise serialize as an extra board line.
-func coerceDraftMap(m map[string]any) storyDraft {
-	d := storyDraft{Prio: 3, Tags: []string{}, Checks: []draftCheck{}}
-	coerceDraftTextFields(m, &d)
-	coerceDraftPrio(m, &d)
-	coerceDraftDue(m, &d)
-	coerceDraftEffort(m, &d)
-	coerceDraftTags(m, &d)
-	coerceDraftChecks(m, &d)
-	coerceDraftSource(m, &d)
-	return d
-}
-
-// coerceDraftSource lifts the 1-based forge issue number a card was derived
-// from. Provenance is only ever resolved against the pack the server built, so
-// anything that is not a positive whole number leaves the draft unsourced
-// rather than pointing at an issue nobody packed.
-func coerceDraftSource(m map[string]any, d *storyDraft) {
-	source, ok := m["source"].(float64)
-	if !ok || source < 1 || source != float64(int(source)) {
-		return
-	}
-	d.Source = int(source)
-}
-
-func coerceDraftTextFields(m map[string]any, d *storyDraft) {
-	if v, ok := m["title"].(string); ok {
-		d.Title = strings.TrimSpace(stripControl(v))
-	}
-	if v, ok := m["emoji"].(string); ok {
-		d.Emoji = board.LeadingEmoji(strings.TrimSpace(v))
-	}
-	if v, ok := m["desc"].(string); ok {
-		// Descriptions are serialized as indented lines, so newlines survive
-		// the wire; every other control character is still stripped.
-		d.Desc = stripControlKeepLines(v)
-	}
-}
-
-func coerceDraftPrio(m map[string]any, d *storyDraft) {
-	switch v := m["prio"].(type) {
-	case float64:
-		d.Prio = clampPrio(int(v))
-	case string:
-		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-			d.Prio = clampPrio(n)
-		}
-	}
-}
-
-func coerceDraftDue(m map[string]any, d *storyDraft) {
-	if v, ok := m["due"].(string); ok {
-		due := strings.TrimSpace(v)
-		// Shape and calendar validity both: "2026-13-45" matches the pattern
-		// but is not a date, and every write path rejects it.
-		if draftDueRe.MatchString(due) {
-			if _, err := time.Parse("2006-01-02", due); err == nil {
-				d.Due = due
-			}
-		}
-	}
-}
-
-func coerceDraftEffort(m map[string]any, d *storyDraft) {
-	if v, ok := m["effort"].(string); ok {
-		switch e := strings.ToUpper(strings.TrimSpace(v)); e {
-		case "S", "M", "L":
-			d.Effort = e
-		}
-	}
-}
-
-func coerceDraftTags(m map[string]any, d *storyDraft) {
-	if vs, ok := m["tags"].([]any); ok {
-		for _, v := range vs {
-			tag, ok := v.(string)
-			if !ok {
-				continue
-			}
-			// A tag is one wire token: no whitespace (a space would start a
-			// second token) and no leading '#' (already the tag sigil).
-			tag = strings.TrimSpace(stripControl(tag))
-			if tag == "" || board.ContainsSpace(tag) || tag[0] == '#' {
-				continue
-			}
-			d.Tags = append(d.Tags, tag)
-		}
-	}
-}
-
-func coerceDraftChecks(m map[string]any, d *storyDraft) {
-	if vs, ok := m["checks"].([]any); ok {
-		for _, v := range vs {
-			cm, ok := v.(map[string]any)
-			if !ok {
-				continue
-			}
-			text, _ := cm["text"].(string)
-			if text = strings.TrimSpace(stripControl(text)); text == "" {
-				continue
-			}
-			done, _ := cm["done"].(bool)
-			d.Checks = append(d.Checks, draftCheck{Text: text, Done: done})
-		}
-	}
-}
-
 // logSafe makes an untrusted value safe to interpolate into a log line. The
 // CR/LF removal is spelled out as explicit replacements rather than folded into
 // stripControl's strings.Map because static analysis recognizes the former as a
@@ -824,14 +636,4 @@ func stripControlKeepLines(s string) string {
 		}
 		return r
 	}, strings.ReplaceAll(s, "\r\n", "\n"))
-}
-
-func clampPrio(n int) int {
-	if n < 1 {
-		return 1
-	}
-	if n > 4 {
-		return 4
-	}
-	return n
 }
