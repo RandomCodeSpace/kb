@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/tui/carddetail"
 )
 
 const (
@@ -53,6 +54,7 @@ type Model struct {
 	user          string
 	board         board.Board
 	boardView     boardViewState
+	detail        carddetail.Model
 	width         int
 	height        int
 	loading       bool
@@ -81,11 +83,13 @@ func newModel(
 	user string,
 	ctx context.Context,
 ) Model {
+	detailReader, _ := store.(carddetail.Reader)
 	return Model{
 		store:       store,
 		watcher:     watcher,
 		user:        user,
 		board:       board.Board{Title: "Board"},
+		detail:      carddetail.New(detailReader, user),
 		width:       defaultWidth,
 		height:      defaultHeight,
 		loading:     watcher == nil,
@@ -113,6 +117,25 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.stopped {
 		return m, nil
 	}
+	var detailCmd tea.Cmd
+	if m.detail.IsOpen() {
+		switch msg := message.(type) {
+		case tea.KeyPressMsg:
+			switch msg.String() {
+			case "esc":
+				m.detail.Close()
+				return m, nil
+			case "q", "ctrl+c":
+				// Preserve the root quit contract while the overlay is open.
+			default:
+				return m, m.detail.Update(message)
+			}
+		case boardCardClickedMsg, boardColumnClickedMsg:
+			return m, nil
+		default:
+			detailCmd = m.detail.Update(message)
+		}
+	}
 	switch msg := message.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
@@ -120,13 +143,24 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.stopped = true
 			m.reloadPending = false
 			return m, tea.Quit
+		case "enter":
+			if task, ok := m.selectedTask(); ok {
+				m.detail.Resize(m.width, m.height)
+				return m, m.detail.Open(task)
+			}
+			return m, nil
 		default:
 			if m.boardView.handleKey(msg.String(), m.board) == boardToggledCancelled {
 				return m, m.queueCancelledPreference()
 			}
 		}
 	case boardCardClickedMsg:
-		m.boardView.focusTask(m.board, msg.taskID)
+		if m.boardView.focusTask(m.board, msg.taskID) {
+			if task, ok := m.selectedTask(); ok {
+				m.detail.Resize(m.width, m.height)
+				return m, m.detail.Open(task)
+			}
+		}
 	case boardColumnClickedMsg:
 		m.boardView.focusColumn(msg.status, m.board)
 	case cancelledPreferenceSavedMsg:
@@ -138,16 +172,17 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Height > 0 {
 			m.height = msg.Height
 		}
+		m.detail.Resize(m.width, m.height)
 	case boardLoadedMsg:
 		next := m.finishBoardLoad(msg)
-		return m, next
+		return m, batchCommands(detailCmd, next)
 	case pollTickMsg:
 		return m, m.readDataVersion()
 	case dataVersionMsg:
 		next := m.observeDataVersion(msg)
 		return m, next
 	}
-	return m, nil
+	return m, detailCmd
 }
 
 // observeDataVersion advances the watcher baseline and schedules exactly one
@@ -186,16 +221,32 @@ func (m *Model) observeDataVersion(msg dataVersionMsg) tea.Cmd {
 func (m *Model) finishBoardLoad(msg boardLoadedMsg) tea.Cmd {
 	m.loading = false
 	m.loadErr = msg.err
+	var detailCmd tea.Cmd
 	if msg.err == nil {
 		previous := m.board
 		m.board = msg.board
 		m.boardView.adoptBoard(previous, m.board)
+		detailCmd = m.reconcileDetail()
 	}
 	if !m.reloadPending {
-		return nil
+		return detailCmd
 	}
 	m.reloadPending = false
-	return m.startBoardLoad()
+	return batchCommands(detailCmd, m.startBoardLoad())
+}
+
+func (m *Model) reconcileDetail() tea.Cmd {
+	if !m.detail.IsOpen() {
+		return nil
+	}
+	taskID := m.detail.TaskID()
+	for _, task := range m.board.Tasks {
+		if task.ID == taskID {
+			return m.detail.Refresh(task)
+		}
+	}
+	m.detail.Close()
+	return nil
 }
 
 // startBoardLoad starts a fallback or retry only when no load is active. The
@@ -225,10 +276,30 @@ func pollAfter(load tea.Cmd) tea.Cmd {
 	return tea.Batch(load, schedulePoll())
 }
 
+func batchCommands(commands ...tea.Cmd) tea.Cmd {
+	filtered := make([]tea.Cmd, 0, len(commands))
+	for _, command := range commands {
+		if command != nil {
+			filtered = append(filtered, command)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	if len(filtered) == 1 {
+		return filtered[0]
+	}
+	return tea.Batch(filtered...)
+}
+
 // View renders the responsive read-only board and wires view-derived mouse hit
 // regions back into the update loop. Editing behavior arrives in later slices.
 func (m Model) View() tea.View {
 	content, hits := m.renderBoard()
+	if m.detail.IsOpen() {
+		content = m.detail.Overlay(content, m.width, m.height)
+		hits = nil
+	}
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
