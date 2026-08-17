@@ -985,7 +985,7 @@ func TestFetchIssueUsesEncodedEndpointsAndHeaderOnlyPAT(t *testing.T) {
 						t.Fatalf("comments per_page = %q, want 50", r.URL.Query().Get("per_page"))
 					}
 					comments := make([]map[string]any, 0, 22)
-					for i := 0; i < 22; i++ {
+					for i := range 22 {
 						body := "comment"
 						if i == 1 {
 							body = strings.Repeat("é", 700)

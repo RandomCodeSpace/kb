@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -321,10 +322,8 @@ func parseGitLabRef(source store.ForgeSource, path string) (forgeRef, error) {
 			return ref, nil
 		}
 	}
-	for _, part := range parts {
-		if part == "-" {
-			return forgeRef{}, errors.New("invalid forge reference")
-		}
+	if slices.Contains(parts, "-") {
+		return forgeRef{}, errors.New("invalid forge reference")
 	}
 	return forgeRef{Source: source, Kind: source.Kind, Project: strings.Join(parts, "/")}, nil
 }
@@ -382,10 +381,8 @@ func forgePathParts(path string) ([]string, error) {
 		return nil, errors.New("invalid forge reference")
 	}
 	parts := strings.Split(path, "/")
-	for _, part := range parts {
-		if part == "" {
-			return nil, errors.New("invalid forge reference")
-		}
+	if slices.Contains(parts, "") {
+		return nil, errors.New("invalid forge reference")
 	}
 	return parts, nil
 }
