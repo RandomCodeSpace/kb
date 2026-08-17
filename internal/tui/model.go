@@ -214,10 +214,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			switch key {
 			case "esc":
-				taskID := m.move.lifted.taskID
-				m.board = m.move.cancel("")
-				m.boardView.focusTask(m.filteredBoard(), taskID)
+				m.cancelCardMove("")
 				return m, nil
+			case "q":
+				// The root quit contract remains available while a write is hung.
 			case "enter", "space":
 				return m, m.startCardDrop()
 			case "up", "down", "left", "right", "h", "j", "k", "l":
@@ -227,7 +227,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "s", "c", "1", "2", "3", "4", "tab", "shift+tab", "n", "e", "/", "f", "x":
-				m.board = m.move.cancel("focus changed")
+				m.cancelCardMove("focus changed")
 			default:
 				return m, nil
 			}
@@ -278,7 +278,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.move.lifted != nil && !m.move.saving {
-			m.board = m.move.cancel("focus changed")
+			m.cancelCardMove("focus changed")
 		}
 		m.filter.blur()
 		if m.boardView.focusTask(m.filteredBoard(), msg.taskID) {
@@ -292,7 +292,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.move.lifted != nil && !m.move.saving {
-			m.board = m.move.cancel("focus changed")
+			m.cancelCardMove("focus changed")
 		}
 		m.filter.blur()
 		m.boardView.focusColumn(msg.status, m.filteredBoard())
@@ -301,7 +301,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.move.lifted != nil {
-			m.board = m.move.cancel("focus changed")
+			m.cancelCardMove("focus changed")
 		}
 		m.filter.blur()
 		if !m.boardView.focusTask(m.filteredBoard(), msg.taskID) {
@@ -321,7 +321,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if !m.move.lifted.dragged {
 			taskID := m.move.lifted.taskID
-			m.board = m.move.cancel("")
+			m.cancelCardMove("")
 			m.move.status = ""
 			m.boardView.focusTask(m.filteredBoard(), taskID)
 			if task, ok := m.selectedTask(); ok {
@@ -338,7 +338,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.move.lifted != nil {
-			m.board = m.move.cancel("focus changed")
+			m.cancelCardMove("focus changed")
 		}
 		return m, m.filter.focusText()
 	case filterLabelClickedMsg:
@@ -346,7 +346,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.move.lifted != nil {
-			m.board = m.move.cancel("focus changed")
+			m.cancelCardMove("focus changed")
 		}
 		return m, m.mutateFilter(func(filter *boardFilterState) { filter.toggleTag(msg.tag) })
 	case filterClearClickedMsg:
@@ -354,7 +354,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.move.lifted != nil {
-			m.board = m.move.cancel("focus changed")
+			m.cancelCardMove("focus changed")
 		}
 		return m, m.mutateFilter(func(filter *boardFilterState) { filter.clear() })
 	case preferenceSavedMsg:
@@ -491,13 +491,25 @@ func (m *Model) requireFreshBoard() tea.Cmd {
 		return nil
 	}
 	if m.move.lifted != nil {
-		m.board = m.move.cancel("board changed; refreshing")
+		m.cancelCardMove("board changed; refreshing")
 	}
 	if m.loading {
 		m.reloadPending = true
 		return nil
 	}
 	return m.startBoardLoad()
+}
+
+func (m *Model) cancelCardMove(reason string) {
+	if m.move.lifted == nil {
+		return
+	}
+	taskID := m.move.lifted.taskID
+	m.board = m.move.cancel(reason)
+	filtered := m.filteredBoard()
+	if !m.boardView.focusTask(filtered, taskID) {
+		m.boardView.normalizeSelection(filtered)
+	}
 }
 
 func pollAfter(load tea.Cmd) tea.Cmd {

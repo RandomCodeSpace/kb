@@ -31,7 +31,7 @@ func (m *Model) startCardDrop() tea.Cmd {
 	)
 	if m.moveStore == nil {
 		title := lift.title
-		m.board = m.move.cancel("")
+		m.cancelCardMove("")
 		m.move.status = fmt.Sprintf("Move failed for %s: store does not support card moves", title)
 		m.move.statusError = true
 		return nil

@@ -95,6 +95,97 @@ func TestIntegratedSavedSelectionRespectsFilterVisibility(t *testing.T) {
 	}
 }
 
+func TestIntegratedSavedSelectionWaitsForFreshSuccessor(t *testing.T) {
+	old := board.Task{ID: "old", Title: "keep old", Status: board.StatusTodo}
+	visible := board.Task{ID: "visible", Title: "keep visible", Status: board.StatusTodo}
+	hidden := board.Task{ID: "hidden", Title: "filtered out", Status: board.StatusTodo}
+	for _, test := range []struct {
+		name    string
+		savedID string
+		fresh   board.Board
+		wantID  string
+	}{
+		{name: "visible", savedID: visible.ID, fresh: board.Board{Tasks: []board.Task{old, visible}}, wantID: visible.ID},
+		{name: "hidden", savedID: hidden.ID, fresh: board.Board{Tasks: []board.Task{old, hidden}}, wantID: old.ID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := NewModel(stubBoardReader{board: test.fresh}, nil, "alice")
+			m.board = board.Board{Tasks: []board.Task{old}}
+			m.filter.input.SetValue("keep")
+			m.boardView.focusTask(m.filteredBoard(), old.ID)
+			m.loading = true
+			m.reloadPending = true
+			m.selectAfterLoad = test.savedID
+
+			successor := m.finishBoardLoad(boardLoadedMsg{board: board.Board{Tasks: []board.Task{old}}})
+			if successor == nil || m.selectAfterLoad != test.savedID {
+				t.Fatalf("stale load discarded saved id: successor=%v pending=%q", successor, m.selectAfterLoad)
+			}
+			completeBoardLoad(t, &m, successor)
+			selected, ok := m.selectedTask()
+			if !ok || selected.ID != test.wantID || m.selectAfterLoad != "" {
+				t.Fatalf("fresh successor selection = %+v,%v pending=%q", selected, ok, m.selectAfterLoad)
+			}
+		})
+	}
+}
+
+func TestIntegratedMoveCancellationRestoresIdentity(t *testing.T) {
+	t.Run("edit", func(t *testing.T) {
+		m, first, _ := integratedMultiCardModel(t)
+		previewFirstBelowSecond(t, &m, first.ID)
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: 'e'})
+		if m.move.lifted != nil || !m.editor.IsOpen() || m.editor.TaskID() != first.ID {
+			t.Fatalf("edit after cancel = move:%#v editor:%v task:%q", m.move, m.editor.IsOpen(), m.editor.TaskID())
+		}
+	})
+
+	t.Run("new", func(t *testing.T) {
+		m, first, _ := integratedMultiCardModel(t)
+		previewFirstBelowSecond(t, &m, first.ID)
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: 'n'})
+		selected, ok := m.selectedTask()
+		if m.move.lifted != nil || !m.editor.IsOpen() || !ok || selected.ID != first.ID {
+			t.Fatalf("new after cancel = move:%#v editor:%v selected:%+v,%v", m.move, m.editor.IsOpen(), selected, ok)
+		}
+	})
+
+	t.Run("filter hides lifted card", func(t *testing.T) {
+		m, first, second := integratedMultiCardModel(t)
+		previewFirstBelowSecond(t, &m, first.ID)
+		updateTestModel(t, &m, filterLabelClickedMsg{tag: "ui"})
+		selected, ok := m.selectedTask()
+		if m.move.lifted != nil || !reflect.DeepEqual(m.filter.tags, []string{"ui"}) || !ok || selected.ID != second.ID {
+			t.Fatalf("filter after cancel = move:%#v tags:%v selected:%+v,%v", m.move, m.filter.tags, selected, ok)
+		}
+	})
+
+	t.Run("watcher refresh", func(t *testing.T) {
+		m, first, _ := integratedMultiCardModel(t)
+		previewFirstBelowSecond(t, &m, first.ID)
+		load := m.requireFreshBoard()
+		selected, ok := m.selectedTask()
+		if load == nil || m.move.lifted != nil || !ok || selected.ID != first.ID {
+			t.Fatalf("watcher cancel = load:%v move:%#v selected:%+v,%v", load, m.move, selected, ok)
+		}
+		completeBoardLoad(t, &m, load)
+		selected, ok = m.selectedTask()
+		if !ok || selected.ID != first.ID {
+			t.Fatalf("watcher refresh selection = %+v,%v", selected, ok)
+		}
+	})
+}
+
+func TestIntegratedHungMoveWriteStillQuits(t *testing.T) {
+	m, first, _ := integratedMultiCardModel(t)
+	previewFirstBelowSecond(t, &m, first.ID)
+	m.move.saving = true
+	quit := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'q'})
+	if quit == nil || !m.stopped {
+		t.Fatalf("q during move write = command:%v stopped:%v", quit, m.stopped)
+	}
+}
+
 func TestIntegratedFilteredMovePreservesHiddenOrder(t *testing.T) {
 	current := board.Board{Tasks: []board.Task{
 		{ID: "hidden-0", Title: "H0", Status: board.StatusTodo},
@@ -217,4 +308,37 @@ func hiddenIDs(current board.Board) []string {
 		}
 	}
 	return ids
+}
+
+func integratedMultiCardModel(t *testing.T) (Model, board.Task, board.Task) {
+	t.Helper()
+	st := newSettingsTestStore(t)
+	first, err := st.AddTask("alice", board.Task{
+		Title: "A", Status: board.StatusTodo, Prio: 3, Tags: []string{"bug"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.AddTask("alice", board.Task{
+		Title: "B", Status: board.StatusTodo, Prio: 3, Tags: []string{"ui"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(st, nil, "alice")
+	completeBoardLoad(t, &m, m.Init())
+	if !m.boardView.focusTask(m.filteredBoard(), first.ID) {
+		t.Fatal("could not focus first card")
+	}
+	return m, first, second
+}
+
+func previewFirstBelowSecond(t *testing.T, m *Model, firstID string) {
+	t.Helper()
+	updateTestModel(t, m, tea.KeyPressMsg{Code: tea.KeySpace})
+	updateTestModel(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	selected, ok := m.selectedTask()
+	if m.move.lifted == nil || !ok || selected.ID != firstID || m.boardView.rows[0] != 1 {
+		t.Fatalf("preview setup = move:%#v selected:%+v,%v row:%d", m.move, selected, ok, m.boardView.rows[0])
+	}
 }
