@@ -12,10 +12,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/RandomCodeSpace/rig"
 
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
@@ -319,10 +322,8 @@ func parseGitLabRef(source store.ForgeSource, path string) (forgeRef, error) {
 			return ref, nil
 		}
 	}
-	for _, part := range parts {
-		if part == "-" {
-			return forgeRef{}, errors.New("invalid forge reference")
-		}
+	if slices.Contains(parts, "-") {
+		return forgeRef{}, errors.New("invalid forge reference")
 	}
 	return forgeRef{Source: source, Kind: source.Kind, Project: strings.Join(parts, "/")}, nil
 }
@@ -380,10 +381,8 @@ func forgePathParts(path string) ([]string, error) {
 		return nil, errors.New("invalid forge reference")
 	}
 	parts := strings.Split(path, "/")
-	for _, part := range parts {
-		if part == "" {
-			return nil, errors.New("invalid forge reference")
-		}
+	if slices.Contains(parts, "") {
+		return nil, errors.New("invalid forge reference")
 	}
 	return parts, nil
 }
@@ -911,6 +910,24 @@ func forgeAPIBase(kind, baseURL string) (string, error) {
 	return u.String(), nil
 }
 
+// importTransformSkillName is the skill the import preview runs. The endpoint
+// keeps its own request and response shape; only the way the drafts are
+// produced is shared with the other skill callers.
+const importTransformSkillName = "import-transform"
+
+// importPartialTransformNote tells the caller the draft list is short because
+// the run ran out of room, not because the issues were judged noise.
+const importPartialTransformNote = "the assistant stopped early — some issues produced no draft"
+
+// appendImportNote joins a second note onto whatever fetchIssues already said,
+// so a rate-limited fetch and a truncated transform can both be reported.
+func appendImportNote(note, extra string) string {
+	if note == "" {
+		return extra
+	}
+	return note + "; " + extra
+}
+
 // handleImportPreview transforms a bounded, configured forge selection once;
 // it never writes cards or provenance, which remain an explicit later commit.
 func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, user string) {
@@ -978,29 +995,43 @@ func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, use
 		writeJSON(w, response)
 		return
 	}
-	content, err := s.chatCompletion(user, []chatMessage{
-		{Role: "system", Content: importSystemPrompt},
-		{Role: "user", Content: "Transform these numbered forge issues into kanban-card proposals:\n\n" + packed},
-	}, aiImportMaxTokens, true)
+	// Forge issues are third-party text — anyone who can comment on an issue
+	// writes part of this prompt — so the run is read-only: no board write, no
+	// outbound fetch. The card cap is stated as maxImportIssues rather than left
+	// to the default, because a pack may carry that many sources. The closing
+	// commentary is dropped; this endpoint's response shape is fixed.
+	run, err := s.runSkillForRequest(w, r, user, skillScopeReadOnly, importTransformSkillName, "Transform these numbered forge issues into kanban-card proposals:\n\n"+packed, maxImportIssues, aiImportMaxTokens)
 	if err != nil {
 		writeAIError(w, user, "import preview", err)
 		return
 	}
-	drafts, err := coerceDrafts(content, maxImportIssues)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+	// A run cut short at a budget still returns the cards it did propose, and
+	// this endpoint drops the commentary that would have said so — so the note
+	// says it instead. Without it a truncated import is a 200 that reads as a
+	// complete one, and the issues that never became drafts look like issues
+	// the model deliberately skipped.
+	if run.Partial {
+		response.Note = appendImportNote(response.Note, importPartialTransformNote)
 	}
-	response.Drafts = buildImportPreviewDrafts(ref, drafts, issues, duplicates)
+	response.Drafts = buildImportPreviewDrafts(ref, run.Cards, issues, duplicates)
 	writeJSON(w, response)
 }
 
+// buildImportPreviewDrafts attaches forge provenance to the drafts the run
+// proposed. One issue yields at most one linked draft: the model is told never
+// to split an issue in two, and nothing enforces that, so a repeated source
+// number would otherwise hand two drafts the same link, external key and
+// duplicate pointer — and accepting both would put two board cards on one
+// external key. The repeat keeps its card and loses only the provenance it
+// cannot own.
 func buildImportPreviewDrafts(ref forgeRef, drafts []storyDraft, issues []forgeIssue, duplicates []*importDuplicate) []importPreviewDraft {
 	previews := make([]importPreviewDraft, 0, len(drafts))
+	claimed := make(map[int]bool, len(drafts))
 	for _, draft := range drafts {
 		preview := importPreviewDraft{storyDraft: draft}
 		preview.Tags = stripModelLinkTags(preview.Tags)
-		if draft.Source > 0 && draft.Source <= len(issues) {
+		if draft.Source > 0 && draft.Source <= len(issues) && !claimed[draft.Source] {
+			claimed[draft.Source] = true
 			issue := issues[draft.Source-1]
 			link, externalKey := importIssueProvenance(ref, issue)
 			preview.Tags = append(preview.Tags, linkTagPrefix+link)
@@ -1325,9 +1356,24 @@ func (s *server) importDriftBaseline(user, externalKey string, current store.Imp
 	return current, false, nil
 }
 
+// importDriftSummaryPrompt is the whole instruction the drift summary gets.
+// The run carries no tools: it compares two pieces of text the caller already
+// holds, so a tool would only be another way for third-party issue text to
+// reach the board.
+const importDriftSummaryPrompt = "Summarize an imported issue change using only the supplied titles and excerpts."
+
+// importDriftSummary is best-effort prose about what changed upstream. Every
+// failure — no configuration, a bad endpoint, an upstream that never answers —
+// degrades to no summary, because a drift comparison the caller asked for is
+// valid without one. One run is one round trip: the loop is capped at a single
+// iteration, and a toolless request cannot ask for a second.
 func (s *server) importDriftSummary(user string, baseline, current store.ImportBaseline) string {
 	cfg, err := s.storedAIConfig(user)
 	if err != nil || strings.TrimSpace(cfg.baseURL) == "" {
+		return ""
+	}
+	client, err := s.rigClient(cfg)
+	if err != nil {
 		return ""
 	}
 	prompt := fmt.Sprintf(
@@ -1338,17 +1384,17 @@ func (s *server) importDriftSummary(user string, baseline, current store.ImportB
 		current.Excerpt,
 	)
 	prompt = truncateImportText(prompt, maxImportPackBytes)
-	msg, err := s.chat(user, cfg, chatCall{
-		msgs: []chatMessage{
-			{Role: "system", Content: "Summarize an imported issue change using only the supplied titles and excerpts."},
-			{Role: "user", Content: prompt},
-		},
-		maxTokens: aiDriftMaxTokens,
+	res, err := client.Run(context.Background(), rig.RunRequest{
+		Model:         cfg.model,
+		System:        importDriftSummaryPrompt,
+		Prompt:        prompt,
+		MaxTokens:     skillBudget(aiDriftMaxTokens),
+		MaxIterations: 1,
 	})
 	if err != nil {
 		return ""
 	}
-	return truncateImportText(strings.TrimSpace(msg.Content), maxImportCommentBytes)
+	return truncateImportText(strings.TrimSpace(res.Text), maxImportCommentBytes)
 }
 
 func (s *server) importDuplicates(scope string, issues []forgeIssue) ([]*importDuplicate, error) {

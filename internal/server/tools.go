@@ -97,6 +97,7 @@ func proposeCardTool(c *cardCollector) rig.Tool {
 			"effort": schemaEnum("effort estimate", "S", "M", "L", ""),
 			"tags":   schemaStrings("labels, single words with no spaces and no leading '#'"),
 			"checks": schemaChecks("acceptance criteria as checklist items"),
+			"source": schemaInt("1-based Source number of the forge issue this card came from; only when the input is numbered forge issues"),
 		}, "title"),
 		Run: func(_ context.Context, input json.RawMessage) (string, error) {
 			if c.atCap() {

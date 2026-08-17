@@ -381,15 +381,9 @@ func TestRemainingPureAndNetworkErrorBranches(t *testing.T) {
 	if _, err := transport.DialContext(context.Background(), "tcp", "invalid-address"); err == nil {
 		t.Fatal("guarded transport accepted invalid dial address")
 	}
-	if _, err := coerceDraft("{"); err == nil {
-		t.Fatal("coerceDraft accepted malformed JSON")
-	}
-	if _, err := coerceDrafts("{", 1); err == nil {
-		t.Fatal("coerceDrafts accepted malformed JSON")
-	}
-	draft, err := coerceDraft(`{"title":"x","prio":"3","due":"2026-01-01"}`)
-	if err != nil || draft.Prio != 3 || draft.Due != "2026-01-01" {
-		t.Fatalf("draft = %+v, err=%v", draft, err)
+	draft := coerceDraftMap(map[string]any{"title": "x", "prio": "3", "due": "2026-01-01"})
+	if draft.Prio != 3 || draft.Due != "2026-01-01" {
+		t.Fatalf("draft = %+v", draft)
 	}
 	if got := forgeIssueADR(forgeIssue{Title: "x", Comments: []string{"one"}}); !strings.Contains(got, "- one") {
 		t.Fatalf("ADR = %q", got)
