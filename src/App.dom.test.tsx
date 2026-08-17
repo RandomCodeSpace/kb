@@ -34,7 +34,10 @@ const state = vi.hoisted(() => ({
   tombstones: [] as Array<{ taskId: string; reason: string }>,
   labels: [] as string[],
   settings: { has_key: false, ai_base_url: '' },
+  settingsError: null as unknown,
   sources: [] as Array<{ name: string; kind: 'github' | 'gitlab' }>,
+  integrationsError: null as unknown,
+  createHold: null as Promise<void> | null,
   savedIdentities: [] as Identity[],
   clearedIdentity: 0,
   exported: [] as string[],
@@ -146,6 +149,7 @@ vi.mock('./lib/api', async () => {
     },
     createTask: async (_identity: Identity, draft: TaskDraft) => {
       state.calls.push(`create:${draft.title}`);
+      if (state.createHold) await state.createHold;
       const refused = state.createErrors[draft.title];
       if (refused) throw refused;
       if (state.writeError) raise(state.writeError);
@@ -210,8 +214,22 @@ vi.mock('./lib/api', async () => {
       }
     },
     getLabels: async () => state.labels,
-    getSettings: async () => state.settings,
-    getIntegrations: async () => state.sources,
+    getSettings: async () => {
+      if (state.settingsError) {
+        const error = state.settingsError;
+        state.settingsError = null;
+        throw error;
+      }
+      return state.settings;
+    },
+    getIntegrations: async () => {
+      if (state.integrationsError) {
+        const error = state.integrationsError;
+        state.integrationsError = null;
+        throw error;
+      }
+      return state.sources;
+    },
     aiStory: vi.fn(async () => ({ title: 'AI draft' })),
     aiStories: vi.fn(async () => [{ title: 'AI story' }]),
     importPreview: vi.fn(async () => ({ drafts: [] })),
@@ -285,11 +303,12 @@ vi.mock('./components/IdentityGate', () => ({
 }));
 
 vi.mock('./components/CardModal', () => ({
-  CardModal: ({ state: modal, onSave, onDelete, onClose, aiDraft }: {
+  CardModal: ({ state: modal, onSave, onDelete, onClose, onDirty, aiDraft }: {
     state: { mode: 'add'; status: Status } | { mode: 'edit'; task: Task };
     onSave: (save: import('./components/CardEditor').CardSave) => void;
     onDelete: (id: string) => void;
     onClose: () => void;
+    onDirty?: () => void;
     aiDraft?: unknown;
   }) => (
     <div role="dialog" aria-label="card modal">
@@ -307,6 +326,7 @@ vi.mock('./components/CardModal', () => ({
           },
       )}>save card</button>
       {modal.mode === 'edit' && <button onClick={() => onDelete(modal.task.id)}>delete card</button>}
+      {onDirty && <button onClick={onDirty}>mark dirty</button>}
       <button onClick={onClose}>close card</button>
     </div>
   ),
@@ -414,7 +434,10 @@ beforeEach(() => {
   state.tombstones = [];
   state.labels = [];
   state.settings = { has_key: false, ai_base_url: '' };
+  state.settingsError = null;
   state.sources = [];
+  state.integrationsError = null;
+  state.createHold = null;
   state.savedIdentities = [];
   state.clearedIdentity = 0;
   state.exported = [];
@@ -1030,6 +1053,118 @@ describe('filtering', () => {
     await user.click(screen.getByRole('button', { name: /Cancelled/ }));
     expect(screen.getByRole('button', { name: /Cancelled/ }).getAttribute('aria-pressed')).toBe('true');
     expect(localStorage.getItem('kb.showCancelled.v1')).toBe('1');
+  });
+});
+
+describe('pre-freeze hardening', () => {
+  it('keeps the editor open with its content when a save is refused', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+    await user.click(screen.getByRole('button', { name: 'edit task-1' }));
+
+    state.writeError = new Error('save refused');
+    await user.click(screen.getByRole('button', { name: 'save card' }));
+    await screen.findAllByText(/That change was not saved: save refused/);
+    expect(screen.getByRole('dialog', { name: 'card modal' })).toBeTruthy();
+
+    // The retry lands and only then does the editor close.
+    await user.click(screen.getByRole('button', { name: 'save card' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'card modal' })).toBeNull());
+    expect(shown()).toContain('First task edited:todo:false');
+  });
+
+  it('creates one card when save is pressed twice before the server answers', async () => {
+    let release = () => {};
+    state.createHold = new Promise((resolve) => {
+      release = resolve;
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+    await user.click(screen.getByRole('button', { name: 'add todo' }));
+    await user.click(screen.getByRole('button', { name: 'save card' }));
+    await user.click(screen.getByRole('button', { name: 'save card' }));
+    release();
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'card modal' })).toBeNull());
+    expect(state.created).toBe(1);
+  });
+
+  it('asks before discarding an edited card, and only discards on confirm', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+    await user.click(screen.getByRole('button', { name: 'edit task-1' }));
+    await user.click(screen.getByRole('button', { name: 'mark dirty' }));
+
+    await user.click(screen.getByRole('button', { name: 'close card' }));
+    // The editor is still there behind the question.
+    expect(screen.getByRole('dialog', { name: 'card modal' })).toBeTruthy();
+    await user.click(
+      within(screen.getByRole('dialog', { name: 'Discard unsaved changes?' }))
+        .getByRole('button', { name: 'confirm action' }),
+    );
+    expect(screen.queryByRole('dialog', { name: 'card modal' })).toBeNull();
+  });
+
+  it('closes an untouched card without asking', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+    await user.click(screen.getByRole('button', { name: 'edit task-1' }));
+    await user.click(screen.getByRole('button', { name: 'close card' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('catches up on outside writes when the tab regains focus, throttled', async () => {
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+    const listsBefore = state.calls.filter((c) => c === 'list').length;
+
+    // A CLI write happens while the tab is away; focus catches it up.
+    state.tasks = [...state.tasks, seed({ id: 'cli-1', title: 'From the CLI', checks: [] })];
+    fireEvent(window, new Event('focus'));
+    await screen.findByText('From the CLI:todo:');
+
+    // A second wake inside the throttle window sends nothing.
+    fireEvent(document, new Event('visibilitychange'));
+    expect(state.calls.filter((c) => c === 'list').length).toBe(listsBefore + 1);
+  });
+
+  it('ignores a wake while the tab is hidden', async () => {
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+    const listsBefore = state.calls.filter((c) => c === 'list').length;
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'hidden',
+      configurable: true,
+    });
+    fireEvent(document, new Event('visibilitychange'));
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'visible',
+      configurable: true,
+    });
+    expect(state.calls.filter((c) => c === 'list').length).toBe(listsBefore);
+  });
+
+  it('says why AI and import actions are hidden when their config fails to load', async () => {
+    state.settingsError = new Error('boom');
+    state.integrationsError = new Error('boom');
+    render(<App />);
+    await screen.findAllByText(/AI settings could not be loaded/);
+    await screen.findAllByText(/Forge sources could not be loaded/);
+  });
+
+  it('stays quiet about hidden actions when the session itself expired', async () => {
+    const { ReauthRequiredError } = await import('./lib/auth');
+    state.settingsError = new ReauthRequiredError('expired');
+    state.integrationsError = new ReauthRequiredError('expired');
+    render(<App />);
+    await screen.findByText('First task:todo:false');
+    expect(screen.queryByText(/AI settings could not be loaded/)).toBeNull();
+    expect(screen.queryByText(/Forge sources could not be loaded/)).toBeNull();
   });
 });
 
