@@ -1,0 +1,22 @@
+kb / settings / alice
+
+AI SETTINGS
+  Base URL: https://api.example/v1
+  Model: gpt-example
+  API key (saved): blank keeps saved key
+> [Test connection]
+  [Save AI settings]
+
+FORGE INTEGRATIONS
+
+-- work (saved) --
+  Name: work (locked)
+  Kind: gitlab (locked)
+  Base URL: https://gitlab.example
+  Project: owner/project (optional)
+  Token (saved): blank keeps saved token
+  [Test]
+  [Save]
+  [Remove]
+  [+ Add integration]
+ready | tab navigate | enter act | esc back

@@ -70,6 +70,8 @@ type Model struct {
 	preferenceErr error
 	prefSaving    bool
 	prefPending   *bool
+	settings      *settingsModel
+	settingsNew   func() *settingsModel
 }
 
 // NewModel creates the root model for one local board owner.
@@ -117,6 +119,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.stopped {
 		return m, nil
 	}
+	if m.settings != nil && isSettingsMessage(message) {
+		command := m.settings.Update(message)
+		if m.settings.closed {
+			m.settings = nil
+		}
+		return m, command
+	}
 	var detailCmd tea.Cmd
 	if m.detail.IsOpen() {
 		switch msg := message.(type) {
@@ -138,11 +147,31 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	switch msg := message.(type) {
 	case tea.KeyPressMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
+		if msg.String() == "ctrl+c" {
+			if m.settings != nil {
+				m.settings.Close()
+			}
 			m.stopped = true
 			m.reloadPending = false
 			return m, tea.Quit
+		}
+		if m.settings != nil {
+			command := m.settings.Update(msg)
+			if m.settings.closed {
+				m.settings = nil
+			}
+			return m, command
+		}
+		switch msg.String() {
+		case "q":
+			m.stopped = true
+			m.reloadPending = false
+			return m, tea.Quit
+		case "s":
+			if m.settingsNew != nil {
+				m.settings = m.settingsNew()
+				return m, m.settings.Init()
+			}
 		case "enter":
 			if task, ok := m.selectedTask(); ok {
 				m.detail.Resize(m.width, m.height)
@@ -300,10 +329,16 @@ func (m Model) View() tea.View {
 		content = m.detail.Overlay(content, m.width, m.height)
 		hits = nil
 	}
+	if m.settings != nil {
+		content = m.settings.View(m.width, m.height)
+		hits = nil
+	}
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
-	view.OnMouse = boardMouseHandler(hits)
+	if m.settings == nil {
+		view.OnMouse = boardMouseHandler(hits)
+	}
 	return view
 }
 

@@ -258,8 +258,37 @@ func (m Model) renderBoard() (string, []boardHit) {
 	if m.boardView.showCancelled {
 		cancelled = "on"
 	}
-	footer := fitLine(state+" | j/k cards | h/l/tab columns | 1-4 jump | c cancelled:"+cancelled+" | q quit", width)
+	help := "j/k cards | h/l/tab columns | 1-4 jump | c cancelled:" + cancelled + " | q quit"
+	if m.settingsNew != nil {
+		footer := settingsBoardFooter(state, cancelled, width)
+		return strings.Join([]string{header, body, footer}, "\n"), hits
+	}
+	footer := fitLine(state+" | "+help, width)
 	return strings.Join([]string{header, body, footer}, "\n"), hits
+}
+
+func settingsBoardFooter(state, cancelled string, width int) string {
+	candidates := [][]string{
+		{"s settings", "j/k cards", "h/l/tab columns", "1-4 jump", "c cancelled:" + cancelled, "q quit"},
+		{"s settings", "j/k cards", "h/l/tab columns", "c cancelled:" + cancelled, "q quit"},
+		{"s settings", "j/k cards", "h/l/tab columns", "q quit"},
+		{"s settings", "j/k", "h/l/tab", "q quit"},
+		{"s settings", "j/k h/l", "q quit"},
+		{"s", "j/k h/l", "q quit"},
+		{"s", "nav", "q quit"},
+		{"s", "q quit"},
+		{"q quit"},
+	}
+	minimumStateWidth := min(ansi.StringWidth(state), 5)
+	for _, candidate := range candidates {
+		help := strings.Join(candidate, " | ")
+		stateWidth := width - ansi.StringWidth(help) - 3
+		if stateWidth < minimumStateWidth {
+			continue
+		}
+		return fitLine(state, stateWidth) + " | " + help
+	}
+	return fitLine("q quit", width)
 }
 
 func (m Model) render() string {

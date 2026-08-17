@@ -1565,7 +1565,7 @@ func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 
-	request, err := newForgeTestRequest(r.Context(), kind, target)
+	request, err := newForgeTestRequest(r.Context(), kind, target, "")
 	if err != nil {
 		writeJSON(w, forgeTestResponse{Error: err.Error()})
 		return
@@ -1614,19 +1614,28 @@ func trimmedForgeProbeValue(value *string) string {
 	return strings.TrimSpace(*value)
 }
 
-func newForgeTestRequest(ctx context.Context, kind string, target forgeTestTarget) (*http.Request, error) {
+func newForgeTestRequest(ctx context.Context, kind string, target forgeTestTarget, project string) (*http.Request, error) {
 	apiBase, err := forgeAPIBase(kind, target.baseURL)
 	if err != nil {
 		return nil, err
 	}
+	project = strings.TrimSpace(project)
 	endpoint := apiBase
-	switch kind {
-	case "gitlab":
-		endpoint += "/version"
-	case "github":
-		endpoint += "/user"
-	default:
-		return nil, errors.New("invalid forge kind")
+	if project != "" {
+		projectPath, err := forgeProjectPath(forgeRef{Kind: kind, Project: project})
+		if err != nil {
+			return nil, err
+		}
+		endpoint += projectPath
+	} else {
+		switch kind {
+		case "gitlab":
+			endpoint += "/version"
+		case "github":
+			endpoint += "/user"
+		default:
+			return nil, errors.New("invalid forge kind")
+		}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -1649,21 +1658,26 @@ func setForgeTestHeaders(request *http.Request, kind, pat string) {
 }
 
 func (s *server) forgeConnectionOK(request *http.Request, user string) bool {
-	response, err := s.forgeClient.Do(request)
+	err := executeForgeTest(s.forgeClient, request)
 	if err != nil {
 		log.Printf("forge: connection test for %s failed: %v", user, err)
 		return false
 	}
-	drainErr := drainForgeResponse(response)
-	if drainErr != nil {
-		log.Printf("forge: connection test for %s failed while closing response: %v", user, drainErr)
-		return false
+	return true
+}
+
+func executeForgeTest(client *http.Client, request *http.Request) error {
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	if err := drainForgeResponse(response); err != nil {
+		return fmt.Errorf("close response: %w", err)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		log.Printf("forge: connection test for %s failed: upstream status %d", user, response.StatusCode)
-		return false
+		return fmt.Errorf("upstream status %d", response.StatusCode)
 	}
-	return true
+	return nil
 }
 
 func drainForgeResponse(response *http.Response) error {

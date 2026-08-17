@@ -20,8 +20,20 @@ type watcherOpener func(context.Context, string) (versionWatcher, error)
 // Run opens the data-version watcher and runs the full-screen program.
 // Program options are accepted for deterministic tests; production passes none.
 func Run(st *store.Store, databasePath, user string, options ...tea.ProgramOption) (err error) {
-	return run(st, databasePath, user, func(ctx context.Context, path string) (versionWatcher, error) {
+	return runWithSettings(st, databasePath, user, func(ctx context.Context, path string) (versionWatcher, error) {
 		return OpenDataVersionWatcher(ctx, path)
+	}, options...)
+}
+
+func runWithSettings(
+	st *store.Store,
+	databasePath string,
+	user string,
+	openWatcher watcherOpener,
+	options ...tea.ProgramOption,
+) (err error) {
+	return runProgram(st, databasePath, user, openWatcher, func(ctx context.Context) *settingsModel {
+		return newSettingsModel(st, user, ctx)
 	}, options...)
 }
 
@@ -30,6 +42,17 @@ func run(
 	databasePath string,
 	user string,
 	openWatcher watcherOpener,
+	options ...tea.ProgramOption,
+) (err error) {
+	return runProgram(st, databasePath, user, openWatcher, nil, options...)
+}
+
+func runProgram(
+	st boardReader,
+	databasePath string,
+	user string,
+	openWatcher watcherOpener,
+	settingsNew func(context.Context) *settingsModel,
 	options ...tea.ProgramOption,
 ) (err error) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -54,6 +77,9 @@ func run(
 			return preferencePathErr
 		}
 		return saveCancelledPreference(preferencePath, show)
+	}
+	if settingsNew != nil {
+		model.settingsNew = func() *settingsModel { return settingsNew(ctx) }
 	}
 	if _, err := tea.NewProgram(model, options...).Run(); err != nil {
 		return fmt.Errorf("tui: run: %w", err)

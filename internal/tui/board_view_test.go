@@ -291,6 +291,65 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	}
 }
 
+func TestBoardFooterPrioritizesProductionSettingsActions(t *testing.T) {
+	model := NewModel(stubBoardReader{}, nil, "alice")
+	model.loading = false
+	model.settingsNew = func() *settingsModel { return nil }
+	for _, test := range []struct {
+		width   int
+		want    []string
+		notWant []string
+	}{
+		{
+			width: 80,
+			want:  []string{"s settings", "j/k cards", "h/l/tab columns", "c cancelled:off", "q quit"},
+			notWant: []string{
+				"1-4 jump",
+			},
+		},
+		{
+			width:   40,
+			want:    []string{"s settings", "j/k h/l", "q quit"},
+			notWant: []string{"1-4 jump", "c cancelled:off"},
+		},
+	} {
+		model.width = test.width
+		content, _ := model.renderBoard()
+		lines := strings.Split(plain(content), "\n")
+		footer := lines[len(lines)-1]
+		for _, want := range test.want {
+			if !strings.Contains(footer, want) {
+				t.Errorf("width %d footer missing %q: %q", test.width, want, footer)
+			}
+		}
+		for _, notWant := range test.notWant {
+			if strings.Contains(footer, notWant) {
+				t.Errorf("width %d footer retained lower-priority %q: %q", test.width, notWant, footer)
+			}
+		}
+		if ansi.StringWidth(footer) > test.width {
+			t.Errorf("width %d footer rendered %d cells: %q", test.width, ansi.StringWidth(footer), footer)
+		}
+	}
+}
+
+func TestBoardFooterWithoutSettingsKeepsBoardHints(t *testing.T) {
+	model := NewModel(stubBoardReader{}, nil, "alice")
+	model.loading = false
+	model.width = 80
+	content, _ := model.renderBoard()
+	lines := strings.Split(plain(content), "\n")
+	footer := lines[len(lines)-1]
+	for _, want := range []string{"j/k cards", "h/l/tab columns", "1-4 jump", "c cancelled:off", "q quit"} {
+		if !strings.Contains(footer, want) {
+			t.Errorf("board-only footer missing %q: %q", want, footer)
+		}
+	}
+	if strings.Contains(footer, "s settings") {
+		t.Fatalf("board-only footer exposed unavailable settings: %q", footer)
+	}
+}
+
 func TestBoardRenderScrollsSelectionIntoShortColumn(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	m := NewModel(stubBoardReader{}, nil, "u")

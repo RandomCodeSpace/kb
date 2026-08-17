@@ -284,7 +284,7 @@ func TestIntegrationProbeReportsRequestBuildErrorWithoutEgress(t *testing.T) {
 
 func TestNewForgeTestRequestRejectsNilContextBeforeEgress(t *testing.T) {
 	//lint:ignore SA1012 Deliberately exercise the request constructor's nil-context error.
-	request, err := newForgeTestRequest(nil, "gitlab", forgeTestTarget{baseURL: "https://gitlab.example.test"})
+	request, err := newForgeTestRequest(nil, "gitlab", forgeTestTarget{baseURL: "https://gitlab.example.test"}, "")
 	if request != nil || err == nil || err.Error() != "invalid forge base URL" {
 		t.Fatalf("nil-context request = (%v, %v), want nil request and construction error", request, err)
 	}

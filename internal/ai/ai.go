@@ -143,6 +143,13 @@ func endpoint(base string) (string, error) {
 	return u.String(), nil
 }
 
+// ValidateBaseURL applies the same endpoint validation used by model runs
+// without constructing a client or reading a credential.
+func ValidateBaseURL(base string) error {
+	_, err := endpoint(base)
+	return err
+}
+
 func usesMaxCompletionTokens(model string) bool {
 	name := strings.ToLower(strings.TrimSpace(model))
 	if i := strings.LastIndex(name, "/"); i >= 0 {
