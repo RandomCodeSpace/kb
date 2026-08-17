@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import type { Check, Status, Task, TaskDraft } from './lib/model';
 import type { BoardFilter } from './lib/filter';
-import { emptyFilter, filterBoard, isFilterActive, toggleTag } from './lib/filter';
+import { emptyFilter, filterBoard, filterFromSearch, filterToSearch, isFilterActive, toggleTag } from './lib/filter';
 import { parse, serialize } from './lib/markdown';
 import { bumpShipped, shipKey, shippedToday, unshipToday } from './lib/store';
 import type { BootAction, Identity } from './lib/auth';
@@ -355,8 +355,22 @@ function BoardApp({ identity, onIdentity, onSignOut }: Readonly<BoardAppProps>) 
   const [tasks, setTasks] = useState<Task[]>([]);
   const tasksRef = useRef(tasks);
   // Display-only narrowing: the filter never touches the task list, so moves
-  // and edits keep operating on the full set by id.
-  const [filter, setFilter] = useState<BoardFilter>(emptyFilter);
+  // and edits keep operating on the full set by id. The URL query string is
+  // its persistence: seeded from it on mount, mirrored back on every change,
+  // so a refresh or a shared link restores the same view.
+  const [filter, setFilter] = useState<BoardFilter>(() =>
+    filterFromSearch(window.location.search),
+  );
+  useEffect(() => {
+    const next = filterToSearch(filter, window.location.search);
+    if (next !== window.location.search) {
+      window.history.replaceState(
+        window.history.state,
+        '',
+        window.location.pathname + next + window.location.hash,
+      );
+    }
+  }, [filter]);
   const handleTagClick = useCallback(
     (tag: string) => setFilter((current) => toggleTag(current, tag)),
     [],

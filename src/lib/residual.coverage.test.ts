@@ -40,6 +40,12 @@ describe('residual deterministic utility branches', () => {
     );
   });
 
+  it('announces the task number right after the title when present', () => {
+    const base = { ...newDraft({ title: 'numbered' }), id: 'c', createdAt: '', movedAt: '' };
+    expect(cardLabel({ ...base, seq: 12 }, 0, 1)).toBe('numbered, number 12, To Do, 1 of 1');
+    expect(cardLabel(base, 0, 1)).toBe('numbered, To Do, 1 of 1');
+  });
+
   it('uses defaults before applying explicit draft fields', () => {
     expect(newDraft({ title: 'write tests', status: 'doing' })).toEqual({
       emoji: '',

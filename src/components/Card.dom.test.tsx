@@ -74,6 +74,20 @@ describe('Card DOM behavior', () => {
     expect(link.getAttribute('target')).toBe('_blank');
   });
 
+  it('shows the task number when the server sent one, hides it otherwise', () => {
+    const { unmount } = renderCard({ seq: 12 });
+    const chip = screen.getByTitle('Task #12');
+    expect(chip.textContent).toBe('#12');
+    expect(chip.getAttribute('aria-hidden')).toBe('true');
+    expect(
+      screen.getByRole('group', { name: /Repair \*\*sync\*\*, number 12, Doing/ }),
+    ).toBeTruthy();
+    unmount();
+
+    renderCard();
+    expect(screen.queryByTitle(/Task #/)).toBeNull();
+  });
+
   it('opens the editor from the body but not from links or card controls', async () => {
     const user = userEvent.setup();
     const { onEdit } = renderCard();

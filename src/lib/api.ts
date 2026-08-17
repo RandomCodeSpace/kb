@@ -907,8 +907,13 @@ export function coerceApiTask(value: unknown): Task | null {
   const effort = fields.effort === 'S' || fields.effort === 'M' || fields.effort === 'L'
     ? fields.effort
     : undefined;
+  const seq =
+    typeof fields.seq === 'number' && Number.isInteger(fields.seq) && fields.seq > 0
+      ? fields.seq
+      : undefined;
   return {
     id,
+    ...(seq === undefined ? {} : { seq }),
     emoji: apiText(fields.emoji),
     title: fields.title,
     desc: apiText(fields.desc),
