@@ -1,4 +1,4 @@
-package server
+package ai
 
 import (
 	"os"
@@ -11,9 +11,9 @@ import (
 
 // newSkillsServer builds a server whose only interesting field is the skills
 // directory; loadSkills touches neither the store nor the network.
-func newSkillsServer(t *testing.T, skillsDir string) *server {
+func newSkillsServer(t *testing.T, skillsDir string) *Runner {
 	t.Helper()
-	return newServer(Config{SkillsDir: skillsDir}, testStatic, newTestStore(t))
+	return NewRunner(newTestStore(t), skillsDir, nil, nil)
 }
 
 func writeSkillFixture(t *testing.T, dir, file, content string) {

@@ -1,4 +1,4 @@
-package server
+package ai
 
 import (
 	"embed"
@@ -20,15 +20,15 @@ var embeddedSkills embed.FS
 // Config.SkillsDir is not an error, the directory is optional; a directory
 // that exists but holds an unparseable skill file is, because a skill that
 // silently vanishes from the advertisement is worse than a failed request.
-func (s *server) loadSkills() ([]rig.Skill, error) {
+func (r *Runner) LoadSkills() ([]rig.Skill, error) {
 	base, err := rig.LoadSkills(embeddedSkills, "skills")
 	if err != nil {
 		return nil, err
 	}
-	if s.cfg.SkillsDir == "" {
+	if r.skillsDir == "" {
 		return base, nil
 	}
-	overrides, err := rig.LoadSkills(os.DirFS(s.cfg.SkillsDir), ".")
+	overrides, err := rig.LoadSkills(os.DirFS(r.skillsDir), ".")
 	if err != nil {
 		// Only the directory read reports fs.ErrNotExist through %w; rig
 		// formats per-file problems into an unwrapped message, so a deleted
@@ -41,3 +41,5 @@ func (s *server) loadSkills() ([]rig.Skill, error) {
 	}
 	return rig.MergeSkills(base, overrides), nil
 }
+
+func (r *Runner) loadSkills() ([]rig.Skill, error) { return r.LoadSkills() }

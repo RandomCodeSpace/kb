@@ -1,4 +1,4 @@
-package server
+package ai
 
 import (
 	"context"
@@ -10,9 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/RandomCodeSpace/rig"
@@ -24,6 +22,9 @@ import (
 // Bounds for the agent tool layer. The model chooses the arguments, so every
 // unbounded read is bounded here rather than in the prompt.
 const (
+	contentTypeHeader   = "Content-Type"
+	jsonMediaType       = "application/json"
+	storageErrorMessage = "storage error"
 	// fetchLinkMaxBytes caps one fetched document. The URL is model-chosen and
 	// the body lands in the next prompt, so the read stops at the cap instead
 	// of buffering whatever the host serves.
@@ -36,40 +37,38 @@ const (
 	findSimilarMinRunes = 3
 )
 
+type similarItem struct {
+	ID     string `json:"id,omitempty"`
+	Title  string `json:"title"`
+	Status string `json:"status,omitempty"`
+	Via    string `json:"via"`
+	Link   string `json:"link,omitempty"`
+}
+
+type similarResponse struct {
+	Items []similarItem `json:"items"`
+}
+
 const cardLimitReachedMessage = "card limit reached; stop proposing"
 
-// linkFetchTimeout bounds one fetch_link request, matching the forge fetch it
-// is shaped after.
-const linkFetchTimeout = 20 * time.Second
-
-// newLinkClient builds the transport fetch_link uses. The destination is a URL
-// the model composed, so loopback, link-local, private and unspecified
-// addresses are refused on the resolved IP unless KB_LINK_ALLOW_PRIVATE opts
-// in -- its own variable, never the forge one: letting a self-hosted forge
-// resolve privately must not also hand the model's URLs the LAN and the cloud
-// metadata service. Same syntax as the forge variable: a comma-separated
-// hostname allowlist, or 1 / * for every host.
-func newLinkClient() *http.Client {
-	raw := os.Getenv("KB_LINK_ALLOW_PRIVATE")
-	allowAll := raw == "1" || raw == "*"
-	var allowHosts map[string]bool
-	if !allowAll {
-		allowHosts = parseAllowedHosts(raw)
-	}
-	return &http.Client{
-		Timeout:       linkFetchTimeout,
-		Transport:     guardedTransport(allowHosts, allowAll),
-		CheckRedirect: sameHostRedirect,
-	}
-}
+const CardLimitReachedMessage = cardLimitReachedMessage
 
 // cardCollector accumulates what propose_card accepted for one run. The rig
 // loop executes tool calls sequentially within a single run, so the slice
 // needs no lock; one collector must not be shared across runs.
 type cardCollector struct {
 	max   int
-	cards []storyDraft
+	cards []Draft
 }
+
+// CardCollector owns the structured card output for one tool loop.
+type CardCollector = cardCollector
+
+// NewCardCollector creates a collector capped to one run's proposal budget.
+func NewCardCollector(max int) *CardCollector { return &cardCollector{max: max} }
+
+// Cards returns the proposals accepted so far.
+func (c *cardCollector) Cards() []Draft { return append([]Draft(nil), c.cards...) }
 
 // atCap reports whether propose_card must refuse. A collector built without a
 // positive max accepts nothing: an unset cap is a missing budget, not an
@@ -120,9 +119,11 @@ func proposeCardTool(c *cardCollector) rig.Tool {
 	}
 }
 
+func ProposeCardTool(c *CardCollector) rig.Tool { return proposeCardTool(c) }
+
 // findSimilarTool exposes the duplicate check the UI runs before a card is
 // created, scoped to user's board.
-func (s *server) findSimilarTool(user string) rig.Tool {
+func (r *Runner) findSimilarTool(user string) rig.Tool {
 	return rig.Tool{
 		Name: "find_similar",
 		Description: "Search existing cards and import history for work that already covers a " +
@@ -141,7 +142,7 @@ func (s *server) findSimilarTool(user string) rig.Tool {
 			if utf8.RuneCountInString(query) < findSimilarMinRunes {
 				return "", fmt.Errorf("query must be at least %d characters", findSimilarMinRunes)
 			}
-			hits, err := s.store.SearchSimilar(user, query, "", nil, findSimilarLimit)
+			hits, err := r.store.SearchSimilar(user, query, "", nil, findSimilarLimit)
 			if err != nil {
 				log.Printf("tools: find_similar for %s: %s", logSafe(user), logSafe(err.Error()))
 				return "", errors.New(storageErrorMessage)
@@ -157,6 +158,8 @@ func (s *server) findSimilarTool(user string) rig.Tool {
 	}
 }
 
+func (r *Runner) FindSimilarTool(user string) rig.Tool { return r.findSimilarTool(user) }
+
 // fetchLinkTool reads one http(s) document the model asked for. The request
 // goes through s.linkClient, whose SSRF guard is governed by its own
 // KB_LINK_ALLOW_PRIVATE, so a model-chosen URL cannot reach a private address
@@ -167,7 +170,7 @@ func (s *server) findSimilarTool(user string) rig.Tool {
 // into a host reachability oracle for whoever writes the document it reads.
 //
 // Depends on the linkClient field on server, owned by the runner change.
-func (s *server) fetchLinkTool() rig.Tool {
+func (r *Runner) fetchLinkTool() rig.Tool {
 	return rig.Tool{
 		Name: "fetch_link",
 		Description: "Fetch one http(s) document and return its text. Use it to read a " +
@@ -182,12 +185,14 @@ func (s *server) fetchLinkTool() rig.Tool {
 			if err := json.Unmarshal(input, &args); err != nil {
 				return "", errors.New(`invalid input: expected {"url": string}`)
 			}
-			return s.fetchLink(ctx, strings.TrimSpace(args.URL))
+			return r.fetchLink(ctx, strings.TrimSpace(args.URL))
 		},
 	}
 }
 
-func (s *server) fetchLink(ctx context.Context, raw string) (string, error) {
+func (r *Runner) FetchLinkTool() rig.Tool { return r.fetchLinkTool() }
+
+func (r *Runner) fetchLink(ctx context.Context, raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || !isHTTPURL(u) || u.Host == "" {
 		return "", errors.New("url must be an absolute http or https URL")
@@ -196,7 +201,7 @@ func (s *server) fetchLink(ctx context.Context, raw string) (string, error) {
 	if u.User != nil {
 		return "", errors.New("url must not contain a username or password")
 	}
-	if s.linkClient == nil {
+	if r.linkClient == nil {
 		return "", errors.New("link fetching is not available")
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -204,7 +209,7 @@ func (s *server) fetchLink(ctx context.Context, raw string) (string, error) {
 		return "", errFetchLinkFailed
 	}
 	request.Header.Set("Accept", "text/*, application/json")
-	response, err := s.linkClient.Do(request)
+	response, err := r.linkClient.Do(request)
 	if err != nil {
 		log.Printf("tools: fetch_link request failed: %s", logSafe(err.Error()))
 		return "", errFetchLinkFailed
@@ -241,7 +246,7 @@ func fetchLinkTextual(header string) bool {
 }
 
 // listTasksTool mirrors the MCP tool of the same name, scoped to user's board.
-func (s *server) listTasksTool(user string) rig.Tool {
+func (r *Runner) listTasksTool(user string) rig.Tool {
 	return rig.Tool{
 		Name: "list_tasks",
 		Description: "List kanban tasks on the board, ordered by column (todo, doing, done, " +
@@ -269,7 +274,7 @@ func (s *server) listTasksTool(user string) rig.Tool {
 				}
 				filter.Status = st
 			}
-			tasks, err := s.store.FilterTasks(user, filter)
+			tasks, err := r.store.FilterTasks(user, filter)
 			if err != nil {
 				log.Printf("tools: list_tasks for %s: %s", logSafe(user), logSafe(err.Error()))
 				return "", errors.New(storageErrorMessage)
@@ -285,8 +290,10 @@ func (s *server) listTasksTool(user string) rig.Tool {
 	}
 }
 
+func (r *Runner) ListTasksTool(user string) rig.Tool { return r.listTasksTool(user) }
+
 // getTaskTool fetches one task in full by any reference the store resolves.
-func (s *server) getTaskTool(user string) rig.Tool {
+func (r *Runner) getTaskTool(user string) rig.Tool {
 	return rig.Tool{
 		Name:        "get_task",
 		Description: "Fetch one task in full by its stable number (12 or #12), UUID, or unique UUID prefix.",
@@ -304,7 +311,7 @@ func (s *server) getTaskTool(user string) rig.Tool {
 			if ref == "" {
 				return "", errors.New("ref must not be empty")
 			}
-			t, err := s.store.Task(user, ref)
+			t, err := r.store.Task(user, ref)
 			if err != nil {
 				return "", taskRefError(err, ref)
 			}
@@ -312,6 +319,8 @@ func (s *server) getTaskTool(user string) rig.Tool {
 		},
 	}
 }
+
+func (r *Runner) GetTaskTool(user string) rig.Tool { return r.getTaskTool(user) }
 
 // toolUpdateArgs distinguishes a field the model supplied from one it left
 // out: a nil pointer is an absent key, and a pointer to the zero value is an
@@ -332,7 +341,7 @@ type toolUpdateArgs struct {
 
 // updateTaskTool edits an existing card. Only supplied fields change; tags and
 // checks replace the whole list when given.
-func (s *server) updateTaskTool(user string) rig.Tool {
+func (r *Runner) updateTaskTool(user string) rig.Tool {
 	return rig.Tool{
 		Name: "update_task",
 		Description: "Update fields of one existing task. Only the fields you supply change; " +
@@ -362,7 +371,7 @@ func (s *server) updateTaskTool(user string) rig.Tool {
 			if err != nil {
 				return "", err
 			}
-			t, err := s.store.UpdateTask(user, ref, patch)
+			t, err := r.store.UpdateTask(user, ref, patch)
 			if err != nil {
 				return "", taskRefError(err, ref)
 			}
@@ -370,6 +379,8 @@ func (s *server) updateTaskTool(user string) rig.Tool {
 		},
 	}
 }
+
+func (r *Runner) UpdateTaskTool(user string) rig.Tool { return r.updateTaskTool(user) }
 
 // patch builds the store patch, sanitizing every model-supplied string the way
 // the draft coercion does: a title carrying a newline would otherwise
