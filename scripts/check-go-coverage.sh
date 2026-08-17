@@ -86,8 +86,12 @@ if ! printf '%s\n' "$test_output" | awk -v required="$package_threshold" -v expe
           printf "coverage: duplicate package result %s\n", package_name > "/dev/stderr"
           failed = 1
         }
-        if (value + 0 < required + 0) {
-          printf "coverage: package %s is %.1f%%, below %.1f%%\n", package_name, value, required > "/dev/stderr"
+        package_required = required
+        if (package_name == "github.com/RandomCodeSpace/kb/internal/tui") {
+          package_required = 90.0
+        }
+        if (value + 0 < package_required + 0) {
+          printf "coverage: package %s is %.1f%%, below %.1f%%\n", package_name, value, package_required > "/dev/stderr"
           failed = 1
         }
       }

@@ -15,6 +15,11 @@ node_modules
 !/dist/.gitkeep
 
 /docs/
+!/docs/
+/docs/*
+!/docs/research/
+/docs/research/*
+!/docs/research/bubbletea-stack.md
 
 # compiled binary
 /kb

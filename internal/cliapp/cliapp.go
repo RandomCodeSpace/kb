@@ -60,6 +60,7 @@ commands:
 other modes (not task commands):
   kb                     with no command: serve the web UI (kb --help
                          lists the serve flags)
+  kb tui                 open the local board in a full-screen terminal UI
   kb mcp                 serve the board to AI agents over MCP stdio
 
 common flags (every command):
