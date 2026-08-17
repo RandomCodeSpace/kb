@@ -42,6 +42,8 @@ export interface CardModalProps {
   aiDraft?: (req: AIStoryRequest, signal?: AbortSignal) => Promise<StoryDraft>;
   onSave: (save: CardSave) => void;
   onDelete: (taskId: string) => void;
+  /** Fired on the first edit; lets the owner guard close against data loss. */
+  onDirty?: () => void;
   onClose: () => void;
 }
 
@@ -431,6 +433,7 @@ export function CardModal({
   onSave,
   onDelete,
   onClose,
+  onDirty,
 }: Readonly<CardModalProps>) {
   const excludeId = state.mode === 'edit' ? state.task.id : undefined;
   const [title, setTitle] = useState(state.mode === 'edit' ? state.task.title : '');
@@ -725,6 +728,7 @@ export function CardModal({
           onSave={onSave}
           onDelete={onDelete}
           onClose={close}
+          onDirty={onDirty}
         />
         <CommentsSection comments={comments} />
       </div>

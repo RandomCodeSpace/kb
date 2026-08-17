@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import type { AIStoryRequest, StoryDraft, TaskPatch } from '../lib/api';
 import type { Check, Effort, Prio, TaskDraft } from '../lib/model';
@@ -30,6 +30,8 @@ export interface CardEditorProps {
   onSave: (save: CardSave) => void;
   onDelete: (taskId: string) => void;
   onClose: () => void;
+  /** Fired on the first edit (typed or AI-applied). */
+  onDirty?: () => void;
 }
 
 function checksToText(checks: Check[]): string {
@@ -60,6 +62,7 @@ export function CardEditor({
   onSave,
   onDelete,
   onClose,
+  onDirty,
 }: Readonly<CardEditorProps>) {
   const base = state.mode === 'edit' ? state.task : null;
   const [emoji, setEmoji] = useState(() => firstEmoji(base?.emoji ?? ''));
@@ -71,6 +74,20 @@ export function CardEditor({
   const [tags, setTags] = useState<string[]>(base ? base.tags : []);
   const [checks, setChecks] = useState(base ? checksToText(base.checks) : '');
   const [busy, setBusy] = useState(false);
+
+  // Any field change after the first render — typed, picked, or AI-applied —
+  // marks the card dirty, so the owner can guard close against data loss.
+  const rendered = useRef(false);
+  useEffect(() => {
+    if (!rendered.current) {
+      rendered.current = true;
+      return;
+    }
+    onDirty?.();
+    // onDirty is deliberately not a dependency: a new callback identity is
+    // not an edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [title, emoji, blocked, desc, prio, due, effort, tags, checks]);
 
   const applyDraft = (draft: StoryDraft) => {
     if (draft.title !== '') onTitleChange(draft.title);
