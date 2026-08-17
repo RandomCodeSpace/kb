@@ -7,6 +7,9 @@
 //	go run ./internal/tui/testdata/generate_web_lower_fixture.go
 //	go run ./internal/tui/testdata/generate_web_lower_fixture.go -write
 //
+// Set NODE_BINARY to another absolute executable path when Node is not at
+// /usr/bin/node. Relative names are rejected; PATH is never searched.
+//
 // The default mode byte-compares generated output with the checked-in fixture.
 package main
 
@@ -17,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -31,6 +35,7 @@ const (
 	oracleUnicode      = "17.0"
 	baseUnicode        = "15.0.0"
 	defaultFixturePath = "internal/tui/testdata/web_lower_unicode17.json"
+	defaultNodeBinary  = "/usr/bin/node"
 )
 
 const nodeOracle = `
@@ -73,13 +78,15 @@ type mappingRange struct {
 
 func main() {
 	fixturePath := flag.String("fixture", defaultFixturePath, "fixture path relative to the repository root")
+	nodeBinary := flag.String("node", configuredNodeBinary(), "absolute path to Node >= 24.15 with Unicode 17")
 	write := flag.Bool("write", false, "replace the fixture instead of checking it")
 	flag.Parse()
 
+	validatedNode := validateNodeBinary(*nodeBinary)
 	if cases.UnicodeVersion != baseUnicode || unicode.Version != baseUnicode {
 		fatalf("base Unicode tables changed: cases=%s stdlib=%s, want %s", cases.UnicodeVersion, unicode.Version, baseUnicode)
 	}
-	generated, runtimeNode := generate()
+	generated, runtimeNode := generate(validatedNode)
 	if *write {
 		if err := os.WriteFile(*fixturePath, generated, 0o644); err != nil {
 			fatalf("write fixture: %v", err)
@@ -97,8 +104,12 @@ func main() {
 	fmt.Printf("%s matches Node %s / Unicode %s\n", *fixturePath, runtimeNode, oracleUnicode)
 }
 
-func generate() ([]byte, string) {
-	command := exec.Command("node", "-e", nodeOracle)
+func generate(nodeBinary string) ([]byte, string) {
+	// Path is validated as absolute so os/exec never performs a PATH lookup.
+	command := &exec.Cmd{
+		Path: nodeBinary,
+		Args: []string{nodeBinary, "-e", nodeOracle},
+	}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		fatalf("open Node stdout: %v", err)
@@ -159,6 +170,31 @@ func generate() ([]byte, string) {
 		compactRanges(ignorableAdd),
 		compactRanges(ignorableRemove),
 	), runtimeNode
+}
+
+func configuredNodeBinary() string {
+	if configured := os.Getenv("NODE_BINARY"); configured != "" {
+		return configured
+	}
+	return defaultNodeBinary
+}
+
+func validateNodeBinary(value string) string {
+	if !filepath.IsAbs(value) {
+		fatalf("Node binary must be an absolute path, got %q", value)
+	}
+	value = filepath.Clean(value)
+	info, err := os.Stat(value)
+	if err != nil {
+		fatalf("stat Node binary %q: %v", value, err)
+	}
+	if !info.Mode().IsRegular() {
+		fatalf("Node binary %q is not a regular file", value)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		fatalf("Node binary %q is not executable", value)
+	}
+	return value
 }
 
 func recordPropertyDelta(r rune, base bool, encoded string, add, remove *[]rune) {
