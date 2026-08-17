@@ -120,6 +120,11 @@ func TestWebLowerPreservesInvalidUTF8AsContextBoundary(t *testing.T) {
 	}
 }
 
+func TestWebLowerProductionRangesAreSortedAndNonOverlapping(t *testing.T) {
+	assertSortedWebRanges(t, "cased additions", webUnicode17CasedAdd)
+	assertSortedWebRanges(t, "case-ignorable additions", webUnicode17CaseIgnorableAdd)
+}
+
 func loadWebLowerOracleFixture(t *testing.T) webLowerOracleFixture {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", "web_lower_unicode17.json"))
@@ -156,14 +161,14 @@ func assertWebPropertyFixture(
 	baseProperty func(rune) bool,
 ) {
 	t.Helper()
-	add := fixtureRanges(t, fixture.Add)
-	remove := fixtureRanges(t, fixture.Remove)
+	add := fixtureRuneSet(t, fixture.Add)
+	remove := fixtureRuneSet(t, fixture.Remove)
 	deltaCount := 0
 	for r := rune(0); r <= unicode.MaxRune; r++ {
 		want := baseProperty(r)
-		if webInRuneRanges(r, remove) {
+		if remove[r] {
 			want = false
-		} else if webInRuneRanges(r, add) {
+		} else if add[r] {
 			want = true
 		}
 		if want != baseProperty(r) {
@@ -178,13 +183,22 @@ func assertWebPropertyFixture(
 	}
 }
 
-func fixtureRanges(t *testing.T, values [][2]string) []webRuneRange {
+func fixtureRuneSet(t *testing.T, values [][2]string) map[rune]bool {
 	t.Helper()
-	ranges := make([]webRuneRange, len(values))
-	for i, value := range values {
-		ranges[i] = webRuneRange{first: fixtureRune(t, value[0]), last: fixtureRune(t, value[1])}
+	result := make(map[rune]bool)
+	for _, value := range values {
+		first, last := fixtureRune(t, value[0]), fixtureRune(t, value[1])
+		if first > last {
+			t.Fatalf("fixture range is reversed: %U..%U", first, last)
+		}
+		for r := first; r <= last; r++ {
+			if result[r] {
+				t.Fatalf("fixture ranges overlap at %U", r)
+			}
+			result[r] = true
+		}
 	}
-	return ranges
+	return result
 }
 
 func fixtureRune(t *testing.T, value string) rune {
@@ -212,5 +226,18 @@ func baseUnicode15CaseIgnorable(r rune) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func assertSortedWebRanges(t *testing.T, name string, values []webRuneRange) {
+	t.Helper()
+	for i, value := range values {
+		if value.first > value.last {
+			t.Fatalf("%s range %d is reversed: %U..%U", name, i, value.first, value.last)
+		}
+		if i > 0 && values[i-1].last >= value.first {
+			t.Fatalf("%s ranges %d and %d overlap or are unsorted: %U..%U then %U..%U",
+				name, i-1, i, values[i-1].first, values[i-1].last, value.first, value.last)
+		}
 	}
 }
