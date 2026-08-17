@@ -37,6 +37,18 @@ validate_threshold GO_TOTAL_COVERAGE_THRESHOLD "$total_threshold"
 : "${CGO_ENABLED:=0}"
 export CGO_ENABLED
 
+if helper_test_output="$(go test \
+  ./internal/tui/testdata/generate_web_lower_fixture.go \
+  ./internal/tui/testdata/generate_web_lower_fixture_test.go \
+  -count=1)"; then
+  :
+else
+  status=$?
+  printf '%s\n' "$helper_test_output"
+  exit "$status"
+fi
+printf '%s\n' "$helper_test_output"
+
 if test_output="$(go test ./... -count=1 -covermode=atomic -coverprofile="$profile")"; then
   :
 else
