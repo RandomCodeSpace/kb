@@ -3,6 +3,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -65,18 +66,29 @@ type Model struct {
 	dataVersion   int64
 	haveVersion   bool
 	stopped       bool
+	readContext   context.Context
 }
 
 // NewModel creates the root model for one local board owner.
 func NewModel(store boardReader, watcher dataVersionReader, user string) Model {
+	return newModel(store, watcher, user, context.Background())
+}
+
+func newModel(
+	store boardReader,
+	watcher dataVersionReader,
+	user string,
+	ctx context.Context,
+) Model {
 	return Model{
-		store:   store,
-		watcher: watcher,
-		user:    user,
-		board:   board.Board{Title: "Board"},
-		width:   defaultWidth,
-		height:  defaultHeight,
-		loading: watcher == nil,
+		store:       store,
+		watcher:     watcher,
+		user:        user,
+		board:       board.Board{Title: "Board"},
+		width:       defaultWidth,
+		height:      defaultHeight,
+		loading:     watcher == nil,
+		readContext: ctx,
 	}
 }
 
@@ -136,6 +148,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) observeDataVersion(msg dataVersionMsg) tea.Cmd {
 	var load tea.Cmd
 	if msg.err != nil {
+		if errors.Is(msg.err, context.Canceled) && errors.Is(m.readContext.Err(), context.Canceled) {
+			return nil
+		}
 		m.pollErr = msg.err
 		if !m.haveVersion || m.loadErr != nil {
 			load = m.startBoardLoad()
@@ -218,7 +233,7 @@ func (m Model) loadBoard() tea.Cmd {
 
 func (m Model) readDataVersion() tea.Cmd {
 	return func() tea.Msg {
-		version, err := m.watcher.DataVersion(context.Background())
+		version, err := m.watcher.DataVersion(m.readContext)
 		return dataVersionMsg{version: version, err: err}
 	}
 }

@@ -229,6 +229,17 @@ func TestModelLoadAndPollFailures(t *testing.T) {
 	}
 }
 
+func TestCanceledVersionReadDoesNotRestartPolling(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	m := newModel(stubBoardReader{}, stubVersionReader{}, "u", ctx)
+	cancel()
+
+	command := updateTestModel(t, &m, dataVersionMsg{err: fmt.Errorf("read: %w", context.Canceled)})
+	if command != nil || m.pollErr != nil || m.loading {
+		t.Fatalf("cancelled read = model:%#v command:%v", m, command)
+	}
+}
+
 func TestVersionBaselineDuringFallbackQueuesSerializedReload(t *testing.T) {
 	reader := &sequenceBoardReader{results: []boardResult{
 		{board: board.Board{Title: "Fallback"}},
