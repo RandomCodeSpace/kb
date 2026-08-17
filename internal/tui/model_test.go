@@ -232,6 +232,80 @@ func TestFailedBoardReloadRetriesOnUnchangedPollUntilRecovery(t *testing.T) {
 	}
 }
 
+func TestRetryPollsDoNotStartOverlappingBoardLoads(t *testing.T) {
+	originalInterval := pollInterval
+	pollInterval = 0
+	t.Cleanup(func() { pollInterval = originalInterval })
+
+	want := errors.New("transient read failure")
+	reader := &sequenceBoardReader{results: []boardResult{
+		{err: want},
+		{board: board.Board{Title: "Recovered"}},
+		{board: board.Board{Title: "Newest"}},
+	}}
+	watcher := &countingVersionReader{version: 9}
+	m := NewModel(reader, watcher, "u")
+	m.loading = false
+	m.haveVersion = true
+	m.dataVersion = 8
+
+	poll := func() tea.Cmd {
+		t.Helper()
+		updated, read := m.Update(pollTickMsg{})
+		m = updated.(Model)
+		updated, next := m.Update(read())
+		m = updated.(Model)
+		return next
+	}
+
+	first := poll()
+	firstBatch := first().(tea.BatchMsg)
+	updated, _ := m.Update(firstBatch[0]())
+	m = updated.(Model)
+	if !errors.Is(m.loadErr, want) || reader.calls != 1 {
+		t.Fatalf("first load = error:%v calls:%d", m.loadErr, reader.calls)
+	}
+
+	retry := poll()
+	retryBatch := retry().(tea.BatchMsg)
+	if !m.loading {
+		t.Fatal("retry load is not marked in flight")
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if message := poll()(); message == nil {
+			t.Fatalf("overlap poll %d did not schedule the next poll", attempt)
+		} else if _, ok := message.(pollTickMsg); !ok {
+			t.Fatalf("overlap poll %d returned %T, want only pollTickMsg", attempt, message)
+		}
+		if reader.calls != 1 {
+			t.Fatalf("overlap poll %d started another board load: calls=%d", attempt, reader.calls)
+		}
+	}
+
+	// A newer version observed while the retry is active is queued, not run
+	// concurrently or forgotten.
+	watcher.version = 10
+	if message := poll()(); message == nil {
+		t.Fatal("newer-version poll did not schedule the next poll")
+	} else if _, ok := message.(pollTickMsg); !ok {
+		t.Fatalf("newer-version poll returned %T, want only pollTickMsg", message)
+	}
+	if reader.calls != 1 || !m.reloadPending {
+		t.Fatalf("queued reload = calls:%d pending:%v", reader.calls, m.reloadPending)
+	}
+
+	updated, pending := m.Update(retryBatch[0]())
+	m = updated.(Model)
+	if pending == nil || reader.calls != 2 || m.board.Title != "Recovered" || !m.loading {
+		t.Fatalf("retry recovery = model:%#v calls:%d command:%v", m, reader.calls, pending)
+	}
+	updated, _ = m.Update(pending())
+	m = updated.(Model)
+	if reader.calls != 3 || m.loadErr != nil || m.loading || m.board.Title != "Newest" {
+		t.Fatalf("queued recovery = model:%#v calls:%d", m, reader.calls)
+	}
+}
+
 func TestEmptyBoardGolden(t *testing.T) {
 	m := NewModel(stubBoardReader{board: board.Board{Title: "Board"}}, nil, "default")
 	// Start from a loaded snapshot so the golden records the frame, not a

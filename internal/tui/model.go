@@ -17,9 +17,10 @@ import (
 const (
 	defaultWidth   = 80
 	defaultHeight  = 24
-	pollInterval   = time.Second
 	wideBoardWidth = 100
 )
+
+var pollInterval = time.Second
 
 var visibleStatuses = [...]board.Status{
 	board.StatusTodo,
@@ -51,18 +52,19 @@ type pollTickMsg struct{}
 // dimensions, and all message routing; commands perform IO and only return
 // messages, so Update remains deterministic.
 type Model struct {
-	store       boardReader
-	watcher     dataVersionReader
-	user        string
-	board       board.Board
-	focus       int
-	width       int
-	height      int
-	loading     bool
-	loadErr     error
-	pollErr     error
-	dataVersion int64
-	haveVersion bool
+	store         boardReader
+	watcher       dataVersionReader
+	user          string
+	board         board.Board
+	focus         int
+	width         int
+	height        int
+	loading       bool
+	reloadPending bool
+	loadErr       error
+	pollErr       error
+	dataVersion   int64
+	haveVersion   bool
 }
 
 // NewModel creates the root model for one local board owner.
@@ -74,7 +76,7 @@ func NewModel(store boardReader, watcher dataVersionReader, user string) Model {
 		board:   board.Board{Title: "Board"},
 		width:   defaultWidth,
 		height:  defaultHeight,
-		loading: true,
+		loading: watcher == nil,
 	}
 }
 
@@ -114,12 +116,17 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.board = msg.board
 		}
+		if m.reloadPending {
+			m.reloadPending = false
+			m.loading = true
+			return m, m.loadBoard()
+		}
 	case pollTickMsg:
 		return m, m.readDataVersion()
 	case dataVersionMsg:
 		if msg.err != nil {
 			m.pollErr = msg.err
-			if (!m.haveVersion && m.loading) || m.loadErr != nil {
+			if (!m.haveVersion || m.loadErr != nil) && !m.loading {
 				m.loading = true
 				return m, tea.Batch(m.loadBoard(), schedulePoll())
 			}
@@ -131,6 +138,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.dataVersion = msg.version
 		m.haveVersion = true
 		if initial || changed || m.loadErr != nil {
+			if m.loading {
+				m.reloadPending = m.reloadPending || changed
+				return m, schedulePoll()
+			}
 			m.loading = true
 			return m, tea.Batch(m.loadBoard(), schedulePoll())
 		}
@@ -192,7 +203,7 @@ func (m Model) render() string {
 	}
 
 	status := "ready"
-	if m.loading {
+	if m.loading || (m.watcher != nil && !m.haveVersion) {
 		status = "loading board..."
 	}
 	if m.loadErr != nil {
