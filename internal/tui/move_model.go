@@ -37,13 +37,23 @@ type cardMoveState struct {
 }
 
 func (s *cardMoveState) begin(current board.Board, task board.Task, statuses []board.Status, fromMouse bool) bool {
+	return s.beginVisible(current, current, task, statuses, fromMouse)
+}
+
+func (s *cardMoveState) beginVisible(
+	current board.Board,
+	visibleBoard board.Board,
+	task board.Task,
+	statuses []board.Status,
+	fromMouse bool,
+) bool {
 	full := visibleTaskIDs(current, task.ID)
-	visible := cloneTaskColumns(full)
+	visible := visibleTaskIDs(visibleBoard, task.ID)
 	visibleSlots := taskSlots(visible)
 	fullSlots := taskSlots(full)
 	ids := visible[task.Status]
 	slot := 0
-	for _, candidate := range tasksInStatus(current, task.Status) {
+	for _, candidate := range tasksInStatus(visibleBoard, task.Status) {
 		if candidate.ID == task.ID {
 			break
 		}

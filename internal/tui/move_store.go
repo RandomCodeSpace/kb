@@ -54,7 +54,7 @@ func (m *Model) startCardDrop() tea.Cmd {
 }
 
 func (m *Model) finishCardDrop(msg cardMoveStoredMsg) tea.Cmd {
-	previous := m.board
+	previous := m.filteredBoard()
 	lift := m.move.lifted
 	fallback := m.board
 	if lift != nil {
@@ -69,10 +69,11 @@ func (m *Model) finishCardDrop(msg cardMoveStoredMsg) tea.Cmd {
 	m.move.saving = false
 	m.move.statusError = msg.writeErr != nil || msg.reloadErr != nil
 	m.move.notice = true
-	m.boardView.adoptBoard(previous, m.board)
+	filtered := m.filteredBoard()
+	m.boardView.adoptBoard(previous, filtered)
 	canonicalTask, found := boardTaskByID(m.board, msg.taskID)
 	if found {
-		m.boardView.focusTask(m.board, msg.taskID)
+		m.boardView.focusTask(filtered, msg.taskID)
 	}
 
 	switch {

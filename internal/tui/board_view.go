@@ -590,13 +590,18 @@ func boardMouseHandler(hits []boardHit, pointerActive bool) func(tea.MouseMsg) t
 			return nil
 		}
 		var matched *boardHit
+		var dragAnchor *boardHit
 		for i := len(hits) - 1; i >= 0; i-- {
 			hit := hits[i]
 			if mouse.X < hit.x0 || mouse.X >= hit.x1 || mouse.Y < hit.y0 || mouse.Y >= hit.y1 {
 				continue
 			}
-			matched = &hit
-			break
+			if matched == nil {
+				matched = &hit
+			}
+			if dragAnchor == nil && hit.kind == boardHitDefault {
+				dragAnchor = &hit
+			}
 		}
 		switch message.(type) {
 		case tea.MouseClickMsg:
@@ -616,9 +621,9 @@ func boardMouseHandler(hits []boardHit, pointerActive bool) func(tea.MouseMsg) t
 			}
 			return func() tea.Msg { return boardColumnClickedMsg{status: matched.status} }
 		case tea.MouseMotionMsg:
-			if matched != nil && matched.kind == boardHitDefault {
+			if dragAnchor != nil {
 				return func() tea.Msg {
-					return boardPointerMoveMsg{status: matched.status, beforeTaskID: matched.taskID}
+					return boardPointerMoveMsg{status: dragAnchor.status, beforeTaskID: dragAnchor.taskID}
 				}
 			}
 		}

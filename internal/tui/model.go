@@ -226,8 +226,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.boardView.focusTask(m.filteredBoard(), m.move.lifted.taskID)
 				}
 				return m, nil
-			case "s", "c", "1", "2", "3", "4", "tab", "shift+tab":
+			case "s", "c", "1", "2", "3", "4", "tab", "shift+tab", "n", "e", "/", "f", "x":
 				m.board = m.move.cancel("focus changed")
+			default:
+				return m, nil
 			}
 		}
 		if handled, command := m.handleFilterKey(msg); handled {
@@ -262,7 +264,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "space":
 			if !m.loading {
 				if task, ok := m.selectedTask(); ok {
-					m.move.begin(m.board, task, m.boardView.visibleStatuses(), false)
+					m.move.beginVisible(m.board, m.filteredBoard(), task, m.boardView.visibleStatuses(), false)
 				}
 			}
 			return m, nil
@@ -272,6 +274,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case boardCardClickedMsg:
+		if m.move.saving {
+			return m, nil
+		}
 		if m.move.lifted != nil && !m.move.saving {
 			m.board = m.move.cancel("focus changed")
 		}
@@ -283,6 +288,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case boardColumnClickedMsg:
+		if m.move.saving {
+			return m, nil
+		}
 		if m.move.lifted != nil && !m.move.saving {
 			m.board = m.move.cancel("focus changed")
 		}
@@ -300,7 +308,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if task, ok := m.selectedTask(); ok {
-			m.move.begin(m.board, task, m.boardView.visibleStatuses(), true)
+			m.move.beginVisible(m.board, m.filteredBoard(), task, m.boardView.visibleStatuses(), true)
 		}
 	case boardPointerMoveMsg:
 		if preview, handled := m.move.previewMouse(msg.status, msg.beforeTaskID); handled {
@@ -374,7 +382,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 func isBoardUserInput(message tea.Msg) bool {
 	switch message.(type) {
 	case tea.KeyPressMsg, boardCardClickedMsg, boardColumnClickedMsg,
-		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
+		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg,
+		filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg:
 		return true
 	default:
 		return false
