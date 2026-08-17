@@ -39,6 +39,12 @@ type boardColumnClickedMsg struct{ status board.Status }
 type filterTextClickedMsg struct{}
 type filterLabelClickedMsg struct{ tag string }
 type filterClearClickedMsg struct{}
+type boardPointerDownMsg struct{ taskID string }
+type boardPointerMoveMsg struct {
+	status       board.Status
+	beforeTaskID string
+}
+type boardPointerUpMsg struct{}
 
 type boardHitKind uint8
 
@@ -274,6 +280,8 @@ func (m Model) renderBoard() (string, []boardHit) {
 		state = "error: " + m.pollErr.Error()
 	} else if m.preferenceErr != nil {
 		state = "error: " + m.preferenceErr.Error()
+	} else if m.move.status != "" {
+		state = m.move.status
 	}
 	cancelled := "off"
 	if m.boardView.showCancelled {
@@ -282,6 +290,10 @@ func (m Model) renderBoard() (string, []boardHit) {
 	help := "j/k cards | h/l/tab columns | 1-4 jump | c cancelled:" + cancelled + " | q quit"
 	if m.editor.Enabled() {
 		help = "n new | e edit | " + help
+	}
+	if m.move.status != "" {
+		footer := fitLine(state, width)
+		return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
 	}
 	if m.settingsNew != nil {
 		footer := settingsBoardFooter(state, cancelled, m.editor.Enabled(), width)
@@ -476,6 +488,9 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 		if m.boardView.column == statusIndex(status) && i == selected {
 			marker = "› "
 		}
+		if m.move.lifted != nil && task.ID == m.move.lifted.taskID {
+			marker = "↕ "
+		}
 		first := cardHeading(task, m.now())
 		for lineIndex, line := range wrapTokens(first, max(width-2, 1)) {
 			prefix := "  "
@@ -560,28 +575,44 @@ func joinColumns(columns []renderedColumn) (string, []boardHit) {
 
 func boardMouseHandler(hits []boardHit) func(tea.MouseMsg) tea.Cmd {
 	return func(message tea.MouseMsg) tea.Cmd {
-		click, ok := message.(tea.MouseClickMsg)
-		if !ok || click.Button != tea.MouseLeft {
+		mouse := message.Mouse()
+		if mouse.Button != tea.MouseLeft {
 			return nil
 		}
-		mouse := click.Mouse()
+		var matched *boardHit
 		for i := len(hits) - 1; i >= 0; i-- {
 			hit := hits[i]
 			if mouse.X < hit.x0 || mouse.X >= hit.x1 || mouse.Y < hit.y0 || mouse.Y >= hit.y1 {
 				continue
 			}
-			switch hit.kind {
+			matched = &hit
+			break
+		}
+		switch message.(type) {
+		case tea.MouseClickMsg:
+			if matched == nil {
+				return nil
+			}
+			switch matched.kind {
 			case boardHitFilterText:
 				return func() tea.Msg { return filterTextClickedMsg{} }
 			case boardHitFilterLabel:
-				return func() tea.Msg { return filterLabelClickedMsg{tag: hit.tag} }
+				return func() tea.Msg { return filterLabelClickedMsg{tag: matched.tag} }
 			case boardHitFilterClear:
 				return func() tea.Msg { return filterClearClickedMsg{} }
 			}
-			if hit.taskID != "" {
-				return func() tea.Msg { return boardCardClickedMsg{taskID: hit.taskID} }
+			if matched.taskID != "" {
+				return func() tea.Msg { return boardPointerDownMsg{taskID: matched.taskID} }
 			}
-			return func() tea.Msg { return boardColumnClickedMsg{status: hit.status} }
+			return func() tea.Msg { return boardColumnClickedMsg{status: matched.status} }
+		case tea.MouseMotionMsg:
+			if matched != nil && matched.kind == boardHitDefault {
+				return func() tea.Msg {
+					return boardPointerMoveMsg{status: matched.status, beforeTaskID: matched.taskID}
+				}
+			}
+		case tea.MouseReleaseMsg:
+			return func() tea.Msg { return boardPointerUpMsg{} }
 		}
 		return nil
 	}

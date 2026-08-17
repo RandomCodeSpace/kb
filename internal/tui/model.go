@@ -51,6 +51,7 @@ type pollTickMsg struct{}
 // messages, so Update remains deterministic.
 type Model struct {
 	store           boardReader
+	moveStore       taskMoveStore
 	watcher         dataVersionReader
 	user            string
 	board           board.Board
@@ -76,6 +77,7 @@ type Model struct {
 	prefPending     *tuiPreferences
 	settings        *settingsModel
 	settingsNew     func() *settingsModel
+	move            cardMoveState
 }
 
 // NewModel creates the root model for one local board owner.
@@ -91,8 +93,10 @@ func newModel(
 ) Model {
 	detailReader, _ := store.(carddetail.Reader)
 	editorStore, _ := store.(cardeditor.Store)
+	moveStore, _ := store.(taskMoveStore)
 	return Model{
 		store:       store,
+		moveStore:   moveStore,
 		watcher:     watcher,
 		user:        user,
 		board:       board.Board{Title: "Board"},
@@ -150,7 +154,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.editor.Update(msg)
 		case boardCardClickedMsg, boardColumnClickedMsg,
-			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg:
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
 			return m, nil
 		}
 	}
@@ -175,7 +180,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.detail.Update(message)
 			}
 		case boardCardClickedMsg, boardColumnClickedMsg,
-			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg:
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
 			return m, nil
 		default:
 			detailCmd = m.detail.Update(message)
@@ -197,6 +203,29 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.settings = nil
 			}
 			return m, command
+		}
+		if m.move.lifted != nil {
+			key := msg.String()
+			if m.move.saving && key != "q" {
+				return m, nil
+			}
+			switch key {
+			case "esc":
+				taskID := m.move.lifted.taskID
+				m.board = m.move.cancel("")
+				m.boardView.focusTask(m.filteredBoard(), taskID)
+				return m, nil
+			case "enter", "space":
+				return m, m.startCardDrop()
+			case "up", "down", "left", "right", "h", "j", "k", "l":
+				if preview, handled := m.move.previewKey(key); handled {
+					m.board = preview
+					m.boardView.focusTask(m.filteredBoard(), m.move.lifted.taskID)
+				}
+				return m, nil
+			case "s", "c", "1", "2", "3", "4", "tab", "shift+tab":
+				m.board = m.move.cancel("focus changed")
+			}
 		}
 		if handled, command := m.handleFilterKey(msg); handled {
 			return m, command
@@ -227,12 +256,22 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.editor.OpenEdit(task)
 				}
 			}
+		case "space":
+			if !m.loading {
+				if task, ok := m.selectedTask(); ok {
+					m.move.begin(m.board, task, m.boardView.visibleStatuses(), false)
+				}
+			}
+			return m, nil
 		default:
 			if m.boardView.handleKey(msg.String(), m.filteredBoard()) == boardToggledCancelled {
 				return m, m.queuePreferences()
 			}
 		}
 	case boardCardClickedMsg:
+		if m.move.lifted != nil && !m.move.saving {
+			m.board = m.move.cancel("focus changed")
+		}
 		m.filter.blur()
 		if m.boardView.focusTask(m.filteredBoard(), msg.taskID) {
 			if task, ok := m.selectedTask(); ok {
@@ -241,21 +280,70 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case boardColumnClickedMsg:
+		if m.move.lifted != nil && !m.move.saving {
+			m.board = m.move.cancel("focus changed")
+		}
 		m.filter.blur()
 		m.boardView.focusColumn(msg.status, m.filteredBoard())
-	case filterTextClickedMsg:
-		if m.settings != nil {
+	case boardPointerDownMsg:
+		if m.loading || m.move.saving {
 			return m, nil
+		}
+		if m.move.lifted != nil {
+			m.board = m.move.cancel("focus changed")
+		}
+		m.filter.blur()
+		if !m.boardView.focusTask(m.filteredBoard(), msg.taskID) {
+			return m, nil
+		}
+		if task, ok := m.selectedTask(); ok {
+			m.move.begin(m.board, task, m.boardView.visibleStatuses(), true)
+		}
+	case boardPointerMoveMsg:
+		if preview, handled := m.move.previewMouse(msg.status, msg.beforeTaskID); handled {
+			m.board = preview
+			m.boardView.focusTask(m.filteredBoard(), m.move.lifted.taskID)
+		}
+	case boardPointerUpMsg:
+		if m.move.lifted == nil || !m.move.lifted.fromMouse {
+			return m, nil
+		}
+		if !m.move.lifted.dragged {
+			taskID := m.move.lifted.taskID
+			m.board = m.move.cancel("")
+			m.move.status = ""
+			m.boardView.focusTask(m.filteredBoard(), taskID)
+			if task, ok := m.selectedTask(); ok {
+				m.detail.Resize(m.width, m.height)
+				return m, m.detail.Open(task)
+			}
+			return m, nil
+		}
+		return m, m.startCardDrop()
+	case cardMoveStoredMsg:
+		return m, m.finishCardDrop(msg)
+	case filterTextClickedMsg:
+		if m.settings != nil || m.move.saving {
+			return m, nil
+		}
+		if m.move.lifted != nil {
+			m.board = m.move.cancel("focus changed")
 		}
 		return m, m.filter.focusText()
 	case filterLabelClickedMsg:
-		if m.settings != nil {
+		if m.settings != nil || m.move.saving {
 			return m, nil
+		}
+		if m.move.lifted != nil {
+			m.board = m.move.cancel("focus changed")
 		}
 		return m, m.mutateFilter(func(filter *boardFilterState) { filter.toggleTag(msg.tag) })
 	case filterClearClickedMsg:
-		if m.settings != nil {
+		if m.settings != nil || m.move.saving {
 			return m, nil
+		}
+		if m.move.lifted != nil {
+			m.board = m.move.cancel("focus changed")
 		}
 		return m, m.mutateFilter(func(filter *boardFilterState) { filter.clear() })
 	case preferenceSavedMsg:
@@ -362,6 +450,10 @@ func (m *Model) reconcileDetail() tea.Cmd {
 // startBoardLoad starts a fallback or retry only when no load is active. The
 // active load already satisfies that obligation, so it does not queue another.
 func (m *Model) startBoardLoad() tea.Cmd {
+	if m.move.saving {
+		m.reloadPending = true
+		return nil
+	}
 	if m.loading {
 		return nil
 	}
@@ -372,6 +464,13 @@ func (m *Model) startBoardLoad() tea.Cmd {
 // requireFreshBoard records a new baseline/change obligation while a load is
 // active. Multiple obligations coalesce into one serialized successor.
 func (m *Model) requireFreshBoard() tea.Cmd {
+	if m.move.saving {
+		m.reloadPending = true
+		return nil
+	}
+	if m.move.lifted != nil {
+		m.board = m.move.cancel("board changed; refreshing")
+	}
 	if m.loading {
 		m.reloadPending = true
 		return nil
