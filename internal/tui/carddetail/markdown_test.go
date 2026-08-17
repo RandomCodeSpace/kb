@@ -65,16 +65,19 @@ func TestInlineMarkdownRejectsMalformedAndOverlappingSyntax(t *testing.T) {
 
 func TestBlockAndBoundaryHelpers(t *testing.T) {
 	tests := []struct {
-		line       string
-		heading    int
-		orderedEnd int
+		line      string
+		heading   int
+		markerEnd int
+		textStart int
 	}{
 		{line: "# one", heading: 1},
 		{line: "### three", heading: 3},
+		{line: "##\t  Plan", heading: 2},
 		{line: "#### four"},
 		{line: "#nospace"},
-		{line: "1. one", orderedEnd: 2},
-		{line: "123. many", orderedEnd: 4},
+		{line: "1. one", markerEnd: 2, textStart: 3},
+		{line: "123. many", markerEnd: 4, textStart: 5},
+		{line: "12.\t  many", markerEnd: 3, textStart: 6},
 		{line: "1234. too many"},
 		{line: ". none"},
 	}
@@ -83,8 +86,9 @@ func TestBlockAndBoundaryHelpers(t *testing.T) {
 		if level != tt.heading {
 			t.Errorf("heading(%q) = %d, want %d", tt.line, level, tt.heading)
 		}
-		if got := orderedPrefix(tt.line); got != tt.orderedEnd {
-			t.Errorf("orderedPrefix(%q) = %d, want %d", tt.line, got, tt.orderedEnd)
+		markerEnd, textStart := orderedPrefix(tt.line)
+		if markerEnd != tt.markerEnd || textStart != tt.textStart {
+			t.Errorf("orderedPrefix(%q) = (%d, %d), want (%d, %d)", tt.line, markerEnd, textStart, tt.markerEnd, tt.textStart)
 		}
 	}
 
@@ -96,6 +100,15 @@ func TestBlockAndBoundaryHelpers(t *testing.T) {
 	}
 	if !wordBefore("a_", 1) || wordBefore("_", 0) || !wordAfter("_a", 1) || wordAfter("_", 1) {
 		t.Fatal("word-boundary helpers returned the wrong result")
+	}
+}
+
+func TestParityMarkdownAcceptsWebWhitespace(t *testing.T) {
+	got := parityMarkdown("##\t Plan\n12.\t  item")
+	for _, want := range []string{"**Plan**", "12. item"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("parity markdown missing %q:\n%s", want, got)
+		}
 	}
 }
 

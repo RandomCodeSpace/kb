@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
+	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -27,25 +28,27 @@ type Reader interface {
 }
 
 type detailLoadedMsg struct {
-	taskID    string
-	comments  []store.Comment
-	links     store.TaskLinks
-	tombstone *store.Tombstone
-	err       error
+	taskID     string
+	generation uint64
+	comments   []store.Comment
+	links      store.TaskLinks
+	tombstone  *store.Tombstone
+	err        error
 }
 
 // Model owns the overlay's task snapshot, enriched detail, and scroll state.
 type Model struct {
-	reader    Reader
-	user      string
-	task      board.Task
-	comments  []store.Comment
-	links     store.TaskLinks
-	tombstone *store.Tombstone
-	open      bool
-	loading   bool
-	err       error
-	scroll    int
+	reader     Reader
+	user       string
+	task       board.Task
+	comments   []store.Comment
+	links      store.TaskLinks
+	tombstone  *store.Tombstone
+	open       bool
+	loading    bool
+	err        error
+	scroll     int
+	generation uint64
 }
 
 // New creates a closed detail pane. A nil reader still shows board-resident
@@ -67,6 +70,7 @@ func (m Model) TaskID() string {
 
 // Open resets the pane to task and returns the asynchronous enrichment load.
 func (m *Model) Open(task board.Task) tea.Cmd {
+	m.generation++
 	m.task = task
 	m.comments = nil
 	m.links = store.TaskLinks{}
@@ -78,7 +82,7 @@ func (m *Model) Open(task board.Task) tea.Cmd {
 	if m.reader == nil {
 		return nil
 	}
-	return m.load(task.ID)
+	return m.load(task.ID, m.generation)
 }
 
 // Close dismisses the pane and invalidates any in-flight result by clearing
@@ -96,7 +100,7 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	}
 	switch msg := message.(type) {
 	case detailLoadedMsg:
-		if msg.taskID != m.task.ID {
+		if msg.taskID != m.task.ID || msg.generation != m.generation {
 			return nil
 		}
 		m.loading = false
@@ -126,7 +130,7 @@ func scrollAmount(key string) int {
 	return 1
 }
 
-func (m Model) load(taskID string) tea.Cmd {
+func (m Model) load(taskID string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		comments, commentsErr := m.reader.Comments(m.user, taskID)
 		links, linksErr := m.reader.TaskLinks(m.user, taskID)
@@ -136,7 +140,7 @@ func (m Model) load(taskID string) tea.Cmd {
 			killed = &tombstone
 		}
 		return detailLoadedMsg{
-			taskID: taskID, comments: comments, links: links, tombstone: killed,
+			taskID: taskID, generation: generation, comments: comments, links: links, tombstone: killed,
 			err: errors.Join(commentsErr, linksErr, tombstoneErr),
 		}
 	}
@@ -194,10 +198,22 @@ func (m Model) frame(width, height int) (string, int, int) {
 	frame := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		Padding(0, 1).
-		Width(paneWidth - 2).
+		Width(innerWidth).
 		Height(paneHeight - 2).
 		Render(content)
-	return frame, paneWidth, paneHeight
+	frame = fitTerminal(frame, width, height)
+	return frame, lipgloss.Width(frame), lipgloss.Height(frame)
+}
+
+func fitTerminal(rendered string, width, height int) string {
+	lines := strings.Split(rendered, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], width, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderBody(width int) string {
@@ -241,18 +257,21 @@ func (m Model) renderBody(width int) string {
 }
 
 func (m Model) metadata() string {
-	blocked := ""
+	primary := []string{fmt.Sprintf("status %s", m.task.Status), fmt.Sprintf("priority %d", m.task.Prio)}
 	if m.task.Blocked {
-		blocked = "  blocked"
+		primary = append(primary, "blocked")
 	}
-	parts := []string{fmt.Sprintf("status %s", m.task.Status), fmt.Sprintf("priority %d", m.task.Prio)}
+	secondary := make([]string, 0, 2)
 	if m.task.Due != "" {
-		parts = append(parts, "due "+m.task.Due)
+		secondary = append(secondary, "due "+m.task.Due)
 	}
 	if m.task.Effort != "" {
-		parts = append(parts, "effort "+m.task.Effort)
+		secondary = append(secondary, "effort "+m.task.Effort)
 	}
-	return strings.Join(parts, "  ") + blocked
+	if len(secondary) == 0 {
+		return strings.Join(primary, "  ")
+	}
+	return strings.Join(primary, "  ") + "\n" + strings.Join(secondary, "  ")
 }
 
 func regularTags(tags []string) []string {
@@ -290,8 +309,11 @@ func killedContext(tombstone store.Tombstone) string {
 }
 
 func renderMarkdown(source string, width int) string {
+	style := styles.DarkStyleConfig
+	zero := uint(0)
+	style.Document.Margin = &zero
 	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
+		glamour.WithStyles(style),
 		glamour.WithWordWrap(max(width, 1)),
 	)
 	if err != nil {
@@ -301,7 +323,7 @@ func renderMarkdown(source string, width int) string {
 	if err != nil {
 		return safeText(source, true)
 	}
-	return strings.TrimSpace(rendered)
+	return strings.Trim(rendered, "\r\n")
 }
 
 func renderChecklist(checks []board.Check) string {

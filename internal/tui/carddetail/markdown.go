@@ -68,31 +68,48 @@ func parityLine(raw string) (line string, listItem bool) {
 	if strings.HasPrefix(raw, "- ") {
 		return "- " + inlineMarkdown(raw[2:], false), true
 	}
-	if ordinalEnd := orderedPrefix(raw); ordinalEnd > 0 {
-		return raw[:ordinalEnd] + " " + inlineMarkdown(raw[ordinalEnd+1:], false), true
+	if markerEnd, textStart := orderedPrefix(raw); markerEnd > 0 {
+		return raw[:markerEnd] + " " + inlineMarkdown(raw[textStart:], false), true
 	}
 	return inlineMarkdown(raw, false), false
 }
 
 func heading(raw string) (int, string, bool) {
-	for level := 1; level <= 3; level++ {
-		prefix := strings.Repeat("#", level) + " "
-		if strings.HasPrefix(raw, prefix) {
-			return level, raw[len(prefix):], true
-		}
+	level := 0
+	for level < len(raw) && level < 4 && raw[level] == '#' {
+		level++
 	}
-	return 0, "", false
+	if level == 0 || level > 3 || level >= len(raw) || !unicode.IsSpace(firstRune(raw[level:])) {
+		return 0, "", false
+	}
+	textStart := level
+	for textStart < len(raw) {
+		r, size := utf8.DecodeRuneInString(raw[textStart:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		textStart += size
+	}
+	return level, raw[textStart:], true
 }
 
-func orderedPrefix(raw string) int {
+func orderedPrefix(raw string) (markerEnd, textStart int) {
 	digits := 0
 	for digits < len(raw) && digits < 3 && raw[digits] >= '0' && raw[digits] <= '9' {
 		digits++
 	}
-	if digits == 0 || digits+1 >= len(raw) || raw[digits] != '.' || raw[digits+1] != ' ' {
-		return 0
+	if digits == 0 || digits+1 >= len(raw) || raw[digits] != '.' || !unicode.IsSpace(firstRune(raw[digits+1:])) {
+		return 0, 0
 	}
-	return digits + 1
+	textStart = digits + 1
+	for textStart < len(raw) {
+		r, size := utf8.DecodeRuneInString(raw[textStart:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		textStart += size
+	}
+	return digits + 1, textStart
 }
 
 func safeFence(lines []string) string {
@@ -152,7 +169,7 @@ func escapeLinkLabel(text string) string {
 	var out strings.Builder
 	for _, r := range text {
 		switch r {
-		case '\\', '[', ']', '*', '_', '~', 0x60:
+		case '\\', '[', ']', '*', '_', '~', '<', '>', 0x60:
 			out.WriteByte('\\')
 		}
 		out.WriteRune(r)

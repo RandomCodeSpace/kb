@@ -130,6 +130,22 @@ func TestModelHandlesErrorsStaleLoadsScrollAndClose(t *testing.T) {
 	}
 }
 
+func TestModelRejectsStaleLoadForReopenedTask(t *testing.T) {
+	m := New(stubReader{}, "u")
+	task := board.Task{ID: "same", Title: "Same", Status: board.StatusTodo}
+	first := m.Open(task)
+	second := m.Open(task)
+
+	m.Update(first())
+	if !m.loading {
+		t.Fatal("stale same-task result changed loading state")
+	}
+	m.Update(second())
+	if m.loading {
+		t.Fatal("current same-task result did not finish loading")
+	}
+}
+
 func TestNilReaderAndRenderingHelpers(t *testing.T) {
 	m := New(nil, "u")
 	task := board.Task{ID: "id", Title: "Bare", Status: board.StatusTodo, Prio: 3}
@@ -187,7 +203,7 @@ func TestCardDetailGolden(t *testing.T) {
 	task := fullTask()
 	task.Status = board.StatusDoing
 	m.Open(task)
-	lines := strings.Split(ansi.Strip(m.View(60, 18)), "\n")
+	lines := strings.Split(ansi.Strip(m.View(60, 20)), "\n")
 	for i := range lines {
 		lines[i] = strings.TrimSpace(lines[i])
 	}
@@ -204,5 +220,22 @@ func TestOverlayKeepsBoardAroundPane(t *testing.T) {
 	got := ansi.Strip(m.Overlay(background, 30, 8))
 	if !strings.Contains(got, "detail") || !strings.Contains(got, "bbbb") {
 		t.Fatalf("composed overlay lost pane or board:\n%s", got)
+	}
+}
+
+func TestViewFitsTinyTerminal(t *testing.T) {
+	m := New(nil, "u")
+	m.Open(board.Task{ID: "id", Title: "detail", Status: board.StatusTodo})
+	for _, size := range [][2]int{{1, 1}, {2, 3}, {4, 3}} {
+		view := m.View(size[0], size[1])
+		lines := strings.Split(view, "\n")
+		if len(lines) > size[1] {
+			t.Fatalf("%dx%d view has %d lines", size[0], size[1], len(lines))
+		}
+		for _, line := range lines {
+			if got := ansi.StringWidth(line); got > size[0] {
+				t.Fatalf("%dx%d view line width = %d: %q", size[0], size[1], got, line)
+			}
+		}
 	}
 }

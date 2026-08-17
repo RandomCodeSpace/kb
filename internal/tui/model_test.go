@@ -16,11 +16,26 @@ import (
 	"github.com/charmbracelet/x/exp/teatest/v2"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
 type stubBoardReader struct {
 	board board.Board
 	err   error
+}
+
+type stubDetailBoardReader struct{ stubBoardReader }
+
+func (stubDetailBoardReader) Comments(string, string) ([]store.Comment, error) {
+	return nil, nil
+}
+
+func (stubDetailBoardReader) TaskLinks(string, string) (store.TaskLinks, error) {
+	return store.TaskLinks{}, nil
+}
+
+func (stubDetailBoardReader) Tombstone(string, string) (store.Tombstone, bool, error) {
+	return store.Tombstone{}, false, nil
 }
 
 func (s stubBoardReader) Board(string) (board.Board, error) { return s.board, s.err }
@@ -158,6 +173,59 @@ func TestModelLoadsRoutesAndRenders(t *testing.T) {
 		if width := ansi.StringWidth(line); width > 1 {
 			t.Fatalf("one-column line width = %d: %q", width, line)
 		}
+	}
+}
+
+func TestCardDetailOpensFromKeyboardAndClick(t *testing.T) {
+	tasks := []board.Task{
+		{ID: "first", Seq: 1, Title: "First card", Desc: "detail-only description", Status: board.StatusTodo},
+		{ID: "second", Seq: 2, Title: "Second card", Status: board.StatusTodo},
+	}
+	m := NewModel(stubDetailBoardReader{stubBoardReader{board: board.Board{Title: "Work", Tasks: tasks}}}, nil, "alice")
+	completeBoardLoad(t, &m, m.Init())
+
+	load := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.detail.IsOpen() || m.detail.TaskID() != "first" || load == nil {
+		t.Fatalf("enter detail state = open %v task %q command %v", m.detail.IsOpen(), m.detail.TaskID(), load)
+	}
+	updateTestModel(t, &m, load())
+	view := ansi.Strip(m.View().Content)
+	if !strings.Contains(view, "detail-only description") || !strings.Contains(view, "esc close") {
+		t.Fatalf("detail overlay missing content:\n%s", view)
+	}
+	columnBefore := m.boardView.column
+	rowBefore := m.boardView.rows[0]
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'j'})
+	updateTestModel(t, &m, boardColumnClickedMsg{status: board.StatusDoing})
+	if m.boardView.column != columnBefore || m.boardView.rows[0] != rowBefore {
+		t.Fatalf("overlay input leaked to board: %+v", m.boardView)
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEsc})
+	if m.detail.IsOpen() {
+		t.Fatal("escape did not close detail")
+	}
+
+	updateTestModel(t, &m, boardCardClickedMsg{taskID: "second"})
+	if !m.detail.IsOpen() || m.detail.TaskID() != "second" || m.boardView.rows[0] != 1 {
+		t.Fatalf("click detail state = open %v task %q row %d", m.detail.IsOpen(), m.detail.TaskID(), m.boardView.rows[0])
+	}
+	if command := m.View().OnMouse(tea.MouseClickMsg{}); command != nil {
+		t.Fatal("board mouse handler remained active behind detail")
+	}
+	if quit := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'q'}); quit == nil || !m.stopped {
+		t.Fatal("q did not preserve root quit while detail was open")
+	}
+}
+
+func TestCardDetailOpenWithoutASelectedTaskIsNoop(t *testing.T) {
+	m := NewModel(stubBoardReader{board: board.Board{Title: "Empty"}}, nil, "u")
+	completeBoardLoad(t, &m, m.Init())
+	if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}); command != nil || m.detail.IsOpen() {
+		t.Fatalf("empty-board enter = command %v open %v", command, m.detail.IsOpen())
+	}
+	updateTestModel(t, &m, boardCardClickedMsg{taskID: "missing"})
+	if m.detail.IsOpen() {
+		t.Fatal("missing card click opened detail")
 	}
 }
 

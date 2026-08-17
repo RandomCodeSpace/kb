@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/tui/carddetail"
 )
 
 const (
@@ -53,6 +54,7 @@ type Model struct {
 	user          string
 	board         board.Board
 	boardView     boardViewState
+	detail        carddetail.Model
 	width         int
 	height        int
 	loading       bool
@@ -81,11 +83,13 @@ func newModel(
 	user string,
 	ctx context.Context,
 ) Model {
+	detailReader, _ := store.(carddetail.Reader)
 	return Model{
 		store:       store,
 		watcher:     watcher,
 		user:        user,
 		board:       board.Board{Title: "Board"},
+		detail:      carddetail.New(detailReader, user),
 		width:       defaultWidth,
 		height:      defaultHeight,
 		loading:     watcher == nil,
@@ -113,6 +117,24 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.stopped {
 		return m, nil
 	}
+	if m.detail.IsOpen() {
+		switch msg := message.(type) {
+		case tea.KeyPressMsg:
+			switch msg.String() {
+			case "esc":
+				m.detail.Close()
+				return m, nil
+			case "q", "ctrl+c":
+				// Preserve the root quit contract while the overlay is open.
+			default:
+				return m, m.detail.Update(message)
+			}
+		case boardCardClickedMsg, boardColumnClickedMsg:
+			return m, nil
+		default:
+			_ = m.detail.Update(message)
+		}
+	}
 	switch msg := message.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
@@ -120,13 +142,22 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.stopped = true
 			m.reloadPending = false
 			return m, tea.Quit
+		case "enter":
+			if task, ok := m.selectedTask(); ok {
+				return m, m.detail.Open(task)
+			}
+			return m, nil
 		default:
 			if m.boardView.handleKey(msg.String(), m.board) == boardToggledCancelled {
 				return m, m.queueCancelledPreference()
 			}
 		}
 	case boardCardClickedMsg:
-		m.boardView.focusTask(m.board, msg.taskID)
+		if m.boardView.focusTask(m.board, msg.taskID) {
+			if task, ok := m.selectedTask(); ok {
+				return m, m.detail.Open(task)
+			}
+		}
 	case boardColumnClickedMsg:
 		m.boardView.focusColumn(msg.status, m.board)
 	case cancelledPreferenceSavedMsg:
@@ -229,6 +260,10 @@ func pollAfter(load tea.Cmd) tea.Cmd {
 // regions back into the update loop. Editing behavior arrives in later slices.
 func (m Model) View() tea.View {
 	content, hits := m.renderBoard()
+	if m.detail.IsOpen() {
+		content = m.detail.Overlay(content, m.width, m.height)
+		hits = nil
+	}
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
