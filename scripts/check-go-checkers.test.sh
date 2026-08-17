@@ -108,6 +108,30 @@ PATH="$fake_go_dir:$PATH" FAKE_PACKAGE_ONE=94.9 FAKE_TOTAL=99.0 \
 assert_status 1 "$status" "package floor"
 assert_contains 'package example.test/one is 94.9%, below 95.0%' "$coverage_output" "package floor"
 
+tui_package_output="$test_dir/tui-package-output"
+tui_list_output="$test_dir/tui-list-output"
+printf 'ok  github.com/RandomCodeSpace/kb/internal/tui  0.001s  coverage: 90.0%% of statements\n' >"$tui_package_output"
+printf 'github.com/RandomCodeSpace/kb/internal/tui\n' >"$tui_list_output"
+if ! PATH="$fake_go_dir:$PATH" FAKE_TEST_OUTPUT_FILE="$tui_package_output" FAKE_LIST_OUTPUT_FILE="$tui_list_output" \
+  sh "$repo_root/scripts/check-go-coverage.sh" >"$coverage_output" 2>&1; then
+  fail "internal/tui 90 percent override failed"
+fi
+
+printf 'ok  github.com/RandomCodeSpace/kb/internal/tui  0.001s  coverage: 89.9%% of statements\n' >"$tui_package_output"
+status=0
+PATH="$fake_go_dir:$PATH" FAKE_TEST_OUTPUT_FILE="$tui_package_output" FAKE_LIST_OUTPUT_FILE="$tui_list_output" \
+  run_capture "$coverage_output" sh "$repo_root/scripts/check-go-coverage.sh" || status=$?
+assert_status 1 "$status" "internal/tui package floor"
+assert_contains 'package github.com/RandomCodeSpace/kb/internal/tui is 89.9%, below 90.0%' "$coverage_output" "internal/tui package floor"
+
+printf 'ok  example.test/internal/tui  0.001s  coverage: 90.0%% of statements\n' >"$tui_package_output"
+printf 'example.test/internal/tui\n' >"$tui_list_output"
+status=0
+PATH="$fake_go_dir:$PATH" FAKE_TEST_OUTPUT_FILE="$tui_package_output" FAKE_LIST_OUTPUT_FILE="$tui_list_output" \
+  run_capture "$coverage_output" sh "$repo_root/scripts/check-go-coverage.sh" || status=$?
+assert_status 1 "$status" "override exact package identity"
+assert_contains 'package example.test/internal/tui is 90.0%, below 95.0%' "$coverage_output" "override exact package identity"
+
 status=0
 PATH="$fake_go_dir:$PATH" FAKE_PACKAGE_ONE=95.0 FAKE_TOTAL=96.3 \
   run_capture "$coverage_output" sh "$repo_root/scripts/check-go-coverage.sh" || status=$?

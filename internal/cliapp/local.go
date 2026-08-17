@@ -49,6 +49,13 @@ func openLocal(user, dataDir string, stderr io.Writer) (backend, error) {
 // scoped to one board owner (users). Same resolution and legacy markdown
 // seeding as openLocal.
 func openLocalStore(dataDir string, stderr io.Writer) (*store.Store, error) {
+	return OpenLocalStore(dataDir, stderr)
+}
+
+// OpenLocalStore opens the local SQLite store with the same data-directory,
+// secret, and legacy-import behavior used by the task CLI. Other local human
+// interfaces use this rather than quietly inventing a second startup path.
+func OpenLocalStore(dataDir string, stderr io.Writer) (*store.Store, error) {
 	if dataDir == "" {
 		d, err := defaultDataDir()
 		if err != nil {

@@ -19,6 +19,7 @@ import (
 // flags only) runs the web server; agents adding CLI verbs register here.
 var subcommands = map[string]func(args []string) error{
 	"mcp":     runMCP,
+	"tui":     runTUI,
 	"version": runVersion,
 }
 

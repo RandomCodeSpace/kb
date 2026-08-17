@@ -2,7 +2,7 @@
 // SQLite store. All HTTP behavior — auth modes (Entra ID bearer tokens,
 // shared-secret token, open; see internal/server), board/labels/settings/AI
 // endpoints, SPA serving — lives in internal/server; storage lives in
-// internal/store. Subcommands (kb mcp) dispatch in dispatch.go.
+// internal/store. Subcommands (kb mcp, kb tui) dispatch in dispatch.go.
 package main
 
 import (
@@ -142,6 +142,7 @@ commands:
   comment, link, unlink
              the task CLI — run "kb help" for the full reference
   mcp        serve the board to AI agents over MCP stdio
+  tui        open the local board in a full-screen terminal UI
   version    print the kb version
   help       task CLI reference
 
