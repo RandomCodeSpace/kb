@@ -16,6 +16,11 @@ type cardLift struct {
 	statuses   []board.Status
 	fromMouse  bool
 	dragged    bool
+	mouseCell  struct {
+		set          bool
+		status       board.Status
+		beforeTaskID string
+	}
 }
 
 type cardMoveState struct {
@@ -91,7 +96,7 @@ func (s *cardMoveState) previewMouse(status board.Status, beforeTaskID string) (
 	}
 	lift := s.lifted
 	if beforeTaskID == lift.taskID {
-		return previewLift(*lift), true
+		return board.Board{}, false
 	}
 	if statusIndexExact(status) < 0 {
 		return board.Board{}, false
@@ -99,6 +104,12 @@ func (s *cardMoveState) previewMouse(status board.Status, beforeTaskID string) (
 	if !containsStatus(lift.statuses, status) {
 		return board.Board{}, false
 	}
+	if lift.mouseCell.set && lift.mouseCell.status == status && lift.mouseCell.beforeTaskID == beforeTaskID {
+		return board.Board{}, false
+	}
+	lift.mouseCell.set = true
+	lift.mouseCell.status = status
+	lift.mouseCell.beforeTaskID = beforeTaskID
 	ids := lift.visibleIDs[status]
 	slot := len(ids)
 	if beforeTaskID != "" {
@@ -109,9 +120,10 @@ func (s *cardMoveState) previewMouse(status board.Status, beforeTaskID string) (
 			}
 		}
 	}
-	if lift.target != status || lift.slot != slot {
-		lift.dragged = true
+	if lift.target == status && lift.slot == slot {
+		return board.Board{}, false
 	}
+	lift.dragged = true
 	lift.target, lift.slot = status, slot
 	preview := previewLift(*lift)
 	s.announcePosition("")

@@ -521,7 +521,8 @@ func (m Model) View() tea.View {
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
 	if m.settings == nil && !m.editor.IsOpen() {
-		view.OnMouse = boardMouseHandler(hits)
+		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
+		view.OnMouse = boardMouseHandler(hits, pointerActive)
 	}
 	return view
 }

@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -142,6 +143,12 @@ func (s *moveTestStore) Board(string) (board.Board, error) {
 	return cloneBoard(s.board), s.reloadErr
 }
 
+func (s *moveTestStore) writeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writes
+}
+
 func (s *moveTestStore) UpdateAndMoveTask(
 	_ string,
 	id string,
@@ -160,13 +167,41 @@ func (s *moveTestStore) UpdateAndMoveTask(
 	if s.writeErr != nil {
 		return board.Task{}, s.writeErr
 	}
-	s.board = moveTaskInBoard(s.board, id, *target, *index)
+	s.board = oracleMoveBoard(s.board, id, *target, *index)
 	for _, task := range s.board.Tasks {
 		if task.ID == id {
 			return task, nil
 		}
 	}
 	return board.Task{}, errors.New("task not found")
+}
+
+// oracleMoveBoard is deliberately independent from the preview implementation.
+// The fake store is routing scaffolding; sharing production reorder code here
+// would let preview and persistence be wrong in exactly the same way.
+func oracleMoveBoard(current board.Board, taskID string, target board.Status, index int) board.Board {
+	columns := map[board.Status][]board.Task{}
+	var moving board.Task
+	for _, task := range current.Tasks {
+		if task.ID == taskID {
+			moving = task
+			continue
+		}
+		columns[task.Status] = append(columns[task.Status], task)
+	}
+	moving.Status = target
+	destination := columns[target]
+	index = min(max(index, 0), len(destination))
+	destination = append(destination[:index], append([]board.Task{moving}, destination[index:]...)...)
+	columns[target] = destination
+	next := board.Board{Title: current.Title}
+	for _, status := range boardStatuses {
+		for position, task := range columns[status] {
+			task.Position = position
+			next.Tasks = append(next.Tasks, task)
+		}
+	}
+	return next
 }
 
 func loadedMoveModel(s *moveTestStore) Model {
@@ -263,7 +298,7 @@ func TestMoveFailurePathsStayTruthful(t *testing.T) {
 		m.move.saving = true
 		canonical := moveFixture()
 		canonical.Tasks = canonical.Tasks[1:]
-		updateTestModel(t, &m, cardMoveStoredMsg{taskID: "a", title: "A", target: board.StatusTodo, board: canonical})
+		updateTestModel(t, &m, cardMoveStoredMsg{taskID: "a", title: "A", board: canonical})
 		if !m.move.statusError || !strings.Contains(m.move.status, "absent") {
 			t.Fatalf("missing canonical task status = error %v %q", m.move.statusError, m.move.status)
 		}
@@ -324,7 +359,7 @@ func TestMouseDragPreviewsAndDropsBetweenColumns(t *testing.T) {
 			destination = hit
 		}
 	}
-	handler := boardMouseHandler(hits)
+	handler := boardMouseHandler(hits, false)
 	down := handler(tea.MouseClickMsg{X: source.x0 + 1, Y: source.y0, Button: tea.MouseLeft})
 	updateTestModel(t, &m, down())
 	move := handler(tea.MouseMotionMsg{X: destination.x0 + 1, Y: destination.y0, Button: tea.MouseLeft})
@@ -386,7 +421,10 @@ func TestCardMoveTeatestInteraction(t *testing.T) {
 		tm.Send(key)
 	}
 	teatest.WaitFor(t, output, func(got []byte) bool {
-		return bytes.Contains(got, []byte("Dropped A, Doing, position 2 of 3"))
+		// Bubble Tea renders the Dropping -> Dropped change as an in-place
+		// two-cell diff in some terminals. Pair the visible position with the
+		// synchronized fake-store receipt instead of depending on diff shape.
+		return bytes.Contains(got, []byte("position 2 of 3")) && s.writeCount() == 1
 	}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Send(tea.KeyPressMsg{Code: 'q'})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(time.Second))
@@ -440,8 +478,8 @@ func TestMoveModelCoverageEdges(t *testing.T) {
 	if _, ok := mouse.previewMouse(board.StatusDoing, "x"); ok {
 		t.Fatal("hidden mouse column was handled")
 	}
-	if _, ok := mouse.previewMouse(board.StatusTodo, "a"); !ok {
-		t.Fatal("motion over lifted card was ignored")
+	if preview, changed := mouse.previewMouse(board.StatusTodo, "a"); changed || len(preview.Tasks) != 0 {
+		t.Fatal("motion over lifted card rebuilt preview")
 	}
 	if preview, ok := mouse.previewMouse(board.StatusTodo, ""); !ok || columnNames(preview, board.StatusTodo) != "B,C,A" {
 		t.Fatalf("blank-column mouse preview = %q,%v", columnNames(preview, board.StatusTodo), ok)
@@ -556,7 +594,7 @@ func TestMoveBoardViewCoverageEdges(t *testing.T) {
 		t.Fatalf("tiny footer = %q", got)
 	}
 	hits := []boardHit{{x1: 5, y1: 5, status: board.StatusDoing}}
-	handler := boardMouseHandler(hits)
+	handler := boardMouseHandler(hits, false)
 	if command := handler(tea.MouseClickMsg{X: 1, Y: 1, Button: tea.MouseLeft}); command == nil {
 		t.Fatal("column click was ignored")
 	} else if msg := command().(boardColumnClickedMsg); msg.status != board.StatusDoing {
@@ -567,5 +605,265 @@ func TestMoveBoardViewCoverageEdges(t *testing.T) {
 	}
 	if command := handler(tea.MouseWheelMsg{X: 1, Y: 1, Button: tea.MouseLeft}); command != nil {
 		t.Fatalf("left-button wheel = %v", command)
+	}
+}
+
+func TestMouseReleaseProtocolsClickAndDrag(t *testing.T) {
+	protocols := []struct {
+		name   string
+		button tea.MouseButton
+	}{
+		{name: "SGR", button: tea.MouseLeft},
+		{name: "X10", button: tea.MouseNone},
+	}
+	for _, protocol := range protocols {
+		for _, drag := range []bool{false, true} {
+			name := protocol.name + "/click"
+			if drag {
+				name = protocol.name + "/drag"
+			}
+			t.Run(name, func(t *testing.T) {
+				s := &moveTestStore{board: moveFixture()}
+				m := loadedMoveModel(s)
+				m.width, m.height = 140, 20
+				_, hits := m.renderBoard()
+				var source, destination boardHit
+				for _, hit := range hits {
+					switch hit.taskID {
+					case "a":
+						source = hit
+					case "y":
+						destination = hit
+					}
+				}
+				down := boardMouseHandler(hits, false)(tea.MouseClickMsg{
+					X: source.x0 + 1, Y: source.y0, Button: tea.MouseLeft,
+				})
+				updateTestModel(t, &m, down())
+				active := boardMouseHandler(hits, true)
+				if drag {
+					motion := active(tea.MouseMotionMsg{
+						X: destination.x0 + 1, Y: destination.y0, Button: tea.MouseLeft,
+					})
+					updateTestModel(t, &m, motion())
+				}
+				release := active(tea.MouseReleaseMsg{
+					X: destination.x0 + 1, Y: destination.y0, Button: protocol.button,
+				})
+				if release == nil {
+					t.Fatalf("%s release was ignored", protocol.name)
+				}
+				command := updateTestModel(t, &m, release())
+				if drag {
+					if command == nil {
+						t.Fatal("drag release did not start drop")
+					}
+					updateTestModel(t, &m, command())
+					if s.writes != 1 || s.target != board.StatusDoing {
+						t.Fatalf("drag write = %d/%s", s.writes, s.target)
+					}
+				} else if !m.detail.IsOpen() || s.writes != 0 {
+					t.Fatalf("click release = detail %v writes %d", m.detail.IsOpen(), s.writes)
+				}
+			})
+		}
+	}
+	if command := boardMouseHandler(nil, false)(tea.MouseReleaseMsg{Button: tea.MouseNone}); command != nil {
+		t.Fatalf("unrelated X10 release produced %v", command)
+	}
+}
+
+func TestMoveFooterSanitizesTitlesStatusesAndStoreErrors(t *testing.T) {
+	hostile := "\x1b]8;;https://evil.example\x07pwn\x1b]8;;\x07\x1b[31mred\x1b[0m\x00\x01\x7f\u0085"
+	assertSafeFooter := func(t *testing.T, model Model, wants ...string) {
+		t.Helper()
+		lines := strings.Split(model.render(), "\n")
+		footer := lines[len(lines)-1]
+		for _, want := range wants {
+			if !strings.Contains(footer, want) {
+				t.Errorf("footer missing %q: %q", want, footer)
+			}
+		}
+		for _, r := range footer {
+			if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+				t.Fatalf("footer retained control U+%04X: %q", r, footer)
+			}
+		}
+		if strings.Contains(footer, "evil.example") || strings.ContainsRune(footer, '\x1b') {
+			t.Fatalf("footer retained terminal control payload: %q", footer)
+		}
+	}
+
+	t.Run("lift title and status", func(t *testing.T) {
+		s := &moveTestStore{board: moveFixture()}
+		s.board.Tasks[0].Title = hostile
+		m := loadedMoveModel(s)
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+		assertSafeFooter(t, m, "pwnred", "Arrows or hjkl")
+	})
+
+	t.Run("store error", func(t *testing.T) {
+		s := &moveTestStore{board: moveFixture(), writeErr: errors.New(hostile)}
+		m := loadedMoveModel(s)
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+		drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+		updateTestModel(t, &m, drop())
+		assertSafeFooter(t, m, "Move failed for A", "pwnred")
+	})
+}
+
+func TestRepeatedSameCellMotionDoesNotRebuildLargePreview(t *testing.T) {
+	const cards = 20_000
+	current := board.Board{Title: "Large"}
+	for i := 0; i < cards; i++ {
+		current.Tasks = append(current.Tasks, board.Task{
+			ID: fmt.Sprintf("t-%d", i), Title: fmt.Sprintf("Task %d", i), Status: board.StatusTodo,
+		})
+	}
+	current.Tasks = append(current.Tasks, board.Task{ID: "doing", Title: "Doing", Status: board.StatusDoing})
+	var state cardMoveState
+	state.begin(current, current.Tasks[0], []board.Status{board.StatusTodo, board.StatusDoing}, true)
+	preview, changed := state.previewMouse(board.StatusTodo, "t-10000")
+	if !changed || len(preview.Tasks) != len(current.Tasks) {
+		t.Fatalf("meaningful motion = changed %v tasks %d", changed, len(preview.Tasks))
+	}
+	rebuilds := 0
+	allocations := testing.AllocsPerRun(1000, func() {
+		preview, changed := state.previewMouse(board.StatusTodo, "t-10000")
+		if changed || len(preview.Tasks) != 0 {
+			rebuilds++
+		}
+	})
+	if rebuilds != 0 || allocations != 0 {
+		t.Fatalf("same-cell motion rebuilt preview %d times with %.1f allocations/run", rebuilds, allocations)
+	}
+}
+
+func TestDropAnnouncementUsesCanonicalTaskStatusTitleAndPosition(t *testing.T) {
+	s := &moveTestStore{board: moveFixture()}
+	m := loadedMoveModel(s)
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyRight}) // requested Doing
+	canonical := moveFixture()
+	canonical.Tasks = append(canonical.Tasks, board.Task{
+		ID: "killed-first", Title: "Killed first", Status: board.StatusCancelled,
+	})
+	for i := range canonical.Tasks {
+		if canonical.Tasks[i].ID == "a" {
+			canonical.Tasks[i].Title = "Renamed concurrently"
+			canonical.Tasks[i].Status = board.StatusCancelled
+		}
+	}
+	updateTestModel(t, &m, cardMoveStoredMsg{taskID: "a", title: "A", board: canonical})
+	if m.move.statusError || m.move.status != "Dropped Renamed concurrently, Cancelled, position 1 of 2" {
+		t.Fatalf("canonical announcement = error %v status %q", m.move.statusError, m.move.status)
+	}
+	if m.boardView.column == statusIndex(board.StatusCancelled) {
+		t.Fatal("hidden Cancelled task stole visible focus")
+	}
+}
+
+func TestActiveMoveStatusPrecedesLingeringErrors(t *testing.T) {
+	for name, install := range map[string]func(*Model){
+		"load":       func(m *Model) { m.loadErr = errors.New("old load error") },
+		"poll":       func(m *Model) { m.pollErr = errors.New("old poll error") },
+		"preference": func(m *Model) { m.preferenceErr = errors.New("old preference error") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &moveTestStore{board: moveFixture()}
+			m := loadedMoveModel(s)
+			install(&m)
+			updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+			footer := lastRenderLine(m)
+			if !strings.Contains(footer, "Lifted A") || strings.Contains(footer, "old ") {
+				t.Fatalf("active footer = %q", footer)
+			}
+			updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEsc})
+			footer = lastRenderLine(m)
+			if !strings.Contains(footer, "old ") {
+				t.Fatalf("restored error footer = %q", footer)
+			}
+		})
+	}
+}
+
+func lastRenderLine(model Model) string {
+	lines := strings.Split(ansi.Strip(model.render()), "\n")
+	return lines[len(lines)-1]
+}
+
+func TestPreviewMatchesRealSQLiteIndexedMoves(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		titles     []string
+		statuses   []board.Status
+		moving     string
+		target     board.Status
+		visible    []string
+		slot       int
+		wantColumn string
+	}{
+		{
+			name: "same column", titles: []string{"A", "B", "C"},
+			statuses: []board.Status{board.StatusTodo, board.StatusTodo, board.StatusTodo},
+			moving:   "B", target: board.StatusTodo, visible: []string{"A", "C"}, slot: 2,
+			wantColumn: "A,C,B",
+		},
+		{
+			name: "cross column", titles: []string{"A", "X", "Y"},
+			statuses: []board.Status{board.StatusTodo, board.StatusDoing, board.StatusDoing},
+			moving:   "A", target: board.StatusDoing, visible: []string{"X", "Y"}, slot: 1,
+			wantColumn: "X,A,Y",
+		},
+		{
+			name: "filtered append", titles: []string{"hidden-0", "visible-a", "hidden-1", "visible-b", "hidden-2", "moving"},
+			statuses: []board.Status{board.StatusTodo, board.StatusTodo, board.StatusTodo, board.StatusTodo, board.StatusTodo, board.StatusDoing},
+			moving:   "moving", target: board.StatusTodo, visible: []string{"visible-a", "visible-b"}, slot: 2,
+			wantColumn: "hidden-0,visible-a,hidden-1,visible-b,hidden-2,moving",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			st, err := store.Open(t.TempDir()+"/kb.db", []byte("preview-store-parity"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			ids := map[string]string{}
+			for i, title := range test.titles {
+				added, addErr := st.AddTask("u", board.Task{Title: title, Status: test.statuses[i]})
+				if addErr != nil {
+					t.Fatal(addErr)
+				}
+				ids[title] = added.ID
+			}
+			canonical, err := st.Board("u")
+			if err != nil {
+				t.Fatal(err)
+			}
+			visibleIDs := make([]string, len(test.visible))
+			for i, title := range test.visible {
+				visibleIDs[i] = ids[title]
+			}
+			lift := cardLift{
+				canonical: canonical, taskID: ids[test.moving], title: test.moving,
+				target: test.target, slot: test.slot,
+				visibleIDs: map[board.Status][]string{test.target: visibleIDs},
+			}
+			preview := previewLift(lift)
+			index := visibleSlotToFullColumnIndex(canonical, test.target, lift.taskID, visibleIDs, test.slot)
+			if _, err := st.UpdateAndMoveTask("u", lift.taskID, store.TaskPatch{}, &test.target, &index, nil); err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := st.Board("u")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := columnNames(preview, test.target); got != test.wantColumn {
+				t.Fatalf("preview = %q, want %q", got, test.wantColumn)
+			}
+			if got := columnNames(persisted, test.target); got != test.wantColumn {
+				t.Fatalf("persisted = %q, want %q", got, test.wantColumn)
+			}
+		})
 	}
 }

@@ -16,7 +16,6 @@ type taskMoveStore interface {
 type cardMoveStoredMsg struct {
 	taskID    string
 	title     string
-	target    board.Status
 	board     board.Board
 	writeErr  error
 	reloadErr error
@@ -48,7 +47,7 @@ func (m *Model) startCardDrop() tea.Cmd {
 		canonical, reloadErr := moveStore.Board(user)
 		return cardMoveStoredMsg{
 			taskID: lift.taskID, title: lift.title,
-			target: lift.target, board: canonical,
+			board:    canonical,
 			writeErr: writeErr, reloadErr: reloadErr,
 		}
 	}
@@ -70,7 +69,10 @@ func (m *Model) finishCardDrop(msg cardMoveStoredMsg) tea.Cmd {
 	m.move.saving = false
 	m.move.statusError = msg.writeErr != nil || msg.reloadErr != nil
 	m.boardView.adoptBoard(previous, m.board)
-	found := m.boardView.focusTask(m.board, msg.taskID)
+	canonicalTask, found := boardTaskByID(m.board, msg.taskID)
+	if found {
+		m.boardView.focusTask(m.board, msg.taskID)
+	}
 
 	switch {
 	case msg.writeErr != nil && msg.reloadErr != nil:
@@ -83,10 +85,10 @@ func (m *Model) finishCardDrop(msg cardMoveStoredMsg) tea.Cmd {
 		m.move.statusError = true
 		m.move.status = fmt.Sprintf("Dropped %s, but it is absent from the canonical board", msg.title)
 	default:
-		position := taskIndex(m.board, msg.target, msg.taskID)
-		count := taskCount(m.board, msg.target)
-		m.move.status = fmt.Sprintf("Dropped %s, %s, position %d of %d", msg.title,
-			statusLabelTitle(msg.target), position+1, count)
+		position := taskIndex(m.board, canonicalTask.Status, msg.taskID)
+		count := taskCount(m.board, canonicalTask.Status)
+		m.move.status = fmt.Sprintf("Dropped %s, %s, position %d of %d", canonicalTask.Title,
+			statusLabelTitle(canonicalTask.Status), position+1, count)
 	}
 
 	if m.reloadPending || msg.reloadErr != nil {
@@ -94,4 +96,13 @@ func (m *Model) finishCardDrop(msg cardMoveStoredMsg) tea.Cmd {
 		return m.startBoardLoad()
 	}
 	return nil
+}
+
+func boardTaskByID(current board.Board, taskID string) (board.Task, bool) {
+	for _, task := range current.Tasks {
+		if task.ID == taskID {
+			return task, true
+		}
+	}
+	return board.Task{}, false
 }

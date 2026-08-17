@@ -271,17 +271,19 @@ func (m Model) renderBoard() (string, []boardHit) {
 	hits = append(filterHits, hits...)
 
 	state := "ready"
-	if m.loading || (m.watcher != nil && !m.haveVersion) {
-		state = "loading board..."
-	}
-	if m.loadErr != nil {
+	moveActive := m.move.lifted != nil || m.move.saving
+	if moveActive && m.move.status != "" {
+		state = sanitizeTerminal(m.move.status)
+	} else if m.loadErr != nil {
 		state = "error: " + m.loadErr.Error()
 	} else if m.pollErr != nil {
 		state = "error: " + m.pollErr.Error()
 	} else if m.preferenceErr != nil {
 		state = "error: " + m.preferenceErr.Error()
 	} else if m.move.status != "" {
-		state = m.move.status
+		state = sanitizeTerminal(m.move.status)
+	} else if m.loading || (m.watcher != nil && !m.haveVersion) {
+		state = "loading board..."
 	}
 	cancelled := "off"
 	if m.boardView.showCancelled {
@@ -573,9 +575,15 @@ func joinColumns(columns []renderedColumn) (string, []boardHit) {
 	return strings.Join(lines, "\n"), hits
 }
 
-func boardMouseHandler(hits []boardHit) func(tea.MouseMsg) tea.Cmd {
+func boardMouseHandler(hits []boardHit, pointerActive bool) func(tea.MouseMsg) tea.Cmd {
 	return func(message tea.MouseMsg) tea.Cmd {
 		mouse := message.Mouse()
+		if _, release := message.(tea.MouseReleaseMsg); release {
+			if mouse.Button == tea.MouseLeft || (mouse.Button == tea.MouseNone && pointerActive) {
+				return func() tea.Msg { return boardPointerUpMsg{} }
+			}
+			return nil
+		}
 		if mouse.Button != tea.MouseLeft {
 			return nil
 		}
@@ -611,8 +619,6 @@ func boardMouseHandler(hits []boardHit) func(tea.MouseMsg) tea.Cmd {
 					return boardPointerMoveMsg{status: matched.status, beforeTaskID: matched.taskID}
 				}
 			}
-		case tea.MouseReleaseMsg:
-			return func() tea.Msg { return boardPointerUpMsg{} }
 		}
 		return nil
 	}
