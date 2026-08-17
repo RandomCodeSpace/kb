@@ -928,6 +928,7 @@ describe('per-task board API', () => {
     it('fills in every field the server omits when empty', () => {
       expect(coerceApiTask(wire)).toEqual({
         id: 'uuid-1',
+        seq: 7,
         emoji: '',
         title: 'Ship it',
         desc: '',
@@ -939,6 +940,15 @@ describe('per-task board API', () => {
         createdAt: '',
         movedAt: '',
       });
+    });
+
+    it('lifts a usable seq and drops an unusable one', () => {
+      expect(coerceApiTask({ ...wire, seq: 12 })?.seq).toBe(12);
+      expect(coerceApiTask({ ...wire, seq: 0 })?.seq).toBeUndefined();
+      expect(coerceApiTask({ ...wire, seq: -3 })?.seq).toBeUndefined();
+      expect(coerceApiTask({ ...wire, seq: 2.5 })?.seq).toBeUndefined();
+      expect(coerceApiTask({ ...wire, seq: '12' })?.seq).toBeUndefined();
+      expect(coerceApiTask({ ...wire, seq: undefined })?.seq).toBeUndefined();
     });
 
     it('keeps the optional fields the server did send', () => {
@@ -960,6 +970,7 @@ describe('per-task board API', () => {
         movedAt: '2026-08-02T00:00:00Z',
       })).toEqual({
         id: 'uuid-1',
+        seq: 7,
         emoji: '🐛',
         title: 'Ship it',
         desc: 'details',

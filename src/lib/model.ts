@@ -9,6 +9,7 @@ export interface Check {
 
 export interface Task {
   id: string;
+  seq?: number; // server-assigned human-facing number (#12); absent on older data
   emoji: string;
   title: string;
   desc: string;
@@ -42,7 +43,7 @@ export const STATUS_LABEL: Record<Status, string> = {
  * (the editor, the ADR split, an issue import, a markdown file) speaks this
  * shape until POST /api/tasks answers with the real task.
  */
-export type TaskDraft = Omit<Task, 'id' | 'createdAt' | 'movedAt'>;
+export type TaskDraft = Omit<Task, 'id' | 'seq' | 'createdAt' | 'movedAt'>;
 
 export function newDraft(partial: Partial<TaskDraft> & { title: string }): TaskDraft {
   return {
@@ -79,6 +80,7 @@ export function cardLabel(
   lifted = false,
 ): string {
   const parts = [task.title, STATUS_LABEL[task.status], `${index + 1} of ${total}`];
+  if (task.seq !== undefined) parts.splice(1, 0, `number ${task.seq}`);
   if (task.blocked) parts.push('blocked');
   const p = progress(task);
   if (p) parts.push(`${p.done} of ${p.total} checklist items done`);

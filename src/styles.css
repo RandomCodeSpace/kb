@@ -561,6 +561,13 @@ body {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.card .seq {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--dim);
+  font-weight: 700;
+  line-height: var(--lh-tight);
+}
 .card .age {
   flex: none;
   font-size: var(--fs-xs);

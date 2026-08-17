@@ -126,6 +126,13 @@ export const Card = memo(function Card({
         <span className="t">
           <InlineText toks={tokenizeInline(task.title)} />
         </span>
+        {/* The number is in the group's aria-label (cardLabel); the visible
+            chip is decoration to a screen reader. */}
+        {task.seq !== undefined && (
+          <span className="seq" aria-hidden="true" title={`Task #${task.seq}`}>
+            #{task.seq}
+          </span>
+        )}
         <span className="age">
           {ageChip(task.status, task.createdAt, task.movedAt, Date.now())}
         </span>

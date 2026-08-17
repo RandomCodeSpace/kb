@@ -392,6 +392,9 @@ import { CARD_GONE_NOTICE, NO_SERVER_NOTICE } from './App';
 beforeEach(() => {
   vi.useRealTimers();
   localStorage.clear();
+  // The filter mirrors itself into the query string; a test that filtered
+  // must not seed the next test's view.
+  window.history.replaceState(null, '', '/');
   state.identity = manual;
   state.authMode = 'unknown';
   state.localDisplayName = '';
@@ -972,6 +975,33 @@ describe('filtering', () => {
 
     // Filtering is display-only: the server still holds all three.
     expect(state.tasks).toHaveLength(3);
+  });
+
+  it('seeds the filter from the URL and mirrors changes back into it', async () => {
+    state.tasks = [
+      seed({ id: 't1', title: 'Fix login', tags: ['bug'], checks: [] }),
+      seed({ id: 't2', title: 'Landing page', tags: ['ui'], checks: [] }),
+    ];
+    window.history.replaceState(null, '', '/?q=fix&other=1');
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('Fix login:todo:');
+
+    // The refresh restored the view: text seeded, board narrowed.
+    const input = screen.getByRole('searchbox', { name: 'Filter cards by text' });
+    expect((input as HTMLInputElement).value).toBe('fix');
+    expect(screen.queryByTestId('task-t2')).toBeNull();
+
+    // Changes mirror into the query string; foreign params survive.
+    await user.click(screen.getByRole('button', { name: 'tag t1' }));
+    await waitFor(() => {
+      const params = new URLSearchParams(window.location.search);
+      expect(params.get('tags')).toBe('bug');
+      expect(params.get('other')).toBe('1');
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    await waitFor(() => expect(window.location.search).toBe('?other=1'));
   });
 
   it('appends a drop past the last visible card', async () => {

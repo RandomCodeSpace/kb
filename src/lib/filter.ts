@@ -28,6 +28,37 @@ export function toggleTag(filter: BoardFilter, tag: string): BoardFilter {
   return { ...filter, tags: [...filter.tags, tag] };
 }
 
+/**
+ * The filter's URL form: ?q= for text, ?tags= comma-separated. The URL is the
+ * persistence layer so a refresh or a shared link restores the same view;
+ * params other than q/tags are never touched.
+ */
+export function filterFromSearch(search: string): BoardFilter {
+  const params = new URLSearchParams(search);
+  const text = params.get('q') ?? '';
+  const tags = (params.get('tags') ?? '')
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter((tag) => tag !== '');
+  return { text, tags: [...new Set(tags)] };
+}
+
+export function filterToSearch(filter: BoardFilter, search: string): string {
+  const params = new URLSearchParams(search);
+  if (filter.text.trim() === '') {
+    params.delete('q');
+  } else {
+    params.set('q', filter.text);
+  }
+  if (filter.tags.length === 0) {
+    params.delete('tags');
+  } else {
+    params.set('tags', filter.tags.join(','));
+  }
+  const encoded = params.toString();
+  return encoded === '' ? '' : `?${encoded}`;
+}
+
 export function taskMatchesFilter(task: Task, filter: BoardFilter): boolean {
   for (const tag of filter.tags) {
     if (!task.tags.includes(tag)) return false;
