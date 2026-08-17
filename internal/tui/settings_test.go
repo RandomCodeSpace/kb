@@ -369,6 +369,43 @@ func TestSettingsViewportKeepsEveryFocusedControlVisible(t *testing.T) {
 	}
 }
 
+func TestSettingsInputCursorAndHorizontalViewport(t *testing.T) {
+	input := settingsInput("placeholder", false)
+	input.SetValue("0123456789abcdef")
+	input.Focus()
+	for _, test := range []struct {
+		name     string
+		position int
+		want     string
+	}{
+		{name: "start", position: 0, want: "|012345678"},
+		{name: "middle", position: 5, want: "01234|5678"},
+		{name: "end", position: 16, want: "789abcdef|"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input.SetCursor(test.position)
+			if got := settingsInputDisplay(input, false, true, 10); got != test.want {
+				t.Fatalf("cursor projection at %d = %q, want %q", test.position, got, test.want)
+			}
+		})
+	}
+
+	input.CursorEnd()
+	end := settingsInputDisplay(input, false, true, 10)
+	input, _ = input.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	left := settingsInputDisplay(input, false, true, 10)
+	input, _ = input.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	right := settingsInputDisplay(input, false, true, 10)
+	if end != "789abcdef|" || left != "6789abcde|" || right != end {
+		t.Fatalf("horizontal cursor tracking = end:%q left:%q right:%q", end, left, right)
+	}
+	for _, view := range []string{end, left, right} {
+		if ansi.StringWidth(view) != 10 || !strings.Contains(view, "|") {
+			t.Fatalf("cursor viewport width/marker = %d/%q", ansi.StringWidth(view), view)
+		}
+	}
+}
+
 func TestSettingsViewStripsTerminalControlsWithoutChangingValues(t *testing.T) {
 	hostile := "safe\x1b[31m-red\x1b[0m\x1b]2;owned\x07\x00\x9b31m"
 	secret := "token\x1b]52;c;stolen\x07\x9b2J"
@@ -376,7 +413,9 @@ func TestSettingsViewStripsTerminalControlsWithoutChangingValues(t *testing.T) {
 		ai:      store.AISettings{BaseURL: hostile, Model: hostile, HasKey: true},
 		sources: []store.ForgeSource{{Name: hostile, Kind: hostile, BaseURL: hostile, HasToken: true}},
 	}
-	model := newSettingsModelWithBackends(backend, &recordingAIProber{}, &recordingForgeProber{}, hostile, context.Background())
+	aiProbe := &recordingAIProber{}
+	forgeProbe := &recordingForgeProber{}
+	model := newSettingsModelWithBackends(backend, aiProbe, forgeProbe, hostile, context.Background())
 	loadSettingsForTest(t, model)
 	row := &model.rows[0]
 	model.aiKey.SetValue(secret)
@@ -406,10 +445,25 @@ func TestSettingsViewStripsTerminalControlsWithoutChangingValues(t *testing.T) {
 			model.aiBase.Value(), model.aiKey.Value(), row.name.Value(), row.kind,
 			row.baseURL.Value(), row.project.Value(), row.token.Value())
 	}
+
+	runSettingsCommand(t, model, model.startAITest())
+	if aiProbe.config.BaseURL != beforeAIBase || aiProbe.config.Model != model.aiModel.Value() || aiProbe.config.Key != beforeAIKey {
+		t.Fatalf("AI probe did not receive underlying values: %+v", aiProbe.config)
+	}
+	runSettingsCommand(t, model, model.startForgeTest(row))
+	if forgeProbe.config.Name != beforeName || forgeProbe.config.Kind != beforeKind ||
+		forgeProbe.config.BaseURL != beforeBase || forgeProbe.config.Project != beforeProject ||
+		forgeProbe.config.Token != beforeToken {
+		t.Fatalf("forge probe did not receive underlying values: %+v", forgeProbe.config)
+	}
 }
 
 func TestRootRoutesSettingsWithoutStoppingBoardPolling(t *testing.T) {
 	st := newSettingsTestStore(t)
+	direct := newSettingsModel(st, "alice", context.Background())
+	if direct.store != st || direct.ai == nil || direct.forge == nil {
+		t.Fatal("production settings constructor did not wire direct backends")
+	}
 	settings := newSettingsModelWithBackends(st, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background())
 	root := NewModel(st, stubVersionReader{version: 2}, "alice")
 	root.settingsNew = func() *settingsModel { return settings }
@@ -427,6 +481,31 @@ func TestRootRoutesSettingsWithoutStoppingBoardPolling(t *testing.T) {
 	updateTestModel(t, &root, tea.KeyPressMsg{Code: tea.KeyEscape})
 	if root.settings != nil || !strings.Contains(root.View().Content, "kb / Board / alice") {
 		t.Fatal("escape did not return to board")
+	}
+}
+
+func TestRootSettingsQuitAndClosedMessageRouting(t *testing.T) {
+	st := newSettingsTestStore(t)
+	settings := newSettingsModelWithBackends(st, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background())
+	loadSettingsForTest(t, settings)
+	if command := settings.startAITest(); command == nil || settings.testCancel == nil {
+		t.Fatal("settings test did not retain cancellable work")
+	}
+	root := NewModel(st, stubVersionReader{version: 1}, "alice")
+	root.settings = settings
+	root.reloadPending = true
+	quit := updateTestModel(t, &root, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if quit == nil || !root.stopped || root.reloadPending || !settings.closed || settings.testCancel != nil {
+		t.Fatalf("ctrl+c settings quit = command:%v stopped:%v pending:%v closed:%v cancel:%v",
+			quit, root.stopped, root.reloadPending, settings.closed, settings.testCancel != nil)
+	}
+
+	closed := newSettingsModelWithBackends(st, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background())
+	closed.closed = true
+	root = NewModel(st, stubVersionReader{version: 1}, "alice")
+	root.settings = closed
+	if command := updateTestModel(t, &root, settingsLoadedMsg{}); command != nil || root.settings != nil {
+		t.Fatalf("closed settings message = command:%v settings:%v", command, root.settings)
 	}
 }
 

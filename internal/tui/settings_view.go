@@ -29,9 +29,9 @@ func (m *settingsModel) View(width, height int) string {
 		body = append(body, "loading settings...")
 	} else {
 		body = append(body,
-			m.inputLine("ai:base", "Base URL", settingsInputDisplay(m.aiBase, false), width),
-			m.inputLine("ai:model", "Model", settingsInputDisplay(m.aiModel, false), width),
-			m.inputLine("ai:key", keyLabel("API key", m.hasKey), settingsInputDisplay(m.aiKey, true), width),
+			m.inputModelLine("ai:base", "Base URL", m.aiBase, false, width),
+			m.inputModelLine("ai:model", "Model", m.aiModel, false, width),
+			m.inputModelLine("ai:key", keyLabel("API key", m.hasKey), m.aiKey, true, width),
 			m.actionLine("ai:test", "Test connection", width),
 			m.actionLine("ai:save", "Save AI settings", width),
 			"", "FORGE INTEGRATIONS",
@@ -95,13 +95,13 @@ func (m *settingsModel) renderForgeRow(row *integrationSettingsRow, width int) [
 	} else {
 		lines = append(lines,
 			m.inputLine(prefix+"kind", "Kind", row.kind, width),
-			m.inputLine(prefix+"name", "Name", settingsInputDisplay(row.name, false), width),
+			m.inputModelLine(prefix+"name", "Name", row.name, false, width),
 		)
 	}
 	lines = append(lines,
-		m.inputLine(prefix+"base", "Base URL", settingsInputDisplay(row.baseURL, false), width),
-		m.inputLine(prefix+"project", "Project", settingsInputDisplay(row.project, false), width),
-		m.inputLine(prefix+"token", keyLabel("Token", row.hasToken), settingsInputDisplay(row.token, true), width),
+		m.inputModelLine(prefix+"base", "Base URL", row.baseURL, false, width),
+		m.inputModelLine(prefix+"project", "Project", row.project, false, width),
+		m.inputModelLine(prefix+"token", keyLabel("Token", row.hasToken), row.token, true, width),
 		m.actionLine(prefix+"test", "Test", width),
 	)
 	remove := "Remove"
@@ -114,16 +114,44 @@ func (m *settingsModel) renderForgeRow(row *integrationSettingsRow, width int) [
 	)
 }
 
-func settingsInputDisplay(input textinput.Model, secret bool) string {
+func settingsInputDisplay(input textinput.Model, secret, focused bool, width int) string {
 	value := input.Value()
 	if value == "" {
-		return sanitizeTerminal(input.Placeholder)
+		value = input.Placeholder
 	}
+	raw := []rune(value)
+	position := min(max(input.Position(), 0), len(raw))
 	safe := sanitizeTerminal(value)
-	if !secret {
-		return safe
+	safePosition := utf8.RuneCountInString(sanitizeTerminal(string(raw[:position])))
+	safePosition = min(safePosition, utf8.RuneCountInString(safe))
+	if secret && input.Value() != "" {
+		safe = strings.Repeat("*", max(utf8.RuneCountInString(safe), 1))
+		safePosition = min(safePosition, utf8.RuneCountInString(safe))
 	}
-	return strings.Repeat("*", max(utf8.RuneCountInString(safe), 1))
+	if !focused {
+		return ansi.Truncate(safe, max(width, 0), "")
+	}
+	return settingsCursorViewport(safe, safePosition, width)
+}
+
+func settingsCursorViewport(value string, position, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	const cursor = "|"
+	if width == 1 {
+		return cursor
+	}
+	runes := []rune(value)
+	position = min(max(position, 0), len(runes))
+	before, after := string(runes[:position]), string(runes[position:])
+	contentWidth := width - 1
+	cursorColumn := ansi.StringWidth(before)
+	left := max(cursorColumn-contentWidth, 0)
+	visibleBefore := ansi.Cut(before, left, cursorColumn)
+	remaining := max(contentWidth-ansi.StringWidth(visibleBefore), 0)
+	visibleAfter := ansi.Truncate(after, remaining, "")
+	return visibleBefore + cursor + visibleAfter
 }
 
 func keyLabel(label string, saved bool) string {
@@ -139,6 +167,22 @@ func (m *settingsModel) inputLine(target, label, value string, width int) string
 		marker = "> "
 	}
 	return settingsFit(marker+label+": "+value, width)
+}
+
+func (m *settingsModel) inputModelLine(
+	target, label string,
+	input textinput.Model,
+	secret bool,
+	width int,
+) string {
+	marker := "  "
+	if m.focus == target {
+		marker = "> "
+	}
+	prefix := marker + label + ": "
+	available := max(width-ansi.StringWidth(prefix), 1)
+	value := settingsInputDisplay(input, secret, m.focus == target, available)
+	return settingsFit(prefix+value, width)
 }
 
 func (m *settingsModel) actionLine(target, label string, width int) string {
