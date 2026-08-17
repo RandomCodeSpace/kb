@@ -149,7 +149,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			return m, m.editor.Update(msg)
-		case boardCardClickedMsg, boardColumnClickedMsg:
+		case boardCardClickedMsg, boardColumnClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg:
 			return m, nil
 		}
 	}
@@ -322,8 +323,10 @@ func (m *Model) finishBoardLoad(msg boardLoadedMsg) tea.Cmd {
 		filtered := m.filteredBoard()
 		m.boardView.adoptBoard(previous, filtered)
 		if m.selectAfterLoad != "" {
-			m.boardView.focusTask(filtered, m.selectAfterLoad)
-			m.selectAfterLoad = ""
+			focused := m.boardView.focusTask(filtered, m.selectAfterLoad)
+			if focused || !m.reloadPending {
+				m.selectAfterLoad = ""
+			}
 		}
 		detailCmd = batchCommands(m.reconcileDetail(), m.reconcileEditor())
 	}
