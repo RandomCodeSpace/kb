@@ -1649,21 +1649,26 @@ func setForgeTestHeaders(request *http.Request, kind, pat string) {
 }
 
 func (s *server) forgeConnectionOK(request *http.Request, user string) bool {
-	response, err := s.forgeClient.Do(request)
+	err := executeForgeTest(s.forgeClient, request)
 	if err != nil {
 		log.Printf("forge: connection test for %s failed: %v", user, err)
 		return false
 	}
-	drainErr := drainForgeResponse(response)
-	if drainErr != nil {
-		log.Printf("forge: connection test for %s failed while closing response: %v", user, drainErr)
-		return false
+	return true
+}
+
+func executeForgeTest(client *http.Client, request *http.Request) error {
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	if err := drainForgeResponse(response); err != nil {
+		return fmt.Errorf("close response: %w", err)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		log.Printf("forge: connection test for %s failed: upstream status %d", user, response.StatusCode)
-		return false
+		return fmt.Errorf("upstream status %d", response.StatusCode)
 	}
-	return true
+	return nil
 }
 
 func drainForgeResponse(response *http.Response) error {
