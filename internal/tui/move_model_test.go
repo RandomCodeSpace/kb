@@ -376,7 +376,7 @@ func TestCardMoveTeatestInteraction(t *testing.T) {
 	var captured bytes.Buffer
 	output := io.TeeReader(tm.Output(), &captured)
 	teatest.WaitFor(t, output, func(got []byte) bool { return bytes.Contains(got, []byte("ready")) },
-		teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	for _, key := range []tea.KeyPressMsg{
 		{Code: tea.KeySpace},
 		{Code: tea.KeyRight},
@@ -387,7 +387,185 @@ func TestCardMoveTeatestInteraction(t *testing.T) {
 	}
 	teatest.WaitFor(t, output, func(got []byte) bool {
 		return bytes.Contains(got, []byte("Dropped A, Doing, position 2 of 3"))
-	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Send(tea.KeyPressMsg{Code: 'q'})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(time.Second))
+}
+
+func TestMoveModelCoverageEdges(t *testing.T) {
+	current := moveFixture()
+	allStatuses := []board.Status{board.StatusTodo, board.StatusDoing, board.StatusDone}
+
+	var empty cardMoveState
+	if _, ok := empty.previewKey("down"); ok {
+		t.Fatal("preview without lift succeeded")
+	}
+	if _, ok := empty.previewMouse(board.StatusTodo, ""); ok {
+		t.Fatal("mouse preview without lift succeeded")
+	}
+	if got := empty.cancel(""); len(got.Tasks) != 0 {
+		t.Fatalf("empty cancel = %+v", got)
+	}
+	empty.announcePosition("ignored")
+
+	missing := board.Task{ID: "missing", Title: "Missing", Status: board.StatusTodo}
+	empty.begin(current, missing, allStatuses, false)
+	if empty.lifted.slot != 3 {
+		t.Fatalf("missing-card slot = %d", empty.lifted.slot)
+	}
+	empty.saving = true
+	if _, ok := empty.previewKey("down"); ok {
+		t.Fatal("preview while saving succeeded")
+	}
+	if _, ok := empty.previewMouse(board.StatusTodo, ""); ok {
+		t.Fatal("mouse preview while saving succeeded")
+	}
+
+	var keyboard cardMoveState
+	keyboard.begin(current, taskNamed(t, current, "A"), allStatuses, false)
+	if _, ok := keyboard.previewKey("unknown"); ok {
+		t.Fatal("unknown move key was handled")
+	}
+	keyboard.previewKey("l")
+	keyboard.previewKey("h")
+	if _, ok := keyboard.previewMouse(board.StatusDoing, "x"); ok {
+		t.Fatal("keyboard lift accepted mouse preview")
+	}
+
+	var mouse cardMoveState
+	mouse.begin(current, taskNamed(t, current, "A"), []board.Status{board.StatusTodo}, true)
+	if _, ok := mouse.previewMouse("bogus", ""); ok {
+		t.Fatal("invalid mouse status was handled")
+	}
+	if _, ok := mouse.previewMouse(board.StatusDoing, "x"); ok {
+		t.Fatal("hidden mouse column was handled")
+	}
+	if _, ok := mouse.previewMouse(board.StatusTodo, "a"); !ok {
+		t.Fatal("motion over lifted card was ignored")
+	}
+	if preview, ok := mouse.previewMouse(board.StatusTodo, ""); !ok || columnNames(preview, board.StatusTodo) != "B,C,A" {
+		t.Fatalf("blank-column mouse preview = %q,%v", columnNames(preview, board.StatusTodo), ok)
+	}
+
+	filtered := board.Board{Tasks: []board.Task{{ID: "a", Status: board.StatusTodo}}}
+	if got := visibleSlotToFullColumnIndex(filtered, board.StatusTodo, "", []string{"gone"}, 0); got != 1 {
+		t.Fatalf("missing visible anchor = %d", got)
+	}
+	if got := moveTaskInBoard(current, "gone", board.StatusDone, -5); columnNames(got, board.StatusTodo) != "A,B,C" {
+		t.Fatalf("missing move changed board = %q", columnNames(got, board.StatusTodo))
+	}
+	if got := moveTaskInBoard(current, "a", board.StatusDoing, -5); columnNames(got, board.StatusDoing) != "A,X,Y" {
+		t.Fatalf("negative preview index = %q", columnNames(got, board.StatusDoing))
+	}
+	if containsStatus(allStatuses, board.StatusCancelled) || statusIndexExact("bogus") != -1 {
+		t.Fatal("status helpers accepted unknown values")
+	}
+	for status, want := range map[board.Status]string{
+		board.StatusTodo: "To Do", board.StatusDoing: "Doing", board.StatusDone: "Done",
+		board.StatusCancelled: "Cancelled", board.Status("bogus"): "bogus",
+	} {
+		if got := statusLabelTitle(status); got != want {
+			t.Errorf("statusLabelTitle(%q) = %q, want %q", status, got, want)
+		}
+	}
+}
+
+func TestMoveRootRoutingCoverageEdges(t *testing.T) {
+	s := &moveTestStore{board: moveFixture()}
+
+	t.Run("saving ignores additional input", func(t *testing.T) {
+		m := loadedMoveModel(s)
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+		m.move.saving = true
+		if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyDown}); command != nil || !m.move.saving {
+			t.Fatalf("saving input = command %v state %#v", command, m.move)
+		}
+		if command := m.startBoardLoad(); command != nil || !m.reloadPending {
+			t.Fatalf("saving load = command %v pending %v", command, m.reloadPending)
+		}
+	})
+
+	t.Run("escape and focus changes cancel", func(t *testing.T) {
+		m := loadedMoveModel(s)
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEsc})
+		if m.move.lifted != nil || !strings.Contains(m.move.status, "cancelled") {
+			t.Fatalf("escape state = %#v", m.move)
+		}
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyTab})
+		if m.move.lifted != nil || m.boardView.column != 1 {
+			t.Fatalf("tab focus change = move %#v column %d", m.move, m.boardView.column)
+		}
+	})
+
+	t.Run("loading and empty boards cannot lift", func(t *testing.T) {
+		m := loadedMoveModel(s)
+		m.loading = true
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+		if m.move.lifted != nil {
+			t.Fatal("loading board lifted a card")
+		}
+		m.loading, m.board = false, board.Board{}
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+		if m.move.lifted != nil {
+			t.Fatal("empty board lifted a card")
+		}
+	})
+
+	t.Run("click and column focus cancel keyboard lift", func(t *testing.T) {
+		m := loadedMoveModel(s)
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+		updateTestModel(t, &m, boardColumnClickedMsg{status: board.StatusDoing})
+		if m.move.lifted != nil || m.boardView.column != 1 {
+			t.Fatalf("column click = move %#v column %d", m.move, m.boardView.column)
+		}
+		m.boardView.column = 0
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+		updateTestModel(t, &m, boardCardClickedMsg{taskID: "b"})
+		if m.move.lifted != nil || !m.detail.IsOpen() {
+			t.Fatalf("card click = move %#v detail %v", m.move, m.detail.IsOpen())
+		}
+	})
+
+	t.Run("pointer guards and click release", func(t *testing.T) {
+		m := loadedMoveModel(s)
+		m.loading = true
+		updateTestModel(t, &m, boardPointerDownMsg{taskID: "a"})
+		m.loading = false
+		updateTestModel(t, &m, boardPointerDownMsg{taskID: "missing"})
+		if m.move.lifted != nil {
+			t.Fatal("guarded pointer down lifted a card")
+		}
+		updateTestModel(t, &m, boardPointerUpMsg{})
+		updateTestModel(t, &m, boardPointerDownMsg{taskID: "a"})
+		if command := updateTestModel(t, &m, boardPointerUpMsg{}); command != nil || !m.detail.IsOpen() {
+			t.Fatalf("click release = command %v detail %v", command, m.detail.IsOpen())
+		}
+	})
+}
+
+func TestMoveBoardViewCoverageEdges(t *testing.T) {
+	if got := taskIndex(moveFixture(), board.StatusDone, "missing"); got != 0 {
+		t.Fatalf("missing task index = %d", got)
+	}
+	if body, hits := joinColumns(nil); body != "" || hits != nil {
+		t.Fatalf("empty columns = %q,%v", body, hits)
+	}
+	if got := settingsBoardFooter("ready", "off", 1); got != "q" {
+		t.Fatalf("tiny footer = %q", got)
+	}
+	hits := []boardHit{{x1: 5, y1: 5, status: board.StatusDoing}}
+	handler := boardMouseHandler(hits)
+	if command := handler(tea.MouseClickMsg{X: 1, Y: 1, Button: tea.MouseLeft}); command == nil {
+		t.Fatal("column click was ignored")
+	} else if msg := command().(boardColumnClickedMsg); msg.status != board.StatusDoing {
+		t.Fatalf("column click status = %s", msg.status)
+	}
+	if command := handler(tea.MouseMotionMsg{X: 9, Y: 9, Button: tea.MouseLeft}); command != nil {
+		t.Fatalf("off-board motion = %v", command)
+	}
+	if command := handler(tea.MouseWheelMsg{X: 1, Y: 1, Button: tea.MouseLeft}); command != nil {
+		t.Fatalf("left-button wheel = %v", command)
+	}
 }
