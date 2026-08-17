@@ -2,6 +2,7 @@ package carddetail
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -100,10 +101,10 @@ func TestModelHandlesErrorsStaleLoadsScrollAndClose(t *testing.T) {
 		t.Fatal("stale result changed loading state")
 	}
 	m.Update(command())
-	if m.loading || m.err == nil || !strings.Contains(m.err.Error(), loadErr.Error()) {
-		t.Fatalf("load error state = loading %v, err %v", m.loading, m.err)
+	if m.loading || !errors.Is(m.commentsErr, loadErr) || m.linksErr == nil {
+		t.Fatalf("load error state = loading %v, comments %v, links %v", m.loading, m.commentsErr, m.linksErr)
 	}
-	if body := ansi.Strip(m.renderBody(40)); !strings.Contains(body, "detail error:") {
+	if body := ansi.Strip(m.renderBody(40)); !strings.Contains(body, "comments error:") || !strings.Contains(body, "blocker links error:") {
 		t.Fatalf("error body:\n%s", body)
 	}
 
@@ -130,6 +131,38 @@ func TestModelHandlesErrorsStaleLoadsScrollAndClose(t *testing.T) {
 	}
 }
 
+func TestModelRendersIndependentEnrichmentResults(t *testing.T) {
+	stamp := time.Date(2026, time.August, 17, 12, 0, 0, 0, time.UTC)
+	task := board.Task{ID: "task", Title: "Task", Status: board.StatusTodo}
+
+	commentsFailed := New(stubReader{
+		commentsErr: errors.New("comments unavailable"),
+		links:       store.TaskLinks{Blocks: []board.Task{{Seq: 9, Status: board.StatusDoing}}},
+		tombstone:   store.Tombstone{TaskID: "task", Reason: "replaced", KilledAt: stamp.Format(time.RFC3339Nano)},
+		found:       true,
+	}, "u")
+	commentsFailed.Update(commentsFailed.Open(task)())
+	body := ansi.Strip(commentsFailed.renderBody(60))
+	for _, want := range []string{"blocks      [#9 doing]", "killed 17 Aug 2026", "comments error: comments unavailable"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("comments failure hid %q:\n%s", want, body)
+		}
+	}
+
+	contextFailed := New(stubReader{
+		comments:     []store.Comment{{ID: 1, Author: "alice", Body: "available", CreatedAt: stamp}},
+		linksErr:     errors.New("links unavailable"),
+		tombstoneErr: errors.New("killed unavailable"),
+	}, "u")
+	contextFailed.Update(contextFailed.Open(task)())
+	body = ansi.Strip(contextFailed.renderBody(60))
+	for _, want := range []string{"available", "blocker links error: links unavailable", "killed context error: killed unavailable"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("context failure hid %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestModelRejectsStaleLoadForReopenedTask(t *testing.T) {
 	m := New(stubReader{}, "u")
 	task := board.Task{ID: "same", Title: "Same", Status: board.StatusTodo}
@@ -143,6 +176,48 @@ func TestModelRejectsStaleLoadForReopenedTask(t *testing.T) {
 	m.Update(second())
 	if m.loading {
 		t.Fatal("current same-task result did not finish loading")
+	}
+}
+
+type countingDetailReader struct{ loads int }
+
+func (r *countingDetailReader) Comments(string, string) ([]store.Comment, error) {
+	r.loads++
+	return []store.Comment{{ID: r.loads, Author: "load", Body: fmt.Sprintf("version %d", r.loads)}}, nil
+}
+
+func (*countingDetailReader) TaskLinks(string, string) (store.TaskLinks, error) {
+	return store.TaskLinks{}, nil
+}
+
+func (*countingDetailReader) Tombstone(string, string) (store.Tombstone, bool, error) {
+	return store.Tombstone{}, false, nil
+}
+
+func TestRefreshCoalescesEnrichmentLoads(t *testing.T) {
+	reader := &countingDetailReader{}
+	m := New(reader, "u")
+	first := m.Open(board.Task{ID: "same", Title: "first", Status: board.StatusTodo})
+	if command := m.Refresh(board.Task{ID: "same", Title: "second", Status: board.StatusDoing}); command != nil {
+		t.Fatal("refresh overlapped the active enrichment load")
+	}
+	if command := m.Refresh(board.Task{ID: "same", Title: "latest", Status: board.StatusDone}); command != nil {
+		t.Fatal("second refresh overlapped the active enrichment load")
+	}
+
+	successor := m.Update(first())
+	if successor == nil || !m.loading || m.reloadPending || len(m.comments) != 0 {
+		t.Fatalf("coalesced first result = loading %v pending %v comments %v command %v", m.loading, m.reloadPending, m.comments, successor)
+	}
+	m.Update(successor())
+	if m.loading || reader.loads != 2 || m.task.Title != "latest" || len(m.comments) != 1 || m.comments[0].Body != "version 2" {
+		t.Fatalf("coalesced successor = model %+v loads %d", m, reader.loads)
+	}
+
+	late := m.Refresh(board.Task{ID: "same", Title: "closed", Status: board.StatusDone})
+	m.Close()
+	if command := m.Update(late()); command != nil || m.IsOpen() {
+		t.Fatal("closed detail restarted a pending refresh")
 	}
 }
 
@@ -190,8 +265,27 @@ func TestViewClampsScrollToContent(t *testing.T) {
 	m := New(nil, "u")
 	task := fullTask()
 	task.Desc = strings.Repeat("line\n", 40)
+	m.Resize(40, 10)
 	m.Open(task)
-	m.scroll = 1000
+	for range 100 {
+		m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	}
+	if m.scroll != m.maxScroll() {
+		t.Fatalf("stored scroll = %d, max = %d", m.scroll, m.maxScroll())
+	}
+	before := m.scroll
+	m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	if m.scroll != before-1 {
+		t.Fatalf("up from bottom = %d, want %d", m.scroll, before-1)
+	}
+	m.Resize(40, 100)
+	if m.scroll != m.maxScroll() {
+		t.Fatalf("resize scroll = %d, max = %d", m.scroll, m.maxScroll())
+	}
+	m.Refresh(board.Task{ID: task.ID, Title: task.Title, Desc: "short", Status: task.Status})
+	if m.scroll != 0 {
+		t.Fatalf("shorter content scroll = %d", m.scroll)
+	}
 	view := ansi.Strip(m.View(40, 10))
 	if !strings.Contains(view, "esc close") || !strings.Contains(view, "/") {
 		t.Fatalf("scrolled overlay footer missing:\n%s", view)
@@ -236,6 +330,33 @@ func TestViewFitsTinyTerminal(t *testing.T) {
 			if got := ansi.StringWidth(line); got > size[0] {
 				t.Fatalf("%dx%d view line width = %d: %q", size[0], size[1], got, line)
 			}
+		}
+	}
+}
+
+func TestHostileFencedTabsStayInsideBorder(t *testing.T) {
+	m := New(nil, "u")
+	m.Open(board.Task{
+		ID: "id", Title: "tabs", Status: board.StatusTodo,
+		Desc: "```\n\t~~~~~~\t界界界界界\n```",
+	})
+	view := ansi.Strip(m.View(20, 20))
+	if strings.ContainsRune(view, '\t') {
+		t.Fatalf("view retained a tab:\n%s", view)
+	}
+	if !strings.Contains(view, "~~~~") {
+		t.Fatalf("hostile fenced code was not visible:\n%s", view)
+	}
+	lines := strings.Split(view, "\n")
+	if len(lines) > 20 {
+		t.Fatalf("view has %d lines:\n%s", len(lines), view)
+	}
+	for _, line := range lines {
+		if width := ansi.StringWidth(line); width > 20 {
+			t.Fatalf("line width = %d:\n%s", width, view)
+		}
+		if strings.HasPrefix(line, "│") && !strings.HasSuffix(line, "│") {
+			t.Fatalf("content crossed the right border: %q", line)
 		}
 	}
 }

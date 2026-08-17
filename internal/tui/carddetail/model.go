@@ -2,7 +2,6 @@
 package carddetail
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -18,7 +17,11 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
-const maxPaneWidth = 92
+const (
+	maxPaneWidth  = 92
+	defaultWidth  = 80
+	defaultHeight = 24
+)
 
 // Reader is the store projection needed to enrich a board task for display.
 type Reader interface {
@@ -28,33 +31,40 @@ type Reader interface {
 }
 
 type detailLoadedMsg struct {
-	taskID     string
-	generation uint64
-	comments   []store.Comment
-	links      store.TaskLinks
-	tombstone  *store.Tombstone
-	err        error
+	taskID       string
+	generation   uint64
+	comments     []store.Comment
+	links        store.TaskLinks
+	tombstone    *store.Tombstone
+	commentsErr  error
+	linksErr     error
+	tombstoneErr error
 }
 
 // Model owns the overlay's task snapshot, enriched detail, and scroll state.
 type Model struct {
-	reader     Reader
-	user       string
-	task       board.Task
-	comments   []store.Comment
-	links      store.TaskLinks
-	tombstone  *store.Tombstone
-	open       bool
-	loading    bool
-	err        error
-	scroll     int
-	generation uint64
+	reader        Reader
+	user          string
+	task          board.Task
+	comments      []store.Comment
+	links         store.TaskLinks
+	tombstone     *store.Tombstone
+	open          bool
+	loading       bool
+	reloadPending bool
+	commentsErr   error
+	linksErr      error
+	tombstoneErr  error
+	scroll        int
+	generation    uint64
+	width         int
+	height        int
 }
 
 // New creates a closed detail pane. A nil reader still shows board-resident
 // task fields; enrichment is simply unavailable to lightweight model tests.
 func New(reader Reader, user string) Model {
-	return Model{reader: reader, user: user}
+	return Model{reader: reader, user: user, width: defaultWidth, height: defaultHeight}
 }
 
 // IsOpen reports whether the overlay currently owns input and rendering.
@@ -70,27 +80,57 @@ func (m Model) TaskID() string {
 
 // Open resets the pane to task and returns the asynchronous enrichment load.
 func (m *Model) Open(task board.Task) tea.Cmd {
-	m.generation++
 	m.task = task
 	m.comments = nil
 	m.links = store.TaskLinks{}
 	m.tombstone = nil
 	m.open = true
-	m.loading = m.reader != nil
-	m.err = nil
+	m.loading = false
+	m.reloadPending = false
+	m.commentsErr = nil
+	m.linksErr = nil
+	m.tombstoneErr = nil
 	m.scroll = 0
 	if m.reader == nil {
 		return nil
 	}
-	return m.load(task.ID, m.generation)
+	return m.startLoad()
+}
+
+// Refresh replaces the board-resident snapshot and serializes enrichment IO.
+// Repeated refreshes during a load collapse into one successor for the latest
+// task snapshot.
+func (m *Model) Refresh(task board.Task) tea.Cmd {
+	if !m.open || task.ID != m.task.ID {
+		return nil
+	}
+	m.task = task
+	m.clampScroll()
+	if m.reader == nil {
+		return nil
+	}
+	if m.loading {
+		m.reloadPending = true
+		return nil
+	}
+	return m.startLoad()
 }
 
 // Close dismisses the pane and invalidates any in-flight result by clearing
 // the current task identity.
 func (m *Model) Close() {
+	m.generation++
 	m.open = false
 	m.loading = false
+	m.reloadPending = false
 	m.task = board.Task{}
+}
+
+// Resize updates the viewport used to bound persistent scroll state.
+func (m *Model) Resize(width, height int) {
+	m.width = max(width, 1)
+	m.height = max(height, 1)
+	m.clampScroll()
 }
 
 // Update handles enrichment results and overlay scrolling.
@@ -103,13 +143,17 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		if msg.taskID != m.task.ID || msg.generation != m.generation {
 			return nil
 		}
-		m.loading = false
-		m.err = msg.err
-		if msg.err == nil {
-			m.comments = msg.comments
-			m.links = msg.links
-			m.tombstone = msg.tombstone
+		if m.reloadPending {
+			m.reloadPending = false
+			return m.startLoad()
 		}
+		m.loading = false
+		m.comments = msg.comments
+		m.links = msg.links
+		m.tombstone = msg.tombstone
+		m.commentsErr = msg.commentsErr
+		m.linksErr = msg.linksErr
+		m.tombstoneErr = msg.tombstoneErr
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "up", "k", "pgup":
@@ -120,6 +164,7 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 			m.scroll = 0
 		}
 	}
+	m.clampScroll()
 	return nil
 }
 
@@ -141,9 +186,19 @@ func (m Model) load(taskID string, generation uint64) tea.Cmd {
 		}
 		return detailLoadedMsg{
 			taskID: taskID, generation: generation, comments: comments, links: links, tombstone: killed,
-			err: errors.Join(commentsErr, linksErr, tombstoneErr),
+			commentsErr: commentsErr, linksErr: linksErr, tombstoneErr: tombstoneErr,
 		}
 	}
+}
+
+func (m *Model) startLoad() tea.Cmd {
+	m.generation++
+	m.loading = true
+	m.commentsErr = nil
+	m.linksErr = nil
+	m.tombstoneErr = nil
+	m.clampScroll()
+	return m.load(m.task.ID, m.generation)
 }
 
 // View renders a centered bordered pane sized for the current terminal.
@@ -177,18 +232,18 @@ func (m Model) Overlay(background string, width, height int) string {
 func (m Model) frame(width, height int) (string, int, int) {
 	width = max(width, 1)
 	height = max(height, 1)
-	paneWidth := min(max(width-4, 12), maxPaneWidth, width)
-	paneHeight := max(min(height-2, height), 5)
-	paneHeight = min(paneHeight, height)
-	innerWidth := max(paneWidth-4, 1)
-	innerHeight := max(paneHeight-4, 1)
+	innerWidth, innerHeight, paneHeight := paneGeometry(width, height)
 
 	body := m.renderBody(innerWidth)
 	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
 	maxScroll := max(0, len(lines)-innerHeight)
 	start := min(m.scroll, maxScroll)
 	end := min(start+innerHeight, len(lines))
-	visible := strings.Join(lines[start:end], "\n")
+	visibleLines := lines[start:end]
+	for i := range visibleLines {
+		visibleLines[i] = ansi.Truncate(visibleLines[i], innerWidth, "")
+	}
+	visible := strings.Join(visibleLines, "\n")
 	visible = lipgloss.NewStyle().Width(innerWidth).Height(innerHeight).Render(visible)
 	footer := "esc close  ↑/↓ scroll"
 	if maxScroll > 0 {
@@ -203,6 +258,29 @@ func (m Model) frame(width, height int) (string, int, int) {
 		Render(content)
 	frame = fitTerminal(frame, width, height)
 	return frame, lipgloss.Width(frame), lipgloss.Height(frame)
+}
+
+func paneGeometry(width, height int) (innerWidth, innerHeight, paneHeight int) {
+	width = max(width, 1)
+	height = max(height, 1)
+	paneWidth := min(max(width-4, 12), maxPaneWidth, width)
+	paneHeight = min(max(min(height-2, height), 5), height)
+	return max(paneWidth-4, 1), max(paneHeight-4, 1), paneHeight
+}
+
+func (m *Model) clampScroll() {
+	if !m.open {
+		m.scroll = 0
+		return
+	}
+	m.scroll = min(max(m.scroll, 0), m.maxScroll())
+}
+
+func (m Model) maxScroll() int {
+	innerWidth, innerHeight, _ := paneGeometry(m.width, m.height)
+	body := m.renderBody(innerWidth)
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	return max(0, len(lines)-innerHeight)
 }
 
 func fitTerminal(rendered string, width, height int) string {
@@ -235,6 +313,9 @@ func (m Model) renderBody(width int) string {
 	if m.tombstone != nil {
 		sections = append(sections, killedContext(*m.tombstone))
 	}
+	if m.tombstoneErr != nil {
+		sections = append(sections, "killed context error: "+safeText(m.tombstoneErr.Error(), false))
+	}
 	if strings.TrimSpace(m.task.Desc) != "" {
 		sections = append(sections, renderMarkdown(m.task.Desc, width))
 	}
@@ -244,14 +325,20 @@ func (m Model) renderBody(width int) string {
 	if refs := renderTaskLinks(m.links); refs != "" {
 		sections = append(sections, refs)
 	}
+	if m.linksErr != nil {
+		sections = append(sections, "blocker links error: "+safeText(m.linksErr.Error(), false))
+	}
 	if m.loading {
 		sections = append(sections, "loading comments and context...")
-	} else if m.err != nil {
-		sections = append(sections, "detail error: "+safeText(m.err.Error(), false))
-	} else if len(m.comments) > 0 {
-		sections = append(sections, renderComments(m.comments, width))
 	} else {
-		sections = append(sections, "comments  none")
+		if len(m.comments) > 0 {
+			sections = append(sections, renderComments(m.comments, width))
+		} else {
+			sections = append(sections, "comments  none")
+		}
+		if m.commentsErr != nil {
+			sections = append(sections, "comments error: "+safeText(m.commentsErr.Error(), false))
+		}
 	}
 	return strings.Join(sections, "\n\n")
 }
@@ -373,13 +460,24 @@ func renderComments(comments []store.Comment, width int) string {
 
 func safeText(text string, keepNewlines bool) string {
 	text = ansi.Strip(text)
-	return strings.Map(func(r rune) rune {
-		if keepNewlines && (r == '\n' || r == '\t') {
-			return r
+	var out strings.Builder
+	for _, r := range text {
+		if r == '\t' {
+			out.WriteString("    ")
+			continue
+		}
+		if r == '\v' || r == '\f' || r == '\r' {
+			out.WriteByte(' ')
+			continue
+		}
+		if keepNewlines && r == '\n' {
+			out.WriteRune(r)
+			continue
 		}
 		if unicode.IsControl(r) {
-			return -1
+			continue
 		}
-		return r
-	}, text)
+		out.WriteRune(r)
+	}
+	return out.String()
 }

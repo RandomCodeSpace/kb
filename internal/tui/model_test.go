@@ -38,6 +38,26 @@ func (stubDetailBoardReader) Tombstone(string, string) (store.Tombstone, bool, e
 	return store.Tombstone{}, false, nil
 }
 
+type mutableDetailReader struct {
+	board        board.Board
+	commentLoads int
+}
+
+func (r *mutableDetailReader) Board(string) (board.Board, error) { return r.board, nil }
+
+func (r *mutableDetailReader) Comments(string, string) ([]store.Comment, error) {
+	r.commentLoads++
+	return []store.Comment{{ID: r.commentLoads, Author: "watcher", Body: fmt.Sprintf("enrichment %d", r.commentLoads)}}, nil
+}
+
+func (*mutableDetailReader) TaskLinks(string, string) (store.TaskLinks, error) {
+	return store.TaskLinks{}, nil
+}
+
+func (*mutableDetailReader) Tombstone(string, string) (store.Tombstone, bool, error) {
+	return store.Tombstone{}, false, nil
+}
+
 func (s stubBoardReader) Board(string) (board.Board, error) { return s.board, s.err }
 
 type stubVersionReader struct {
@@ -226,6 +246,64 @@ func TestCardDetailOpenWithoutASelectedTaskIsNoop(t *testing.T) {
 	updateTestModel(t, &m, boardCardClickedMsg{taskID: "missing"})
 	if m.detail.IsOpen() {
 		t.Fatal("missing card click opened detail")
+	}
+}
+
+func TestBoardReloadReconcilesOpenDetailAndCoalescesEnrichment(t *testing.T) {
+	reader := &mutableDetailReader{board: board.Board{Title: "Work", Tasks: []board.Task{{
+		ID: "same", Title: "Old", Desc: "old description", Status: board.StatusTodo,
+	}}}}
+	m := NewModel(reader, nil, "u")
+	completeBoardLoad(t, &m, m.Init())
+	firstDetailLoad := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	updated := board.Task{
+		ID: "same", Title: "Updated", Desc: "updated description", Status: board.StatusDoing,
+		Checks: []board.Check{{Text: "fresh check", Done: true}},
+	}
+	latest := updated
+	latest.Title = "Latest"
+	latest.Desc = "latest description"
+	for _, snapshot := range []board.Board{
+		{Title: "Work", Tasks: []board.Task{updated}},
+		{Title: "Work", Tasks: []board.Task{latest}},
+	} {
+		if command := updateTestModel(t, &m, boardLoadedMsg{board: snapshot}); command != nil {
+			t.Fatal("board refresh overlapped an active detail enrichment load")
+		}
+	}
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "Latest") || !strings.Contains(view, "latest description") || !strings.Contains(view, "fresh check") {
+		t.Fatalf("board refresh did not replace the open task snapshot:\n%s", view)
+	}
+
+	successor := updateTestModel(t, &m, firstDetailLoad())
+	if successor == nil {
+		t.Fatal("root discarded the coalesced detail successor")
+	}
+	updateTestModel(t, &m, successor())
+	if reader.commentLoads != 2 || !strings.Contains(ansi.Strip(m.View().Content), "enrichment 2") {
+		t.Fatalf("coalesced enrichment = loads %d view:\n%s", reader.commentLoads, ansi.Strip(m.View().Content))
+	}
+
+	idleUpdate := latest
+	idleUpdate.Desc = "idle refresh"
+	refresh := updateTestModel(t, &m, boardLoadedMsg{board: board.Board{Title: "Work", Tasks: []board.Task{idleUpdate}}})
+	if refresh == nil {
+		t.Fatal("idle board refresh did not reload detail enrichment")
+	}
+	updateTestModel(t, &m, refresh())
+	if reader.commentLoads != 3 || !strings.Contains(ansi.Strip(m.View().Content), "idle refresh") {
+		t.Fatalf("idle detail refresh = loads %d view:\n%s", reader.commentLoads, ansi.Strip(m.View().Content))
+	}
+
+	wantErr := errors.New("external read failed")
+	updateTestModel(t, &m, boardLoadedMsg{err: wantErr})
+	if !m.detail.IsOpen() || !strings.Contains(ansi.Strip(m.View().Content), "idle refresh") {
+		t.Fatal("failed board reload discarded the last-good detail")
+	}
+	updateTestModel(t, &m, boardLoadedMsg{board: board.Board{Title: "Work"}})
+	if m.detail.IsOpen() {
+		t.Fatal("deleted task left a ghost detail snapshot")
 	}
 }
 

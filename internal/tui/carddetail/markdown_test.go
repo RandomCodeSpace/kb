@@ -3,6 +3,8 @@ package carddetail
 import (
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestParityMarkdownKeepsOnlyFrozenScope(t *testing.T) {
@@ -34,7 +36,7 @@ func TestParityMarkdownKeepsOnlyFrozenScope(t *testing.T) {
 		"[docs](https://example.com/x)",
 		"<https://example.com/y>",
 		"- bullet",
-		"12. ordered",
+		"12\\. ordered",
 		"\\#\\#\\#\\# not heading",
 		"\\> quote",
 		"\\~\\~strike\\~\\~",
@@ -105,9 +107,55 @@ func TestBlockAndBoundaryHelpers(t *testing.T) {
 
 func TestParityMarkdownAcceptsWebWhitespace(t *testing.T) {
 	got := parityMarkdown("##\t Plan\n12.\t  item")
-	for _, want := range []string{"**Plan**", "12. item"} {
+	for _, want := range []string{"**Plan**", "12\\. item"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("parity markdown missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderMarkdownPreservesSourceOrdinals(t *testing.T) {
+	got := ansi.Strip(renderMarkdown("0. zero\n3. three\n9. nine\n001. padded", 60))
+	for _, want := range []string{"0. zero", "3. three", "9. nine", "001. padded"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered markdown missing source marker %q:\n%s", want, got)
+		}
+	}
+	lines := "\n" + strings.TrimSpace(got) + "\n"
+	if strings.Contains(lines, "\n4. three\n") || strings.Contains(lines, "\n1. padded\n") {
+		t.Fatalf("rendered markdown renumbered source ordinals:\n%s", got)
+	}
+}
+
+func TestFrozenJavaScriptBoundaryParity(t *testing.T) {
+	got := inlineMarkdown("é_x_ _y_界 A_z_ _q_9", false)
+	want := "é*x* *y*界 A\\_z\\_ \\_q\\_9"
+	if got != want {
+		t.Fatalf("ASCII word-boundary parity = %q, want %q", got, want)
+	}
+
+	nbsp := "\u00a0"
+	got = parityMarkdown("https://a.test/x" + nbsp + "tail")
+	if !strings.Contains(got, "<https://a.test/x>"+nbsp+"tail") {
+		t.Fatalf("bare URL crossed JavaScript whitespace: %q", got)
+	}
+	got = inlineMarkdown("[bad](https://x.test/"+nbsp+"tail) [ok](https://ok.test)", false)
+	if strings.Contains(got, "[bad](") || !strings.Contains(got, "[ok](https://ok.test)") {
+		t.Fatalf("explicit-link whitespace parity = %q", got)
+	}
+	if _, _, ok := heading("#\u0085text"); ok {
+		t.Fatal("U+0085 incorrectly matched JavaScript whitespace")
+	}
+	if marker, _ := orderedPrefix("1.\u0085text"); marker != 0 {
+		t.Fatal("U+0085 incorrectly started an ordered item")
+	}
+}
+
+func TestRenderMarkdownPreservesJavaScriptControlWhitespace(t *testing.T) {
+	got := ansi.Strip(renderMarkdown("*\vx*\n#\vheading\n1.\fitem", 60))
+	for _, want := range []string{"* x*", "heading", "1. item"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rendered control whitespace missing %q:\n%s", want, got)
 		}
 	}
 }

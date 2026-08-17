@@ -28,10 +28,8 @@ type inlineMatch struct {
 }
 
 var (
-	codePattern   = regexp.MustCompile("\\x60([^\\x60\\r\\n]+)\\x60")
-	boldPattern   = regexp.MustCompile("\\*\\*([^*\\r\\n]+)\\*\\*")
-	italicPattern = regexp.MustCompile("\\*([^*\\s][^*\\r\\n]*)\\*")
-	urlPattern    = regexp.MustCompile("https?://[^\\s<>()\\\"'\\x60]+")
+	codePattern = regexp.MustCompile("\\x60([^\\x60\\r\\n]+)\\x60")
+	boldPattern = regexp.MustCompile("\\*\\*([^*\\r\\n]+)\\*\\*")
 )
 
 // parityMarkdown reduces a description to the frozen web renderer's grammar
@@ -69,7 +67,9 @@ func parityLine(raw string) (line string, listItem bool) {
 		return "- " + inlineMarkdown(raw[2:], false), true
 	}
 	if markerEnd, textStart := orderedPrefix(raw); markerEnd > 0 {
-		return raw[:markerEnd] + " " + inlineMarkdown(raw[textStart:], false), true
+		// Keep the source ordinal literal. Glamour renumbers adjacent ordered
+		// list items, while the frozen web renderer preserves every marker.
+		return escapeMarkdown(raw[:markerEnd]) + " " + inlineMarkdown(raw[textStart:], false), false
 	}
 	return inlineMarkdown(raw, false), false
 }
@@ -79,13 +79,13 @@ func heading(raw string) (int, string, bool) {
 	for level < len(raw) && level < 4 && raw[level] == '#' {
 		level++
 	}
-	if level == 0 || level > 3 || level >= len(raw) || !unicode.IsSpace(firstRune(raw[level:])) {
+	if level == 0 || level > 3 || level >= len(raw) || !jsWhitespace(firstRune(raw[level:])) {
 		return 0, "", false
 	}
 	textStart := level
 	for textStart < len(raw) {
 		r, size := utf8.DecodeRuneInString(raw[textStart:])
-		if !unicode.IsSpace(r) {
+		if !jsWhitespace(r) {
 			break
 		}
 		textStart += size
@@ -98,13 +98,13 @@ func orderedPrefix(raw string) (markerEnd, textStart int) {
 	for digits < len(raw) && digits < 3 && raw[digits] >= '0' && raw[digits] <= '9' {
 		digits++
 	}
-	if digits == 0 || digits+1 >= len(raw) || raw[digits] != '.' || !unicode.IsSpace(firstRune(raw[digits+1:])) {
+	if digits == 0 || digits+1 >= len(raw) || raw[digits] != '.' || !jsWhitespace(firstRune(raw[digits+1:])) {
 		return 0, 0
 	}
 	textStart = digits + 1
 	for textStart < len(raw) {
 		r, size := utf8.DecodeRuneInString(raw[textStart:])
-		if !unicode.IsSpace(r) {
+		if !jsWhitespace(r) {
 			break
 		}
 		textStart += size
@@ -181,22 +181,42 @@ func inlineMatches(line string) []inlineMatch {
 	var found []inlineMatch
 	found = appendPattern(found, line, codePattern, 0, inlineCode)
 	found = appendPattern(found, line, boldPattern, 1, inlineBold)
-	found = appendPattern(found, line, italicPattern, 2, inlineItalic)
+	found = append(found, starItalicMatches(line)...)
 	found = append(found, underscoreMatches(line)...)
 	found = append(found, linkMatches(line)...)
-	for _, index := range urlPattern.FindAllStringIndex(line, -1) {
-		url := strings.TrimRight(line[index[0]:index[1]], ".,;:!?")
-		found = append(found, inlineMatch{
-			start: index[0], end: index[0] + len(url), priority: 4,
-			kind: inlineAutoLink, text: url, href: url,
-		})
-	}
+	found = append(found, bareURLMatches(line)...)
 	slices.SortFunc(found, func(left, right inlineMatch) int {
 		if left.start != right.start {
 			return left.start - right.start
 		}
 		return left.priority - right.priority
 	})
+	return found
+}
+
+func starItalicMatches(line string) []inlineMatch {
+	var found []inlineMatch
+	for cursor := 0; cursor < len(line); {
+		relative := strings.IndexByte(line[cursor:], '*')
+		if relative < 0 {
+			break
+		}
+		open := cursor + relative
+		closeRelative := strings.IndexByte(line[open+1:], '*')
+		if closeRelative < 0 {
+			break
+		}
+		close := open + 1 + closeRelative
+		content := line[open+1 : close]
+		if content != "" && !jsWhitespace(firstRune(content)) {
+			found = append(found, inlineMatch{
+				start: open, end: close + 1, priority: 2, kind: inlineItalic, text: content,
+			})
+			cursor = close + 1
+			continue
+		}
+		cursor = open + 1
+	}
 	return found
 }
 
@@ -224,7 +244,7 @@ func underscoreMatches(line string) []inlineMatch {
 		}
 		close := open + 1 + closeRelative
 		content := line[open+1 : close]
-		if content != "" && !unicode.IsSpace(firstRune(content)) && !unicode.IsSpace(lastRune(content)) &&
+		if content != "" && !jsWhitespace(firstRune(content)) && !jsWhitespace(lastRune(content)) &&
 			!wordBefore(line, open) && !wordAfter(line, close+1) {
 			found = append(found, inlineMatch{
 				start: open, end: close + 1, priority: 2, kind: inlineItalic, text: content,
@@ -260,8 +280,12 @@ func linkMatches(line string) []inlineMatch {
 			continue
 		}
 		hrefEnd := hrefStart
-		for hrefEnd < len(line) && line[hrefEnd] != ')' && !unicode.IsSpace(rune(line[hrefEnd])) {
-			hrefEnd++
+		for hrefEnd < len(line) && line[hrefEnd] != ')' {
+			r, size := utf8.DecodeRuneInString(line[hrefEnd:])
+			if jsWhitespace(r) {
+				break
+			}
+			hrefEnd += size
 		}
 		if hrefEnd >= len(line) || line[hrefEnd] != ')' {
 			cursor = hrefEnd + 1
@@ -274,6 +298,46 @@ func linkMatches(line string) []inlineMatch {
 		cursor = hrefEnd + 1
 	}
 	return found
+}
+
+func bareURLMatches(line string) []inlineMatch {
+	var found []inlineMatch
+	for cursor := 0; cursor < len(line); {
+		start := nextURLStart(line, cursor)
+		if start < 0 {
+			break
+		}
+		end := start
+		for end < len(line) {
+			r, size := utf8.DecodeRuneInString(line[end:])
+			if jsWhitespace(r) || strings.ContainsRune("<>()\"'`", r) {
+				break
+			}
+			end += size
+		}
+		url := strings.TrimRight(line[start:end], ".,;:!?")
+		found = append(found, inlineMatch{
+			start: start, end: start + len(url), priority: 4,
+			kind: inlineAutoLink, text: url, href: url,
+		})
+		cursor = max(end, start+1)
+	}
+	return found
+}
+
+func nextURLStart(line string, cursor int) int {
+	http := strings.Index(line[cursor:], "http://")
+	https := strings.Index(line[cursor:], "https://")
+	switch {
+	case http < 0 && https < 0:
+		return -1
+	case http < 0:
+		return cursor + https
+	case https < 0:
+		return cursor + http
+	default:
+		return cursor + min(http, https)
+	}
 }
 
 func escapeMarkdown(text string) string {
@@ -302,7 +366,7 @@ func wordBefore(text string, index int) bool {
 		return false
 	}
 	r, _ := utf8.DecodeLastRuneInString(text[:index])
-	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+	return asciiWord(r)
 }
 
 func wordAfter(text string, index int) bool {
@@ -310,5 +374,20 @@ func wordAfter(text string, index int) bool {
 		return false
 	}
 	r, _ := utf8.DecodeRuneInString(text[index:])
-	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+	return asciiWord(r)
+}
+
+func asciiWord(r rune) bool {
+	return r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+}
+
+func jsWhitespace(r rune) bool {
+	switch r {
+	case '\t', '\n', '\v', '\f', '\r', ' ', '\u00a0', '\u1680', '\u2000', '\u2001', '\u2002', '\u2003',
+		'\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200a', '\u2028', '\u2029', '\u202f',
+		'\u205f', '\u3000', '\ufeff':
+		return true
+	default:
+		return false
+	}
 }
