@@ -68,6 +68,7 @@ func (m *Model) finishCardDrop(msg cardMoveStoredMsg) tea.Cmd {
 	m.move.lifted = nil
 	m.move.saving = false
 	m.move.statusError = msg.writeErr != nil || msg.reloadErr != nil
+	m.move.notice = true
 	m.boardView.adoptBoard(previous, m.board)
 	canonicalTask, found := boardTaskByID(m.board, msg.taskID)
 	if found {

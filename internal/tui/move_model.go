@@ -13,6 +13,11 @@ type cardLift struct {
 	target     board.Status
 	slot       int
 	visibleIDs map[board.Status][]string
+	visibleAt  map[board.Status]map[string]int
+	fullIDs    map[board.Status][]string
+	fullAt     map[board.Status]map[string]int
+	preview    board.Board
+	previewAt  map[string]int
 	statuses   []board.Status
 	fromMouse  bool
 	dragged    bool
@@ -28,10 +33,12 @@ type cardMoveState struct {
 	saving      bool
 	status      string
 	statusError bool
+	notice      bool
 }
 
 func (s *cardMoveState) begin(current board.Board, task board.Task, statuses []board.Status, fromMouse bool) bool {
 	visible := visibleTaskIDs(current, task.ID)
+	visibleSlots := taskSlots(visible)
 	ids := visible[task.Status]
 	slot := 0
 	for _, candidate := range tasksInStatus(current, task.Status) {
@@ -50,10 +57,16 @@ func (s *cardMoveState) begin(current board.Board, task board.Task, statuses []b
 		target:     task.Status,
 		slot:       slot,
 		visibleIDs: visible,
+		visibleAt:  visibleSlots,
+		fullIDs:    visible,
+		fullAt:     visibleSlots,
+		preview:    cloneBoard(current),
+		previewAt:  boardTaskSlots(current),
 		statuses:   append([]board.Status(nil), statuses...),
 		fromMouse:  fromMouse,
 	}
 	s.statusError = false
+	s.notice = false
 	s.status = fmt.Sprintf("Lifted %s. Arrows or hjkl move; Enter/Space drop; Escape cancel.", task.Title)
 	return true
 }
@@ -85,7 +98,7 @@ func (s *cardMoveState) previewKey(key string) (board.Board, bool) {
 	if changed {
 		lift.dragged = true
 	}
-	preview := previewLift(*lift)
+	preview := repositionLiftPreview(lift)
 	s.announcePosition("")
 	return preview, true
 }
@@ -113,11 +126,8 @@ func (s *cardMoveState) previewMouse(status board.Status, beforeTaskID string) (
 	ids := lift.visibleIDs[status]
 	slot := len(ids)
 	if beforeTaskID != "" {
-		for i, id := range ids {
-			if id == beforeTaskID {
-				slot = i
-				break
-			}
+		if at, ok := lift.visibleAt[status][beforeTaskID]; ok {
+			slot = at
 		}
 	}
 	if lift.target == status && lift.slot == slot {
@@ -125,7 +135,7 @@ func (s *cardMoveState) previewMouse(status board.Status, beforeTaskID string) (
 	}
 	lift.dragged = true
 	lift.target, lift.slot = status, slot
-	preview := previewLift(*lift)
+	preview := repositionLiftPreview(lift)
 	s.announcePosition("")
 	return preview, true
 }
@@ -157,6 +167,7 @@ func (s *cardMoveState) cancel(reason string) board.Board {
 	s.lifted = nil
 	s.saving = false
 	s.statusError = false
+	s.notice = true
 	if reason == "" {
 		s.status = fmt.Sprintf("Move cancelled: %s restored.", lift.title)
 	} else {
@@ -176,6 +187,7 @@ func (s *cardMoveState) announcePosition(prefix string) {
 	s.status = fmt.Sprintf("%s%s, %s, position %d of %d", prefix, lift.title,
 		statusLabelTitle(lift.target), lift.slot+1, len(lift.visibleIDs[lift.target])+1)
 	s.statusError = false
+	s.notice = false
 }
 
 func previewLift(lift cardLift) board.Board {
@@ -183,6 +195,92 @@ func previewLift(lift cardLift) board.Board {
 		lift.canonical, lift.target, lift.taskID, lift.visibleIDs[lift.target], lift.slot,
 	)
 	return moveTaskInBoard(lift.canonical, lift.taskID, lift.target, index)
+}
+
+// repositionLiftPreview applies the current target to the lift's existing
+// preview slice. The indexes are built once at lift time; each transition then
+// rotates only the tasks between the old and new slots and allocates nothing.
+func repositionLiftPreview(lift *cardLift) board.Board {
+	fullIndex := len(lift.fullIDs[lift.target])
+	if lift.slot < len(lift.visibleIDs[lift.target]) {
+		anchor := lift.visibleIDs[lift.target][lift.slot]
+		if at, ok := lift.fullAt[lift.target][anchor]; ok {
+			fullIndex = at
+		}
+	}
+	repositionPreviewTask(lift, lift.target, fullIndex)
+	return lift.preview
+}
+
+func repositionPreviewTask(lift *cardLift, target board.Status, fullIndex int) {
+	tasks := lift.preview.Tasks
+	source, ok := lift.previewAt[lift.taskID]
+	if !ok || source < 0 || source >= len(tasks) {
+		return
+	}
+
+	destination := len(tasks)
+	targetIDs := lift.fullIDs[target]
+	switch {
+	case fullIndex < len(targetIDs):
+		destination = lift.previewAt[targetIDs[fullIndex]]
+	case len(targetIDs) > 0:
+		destination = lift.previewAt[targetIDs[len(targetIDs)-1]] + 1
+	default:
+		targetOrder := statusIndexExact(target)
+		for _, status := range boardStatuses {
+			ids := lift.fullIDs[status]
+			if statusIndexExact(status) > targetOrder && len(ids) > 0 {
+				destination = lift.previewAt[ids[0]]
+				break
+			}
+		}
+	}
+	if source < destination {
+		destination--
+	}
+	if destination == source {
+		tasks[source].Status = target
+		tasks[source].Position = fullIndex
+		return
+	}
+
+	moving := tasks[source]
+	moving.Status = target
+	moving.Position = fullIndex
+	if source < destination {
+		copy(tasks[source:destination], tasks[source+1:destination+1])
+		tasks[destination] = moving
+		for index := source; index <= destination; index++ {
+			lift.previewAt[tasks[index].ID] = index
+		}
+	} else {
+		copy(tasks[destination+1:source+1], tasks[destination:source])
+		tasks[destination] = moving
+		for index := destination; index <= source; index++ {
+			lift.previewAt[tasks[index].ID] = index
+		}
+	}
+}
+
+func taskSlots(columns map[board.Status][]string) map[board.Status]map[string]int {
+	slots := make(map[board.Status]map[string]int, len(columns))
+	for status, ids := range columns {
+		column := make(map[string]int, len(ids))
+		for index, id := range ids {
+			column[id] = index
+		}
+		slots[status] = column
+	}
+	return slots
+}
+
+func boardTaskSlots(current board.Board) map[string]int {
+	slots := make(map[string]int, len(current.Tasks))
+	for index, task := range current.Tasks {
+		slots[task.ID] = index
+	}
+	return slots
 }
 
 // visibleSlotToFullColumnIndex maps an insertion slot in the cards currently

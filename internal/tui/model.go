@@ -130,6 +130,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.stopped {
 		return m, nil
 	}
+	if m.move.lifted == nil && m.move.notice && isBoardUserInput(message) {
+		m.move.notice = false
+	}
 	if m.settings != nil && isSettingsMessage(message) {
 		command := m.settings.Update(message)
 		if m.settings.closed {
@@ -366,6 +369,16 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, next
 	}
 	return m, detailCmd
+}
+
+func isBoardUserInput(message tea.Msg) bool {
+	switch message.(type) {
+	case tea.KeyPressMsg, boardCardClickedMsg, boardColumnClickedMsg,
+		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
+		return true
+	default:
+		return false
+	}
 }
 
 // observeDataVersion advances the watcher baseline and schedules exactly one

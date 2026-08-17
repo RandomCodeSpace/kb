@@ -272,7 +272,9 @@ func (m Model) renderBoard() (string, []boardHit) {
 
 	state := "ready"
 	moveActive := m.move.lifted != nil || m.move.saving
-	if moveActive && m.move.status != "" {
+	movePriority := moveActive || m.move.notice
+	showMoveStatus := movePriority && m.move.status != ""
+	if showMoveStatus {
 		state = sanitizeTerminal(m.move.status)
 	} else if m.loadErr != nil {
 		state = "error: " + m.loadErr.Error()
@@ -293,7 +295,7 @@ func (m Model) renderBoard() (string, []boardHit) {
 	if m.editor.Enabled() {
 		help = "n new | e edit | " + help
 	}
-	if m.move.status != "" {
+	if showMoveStatus || (m.move.status != "" && m.loadErr == nil && m.pollErr == nil && m.preferenceErr == nil) {
 		footer := fitLine(state, width)
 		return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
 	}
