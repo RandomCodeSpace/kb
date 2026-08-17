@@ -7,8 +7,6 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 )
@@ -140,12 +138,6 @@ func (s boardFilterState) matches(task board.Task) bool {
 		}
 	}
 	return false
-}
-
-// webLower matches JavaScript String.prototype.toLowerCase: Unicode default
-// full-string lowercasing, including expanding and context-sensitive mappings.
-func webLower(value string) string {
-	return cases.Lower(language.Und).String(value)
 }
 
 func (s boardFilterState) project(current board.Board) board.Board {
