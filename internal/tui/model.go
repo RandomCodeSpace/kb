@@ -4,28 +4,24 @@ package tui
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 )
 
 const (
-	defaultWidth   = 80
-	defaultHeight  = 24
-	pollInterval   = time.Second
-	wideBoardWidth = 100
+	defaultWidth  = 80
+	defaultHeight = 24
+	pollInterval  = time.Second
 )
 
-var visibleStatuses = [...]board.Status{
+var boardStatuses = [...]board.Status{
 	board.StatusTodo,
 	board.StatusDoing,
 	board.StatusDone,
+	board.StatusCancelled,
 }
 
 type boardReader interface {
@@ -56,7 +52,7 @@ type Model struct {
 	watcher       dataVersionReader
 	user          string
 	board         board.Board
-	focus         int
+	boardView     boardViewState
 	width         int
 	height        int
 	loading       bool
@@ -67,6 +63,11 @@ type Model struct {
 	haveVersion   bool
 	stopped       bool
 	readContext   context.Context
+	now           func() time.Time
+	saveCancelled func(bool) error
+	preferenceErr error
+	prefSaving    bool
+	prefPending   *bool
 }
 
 // NewModel creates the root model for one local board owner.
@@ -89,6 +90,7 @@ func newModel(
 		height:      defaultHeight,
 		loading:     watcher == nil,
 		readContext: ctx,
+		now:         time.Now,
 	}
 }
 
@@ -118,11 +120,17 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.stopped = true
 			m.reloadPending = false
 			return m, tea.Quit
-		case "left", "h", "shift+tab":
-			m.focus = (m.focus + len(visibleStatuses) - 1) % len(visibleStatuses)
-		case "right", "l", "tab":
-			m.focus = (m.focus + 1) % len(visibleStatuses)
+		default:
+			if m.boardView.handleKey(msg.String(), m.board) == boardToggledCancelled {
+				return m, m.queueCancelledPreference()
+			}
 		}
+	case boardCardClickedMsg:
+		m.boardView.focusTask(m.board, msg.taskID)
+	case boardColumnClickedMsg:
+		m.boardView.focusColumn(msg.status, m.board)
+	case cancelledPreferenceSavedMsg:
+		return m, m.finishCancelledPreference(msg)
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 {
 			m.width = msg.Width
@@ -179,7 +187,9 @@ func (m *Model) finishBoardLoad(msg boardLoadedMsg) tea.Cmd {
 	m.loading = false
 	m.loadErr = msg.err
 	if msg.err == nil {
+		previous := m.board
 		m.board = msg.board
+		m.boardView.adoptBoard(previous, m.board)
 	}
 	if !m.reloadPending {
 		return nil
@@ -215,12 +225,14 @@ func pollAfter(load tea.Cmd) tea.Cmd {
 	return tea.Batch(load, schedulePoll())
 }
 
-// View renders the board frame. Cards and editing behavior arrive in later
-// wayfinder slices; this scaffold deliberately renders only per-column counts.
+// View renders the responsive read-only board and wires view-derived mouse hit
+// regions back into the update loop. Editing behavior arrives in later slices.
 func (m Model) View() tea.View {
-	view := tea.NewView(m.render())
+	content, hits := m.renderBoard()
+	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
+	view.OnMouse = boardMouseHandler(hits)
 	return view
 }
 
@@ -240,88 +252,4 @@ func (m Model) readDataVersion() tea.Cmd {
 
 func schedulePoll() tea.Cmd {
 	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return pollTickMsg{} })
-}
-
-func (m Model) render() string {
-	width := max(m.width, 1)
-	height := max(m.height, 8)
-	title := strings.TrimSpace(m.board.Title)
-	if title == "" {
-		title = "Board"
-	}
-	header := fitLine(fmt.Sprintf("kb / %s / %s", title, m.user), width)
-
-	statuses := visibleStatuses[:]
-	if width < wideBoardWidth {
-		statuses = visibleStatuses[m.focus : m.focus+1]
-	}
-	gaps := len(statuses) - 1
-	columnWidth := (width - gaps) / len(statuses)
-	columnHeight := max(height-4, 3)
-	columns := make([]string, 0, len(statuses))
-	for _, status := range statuses {
-		columns = append(columns, m.renderColumn(status, columnWidth, columnHeight))
-	}
-	body := lipgloss.JoinHorizontal(lipgloss.Top, columns...)
-	if len(columns) > 1 {
-		body = lipgloss.JoinHorizontal(lipgloss.Top, intersperse(columns, " ")...)
-	}
-
-	status := "ready"
-	if m.loading || (m.watcher != nil && !m.haveVersion) {
-		status = "loading board..."
-	}
-	if m.loadErr != nil {
-		status = "error: " + m.loadErr.Error()
-	} else if m.pollErr != nil {
-		status = "error: " + m.pollErr.Error()
-	}
-	footer := fitLine(status+" | q quit | tab/shift+tab focus", width)
-	return strings.Join([]string{header, body, footer}, "\n")
-}
-
-func (m Model) renderColumn(status board.Status, width, height int) string {
-	label := map[board.Status]string{
-		board.StatusTodo:  "TO DO",
-		board.StatusDoing: "DOING",
-		board.StatusDone:  "DONE",
-	}[status]
-	if visibleStatuses[m.focus] == status {
-		label = "[" + label + "]"
-	}
-	count := 0
-	for _, task := range m.board.Tasks {
-		if task.Status == status {
-			count++
-		}
-	}
-	state := "(empty)"
-	if count > 0 {
-		state = fmt.Sprintf("%d card(s)", count)
-	}
-	if width < 3 {
-		return strings.Join([]string{fitLine(label, width), "", fitLine(state, width)}, "\n")
-	}
-	innerWidth := width - 2
-	contents := strings.Join([]string{fitLine(label, innerWidth), "", fitLine(state, innerWidth)}, "\n")
-	return lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder()).
-		Width(innerWidth).
-		Height(max(height-2, 1)).
-		Render(contents)
-}
-
-func fitLine(line string, width int) string {
-	return ansi.Truncate(line, max(width, 0), "")
-}
-
-func intersperse(values []string, separator string) []string {
-	out := make([]string, 0, len(values)*2-1)
-	for i, value := range values {
-		if i > 0 {
-			out = append(out, separator)
-		}
-		out = append(out, value)
-	}
-	return out
 }
