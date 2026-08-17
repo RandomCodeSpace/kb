@@ -249,6 +249,81 @@ func TestCardDetailOpenWithoutASelectedTaskIsNoop(t *testing.T) {
 	}
 }
 
+func TestRootRoutesCreateEditorAndRefreshesAcknowledgedSave(t *testing.T) {
+	st := newSettingsTestStore(t)
+	m := NewModel(st, nil, "alice")
+	completeBoardLoad(t, &m, m.Init())
+	loadLabels := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'n'})
+	if !m.editor.IsOpen() || loadLabels == nil {
+		t.Fatalf("new editor = open:%v command:%v", m.editor.IsOpen(), loadLabels)
+	}
+	updateTestModel(t, &m, loadLabels())
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "CREATE CARD / todo") || m.View().OnMouse != nil {
+		t.Fatalf("create overlay missing or board mouse active:\n%s", view)
+	}
+	for _, char := range "Root-created card" {
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: char, Text: string(char)})
+	}
+	save := updateTestModel(t, &m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	if save == nil {
+		t.Fatal("root ctrl+s did not dispatch editor save")
+	}
+	refresh := updateTestModel(t, &m, save())
+	if m.editor.IsOpen() || refresh == nil || !m.loading {
+		t.Fatalf("save acknowledgement = editor:%v refresh:%v loading:%v", m.editor.IsOpen(), refresh, m.loading)
+	}
+	completeBoardLoad(t, &m, refresh)
+	if len(m.board.Tasks) != 1 || m.board.Tasks[0].Title != "Root-created card" {
+		t.Fatalf("refreshed board = %+v", m.board)
+	}
+}
+
+func TestRootEditRoutingAndDirtyWatcherRefreshPreservesInput(t *testing.T) {
+	st := newSettingsTestStore(t)
+	task, err := st.AddTask("alice", board.Task{Title: "Original card", Status: board.StatusTodo, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(st, nil, "alice")
+	completeBoardLoad(t, &m, m.Init())
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'e'})
+	if !m.editor.IsOpen() || m.editor.TaskID() != task.ID {
+		t.Fatalf("board edit route = open:%v id:%q", m.editor.IsOpen(), m.editor.TaskID())
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'X', Text: "X"})
+	remote := task
+	remote.Title = "Remote card"
+	updateTestModel(t, &m, boardLoadedMsg{board: board.Board{Title: "Board", Tasks: []board.Task{remote}}})
+	view := ansi.Strip(m.View().Content)
+	if !strings.Contains(view, "Original cardX") || !strings.Contains(view, "current edits were preserved") {
+		t.Fatalf("dirty watcher refresh overwrote form:\n%s", view)
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if !m.editor.IsOpen() || !strings.Contains(ansi.Strip(m.View().Content), "D discard") {
+		t.Fatal("root escape bypassed editor unsaved guard")
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'd'})
+	if m.editor.IsOpen() {
+		t.Fatal("root did not route explicit discard")
+	}
+
+	// Detail launches the same editor and returns to detail when cancelled.
+	m.board = board.Board{Title: "Board", Tasks: []board.Task{task}}
+	m.boardView = boardViewState{}
+	detailLoad := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if detailLoad == nil || !m.detail.IsOpen() {
+		t.Fatal("detail did not open")
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'e'})
+	if !m.editor.IsOpen() || !m.detail.IsOpen() {
+		t.Fatal("detail edit did not layer editor over detail")
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.editor.IsOpen() || !m.detail.IsOpen() {
+		t.Fatal("clean editor close did not return to detail")
+	}
+}
+
 func TestBoardReloadReconcilesOpenDetailAndCoalescesEnrichment(t *testing.T) {
 	reader := &mutableDetailReader{board: board.Board{Title: "Work", Tasks: []board.Task{{
 		ID: "same", Title: "Old", Desc: "old description", Status: board.StatusTodo,

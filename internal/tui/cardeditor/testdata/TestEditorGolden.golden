@@ -1,0 +1,29 @@
+╭──────────────────────────────────────────────────────────────────────────╮
+│ EDIT CARD #90                                                            │
+│                                                                          │
+│   Title: Map the editor                                                  │
+│   Emoji: 🧭                                                              │
+│   Description:                                                           │
+│     First line                                                           │
+│     Second line                                                          │
+│                                                                          │
+│   Priority: 1 (urgent)  left/right                                       │
+│   Due: 2026-08-20  [/] day; ctrl+x clear                                 │
+│   Effort: M  left/right; ctrl+x clear                                    │
+│   Blocked: yes  space toggle                                             │
+│   Labels: label or scope::value                                          │
+│   selected: [tui] [type::feature]                                        │
+│   Checklist (x prefix = done):                                           │
+│     write tests                                                          │
+│     x ship                                                               │
+│                                                                          │
+│                                                                          │
+│   similar items (2):                                                     │
+│     [killed 2026-07-01 — superseded] Map old editor  [Enter dismiss]     │
+│     [import] Editor planning  [Enter dismiss]                            │
+│     [Dismiss all similar items]                                          │
+│                                                                          │
+│   [Cancel]                                                               │
+│ > [Save card]                                                            │
+│ tab navigate | ctrl+s save | esc close                                   │
+╰──────────────────────────────────────────────────────────────────────────╯
