@@ -41,30 +41,38 @@ type detailLoadedMsg struct {
 	tombstoneErr error
 }
 
+type markdownRenderer func(source string, width int) string
+
 // Model owns the overlay's task snapshot, enriched detail, and scroll state.
 type Model struct {
-	reader        Reader
-	user          string
-	task          board.Task
-	comments      []store.Comment
-	links         store.TaskLinks
-	tombstone     *store.Tombstone
-	open          bool
-	loading       bool
-	reloadPending bool
-	commentsErr   error
-	linksErr      error
-	tombstoneErr  error
-	scroll        int
-	generation    uint64
-	width         int
-	height        int
+	reader         Reader
+	user           string
+	task           board.Task
+	comments       []store.Comment
+	links          store.TaskLinks
+	tombstone      *store.Tombstone
+	open           bool
+	loading        bool
+	reloadPending  bool
+	commentsErr    error
+	linksErr       error
+	tombstoneErr   error
+	scroll         int
+	generation     uint64
+	width          int
+	height         int
+	renderMarkdown markdownRenderer
+	bodyLines      []string
+	bodyWidth      int
 }
 
 // New creates a closed detail pane. A nil reader still shows board-resident
 // task fields; enrichment is simply unavailable to lightweight model tests.
 func New(reader Reader, user string) Model {
-	return Model{reader: reader, user: user, width: defaultWidth, height: defaultHeight}
+	return Model{
+		reader: reader, user: user, width: defaultWidth, height: defaultHeight,
+		renderMarkdown: renderMarkdown,
+	}
 }
 
 // IsOpen reports whether the overlay currently owns input and rendering.
@@ -92,6 +100,7 @@ func (m *Model) Open(task board.Task) tea.Cmd {
 	m.tombstoneErr = nil
 	m.scroll = 0
 	if m.reader == nil {
+		m.rebuildBody()
 		return nil
 	}
 	return m.startLoad()
@@ -105,12 +114,13 @@ func (m *Model) Refresh(task board.Task) tea.Cmd {
 		return nil
 	}
 	m.task = task
-	m.clampScroll()
 	if m.reader == nil {
+		m.rebuildBody()
 		return nil
 	}
 	if m.loading {
 		m.reloadPending = true
+		m.rebuildBody()
 		return nil
 	}
 	return m.startLoad()
@@ -124,12 +134,20 @@ func (m *Model) Close() {
 	m.loading = false
 	m.reloadPending = false
 	m.task = board.Task{}
+	m.bodyLines = nil
+	m.bodyWidth = 0
+	m.scroll = 0
 }
 
 // Resize updates the viewport used to bound persistent scroll state.
 func (m *Model) Resize(width, height int) {
 	m.width = max(width, 1)
 	m.height = max(height, 1)
+	innerWidth, _, _ := paneGeometry(m.width, m.height)
+	if m.open && (m.bodyLines == nil || m.bodyWidth != innerWidth) {
+		m.rebuildBody()
+		return
+	}
 	m.clampScroll()
 }
 
@@ -154,6 +172,7 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		m.commentsErr = msg.commentsErr
 		m.linksErr = msg.linksErr
 		m.tombstoneErr = msg.tombstoneErr
+		m.rebuildBody()
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "up", "k", "pgup":
@@ -197,12 +216,12 @@ func (m *Model) startLoad() tea.Cmd {
 	m.commentsErr = nil
 	m.linksErr = nil
 	m.tombstoneErr = nil
-	m.clampScroll()
+	m.rebuildBody()
 	return m.load(m.task.ID, m.generation)
 }
 
 // View renders a centered bordered pane sized for the current terminal.
-func (m Model) View(width, height int) string {
+func (m *Model) View(width, height int) string {
 	if !m.open {
 		return ""
 	}
@@ -214,7 +233,7 @@ func (m Model) View(width, height int) string {
 
 // Overlay composes the pane over the board without making carddetail own the
 // board renderer. Input routing remains the root model's responsibility.
-func (m Model) Overlay(background string, width, height int) string {
+func (m *Model) Overlay(background string, width, height int) string {
 	if !m.open {
 		return background
 	}
@@ -229,17 +248,17 @@ func (m Model) Overlay(background string, width, height int) string {
 	).Render()
 }
 
-func (m Model) frame(width, height int) (string, int, int) {
+func (m *Model) frame(width, height int) (string, int, int) {
 	width = max(width, 1)
 	height = max(height, 1)
+	m.ensureBody(width, height)
 	innerWidth, innerHeight, paneHeight := paneGeometry(width, height)
 
-	body := m.renderBody(innerWidth)
-	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	lines := m.bodyLines
 	maxScroll := max(0, len(lines)-innerHeight)
 	start := min(m.scroll, maxScroll)
 	end := min(start+innerHeight, len(lines))
-	visibleLines := lines[start:end]
+	visibleLines := append([]string(nil), lines[start:end]...)
 	for i := range visibleLines {
 		visibleLines[i] = ansi.Truncate(visibleLines[i], innerWidth, "")
 	}
@@ -277,10 +296,33 @@ func (m *Model) clampScroll() {
 }
 
 func (m Model) maxScroll() int {
-	innerWidth, innerHeight, _ := paneGeometry(m.width, m.height)
+	_, innerHeight, _ := paneGeometry(m.width, m.height)
+	return max(0, len(m.bodyLines)-innerHeight)
+}
+
+func (m *Model) ensureBody(width, height int) {
+	m.width = max(width, 1)
+	m.height = max(height, 1)
+	innerWidth, _, _ := paneGeometry(m.width, m.height)
+	if m.bodyLines == nil || m.bodyWidth != innerWidth {
+		m.rebuildBody()
+		return
+	}
+	m.clampScroll()
+}
+
+func (m *Model) rebuildBody() {
+	if !m.open {
+		m.bodyLines = nil
+		m.bodyWidth = 0
+		m.scroll = 0
+		return
+	}
+	innerWidth, _, _ := paneGeometry(m.width, m.height)
 	body := m.renderBody(innerWidth)
-	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
-	return max(0, len(lines)-innerHeight)
+	m.bodyLines = strings.Split(strings.TrimRight(body, "\n"), "\n")
+	m.bodyWidth = innerWidth
+	m.clampScroll()
 }
 
 func fitTerminal(rendered string, width, height int) string {
@@ -317,7 +359,7 @@ func (m Model) renderBody(width int) string {
 		sections = append(sections, "killed context error: "+safeText(m.tombstoneErr.Error(), false))
 	}
 	if strings.TrimSpace(m.task.Desc) != "" {
-		sections = append(sections, renderMarkdown(m.task.Desc, width))
+		sections = append(sections, m.markdown(m.task.Desc, width))
 	}
 	if len(m.task.Checks) > 0 {
 		sections = append(sections, renderChecklist(m.task.Checks))
@@ -330,17 +372,23 @@ func (m Model) renderBody(width int) string {
 	}
 	if m.loading {
 		sections = append(sections, "loading comments and context...")
+	} else if m.commentsErr != nil {
+		sections = append(sections, "comments error: "+safeText(m.commentsErr.Error(), false))
 	} else {
 		if len(m.comments) > 0 {
-			sections = append(sections, renderComments(m.comments, width))
+			sections = append(sections, renderCommentsWith(m.comments, width, m.markdown))
 		} else {
 			sections = append(sections, "comments  none")
 		}
-		if m.commentsErr != nil {
-			sections = append(sections, "comments error: "+safeText(m.commentsErr.Error(), false))
-		}
 	}
 	return strings.Join(sections, "\n\n")
+}
+
+func (m Model) markdown(source string, width int) string {
+	if m.renderMarkdown == nil {
+		return renderMarkdown(source, width)
+	}
+	return m.renderMarkdown(source, width)
 }
 
 func (m Model) metadata() string {
@@ -449,11 +497,15 @@ func taskChips(tasks []board.Task) string {
 }
 
 func renderComments(comments []store.Comment, width int) string {
+	return renderCommentsWith(comments, width, renderMarkdown)
+}
+
+func renderCommentsWith(comments []store.Comment, width int, renderer markdownRenderer) string {
 	sections := []string{fmt.Sprintf("comments  %d", len(comments))}
 	for _, comment := range comments {
 		date := comment.CreatedAt.UTC().Format("2 Jan 2006")
 		header := fmt.Sprintf("c%d  %s  %s", comment.ID, safeText(comment.Author, false), date)
-		sections = append(sections, header+"\n"+renderMarkdown(comment.Body, width))
+		sections = append(sections, header+"\n"+renderer(comment.Body, width))
 	}
 	return strings.Join(sections, "\n\n")
 }

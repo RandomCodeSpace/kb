@@ -90,6 +90,9 @@ func heading(raw string) (int, string, bool) {
 		}
 		textStart += size
 	}
+	if strings.ContainsAny(raw[textStart:], "\r\n\u2028\u2029") {
+		return 0, "", false
+	}
 	return level, raw[textStart:], true
 }
 
@@ -108,6 +111,9 @@ func orderedPrefix(raw string) (markerEnd, textStart int) {
 			break
 		}
 		textStart += size
+	}
+	if strings.ContainsAny(raw[textStart:], "\r\n\u2028\u2029") {
+		return 0, 0
 	}
 	return digits + 1, textStart
 }

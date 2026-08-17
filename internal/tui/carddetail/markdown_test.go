@@ -160,6 +160,37 @@ func TestRenderMarkdownPreservesJavaScriptControlWhitespace(t *testing.T) {
 	}
 }
 
+func TestNodeDerivedLineSeparatorVectors(t *testing.T) {
+	for _, tt := range []struct {
+		line        string
+		headingText string
+		ordinalText string
+	}{
+		{line: "#\u2028head", headingText: "head"},
+		{line: "1.\u2029item", ordinalText: "item"},
+		{line: "# head\u2028tail"},
+		{line: "# head\u2029tail"},
+		{line: "# head\u2028"},
+		{line: "1. item\u2028tail"},
+		{line: "1. item\u2029tail"},
+		{line: "1. item\u2029"},
+	} {
+		_, headingText, headingOK := heading(tt.line)
+		if headingOK != (tt.headingText != "") || headingText != tt.headingText {
+			t.Errorf("heading(%q) = (%q, %v), want (%q, %v)", tt.line, headingText, headingOK, tt.headingText, tt.headingText != "")
+		}
+		markerEnd, textStart := orderedPrefix(tt.line)
+		ordinalOK := markerEnd > 0
+		ordinalText := ""
+		if ordinalOK {
+			ordinalText = tt.line[textStart:]
+		}
+		if ordinalOK != (tt.ordinalText != "") || ordinalText != tt.ordinalText {
+			t.Errorf("orderedPrefix(%q) = (%q, %v), want (%q, %v)", tt.line, ordinalText, ordinalOK, tt.ordinalText, tt.ordinalText != "")
+		}
+	}
+}
+
 func TestParityMarkdownUnterminatedFenceAndEmptyInput(t *testing.T) {
 	fence := strings.Repeat(string(rune(0x60)), 3)
 	got := parityMarkdown(fence + "\ncode\n~~~")

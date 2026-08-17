@@ -136,6 +136,7 @@ func TestModelRendersIndependentEnrichmentResults(t *testing.T) {
 	task := board.Task{ID: "task", Title: "Task", Status: board.StatusTodo}
 
 	commentsFailed := New(stubReader{
+		comments:    []store.Comment{{ID: 8, Author: "partial", Body: "must not render", CreatedAt: stamp}},
 		commentsErr: errors.New("comments unavailable"),
 		links:       store.TaskLinks{Blocks: []board.Task{{Seq: 9, Status: board.StatusDoing}}},
 		tombstone:   store.Tombstone{TaskID: "task", Reason: "replaced", KilledAt: stamp.Format(time.RFC3339Nano)},
@@ -147,6 +148,9 @@ func TestModelRendersIndependentEnrichmentResults(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("comments failure hid %q:\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, "comments  none") || strings.Contains(body, "must not render") {
+		t.Fatalf("failed comments read rendered a successful comments state:\n%s", body)
 	}
 
 	contextFailed := New(stubReader{
@@ -358,5 +362,38 @@ func TestHostileFencedTabsStayInsideBorder(t *testing.T) {
 		if strings.HasPrefix(line, "│") && !strings.HasSuffix(line, "│") {
 			t.Fatalf("content crossed the right border: %q", line)
 		}
+	}
+}
+
+func TestScrollAndViewReuseRenderedMarkdown(t *testing.T) {
+	renders := 0
+	m := New(nil, "u")
+	m.renderMarkdown = func(source string, _ int) string {
+		renders++
+		return source
+	}
+	m.Resize(40, 10)
+	m.Open(board.Task{ID: "id", Title: "cached", Desc: strings.Repeat("line\n", 40), Status: board.StatusTodo})
+	initial := renders
+	if initial == 0 {
+		t.Fatal("open did not render the markdown cache")
+	}
+	for range 100 {
+		m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+		m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	}
+	for range 10 {
+		_ = m.View(40, 10)
+	}
+	if renders != initial {
+		t.Fatalf("scroll/view rerendered markdown: before %d after %d", initial, renders)
+	}
+	m.Resize(40, 20)
+	if renders != initial {
+		t.Fatalf("height-only resize rerendered markdown: before %d after %d", initial, renders)
+	}
+	m.Resize(30, 10)
+	if renders != initial+1 {
+		t.Fatalf("width change renders = %d, want %d", renders, initial+1)
 	}
 }
