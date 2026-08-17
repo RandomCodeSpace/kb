@@ -3,13 +3,16 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/golden"
 
 	kbai "github.com/RandomCodeSpace/kb/internal/ai"
+	"github.com/RandomCodeSpace/kb/internal/server"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -34,9 +37,10 @@ func (p *recordingAIProber) Probe(ctx context.Context, user string, config kbai.
 }
 
 type recordingForgeProber struct {
-	user, name, baseURL, token string
-	hadDeadline                bool
-	err                        error
+	user        string
+	config      server.ForgeProbeConfig
+	hadDeadline bool
+	err         error
 }
 
 type faultSettingsStore struct {
@@ -69,8 +73,8 @@ func (s *faultSettingsStore) DeleteForgeSource(string, string) error {
 	return s.deleteForgeErr
 }
 
-func (p *recordingForgeProber) Probe(ctx context.Context, user, name, baseURL, token string) error {
-	p.user, p.name, p.baseURL, p.token = user, name, baseURL, token
+func (p *recordingForgeProber) Probe(ctx context.Context, user string, config server.ForgeProbeConfig) error {
+	p.user, p.config = user, config
 	_, p.hadDeadline = ctx.Deadline()
 	return p.err
 }
@@ -219,10 +223,13 @@ func TestForgeSettingsTestSaveLockAndArmedRemoval(t *testing.T) {
 	}
 
 	row.baseURL.SetValue("https://unsaved.example")
+	row.project.SetValue("group/project")
 	row.token.SetValue(settingsUnsavedSecret)
 	runSettingsCommand(t, model, model.startForgeTest(row))
-	if forgeProbe.user != "alice" || forgeProbe.name != "primary" ||
-		forgeProbe.baseURL != "https://unsaved.example" || forgeProbe.token != settingsUnsavedSecret || !forgeProbe.hadDeadline {
+	if forgeProbe.user != "alice" || forgeProbe.config != (server.ForgeProbeConfig{
+		Name: "primary", Kind: "gitlab", BaseURL: "https://unsaved.example",
+		Project: "group/project", Token: settingsUnsavedSecret, Saved: true,
+	}) || !forgeProbe.hadDeadline {
 		t.Fatalf("forge probe = %+v", forgeProbe)
 	}
 	if _, savedBase, savedPAT, err := st.ForgePAT("alice", "primary"); err != nil || savedBase != base || savedPAT != settingsStoredPAT {
@@ -264,12 +271,14 @@ func TestForgeDraftBecomesPersistedAndImmutable(t *testing.T) {
 	loadSettingsForTest(t, model)
 	model.addForgeDraft()
 	row := &model.rows[0]
-	row.name.SetValue("work-github")
+	row.name.SetValue("Work-GitHub")
 	row.kind = "github"
 	row.baseURL.SetValue("github.example")
 	row.token.SetValue(settingsUnsavedSecret)
 	runSettingsCommand(t, model, model.startForgeSave(row))
-	if !row.persisted || row.name.Value() != "work-github" || row.kind != "github" || row.token.Value() != "" || !row.hasToken {
+	if !row.persisted || row.id != "source:work-github" || row.name.Value() != "work-github" ||
+		row.kind != "github" || row.baseURL.Value() != "https://github.example" ||
+		row.project.Value() != "" || row.token.Value() != "" || !row.hasToken {
 		t.Fatalf("saved draft row = %+v", row)
 	}
 	if kind, savedBase, savedPAT, err := st.ForgePAT("alice", "work-github"); err != nil || kind != "github" || savedBase != "https://github.example" || savedPAT != settingsUnsavedSecret {
@@ -279,6 +288,123 @@ func TestForgeDraftBecomesPersistedAndImmutable(t *testing.T) {
 		if strings.HasSuffix(target, ":name") || strings.HasSuffix(target, ":kind") {
 			t.Fatalf("saved draft identity remained editable: %q", target)
 		}
+	}
+}
+
+func TestForgeDraftTestsUnsavedValuesWithoutStoreMutation(t *testing.T) {
+	st := newSettingsTestStore(t)
+	forgeProbe := &recordingForgeProber{}
+	model := newSettingsModelWithBackends(st, &recordingAIProber{}, forgeProbe, "alice", context.Background())
+	loadSettingsForTest(t, model)
+	model.addForgeDraft()
+	row := &model.rows[0]
+	row.name.SetValue("unsaved")
+	row.kind = "github"
+	row.baseURL.SetValue("https://candidate.example")
+	row.project.SetValue("owner/project")
+	row.token.SetValue(settingsUnsavedSecret)
+
+	if !slicesContains(model.focusTargets(), "forge:"+row.id+":test") {
+		t.Fatal("draft test action is not focusable")
+	}
+	runSettingsCommand(t, model, model.startForgeTest(row))
+	want := server.ForgeProbeConfig{
+		Name: "unsaved", Kind: "github", BaseURL: "https://candidate.example",
+		Project: "owner/project", Token: settingsUnsavedSecret,
+	}
+	if forgeProbe.user != "alice" || forgeProbe.config != want || !forgeProbe.hadDeadline {
+		t.Fatalf("draft forge probe = user:%q config:%+v deadline:%v", forgeProbe.user, forgeProbe.config, forgeProbe.hadDeadline)
+	}
+	if sources, err := st.ForgeSources("alice"); err != nil || len(sources) != 0 {
+		t.Fatalf("draft probe mutated store: sources=%+v err=%v", sources, err)
+	}
+}
+
+func slicesContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSettingsViewportKeepsEveryFocusedControlVisible(t *testing.T) {
+	sources := make([]store.ForgeSource, 10)
+	for i := range sources {
+		sources[i] = store.ForgeSource{
+			Name: fmt.Sprintf("source-%02d", i), Kind: "gitlab", BaseURL: "https://forge.example",
+		}
+	}
+	backend := &faultSettingsStore{
+		ai: store.AISettings{BaseURL: "https://api.example", Model: "model"}, sources: sources,
+	}
+	model := newSettingsModelWithBackends(backend, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background())
+	loadSettingsForTest(t, model)
+
+	for _, target := range model.focusTargets() {
+		model.focus = target
+		model.applyFocus()
+		view := model.View(42, 7)
+		if !strings.Contains("\n"+view, "\n>") {
+			t.Fatalf("focused control %q is outside viewport:\n%s", target, view)
+		}
+		lines := strings.Split(view, "\n")
+		if len(lines) > 7 {
+			t.Fatalf("viewport height for %q = %d", target, len(lines))
+		}
+		for _, line := range lines {
+			if ansi.StringWidth(line) > 42 {
+				t.Fatalf("viewport width for %q = %d: %q", target, ansi.StringWidth(line), line)
+			}
+		}
+	}
+	if model.scroll == 0 {
+		t.Fatal("long settings pane never scrolled")
+	}
+	model.focus = "ai:base"
+	model.applyFocus()
+	if view := model.View(42, 7); !strings.Contains(view, "> Base URL") {
+		t.Fatalf("viewport did not scroll back to AI focus:\n%s", view)
+	}
+}
+
+func TestSettingsViewStripsTerminalControlsWithoutChangingValues(t *testing.T) {
+	hostile := "safe\x1b[31m-red\x1b[0m\x1b]2;owned\x07\x00\x9b31m"
+	secret := "token\x1b]52;c;stolen\x07\x9b2J"
+	backend := &faultSettingsStore{
+		ai:      store.AISettings{BaseURL: hostile, Model: hostile, HasKey: true},
+		sources: []store.ForgeSource{{Name: hostile, Kind: hostile, BaseURL: hostile, HasToken: true}},
+	}
+	model := newSettingsModelWithBackends(backend, &recordingAIProber{}, &recordingForgeProber{}, hostile, context.Background())
+	loadSettingsForTest(t, model)
+	row := &model.rows[0]
+	model.aiKey.SetValue(secret)
+	row.project.SetValue(hostile)
+	row.token.SetValue(secret)
+	model.status = hostile
+	beforeAIBase, beforeAIKey := model.aiBase.Value(), model.aiKey.Value()
+	beforeName, beforeKind := row.name.Value(), row.kind
+	beforeBase, beforeProject, beforeToken := row.baseURL.Value(), row.project.Value(), row.token.Value()
+
+	view := model.View(100, 30)
+	for _, r := range view {
+		if r == '\n' {
+			continue
+		}
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+			t.Fatalf("view contains terminal control U+%04X: %q", r, view)
+		}
+	}
+	if strings.Contains(view, "\x1b") || strings.Contains(view, secret) {
+		t.Fatalf("view contains escape or raw secret: %q", view)
+	}
+	if model.aiBase.Value() != beforeAIBase || model.aiKey.Value() != beforeAIKey ||
+		row.name.Value() != beforeName || row.kind != beforeKind || row.baseURL.Value() != beforeBase ||
+		row.project.Value() != beforeProject || row.token.Value() != beforeToken {
+		t.Fatalf("render sanitization changed values: aiBase=%q aiKey=%q name=%q kind=%q base=%q project=%q token=%q",
+			model.aiBase.Value(), model.aiKey.Value(), row.name.Value(), row.kind,
+			row.baseURL.Value(), row.project.Value(), row.token.Value())
 	}
 }
 
@@ -360,15 +486,17 @@ func TestSettingsKeyboardAndFailureStateBranches(t *testing.T) {
 
 	// Every editable input is routed through the focused text input. The saved
 	// row's name is deliberately absent: it is immutable after save.
-	for _, target := range []string{"ai:base", "ai:model", "ai:key", "forge:source:saved:base", "forge:source:saved:token"} {
+	for _, target := range []string{"ai:base", "ai:model", "ai:key", "forge:source:saved:base", "forge:source:saved:project", "forge:source:saved:token"} {
 		model.focus = target
 		model.applyFocus()
 		model.Update(tea.KeyPressMsg(tea.Key{Code: 'z', Text: "z"}))
 	}
 	if !strings.HasSuffix(model.aiBase.Value(), "z") || !strings.HasSuffix(model.aiModel.Value(), "z") ||
-		model.aiKey.Value() != "z" || !strings.HasSuffix(model.rows[0].baseURL.Value(), "z") || model.rows[0].token.Value() != "z" {
-		t.Fatalf("focused input routing failed: base=%q model=%q key=%q forge=%q token=%q",
-			model.aiBase.Value(), model.aiModel.Value(), model.aiKey.Value(), model.rows[0].baseURL.Value(), model.rows[0].token.Value())
+		model.aiKey.Value() != "z" || !strings.HasSuffix(model.rows[0].baseURL.Value(), "z") ||
+		model.rows[0].project.Value() != "z" || model.rows[0].token.Value() != "z" {
+		t.Fatalf("focused input routing failed: base=%q model=%q key=%q forge=%q project=%q token=%q",
+			model.aiBase.Value(), model.aiModel.Value(), model.aiKey.Value(), model.rows[0].baseURL.Value(),
+			model.rows[0].project.Value(), model.rows[0].token.Value())
 	}
 
 	model.focus = "forge:add"
@@ -387,21 +515,21 @@ func TestSettingsKeyboardAndFailureStateBranches(t *testing.T) {
 	if draft.kind != "github" {
 		t.Fatalf("right did not toggle kind: %q", draft.kind)
 	}
-	for _, target := range []string{"forge:" + draft.id + ":name", "forge:" + draft.id + ":base", "forge:" + draft.id + ":token"} {
+	for _, target := range []string{"forge:" + draft.id + ":name", "forge:" + draft.id + ":base", "forge:" + draft.id + ":project", "forge:" + draft.id + ":token"} {
 		model.focus = target
 		model.applyFocus()
 		model.Update(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
 	}
-	if draft.name.Value() != "x" || draft.baseURL.Value() != "x" || draft.token.Value() != "x" {
-		t.Fatalf("draft input routing = %q/%q/%q", draft.name.Value(), draft.baseURL.Value(), draft.token.Value())
+	if draft.name.Value() != "x" || draft.baseURL.Value() != "x" || draft.project.Value() != "x" || draft.token.Value() != "x" {
+		t.Fatalf("draft input routing = %q/%q/%q/%q", draft.name.Value(), draft.baseURL.Value(), draft.project.Value(), draft.token.Value())
 	}
 
 	model.focus = "ai:test"
 	runSettingsCommand(t, model, model.activateFocus())
 	model.focus = "forge:source:saved:test"
 	runSettingsCommand(t, model, model.activateFocus())
-	if aiProbe.user != "alice" || forgeProbe.name != "saved" {
-		t.Fatalf("action routing missed probes: AI=%q forge=%q", aiProbe.user, forgeProbe.name)
+	if aiProbe.user != "alice" || forgeProbe.config.Name != "saved" {
+		t.Fatalf("action routing missed probes: AI=%q forge=%q", aiProbe.user, forgeProbe.config.Name)
 	}
 
 	// Navigation wraps and both loaded and busy states ignore unrelated input.

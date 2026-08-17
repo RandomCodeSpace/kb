@@ -1565,7 +1565,7 @@ func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 
-	request, err := newForgeTestRequest(r.Context(), kind, target)
+	request, err := newForgeTestRequest(r.Context(), kind, target, "")
 	if err != nil {
 		writeJSON(w, forgeTestResponse{Error: err.Error()})
 		return
@@ -1614,19 +1614,28 @@ func trimmedForgeProbeValue(value *string) string {
 	return strings.TrimSpace(*value)
 }
 
-func newForgeTestRequest(ctx context.Context, kind string, target forgeTestTarget) (*http.Request, error) {
+func newForgeTestRequest(ctx context.Context, kind string, target forgeTestTarget, project string) (*http.Request, error) {
 	apiBase, err := forgeAPIBase(kind, target.baseURL)
 	if err != nil {
 		return nil, err
 	}
+	project = strings.TrimSpace(project)
 	endpoint := apiBase
-	switch kind {
-	case "gitlab":
-		endpoint += "/version"
-	case "github":
-		endpoint += "/user"
-	default:
-		return nil, errors.New("invalid forge kind")
+	if project != "" {
+		projectPath, err := forgeProjectPath(forgeRef{Kind: kind, Project: project})
+		if err != nil {
+			return nil, err
+		}
+		endpoint += projectPath
+	} else {
+		switch kind {
+		case "gitlab":
+			endpoint += "/version"
+		case "github":
+			endpoint += "/user"
+		default:
+			return nil, errors.New("invalid forge kind")
+		}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {

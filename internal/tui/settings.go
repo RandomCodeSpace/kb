@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -30,7 +31,7 @@ type aiConnectionProber interface {
 }
 
 type forgeConnectionProber interface {
-	Probe(context.Context, string, string, string, string) error
+	Probe(context.Context, string, server.ForgeProbeConfig) error
 }
 
 type settingsLoadedMsg struct {
@@ -51,9 +52,7 @@ type forgeSettingsTestedMsg struct {
 }
 type forgeSettingsSavedMsg struct {
 	id           string
-	name         string
-	baseURL      string
-	tokenSet     bool
+	source       store.ForgeSource
 	tokenCleared bool
 	err          error
 }
@@ -68,6 +67,7 @@ type integrationSettingsRow struct {
 	name      textinput.Model
 	kind      string
 	baseURL   textinput.Model
+	project   textinput.Model
 	token     textinput.Model
 	hasToken  bool
 }
@@ -92,6 +92,7 @@ type settingsModel struct {
 	status        string
 	statusIsError bool
 	armedRemove   string
+	scroll        int
 	testCancel    context.CancelFunc
 	closed        bool
 }
@@ -232,6 +233,7 @@ func persistedIntegrationRow(source store.ForgeSource) integrationSettingsRow {
 		name:      settingsInput("source-name", false),
 		kind:      source.Kind,
 		baseURL:   settingsInput("forge.example.com", false),
+		project:   settingsInput("owner/project (optional)", false),
 		token:     settingsInput("blank keeps saved token", true),
 		hasToken:  source.HasToken,
 	}
@@ -309,10 +311,7 @@ func (m *settingsModel) focusTargets() []string {
 		if !row.persisted {
 			targets = append(targets, prefix+"kind", prefix+"name")
 		}
-		targets = append(targets, prefix+"base", prefix+"token")
-		if row.persisted {
-			targets = append(targets, prefix+"test")
-		}
+		targets = append(targets, prefix+"base", prefix+"project", prefix+"token", prefix+"test")
 		targets = append(targets, prefix+"save", prefix+"remove")
 	}
 	return append(targets, "forge:add")
@@ -325,6 +324,7 @@ func (m *settingsModel) applyFocus() tea.Cmd {
 	for i := range m.rows {
 		m.rows[i].name.Blur()
 		m.rows[i].baseURL.Blur()
+		m.rows[i].project.Blur()
 		m.rows[i].token.Blur()
 	}
 	switch m.focus {
@@ -347,6 +347,8 @@ func (m *settingsModel) applyFocus() tea.Cmd {
 		return row.name.Focus()
 	case "base":
 		return row.baseURL.Focus()
+	case "project":
+		return row.project.Focus()
 	case "token":
 		return row.token.Focus()
 	}
@@ -375,6 +377,8 @@ func (m *settingsModel) updateFocusedInput(msg tea.Msg) tea.Cmd {
 			row.name, cmd = row.name.Update(msg)
 		case "base":
 			row.baseURL, cmd = row.baseURL.Update(msg)
+		case "project":
+			row.project, cmd = row.project.Update(msg)
 		case "token":
 			row.token, cmd = row.token.Update(msg)
 		}
@@ -505,6 +509,7 @@ func (m *settingsModel) addForgeDraft() {
 		name:    settingsInput("work-gitlab", false),
 		kind:    "gitlab",
 		baseURL: settingsInput("gitlab.example.com", false),
+		project: settingsInput("owner/project (optional)", false),
 		token:   settingsInput("personal access token", true),
 	})
 	m.focus = "forge:" + id + ":name"
@@ -518,11 +523,14 @@ func (m *settingsModel) startForgeTest(row *integrationSettingsRow) tea.Cmd {
 	m.busy = "forge:test:" + row.id
 	m.status = "testing " + row.name.Value() + "..."
 	m.statusIsError = false
-	id, name := row.id, row.name.Value()
-	baseURL, token := row.baseURL.Value(), row.token.Value()
+	id := row.id
+	config := server.ForgeProbeConfig{
+		Name: row.name.Value(), Kind: row.kind, BaseURL: row.baseURL.Value(),
+		Project: row.project.Value(), Token: row.token.Value(), Saved: row.persisted,
+	}
 	return func() tea.Msg {
 		defer cancel()
-		err := m.forge.Probe(ctx, m.user, name, baseURL, token)
+		err := m.forge.Probe(ctx, m.user, config)
 		return forgeSettingsTestedMsg{id: id, err: err}
 	}
 }
@@ -550,13 +558,22 @@ func (m *settingsModel) startForgeSave(row *integrationSettingsRow) tea.Cmd {
 	m.busy = "forge:save:" + row.id
 	m.status = "saving " + name + "..."
 	m.statusIsError = false
-	id, kind, tokenSet := row.id, row.kind, token != nil
+	id, kind := row.id, row.kind
 	return func() tea.Msg {
 		cleared, err := m.store.SetForgeSource(m.user, name, kind, baseURL, token)
-		return forgeSettingsSavedMsg{
-			id: id, name: name, baseURL: valueOrEmpty(baseURL), tokenSet: tokenSet,
-			tokenCleared: cleared, err: err,
+		if err != nil {
+			return forgeSettingsSavedMsg{id: id, tokenCleared: cleared, err: err}
 		}
+		sources, err := m.store.ForgeSources(m.user)
+		if err != nil {
+			return forgeSettingsSavedMsg{id: id, tokenCleared: cleared, err: err}
+		}
+		for _, source := range sources {
+			if strings.EqualFold(source.Name, name) {
+				return forgeSettingsSavedMsg{id: id, source: source, tokenCleared: cleared}
+			}
+		}
+		return forgeSettingsSavedMsg{id: id, tokenCleared: cleared, err: errors.New("saved integration unavailable")}
 	}
 }
 
@@ -571,13 +588,10 @@ func (m *settingsModel) finishForgeSave(msg forgeSettingsSavedMsg) {
 		m.statusIsError = true
 		return
 	}
-	row.persisted = true
-	row.name.SetValue(msg.name)
-	if msg.baseURL != "" {
-		row.baseURL.SetValue(msg.baseURL)
-	}
-	row.hasToken = msg.tokenSet || (row.hasToken && !msg.tokenCleared)
-	row.token.SetValue("")
+	replacement := persistedIntegrationRow(msg.source)
+	*row = replacement
+	m.focus = "forge:" + replacement.id + ":save"
+	m.applyFocus()
 	m.statusIsError = false
 	if msg.tokenCleared {
 		m.status = "saved; endpoint changed, re-enter the token"
@@ -682,7 +696,7 @@ func safeSettingsError(err error, secrets ...string) string {
 			}
 		}
 	}
-	message = strings.Join(strings.Fields(message), " ")
+	message = sanitizeTerminal(strings.Join(strings.Fields(message), " "))
 	if message == "" {
 		message = "operation failed"
 	}
