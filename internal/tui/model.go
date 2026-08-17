@@ -334,7 +334,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case cardMoveStoredMsg:
 		return m, m.finishCardDrop(msg)
 	case filterTextClickedMsg:
-		if m.settings != nil || m.move.saving {
+		if m.settings != nil {
+			return m, nil
+		}
+		if m.move.saving {
 			return m, nil
 		}
 		if m.move.lifted != nil {
@@ -342,7 +345,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.filter.focusText()
 	case filterLabelClickedMsg:
-		if m.settings != nil || m.move.saving {
+		if m.settings != nil {
+			return m, nil
+		}
+		if m.move.saving {
 			return m, nil
 		}
 		if m.move.lifted != nil {
@@ -350,7 +356,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.mutateFilter(func(filter *boardFilterState) { filter.toggleTag(msg.tag) })
 	case filterClearClickedMsg:
-		if m.settings != nil || m.move.saving {
+		if m.settings != nil {
+			return m, nil
+		}
+		if m.move.saving {
 			return m, nil
 		}
 		if m.move.lifted != nil {

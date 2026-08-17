@@ -577,7 +577,8 @@ func joinColumns(columns []renderedColumn) (string, []boardHit) {
 	return strings.Join(lines, "\n"), hits
 }
 
-func boardMouseHandler(hits []boardHit, pointerActive bool) func(tea.MouseMsg) tea.Cmd {
+func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.Cmd {
+	pointerActive := len(active) > 0 && active[0]
 	return func(message tea.MouseMsg) tea.Cmd {
 		mouse := message.Mouse()
 		if _, release := message.(tea.MouseReleaseMsg); release {
