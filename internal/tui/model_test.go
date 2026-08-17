@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest/v2"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
@@ -26,6 +28,32 @@ func (s stubBoardReader) Board(string) (board.Board, error) { return s.board, s.
 type stubVersionReader struct {
 	version int64
 	err     error
+}
+
+type boardResult struct {
+	board board.Board
+	err   error
+}
+
+type sequenceBoardReader struct {
+	results []boardResult
+	calls   int
+}
+
+func (s *sequenceBoardReader) Board(string) (board.Board, error) {
+	result := s.results[s.calls]
+	s.calls++
+	return result.board, result.err
+}
+
+type countingVersionReader struct {
+	version int64
+	calls   int
+}
+
+func (s *countingVersionReader) DataVersion(context.Context) (int64, error) {
+	s.calls++
+	return s.version, nil
 }
 
 func (s stubVersionReader) DataVersion(context.Context) (int64, error) {
@@ -86,8 +114,34 @@ func TestModelLoadsRoutesAndRenders(t *testing.T) {
 	m.board.Title = "   "
 	m.width = 1
 	m.height = 1
-	if compact := m.render(); !strings.Contains(compact, "kb / Board / alice") {
-		t.Fatalf("compact fallback view:\n%s", compact)
+	for _, line := range strings.Split(m.render(), "\n") {
+		if width := ansi.StringWidth(line); width > 1 {
+			t.Fatalf("one-column line width = %d: %q", width, line)
+		}
+	}
+}
+
+func TestRenderFitsNarrowTerminal(t *testing.T) {
+	m := NewModel(stubBoardReader{}, nil, strings.Repeat("owner", 20))
+	m.loading = false
+	m.board = board.Board{
+		Title: strings.Repeat("wide 界🙂 ", 10),
+		Tasks: []board.Task{{Title: "one", Status: board.StatusTodo}},
+	}
+	m.loadErr = errors.New("a deliberately long database error that must not widen the terminal")
+	for _, width := range []int{1, 2, 3, 8, 16, 23} {
+		t.Run(fmt.Sprintf("width_%d", width), func(t *testing.T) {
+			m.width = width
+			output := m.render()
+			for lineNumber, line := range strings.Split(output, "\n") {
+				if got := ansi.StringWidth(line); got > width {
+					t.Errorf("line %d width = %d, terminal = %d: %q", lineNumber+1, got, width, line)
+				}
+			}
+			if width >= 3 && !strings.Contains(output, "┌") {
+				t.Errorf("width %d lost the board frame:\n%s", width, output)
+			}
+		})
 	}
 }
 
@@ -132,6 +186,49 @@ func TestModelLoadAndPollFailures(t *testing.T) {
 	}
 	if message := command(); message.(dataVersionMsg).version != 7 {
 		t.Fatalf("poll result = %#v", message)
+	}
+}
+
+func TestFailedBoardReloadRetriesOnUnchangedPollUntilRecovery(t *testing.T) {
+	want := errors.New("transient read failure")
+	reader := &sequenceBoardReader{results: []boardResult{
+		{err: want},
+		{err: want},
+		{board: board.Board{Title: "Recovered"}},
+	}}
+	watcher := &countingVersionReader{version: 9}
+	m := NewModel(reader, watcher, "u")
+	m.loading = false
+	m.haveVersion = true
+	m.dataVersion = 8
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		updated, poll := m.Update(pollTickMsg{})
+		m = updated.(Model)
+		if poll == nil {
+			t.Fatalf("attempt %d: poll command is nil", attempt)
+		}
+		updated, reload := m.Update(poll())
+		m = updated.(Model)
+		if reload == nil {
+			t.Fatalf("attempt %d: unchanged data_version did not retry failed load", attempt)
+		}
+		batch, ok := reload().(tea.BatchMsg)
+		if !ok || len(batch) != 2 {
+			t.Fatalf("attempt %d: reload message = %#v, want load and next poll", attempt, batch)
+		}
+		updated, _ = m.Update(batch[0]())
+		m = updated.(Model)
+		if attempt < 3 {
+			if !errors.Is(m.loadErr, want) {
+				t.Fatalf("attempt %d: load error = %v", attempt, m.loadErr)
+			}
+		} else if m.loadErr != nil || m.board.Title != "Recovered" {
+			t.Fatalf("recovery state = %#v", m)
+		}
+	}
+	if reader.calls != 3 || watcher.calls != 3 || m.dataVersion != 9 {
+		t.Fatalf("calls/version = board:%d watcher:%d version:%d", reader.calls, watcher.calls, m.dataVersion)
 	}
 }
 

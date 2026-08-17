@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 )
@@ -118,7 +119,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case dataVersionMsg:
 		if msg.err != nil {
 			m.pollErr = msg.err
-			if !m.haveVersion && m.loading {
+			if (!m.haveVersion && m.loading) || m.loadErr != nil {
+				m.loading = true
 				return m, tea.Batch(m.loadBoard(), schedulePoll())
 			}
 			return m, schedulePoll()
@@ -128,7 +130,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		changed := !initial && msg.version != m.dataVersion
 		m.dataVersion = msg.version
 		m.haveVersion = true
-		if initial || changed {
+		if initial || changed || m.loadErr != nil {
 			m.loading = true
 			return m, tea.Batch(m.loadBoard(), schedulePoll())
 		}
@@ -165,13 +167,13 @@ func schedulePoll() tea.Cmd {
 }
 
 func (m Model) render() string {
-	width := max(m.width, 24)
+	width := max(m.width, 1)
 	height := max(m.height, 8)
 	title := strings.TrimSpace(m.board.Title)
 	if title == "" {
 		title = "Board"
 	}
-	header := fmt.Sprintf("kb / %s / %s", title, m.user)
+	header := fitLine(fmt.Sprintf("kb / %s / %s", title, m.user), width)
 
 	statuses := visibleStatuses[:]
 	if width < wideBoardWidth {
@@ -198,7 +200,8 @@ func (m Model) render() string {
 	} else if m.pollErr != nil {
 		status = "error: " + m.pollErr.Error()
 	}
-	return strings.Join([]string{header, body, status + " | q quit | tab/shift+tab focus"}, "\n")
+	footer := fitLine(status+" | q quit | tab/shift+tab focus", width)
+	return strings.Join([]string{header, body, footer}, "\n")
 }
 
 func (m Model) renderColumn(status board.Status, width, height int) string {
@@ -216,15 +219,24 @@ func (m Model) renderColumn(status board.Status, width, height int) string {
 			count++
 		}
 	}
-	contents := fmt.Sprintf("%s\n\n(empty)", label)
+	state := "(empty)"
 	if count > 0 {
-		contents = fmt.Sprintf("%s\n\n%d card(s)", label, count)
+		state = fmt.Sprintf("%d card(s)", count)
 	}
+	if width < 3 {
+		return strings.Join([]string{fitLine(label, width), "", fitLine(state, width)}, "\n")
+	}
+	innerWidth := width - 2
+	contents := strings.Join([]string{fitLine(label, innerWidth), "", fitLine(state, innerWidth)}, "\n")
 	return lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
-		Width(max(width-2, 1)).
+		Width(innerWidth).
 		Height(max(height-2, 1)).
 		Render(contents)
+}
+
+func fitLine(line string, width int) string {
+	return ansi.Truncate(line, max(width, 0), "")
 }
 
 func intersperse(values []string, separator string) []string {

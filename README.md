@@ -963,7 +963,7 @@ You need one app registration; no client secret, no Graph permissions.
 | `KB_SECRET`            | server/CLI/MCP     | unset                | AES-GCM secret for stored AI keys and forge PATs; if unset, generated at `<data>/secret`. Under 16 bytes the server refuses to start and the CLI/MCP warn |
 | `KB_SERVER`            | CLI, runtime       | unset                | Remote mode: base URL of a kb server; CLI talks HTTP instead of the local DB |
 | `KB_SERVER_TOKEN`      | CLI, runtime       | unset                | Bearer token the CLI sends in remote mode (the server's `KB_TOKEN`)          |
-| `KB_USER`              | MCP, runtime       | `default`            | Board user for `kb mcp` (`--user` flag overrides)                            |
+| `KB_USER`              | TUI/MCP, runtime   | `default`            | Board user for `kb tui` and `kb mcp` (`--user` flag overrides)               |
 | `VITE_AZURE_TENANT_ID` | frontend, build    | unset                | Dev-server fallback only: baked into the bundle, used when `GET /api/config` returns no tenant ID. For a released binary set `KB_AZURE_TENANT_ID` |
 | `VITE_AZURE_CLIENT_ID` | frontend, build    | unset                | Dev-server fallback only: baked into the bundle, used when `GET /api/config` returns no client ID. For a released binary set `KB_AZURE_CLIENT_ID` |
 
