@@ -17,10 +17,9 @@ import (
 const (
 	defaultWidth   = 80
 	defaultHeight  = 24
+	pollInterval   = time.Second
 	wideBoardWidth = 100
 )
-
-var pollInterval = time.Second
 
 var visibleStatuses = [...]board.Status{
 	board.StatusTodo,
@@ -65,6 +64,7 @@ type Model struct {
 	pollErr       error
 	dataVersion   int64
 	haveVersion   bool
+	stopped       bool
 }
 
 // NewModel creates the root model for one local board owner.
@@ -82,6 +82,9 @@ func NewModel(store boardReader, watcher dataVersionReader, user string) Model {
 
 // Init loads the first board snapshot and starts the external-write watcher.
 func (m Model) Init() tea.Cmd {
+	if m.stopped {
+		return nil
+	}
 	if m.watcher != nil {
 		// Establish the connection-local baseline before loading. If these ran
 		// concurrently, a commit between the stale load and a later baseline
@@ -93,10 +96,15 @@ func (m Model) Init() tea.Cmd {
 
 // Update handles global messages before any future pane-specific routing.
 func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	if m.stopped {
+		return m, nil
+	}
 	switch msg := message.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
+			m.stopped = true
+			m.reloadPending = false
 			return m, tea.Quit
 		case "left", "h", "shift+tab":
 			m.focus = (m.focus + len(visibleStatuses) - 1) % len(visibleStatuses)
@@ -111,43 +119,85 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.height = msg.Height
 		}
 	case boardLoadedMsg:
-		m.loading = false
-		m.loadErr = msg.err
-		if msg.err == nil {
-			m.board = msg.board
-		}
-		if m.reloadPending {
-			m.reloadPending = false
-			m.loading = true
-			return m, m.loadBoard()
-		}
+		next := m.finishBoardLoad(msg)
+		return m, next
 	case pollTickMsg:
 		return m, m.readDataVersion()
 	case dataVersionMsg:
-		if msg.err != nil {
-			m.pollErr = msg.err
-			if (!m.haveVersion || m.loadErr != nil) && !m.loading {
-				m.loading = true
-				return m, tea.Batch(m.loadBoard(), schedulePoll())
-			}
-			return m, schedulePoll()
-		}
-		m.pollErr = nil
-		initial := !m.haveVersion
-		changed := !initial && msg.version != m.dataVersion
-		m.dataVersion = msg.version
-		m.haveVersion = true
-		if initial || changed || m.loadErr != nil {
-			if m.loading {
-				m.reloadPending = m.reloadPending || changed
-				return m, schedulePoll()
-			}
-			m.loading = true
-			return m, tea.Batch(m.loadBoard(), schedulePoll())
-		}
-		return m, schedulePoll()
+		next := m.observeDataVersion(msg)
+		return m, next
 	}
 	return m, nil
+}
+
+// observeDataVersion advances the watcher baseline and schedules exactly one
+// successor poll. Baselines are opaque: only equality with the last successful
+// value matters.
+func (m *Model) observeDataVersion(msg dataVersionMsg) tea.Cmd {
+	var load tea.Cmd
+	if msg.err != nil {
+		m.pollErr = msg.err
+		if !m.haveVersion || m.loadErr != nil {
+			load = m.startBoardLoad()
+		}
+		return pollAfter(load)
+	}
+
+	m.pollErr = nil
+	initial := !m.haveVersion
+	changed := !initial && msg.version != m.dataVersion
+	m.dataVersion = msg.version
+	m.haveVersion = true
+
+	switch {
+	case initial || changed:
+		load = m.requireFreshBoard()
+	case m.loadErr != nil:
+		load = m.startBoardLoad()
+	}
+	return pollAfter(load)
+}
+
+// finishBoardLoad commits only successful snapshots. A pending freshness
+// obligation starts one serialized successor without creating another poll.
+func (m *Model) finishBoardLoad(msg boardLoadedMsg) tea.Cmd {
+	m.loading = false
+	m.loadErr = msg.err
+	if msg.err == nil {
+		m.board = msg.board
+	}
+	if !m.reloadPending {
+		return nil
+	}
+	m.reloadPending = false
+	return m.startBoardLoad()
+}
+
+// startBoardLoad starts a fallback or retry only when no load is active. The
+// active load already satisfies that obligation, so it does not queue another.
+func (m *Model) startBoardLoad() tea.Cmd {
+	if m.loading {
+		return nil
+	}
+	m.loading = true
+	return m.loadBoard()
+}
+
+// requireFreshBoard records a new baseline/change obligation while a load is
+// active. Multiple obligations coalesce into one serialized successor.
+func (m *Model) requireFreshBoard() tea.Cmd {
+	if m.loading {
+		m.reloadPending = true
+		return nil
+	}
+	return m.startBoardLoad()
+}
+
+func pollAfter(load tea.Cmd) tea.Cmd {
+	if load == nil {
+		return schedulePoll()
+	}
+	return tea.Batch(load, schedulePoll())
 }
 
 // View renders the board frame. Cards and editing behavior arrive in later

@@ -60,6 +60,46 @@ func (s stubVersionReader) DataVersion(context.Context) (int64, error) {
 	return s.version, s.err
 }
 
+func updateTestModel(t *testing.T, model *Model, message tea.Msg) tea.Cmd {
+	t.Helper()
+	updated, command := model.Update(message)
+	*model = updated.(Model)
+	return command
+}
+
+func boardLoadFromBatch(t *testing.T, command tea.Cmd) tea.Cmd {
+	t.Helper()
+	if command == nil {
+		t.Fatal("load and poll command is nil")
+	}
+	batch, ok := command().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("load and poll command = %#v, want two-command batch", batch)
+	}
+	return batch[0]
+}
+
+func completeBoardLoad(t *testing.T, model *Model, command tea.Cmd) tea.Cmd {
+	t.Helper()
+	if command == nil {
+		t.Fatal("board load command is nil")
+	}
+	message := command()
+	if _, ok := message.(boardLoadedMsg); !ok {
+		t.Fatalf("board load command returned %T", message)
+	}
+	return updateTestModel(t, model, message)
+}
+
+func runPoll(t *testing.T, model *Model) tea.Cmd {
+	t.Helper()
+	read := updateTestModel(t, model, pollTickMsg{})
+	if read == nil {
+		t.Fatal("poll tick did not start a data_version read")
+	}
+	return updateTestModel(t, model, read())
+}
+
 func TestModelLoadsRoutesAndRenders(t *testing.T) {
 	loaded := board.Board{Title: "Work", Tasks: []board.Task{{Title: "one", Status: board.StatusTodo}}}
 	m := NewModel(stubBoardReader{board: loaded}, nil, "alice")
@@ -189,120 +229,183 @@ func TestModelLoadAndPollFailures(t *testing.T) {
 	}
 }
 
-func TestFailedBoardReloadRetriesOnUnchangedPollUntilRecovery(t *testing.T) {
-	want := errors.New("transient read failure")
+func TestVersionBaselineDuringFallbackQueuesSerializedReload(t *testing.T) {
 	reader := &sequenceBoardReader{results: []boardResult{
-		{err: want},
-		{err: want},
-		{board: board.Board{Title: "Recovered"}},
+		{board: board.Board{Title: "Fallback"}},
+		{board: board.Board{Title: "Current"}},
 	}}
-	watcher := &countingVersionReader{version: 9}
-	m := NewModel(reader, watcher, "u")
-	m.loading = false
-	m.haveVersion = true
-	m.dataVersion = 8
+	m := NewModel(reader, stubVersionReader{}, "u")
 
-	for attempt := 1; attempt <= 3; attempt++ {
-		updated, poll := m.Update(pollTickMsg{})
-		m = updated.(Model)
-		if poll == nil {
-			t.Fatalf("attempt %d: poll command is nil", attempt)
-		}
-		updated, reload := m.Update(poll())
-		m = updated.(Model)
-		if reload == nil {
-			t.Fatalf("attempt %d: unchanged data_version did not retry failed load", attempt)
-		}
-		batch, ok := reload().(tea.BatchMsg)
-		if !ok || len(batch) != 2 {
-			t.Fatalf("attempt %d: reload message = %#v, want load and next poll", attempt, batch)
-		}
-		updated, _ = m.Update(batch[0]())
-		m = updated.(Model)
-		if attempt < 3 {
-			if !errors.Is(m.loadErr, want) {
-				t.Fatalf("attempt %d: load error = %v", attempt, m.loadErr)
-			}
-		} else if m.loadErr != nil || m.board.Title != "Recovered" {
-			t.Fatalf("recovery state = %#v", m)
-		}
+	fallback := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{err: errors.New("version unavailable")}))
+	if !m.loading || m.reloadPending || m.haveVersion || reader.calls != 0 {
+		t.Fatalf("fallback start = model:%#v calls:%d", m, reader.calls)
 	}
-	if reader.calls != 3 || watcher.calls != 3 || m.dataVersion != 9 {
-		t.Fatalf("calls/version = board:%d watcher:%d version:%d", reader.calls, watcher.calls, m.dataVersion)
+	if nextPoll := updateTestModel(t, &m, dataVersionMsg{version: 1}); nextPoll == nil {
+		t.Fatal("successful baseline did not continue the poll chain")
+	}
+	if !m.loading || !m.reloadPending || !m.haveVersion || m.dataVersion != 1 {
+		t.Fatalf("baseline during fallback = %#v", m)
+	}
+
+	successor := completeBoardLoad(t, &m, fallback)
+	if successor == nil || !m.loading || m.reloadPending || m.board.Title != "Fallback" || reader.calls != 1 {
+		t.Fatalf("fallback completion = model:%#v calls:%d command:%v", m, reader.calls, successor)
+	}
+	if next := completeBoardLoad(t, &m, successor); next != nil {
+		t.Fatalf("serialized completion scheduled %v", next)
+	}
+	if m.loading || m.reloadPending || m.board.Title != "Current" || reader.calls != 2 {
+		t.Fatalf("serialized reload = model:%#v calls:%d", m, reader.calls)
 	}
 }
 
-func TestRetryPollsDoNotStartOverlappingBoardLoads(t *testing.T) {
-	originalInterval := pollInterval
-	pollInterval = 0
-	t.Cleanup(func() { pollInterval = originalInterval })
+func TestInitialVersionSuccessLoadsBoard(t *testing.T) {
+	reader := &sequenceBoardReader{results: []boardResult{{board: board.Board{Title: "Initial"}}}}
+	m := NewModel(reader, stubVersionReader{}, "u")
 
+	load := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 7}))
+	if !m.haveVersion || m.dataVersion != 7 || !m.loading || m.reloadPending {
+		t.Fatalf("initial baseline = %#v", m)
+	}
+	if next := completeBoardLoad(t, &m, load); next != nil {
+		t.Fatalf("initial load completion scheduled %v", next)
+	}
+	if m.loading || m.reloadPending || m.loadErr != nil || m.board.Title != "Initial" || reader.calls != 1 {
+		t.Fatalf("initial load = model:%#v calls:%d", m, reader.calls)
+	}
+}
+
+func TestInitialLoadFailureRetriesAfterUnchangedPoll(t *testing.T) {
 	want := errors.New("transient read failure")
 	reader := &sequenceBoardReader{results: []boardResult{
 		{err: want},
 		{board: board.Board{Title: "Recovered"}},
-		{board: board.Board{Title: "Newest"}},
 	}}
 	watcher := &countingVersionReader{version: 9}
 	m := NewModel(reader, watcher, "u")
-	m.loading = false
-	m.haveVersion = true
-	m.dataVersion = 8
+	m.board = board.Board{Title: "Last good"}
 
-	poll := func() tea.Cmd {
-		t.Helper()
-		updated, read := m.Update(pollTickMsg{})
-		m = updated.(Model)
-		updated, next := m.Update(read())
-		m = updated.(Model)
-		return next
+	first := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 9}))
+	if next := completeBoardLoad(t, &m, first); next != nil {
+		t.Fatalf("failed load completion scheduled %v", next)
+	}
+	if !errors.Is(m.loadErr, want) || m.loading || m.board.Title != "Last good" {
+		t.Fatalf("initial failure = %#v", m)
 	}
 
-	first := poll()
-	firstBatch := first().(tea.BatchMsg)
-	updated, _ := m.Update(firstBatch[0]())
-	m = updated.(Model)
-	if !errors.Is(m.loadErr, want) || reader.calls != 1 {
-		t.Fatalf("first load = error:%v calls:%d", m.loadErr, reader.calls)
+	retry := boardLoadFromBatch(t, runPoll(t, &m))
+	if !m.loading || m.reloadPending || watcher.calls != 1 {
+		t.Fatalf("unchanged retry start = model:%#v watcher calls:%d", m, watcher.calls)
 	}
+	if next := completeBoardLoad(t, &m, retry); next != nil {
+		t.Fatalf("retry completion scheduled %v", next)
+	}
+	if m.loading || m.loadErr != nil || m.board.Title != "Recovered" || reader.calls != 2 {
+		t.Fatalf("retry recovery = model:%#v calls:%d", m, reader.calls)
+	}
+}
 
-	retry := poll()
-	retryBatch := retry().(tea.BatchMsg)
-	if !m.loading {
-		t.Fatal("retry load is not marked in flight")
-	}
-	for attempt := 1; attempt <= 2; attempt++ {
-		if message := poll()(); message == nil {
-			t.Fatalf("overlap poll %d did not schedule the next poll", attempt)
-		} else if _, ok := message.(pollTickMsg); !ok {
-			t.Fatalf("overlap poll %d returned %T, want only pollTickMsg", attempt, message)
+func TestRepeatedPollsDoNotOverlapHeldRetry(t *testing.T) {
+	want := errors.New("transient read failure")
+	reader := &sequenceBoardReader{results: []boardResult{
+		{err: want},
+		{board: board.Board{Title: "Recovered"}},
+	}}
+	watcher := &countingVersionReader{version: 3}
+	m := NewModel(reader, watcher, "u")
+
+	first := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 3}))
+	completeBoardLoad(t, &m, first)
+	retry := boardLoadFromBatch(t, runPoll(t, &m))
+	for attempt := 1; attempt <= 3; attempt++ {
+		if nextPoll := runPoll(t, &m); nextPoll == nil {
+			t.Fatalf("held retry poll %d stopped the poll chain", attempt)
 		}
-		if reader.calls != 1 {
-			t.Fatalf("overlap poll %d started another board load: calls=%d", attempt, reader.calls)
+		if !m.loading || m.reloadPending || reader.calls != 1 {
+			t.Fatalf("held retry poll %d = model:%#v calls:%d", attempt, m, reader.calls)
 		}
 	}
+	if next := completeBoardLoad(t, &m, retry); next != nil {
+		t.Fatalf("held retry completion scheduled %v", next)
+	}
+	if m.loading || m.loadErr != nil || m.board.Title != "Recovered" || reader.calls != 2 {
+		t.Fatalf("held retry recovery = model:%#v calls:%d", m, reader.calls)
+	}
+}
 
-	// A newer version observed while the retry is active is queued, not run
-	// concurrently or forgotten.
-	watcher.version = 10
-	if message := poll()(); message == nil {
-		t.Fatal("newer-version poll did not schedule the next poll")
-	} else if _, ok := message.(pollTickMsg); !ok {
-		t.Fatalf("newer-version poll returned %T, want only pollTickMsg", message)
+func TestVersionChangesDuringLoadCoalesceOneSuccessor(t *testing.T) {
+	reader := &sequenceBoardReader{results: []boardResult{
+		{board: board.Board{Title: "V1"}},
+		{board: board.Board{Title: "V2"}},
+		{board: board.Board{Title: "V3"}},
+	}}
+	m := NewModel(reader, stubVersionReader{}, "u")
+	initial := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 1}))
+	completeBoardLoad(t, &m, initial)
+
+	v2 := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 2}))
+	for _, version := range []int64{3, 3} {
+		if nextPoll := updateTestModel(t, &m, dataVersionMsg{version: version}); nextPoll == nil {
+			t.Fatalf("version %d stopped the poll chain", version)
+		}
 	}
-	if reader.calls != 1 || !m.reloadPending {
-		t.Fatalf("queued reload = calls:%d pending:%v", reader.calls, m.reloadPending)
+	if !m.loading || !m.reloadPending || m.dataVersion != 3 || reader.calls != 1 {
+		t.Fatalf("coalesced changes = model:%#v calls:%d", m, reader.calls)
 	}
 
-	updated, pending := m.Update(retryBatch[0]())
-	m = updated.(Model)
-	if pending == nil || reader.calls != 2 || m.board.Title != "Recovered" || !m.loading {
-		t.Fatalf("retry recovery = model:%#v calls:%d command:%v", m, reader.calls, pending)
+	successor := completeBoardLoad(t, &m, v2)
+	if successor == nil || !m.loading || m.reloadPending || m.board.Title != "V2" || reader.calls != 2 {
+		t.Fatalf("first changed load = model:%#v calls:%d command:%v", m, reader.calls, successor)
 	}
-	updated, _ = m.Update(pending())
-	m = updated.(Model)
-	if reader.calls != 3 || m.loadErr != nil || m.loading || m.board.Title != "Newest" {
-		t.Fatalf("queued recovery = model:%#v calls:%d", m, reader.calls)
+	if next := completeBoardLoad(t, &m, successor); next != nil {
+		t.Fatalf("coalesced successor scheduled a third load: %v", next)
+	}
+	if m.loading || m.board.Title != "V3" || reader.calls != 3 {
+		t.Fatalf("coalesced successor = model:%#v calls:%d", m, reader.calls)
+	}
+}
+
+func TestFailedLoadWithPendingChangeStartsSerializedSuccessor(t *testing.T) {
+	want := errors.New("changed snapshot failed")
+	reader := &sequenceBoardReader{results: []boardResult{
+		{board: board.Board{Title: "V1"}},
+		{err: want},
+		{board: board.Board{Title: "V3"}},
+	}}
+	m := NewModel(reader, stubVersionReader{}, "u")
+	initial := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 1}))
+	completeBoardLoad(t, &m, initial)
+
+	v2 := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 2}))
+	updateTestModel(t, &m, dataVersionMsg{version: 3})
+	successor := completeBoardLoad(t, &m, v2)
+	if successor == nil || !m.loading || m.reloadPending || !errors.Is(m.loadErr, want) || m.board.Title != "V1" {
+		t.Fatalf("failed load with pending change = %#v", m)
+	}
+	if next := completeBoardLoad(t, &m, successor); next != nil {
+		t.Fatalf("pending recovery scheduled %v", next)
+	}
+	if m.loading || m.loadErr != nil || m.board.Title != "V3" || reader.calls != 3 {
+		t.Fatalf("pending recovery = model:%#v calls:%d", m, reader.calls)
+	}
+}
+
+func TestShutdownIgnoresLateResults(t *testing.T) {
+	reader := &sequenceBoardReader{results: []boardResult{{board: board.Board{Title: "Late"}}}}
+	m := NewModel(reader, stubVersionReader{}, "u")
+	load := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 1}))
+	if quit := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'q'}); quit == nil || !m.stopped {
+		t.Fatalf("shutdown = model:%#v command:%v", m, quit)
+	}
+
+	lateLoad := load()
+	for _, message := range []tea.Msg{lateLoad, dataVersionMsg{version: 2}, pollTickMsg{}} {
+		if command := updateTestModel(t, &m, message); command != nil {
+			t.Fatalf("late %T scheduled %v", message, command)
+		}
+	}
+	if m.board.Title == "Late" || m.dataVersion != 1 || m.reloadPending || m.Init() != nil {
+		t.Fatalf("late results changed stopped model: %#v", m)
 	}
 }
 
