@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
@@ -1391,6 +1393,424 @@ func TestFinalFullScreenFrame(t *testing.T) {
 	}
 }
 
+type renderedCell struct {
+	value rune
+	style string
+}
+
+type renderedScreen struct {
+	cells       [][]renderedCell
+	cursorX     int
+	cursorY     int
+	savedCursor [2]int
+	style       sgrStyle
+}
+
+type sgrStyle struct {
+	bold       bool
+	faint      bool
+	italic     bool
+	underline  bool
+	blink      bool
+	reverse    bool
+	conceal    bool
+	strike     bool
+	foreground string
+	background string
+}
+
+func (s *sgrStyle) reset() {
+	*s = sgrStyle{}
+}
+
+func (s *sgrStyle) applyBasic(code int) bool {
+	switch code {
+	case 0:
+		s.reset()
+	case 1:
+		s.bold, s.faint = true, false
+	case 2:
+		s.faint, s.bold = true, false
+	case 3:
+		s.italic = true
+	case 4:
+		s.underline = true
+	case 5, 6:
+		s.blink = true
+	case 7:
+		s.reverse = true
+	case 8:
+		s.conceal = true
+	case 9:
+		s.strike = true
+	case 22:
+		s.bold, s.faint = false, false
+	case 23:
+		s.italic = false
+	case 24:
+		s.underline = false
+	case 25:
+		s.blink = false
+	case 27:
+		s.reverse = false
+	case 28:
+		s.conceal = false
+	case 29:
+		s.strike = false
+	case 39:
+		s.foreground = ""
+	case 49:
+		s.background = ""
+	default:
+		return false
+	}
+	return true
+}
+
+func (s *sgrStyle) applyColor(parts []string, index *int, code int) {
+	switch {
+	case code >= 30 && code <= 37, code >= 90 && code <= 97:
+		s.foreground = strconv.Itoa(code)
+	case code >= 40 && code <= 47, code >= 100 && code <= 107:
+		s.background = strconv.Itoa(code)
+	case code == 38 || code == 48:
+		if *index+2 >= len(parts) {
+			return
+		}
+		value := strings.Join(parts[*index:*index+3], ";")
+		if code == 38 {
+			s.foreground = value
+		} else {
+			s.background = value
+		}
+		*index += 2
+	}
+}
+
+func (s *sgrStyle) apply(params string) {
+	if params == "" {
+		s.reset()
+		return
+	}
+	parts := strings.Split(params, ";")
+	for i := 0; i < len(parts); i++ {
+		code, err := strconv.Atoi(parts[i])
+		if err == nil && !s.applyBasic(code) {
+			s.applyColor(parts, &i, code)
+		}
+	}
+}
+
+func (s sgrStyle) key() string {
+	params := make([]string, 0, 10)
+	if s.bold {
+		params = append(params, "1")
+	}
+	if s.faint {
+		params = append(params, "2")
+	}
+	if s.italic {
+		params = append(params, "3")
+	}
+	if s.underline {
+		params = append(params, "4")
+	}
+	if s.blink {
+		params = append(params, "5")
+	}
+	if s.reverse {
+		params = append(params, "7")
+	}
+	if s.conceal {
+		params = append(params, "8")
+	}
+	if s.strike {
+		params = append(params, "9")
+	}
+	if s.foreground != "" {
+		params = append(params, s.foreground)
+	}
+	if s.background != "" {
+		params = append(params, s.background)
+	}
+	return strings.Join(params, ";")
+}
+
+func newRenderedScreen(width, height int) *renderedScreen {
+	cells := make([][]renderedCell, height)
+	for y := range cells {
+		cells[y] = make([]renderedCell, width)
+		for x := range cells[y] {
+			cells[y][x].value = ' '
+		}
+	}
+	return &renderedScreen{cells: cells}
+}
+
+func (s *renderedScreen) clearCell(x, y int) {
+	if y < 0 || y >= len(s.cells) || x < 0 || x >= len(s.cells[y]) {
+		return
+	}
+	s.cells[y][x] = renderedCell{value: ' ', style: s.style.key()}
+}
+
+func (s *renderedScreen) clearAll() {
+	for y := range s.cells {
+		for x := range s.cells[y] {
+			s.cells[y][x] = renderedCell{value: ' '}
+		}
+	}
+}
+
+func (s *renderedScreen) clearToEndOfLine(mode int) {
+	if s.cursorY < 0 || s.cursorY >= len(s.cells) {
+		return
+	}
+	start, end := 0, len(s.cells[s.cursorY])-1
+	switch mode {
+	case 0:
+		start = s.cursorX
+	case 1:
+		end = s.cursorX
+	case 2:
+	default:
+		return
+	}
+	for x := start; x <= end; x++ {
+		s.clearCell(x, s.cursorY)
+	}
+}
+
+func (s *renderedScreen) clearToEndOfScreen(mode int) {
+	if mode == 2 {
+		s.clearAll()
+		return
+	}
+	if s.cursorY < 0 || s.cursorY >= len(s.cells) {
+		return
+	}
+	if mode == 0 {
+		s.clearToEndOfLine(0)
+		for y := s.cursorY + 1; y < len(s.cells); y++ {
+			for x := range s.cells[y] {
+				s.clearCell(x, y)
+			}
+		}
+	} else if mode == 1 {
+		for y := 0; y < s.cursorY; y++ {
+			for x := range s.cells[y] {
+				s.clearCell(x, y)
+			}
+		}
+		s.clearToEndOfLine(1)
+	}
+}
+
+func csiParam(params string, index, fallback int) int {
+	params = strings.TrimPrefix(params, "?")
+	parts := strings.Split(params, ";")
+	if index >= len(parts) || parts[index] == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(parts[index])
+	if err != nil || value < 0 {
+		return fallback
+	}
+	return value
+}
+
+func (s *renderedScreen) applyCSI(params string, final byte) {
+	switch final {
+	case 'A':
+		s.cursorY -= csiParam(params, 0, 1)
+	case 'B':
+		s.cursorY += csiParam(params, 0, 1)
+	case 'C':
+		s.cursorX += csiParam(params, 0, 1)
+	case 'D':
+		s.cursorX -= csiParam(params, 0, 1)
+	case 'G':
+		s.cursorX = csiParam(params, 0, 1) - 1
+	case 'H', 'f':
+		s.cursorY = csiParam(params, 0, 1) - 1
+		s.cursorX = csiParam(params, 1, 1) - 1
+	case 'd':
+		s.cursorY = csiParam(params, 0, 1) - 1
+	case 'J':
+		s.clearToEndOfScreen(csiParam(params, 0, 0))
+	case 'K':
+		s.clearToEndOfLine(csiParam(params, 0, 0))
+	case 'X':
+		for x := s.cursorX; x < s.cursorX+csiParam(params, 0, 1); x++ {
+			s.clearCell(x, s.cursorY)
+		}
+	case 'm':
+		s.style.apply(strings.TrimPrefix(params, "?"))
+	case 's':
+		s.savedCursor = [2]int{s.cursorX, s.cursorY}
+	case 'u':
+		s.cursorX, s.cursorY = s.savedCursor[0], s.savedCursor[1]
+	}
+}
+
+func (s *renderedScreen) consumeCSI(frame []byte) (int, error) {
+	end := 2
+	for end < len(frame) && (frame[end] < 0x40 || frame[end] > 0x7e) {
+		end++
+	}
+	if end == len(frame) {
+		return 0, fmt.Errorf("unterminated CSI sequence")
+	}
+	s.applyCSI(string(frame[2:end]), frame[end])
+	return end + 1, nil
+}
+
+func (s *renderedScreen) consumeOSC(frame []byte) (int, error) {
+	for i := 2; i < len(frame); i++ {
+		if frame[i] == '\a' {
+			return i + 1, nil
+		}
+		if frame[i] == '\x1b' && i+1 < len(frame) && frame[i+1] == '\\' {
+			return i + 2, nil
+		}
+	}
+	return 0, fmt.Errorf("unterminated OSC sequence")
+}
+
+func (s *renderedScreen) consumeEscape(frame []byte) (int, error) {
+	if len(frame) < 2 {
+		return len(frame), nil
+	}
+	switch frame[1] {
+	case '[':
+		return s.consumeCSI(frame)
+	case ']':
+		return s.consumeOSC(frame)
+	default:
+		return 2, nil
+	}
+}
+
+func (s *renderedScreen) writeRune(value rune, width, height int) {
+	if s.cursorY >= 0 && s.cursorY < height && s.cursorX >= 0 && s.cursorX < width {
+		s.cells[s.cursorY][s.cursorX] = renderedCell{value: value, style: s.style.key()}
+	}
+	cellWidth := ansi.StringWidth(string(value))
+	if cellWidth < 1 {
+		cellWidth = 1
+	}
+	s.cursorX += cellWidth
+}
+
+func (s *renderedScreen) consumeByte(frame []byte, width, height int) (int, error) {
+	switch frame[0] {
+	case '\x1b':
+		return s.consumeEscape(frame)
+	case '\r':
+		s.cursorX = 0
+	case '\n':
+		// Bubble Tea renders view rows with LF. The terminal's newline mode
+		// returns to column zero as it advances to the next row.
+		s.cursorX = 0
+		s.cursorY++
+	case '\b':
+		s.cursorX--
+	case '\t':
+		s.cursorX = (s.cursorX/8 + 1) * 8
+	default:
+		if frame[0] < 0x20 {
+			return 1, nil
+		}
+		value, size := utf8.DecodeRune(frame)
+		if value == utf8.RuneError && size == 1 {
+			return 0, fmt.Errorf("invalid UTF-8")
+		}
+		s.writeRune(value, width, height)
+		return size, nil
+	}
+	return 1, nil
+}
+
+func writeRenderedStyle(output *strings.Builder, current *string, next string) {
+	if next == *current {
+		return
+	}
+	if next == "" {
+		output.WriteString("\x1b[m")
+	} else {
+		output.WriteString("\x1b[" + next + "m")
+	}
+	*current = next
+}
+
+func renderedRow(row []renderedCell) string {
+	var output strings.Builder
+	rowEnd := len(row)
+	for rowEnd > 0 && row[rowEnd-1].value == ' ' {
+		rowEnd--
+	}
+	style := ""
+	for _, cell := range row[:rowEnd] {
+		writeRenderedStyle(&output, &style, cell.style)
+		output.WriteRune(cell.value)
+	}
+	// Trailing spaces are real cells, not discarded output. Encode them
+	// as a visible marker so the golden remains diff-check clean.
+	for _, cell := range row[rowEnd:] {
+		writeRenderedStyle(&output, &style, cell.style)
+		output.WriteRune('·')
+	}
+	return output.String()
+}
+
+func (s *renderedScreen) grid() []byte {
+	rows := make([]string, len(s.cells))
+	for y, row := range s.cells {
+		rows[y] = renderedRow(row)
+	}
+	return []byte(strings.Join(rows, "\n"))
+}
+
+func renderedCellGrid(frame []byte, width, height int) ([]byte, error) {
+	screen := newRenderedScreen(width, height)
+	for i := 0; i < len(frame); {
+		consumed, err := screen.consumeByte(frame[i:], width, height)
+		if err != nil {
+			return nil, fmt.Errorf("parse terminal output at byte %d: %w", i, err)
+		}
+		if consumed < 1 {
+			return nil, fmt.Errorf("terminal parser consumed no bytes at byte %d", i)
+		}
+		i += consumed
+	}
+	return screen.grid(), nil
+}
+
+func TestRenderedCellGridNormalizesEraseAndCursor(t *testing.T) {
+	frame := append([]byte{}, fullScreenClear...)
+	frame = append(frame, []byte("header")...)
+	frame = append(frame, []byte("\x1b[2;1Hbody\x1b[2;8H\x1b[3X\x1b[3;4Htail")...)
+	got, err := renderedCellGrid(frame, 12, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "header······\nbody········\n   tail·····"
+	if string(got) != want {
+		t.Fatalf("grid = %q, want %q", got, want)
+	}
+	first, err := renderedCellGrid(append(append([]byte{}, fullScreenClear...), []byte("\x1b[1mA")...), 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := renderedCellGrid(append(append([]byte{}, fullScreenClear...), []byte("\x1b[0;1mA")...), 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("equivalent SGR grids differ: %q != %q", first, second)
+	}
+}
+
 func TestEmptyBoardGolden(t *testing.T) {
 	m := NewModel(stubBoardReader{board: board.Board{Title: "Board"}}, nil, "default")
 	// Start from a loaded snapshot so the golden records the frame, not a
@@ -1417,7 +1837,11 @@ func TestEmptyBoardGolden(t *testing.T) {
 	if !ok {
 		t.Fatal("teatest output did not contain a full-screen frame")
 	}
-	teatest.RequireEqualOutput(t, frame)
+	grid, err := renderedCellGrid(frame, 120, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	teatest.RequireEqualOutput(t, grid)
 	tm.Send(tea.KeyPressMsg{Code: 'q'})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(time.Second))
 }
