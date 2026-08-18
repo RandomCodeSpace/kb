@@ -216,7 +216,7 @@ func decodeForgeJSON(t *testing.T, response *httptest.ResponseRecorder, dst any)
 func newIntegrationsHandler(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
 	st := newTestStore(t)
-	s := newServer(Config{}, testStatic, st)
+	s := newServer(Config{}, st)
 	if s.forgeClient == nil {
 		t.Fatal("newServer did not construct a forge client")
 	}
@@ -1288,7 +1288,7 @@ func TestImportLinksAreScopedByAuthenticatedUser(t *testing.T) {
 // when different projects share the short forge link, without making egress.
 func TestImportProvenanceReturnsAllScopedCandidatesWithoutEgress(t *testing.T) {
 	st := newTestStore(t)
-	s := newServer(Config{}, testStatic, st)
+	s := newServer(Config{}, st)
 	var egress atomic.Int32
 	denyEgress := roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		egress.Add(1)
@@ -1572,7 +1572,7 @@ func TestImportDriftRevisionAndAccept(t *testing.T) {
 
 	t.Setenv("KB_FORGE_ALLOW_PRIVATE", "127.0.0.1")
 	st := newTestStore(t)
-	s := newServer(Config{}, testStatic, st)
+	s := newServer(Config{}, st)
 	t.Cleanup(s.forgeClient.CloseIdleConnections)
 	var aiCalls atomic.Int32
 	s.aiClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {

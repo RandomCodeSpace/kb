@@ -36,7 +36,7 @@ func TestTombstonePostRestoreCommitOrders(t *testing.T) {
 			if err != nil {
 				t.Fatalf("AddTask: %v", err)
 			}
-			h := New(Config{}, testStatic, primary)
+			h := New(Config{}, primary)
 			post := func() *httptest.ResponseRecorder {
 				return doReq(t, h, http.MethodPost, "/api/tombstones", tombstoneBody(t, task.ID, "Race reason"), nil)
 			}

@@ -8,10 +8,8 @@ import (
 	"testing"
 )
 
-// The testdata/<name>.md + testdata/<name>.json pairs are the shared codec
-// fixtures: src/lib/markdown.test.ts reads the very same files and asserts the
-// very same two properties. If the Go and TypeScript codecs ever drift apart,
-// one of the two suites fails on the fixture the other still passes.
+// The testdata/<name>.md + testdata/<name>.json pairs freeze the legacy wire
+// format so parser and serializer changes remain backward compatible.
 //
 //	golden — a legacy three-section board (no Cancelled section, no %blocked)
 //	phase3 — the phase-3 grammar: %blocked, an escaped literal "%blocked"

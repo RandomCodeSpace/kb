@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,13 +13,16 @@ import (
 	"sort"
 	"strings"
 
+	term "github.com/charmbracelet/x/term"
+
 	"github.com/RandomCodeSpace/kb/internal/mcpserv"
 )
 
-// subcommands is the kb subcommand dispatch table. A bare invocation (or
-// flags only) runs the web server; agents adding CLI verbs register here.
+// subcommands is the kb subcommand dispatch table. A bare invocation is
+// handled separately because it depends on whether stdin and stdout are TTYs.
 var subcommands = map[string]func(args []string) error{
 	"mcp":     runMCP,
+	"serve":   runWebServer,
 	"tui":     runTUI,
 	"version": runVersion,
 }
@@ -26,6 +30,34 @@ var subcommands = map[string]func(args []string) error{
 var mcpRun = mcpserv.Run
 var exitProcess = os.Exit
 var fatalLogf = log.Fatalf
+
+var (
+	rootStdout       io.Writer = os.Stdout
+	rootStderr       io.Writer = os.Stderr
+	stdinIsTerminal            = func() bool { return term.IsTerminal(os.Stdin.Fd()) }
+	stdoutIsTerminal           = func() bool { return term.IsTerminal(os.Stdout.Fd()) }
+)
+
+type rootUsageError struct{ message string }
+
+func (e *rootUsageError) Error() string { return e.message }
+
+// runRoot handles only the commandless surface. It never opens the data store
+// when either standard stream is non-interactive.
+func runRoot(args []string) error {
+	if len(args) != 0 {
+		if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+			fmt.Fprint(rootStdout, rootUsageText)
+			return nil
+		}
+		return &rootUsageError{message: "root flags are no longer accepted; use `kb serve --port ... --data ... --log ...` for the optional API server"}
+	}
+	if !stdinIsTerminal() || !stdoutIsTerminal() {
+		fmt.Fprint(rootStdout, rootUsageText)
+		return nil
+	}
+	return runTUI(nil)
+}
 
 // dispatch runs os.Args[1] as a subcommand when one is named, reporting
 // whether it handled the invocation. Unknown subcommands exit with an error
@@ -54,6 +86,14 @@ func dispatchArgs(args []string, stderr io.Writer) (handled bool, exitCode int) 
 		return true, 2
 	}
 	if err := fn(args[1:]); err != nil {
+		var flagErr *webFlagError
+		if errors.As(err, &flagErr) {
+			if errors.Is(flagErr, flag.ErrHelp) {
+				return true, 0
+			}
+			fmt.Fprintf(stderr, "kb %s: %v\n", cmd, err)
+			return true, 2
+		}
 		fmt.Fprintf(stderr, "kb %s: %v\n", cmd, err)
 		return true, 1
 	}

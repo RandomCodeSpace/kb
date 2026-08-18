@@ -50,7 +50,7 @@ func TestEntraAuth(t *testing.T) {
 		TenantID: tenant,
 		ClientID: clientID,
 		JWKSURL:  jwksSrv.URL,
-	}, testStatic, st)
+	}, st)
 
 	const oid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 	base := func() jwt.MapClaims {

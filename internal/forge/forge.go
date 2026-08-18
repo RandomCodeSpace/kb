@@ -44,7 +44,7 @@ const (
 	importPackTruncationNote      = "assistant input limit reached — some fetched issues produced no draft"
 )
 
-// Error is a caller-safe failure category shared by local frontends and HTTP
+// Error is a caller-safe failure category shared by local UIs and HTTP
 // adapters. Cause is retained for errors.Is/As and logs, never display.
 type Error struct {
 	Code    int

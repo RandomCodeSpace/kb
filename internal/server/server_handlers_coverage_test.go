@@ -25,7 +25,7 @@ func TestWriteBoardJSONParseErrorReturnsStorageErrorWhenConditionCheckFails(t *t
 
 func TestPutBoardReturnsStorageErrorWhenReplaceFails(t *testing.T) {
 	st := newTestStore(t)
-	srv := newServer(Config{}, testStatic, st)
+	srv := newServer(Config{}, st)
 	closedAfterSnapshot := false
 	srv.afterConditionalBoardSnapshot = func() {
 		closedAfterSnapshot = true

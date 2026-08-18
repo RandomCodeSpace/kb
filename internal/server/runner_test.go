@@ -480,7 +480,7 @@ func TestRunSkillRequiresAuth(t *testing.T) {
 // a 400 rather than collapsed into the opaque upstream failure.
 func TestRigClientRejectsUnusableConfig(t *testing.T) {
 	st := newTestStore(t)
-	s := newServer(Config{}, testStatic, st)
+	s := newServer(Config{}, st)
 
 	tests := []struct {
 		name string
@@ -706,7 +706,7 @@ func TestSkillRunBudgetIsClampedToTheCeiling(t *testing.T) {
 			defer upstream.Close()
 			t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
 			st := newTestStore(t)
-			s := newServer(Config{}, testStatic, st)
+			s := newServer(Config{}, st)
 			configureAI(t, s.handler(), upstream.URL, "test-model", "sk-test")
 
 			if _, err := s.runSkill(context.Background(), "default", skillScopeReadOnly, "adr-split", "# ADR", 1, tt.ask); err != nil {
@@ -731,7 +731,7 @@ func TestSkillRunBudgetIsClampedToTheCeiling(t *testing.T) {
 // failure the user reads as "connection failed".
 func TestBuiltInSkillsAgreeWithTheRunnerRules(t *testing.T) {
 	st := newTestStore(t)
-	s := newServer(Config{}, testStatic, st)
+	s := newServer(Config{}, st)
 	skills, err := s.loadSkills()
 	if err != nil {
 		t.Fatalf("loadSkills: %v", err)

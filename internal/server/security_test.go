@@ -53,7 +53,7 @@ func newRawServer(t *testing.T, cfg Config) string {
 	if err := st.ReplaceBoard("default", seed); err != nil {
 		t.Fatalf("seed board: %v", err)
 	}
-	srv := httptest.NewServer(New(cfg, testStatic, st))
+	srv := httptest.NewServer(New(cfg, st))
 	t.Cleanup(srv.Close)
 	return strings.TrimPrefix(srv.URL, "http://")
 }
@@ -303,108 +303,6 @@ func TestSameOriginRequest(t *testing.T) {
 				t.Errorf("sameOriginRequest() = %v, want %v", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestFrameGuardsOnStatic(t *testing.T) {
-	h, _ := newTestServer(t, Config{})
-
-	for _, path := range []string{"/", "/some/client/route"} {
-		w := doReq(t, h, "GET", path, "", nil)
-		if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
-			t.Errorf("GET %s X-Frame-Options = %q, want DENY", path, got)
-		}
-		if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
-			t.Errorf("GET %s CSP = %q, want frame-ancestors 'none'", path, got)
-		}
-	}
-}
-
-// The CSP is the enforced half of kb's zero-telemetry promise: with it the
-// SPA cannot open a connection off-origin even if a dependency tries. The
-// only cross-origin host that may ever appear is the Entra one, and only
-// when Azure sign-in is configured.
-func TestContentSecurityPolicyOnStatic(t *testing.T) {
-	// style-src carries 'unsafe-inline' deliberately, and for two independent
-	// reasons: the app's own React style={{…}} attributes (drag clone
-	// position, progress bar widths, tag colours) are style-src-attr and fall
-	// back to style-src, and emoji-mart styles its shadow-DOM picker with a
-	// <style> element it builds at runtime. Verified in Chrome — under a bare
-	// style-src 'self' the picker reports a style-src-elem violation and
-	// renders unstyled. Removing emoji-mart would not make this droppable.
-	// Vite's own output is a linked stylesheet.
-	common := []string{
-		"default-src 'self'",
-		"script-src 'self'",
-		"style-src 'self' 'unsafe-inline'",
-		"img-src 'self' data:",
-		"font-src 'self'",
-		"object-src 'none'",
-		"base-uri 'none'",
-		"form-action 'none'",
-		"frame-ancestors 'none'",
-	}
-	tests := []struct {
-		name    string
-		cfg     Config
-		want    []string
-		notWant []string
-	}{
-		{
-			name: "open mode reaches nothing off-origin",
-			cfg:  Config{},
-			want: append([]string{"connect-src 'self'", "frame-src 'self'"}, common...),
-			// Not merely absent from connect-src: absent from the whole policy.
-			notWant: []string{entraOrigin},
-		},
-		{
-			name: "entra mode adds only the sign-in origin",
-			cfg:  Config{TenantID: "tenant", ClientID: "client"},
-			want: append([]string{
-				"connect-src 'self' " + entraOrigin,
-				"frame-src 'self' " + entraOrigin,
-			}, common...),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			h, _ := newTestServer(t, tt.cfg)
-			// index.html and a client-side route both carry the policy.
-			for _, path := range []string{"/", "/some/client/route"} {
-				got := doReq(t, h, "GET", path, "", nil).Header().Get("Content-Security-Policy")
-				for _, want := range tt.want {
-					if !strings.Contains(got, want) {
-						t.Errorf("GET %s CSP = %q, missing %q", path, got, want)
-					}
-				}
-				for _, bad := range tt.notWant {
-					if strings.Contains(got, bad) {
-						t.Errorf("GET %s CSP = %q, must not mention %q", path, got, bad)
-					}
-				}
-			}
-		})
-	}
-}
-
-// WebRTC is a real hole in this policy — connect-src governs no
-// RTCPeerConnection in any browser, and a STUN hostname is not an http(s) URL
-// either — but `webrtc 'block'` is not the fix. Measured against Chrome 151:
-// a peer connection constructs and opens a data channel under it, and the
-// only console output on an otherwise clean load is "Unrecognized
-// Content-Security-Policy directive 'webrtc'". Shipping it would trade a
-// clean console for nothing, so the guard lives in src/egress.test.ts, which
-// fails the build if RTCPeerConnection appears in src/ at all.
-//
-// Re-measure before adding it back; this test is here so that is a decision
-// rather than an accident.
-func TestContentSecurityPolicyOmitsUnimplementedDirectives(t *testing.T) {
-	for _, cfg := range []Config{{}, {TenantID: "tenant", ClientID: "client"}} {
-		h, _ := newTestServer(t, cfg)
-		got := doReq(t, h, "GET", "/", "", nil).Header().Get("Content-Security-Policy")
-		if strings.Contains(got, "webrtc") {
-			t.Errorf("CSP = %q, must not send the unimplemented webrtc directive", got)
-		}
 	}
 }
 

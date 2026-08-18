@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"path/filepath"
 	"reflect"
 	"runtime/debug"
@@ -49,6 +50,26 @@ func TestDispatchArgs(t *testing.T) {
 	if !handled || code != 2 || !strings.Contains(stderr.String(), `unknown command "missing"`) ||
 		!strings.Contains(stderr.String(), "known: alpha, zeta") {
 		t.Fatalf("unknown command = handled %v code %d stderr %q", handled, code, stderr.String())
+	}
+}
+
+func TestDispatchArgsClassifiesServeFlagErrors(t *testing.T) {
+	original := subcommands
+	t.Cleanup(func() { subcommands = original })
+	subcommands = map[string]func([]string) error{
+		"serve": func([]string) error { return &webFlagError{err: errors.New("bad serve flag")} },
+	}
+	var stderr bytes.Buffer
+	handled, code := dispatchArgs([]string{"serve", "--bad"}, &stderr)
+	if !handled || code != 2 || !strings.Contains(stderr.String(), "bad serve flag") {
+		t.Fatalf("serve flag error = handled %v code %d stderr %q", handled, code, stderr.String())
+	}
+
+	subcommands["serve"] = func([]string) error { return &webFlagError{err: flag.ErrHelp} }
+	stderr.Reset()
+	handled, code = dispatchArgs([]string{"serve", "--help"}, &stderr)
+	if !handled || code != 0 || stderr.Len() != 0 {
+		t.Fatalf("serve help = handled %v code %d stderr %q", handled, code, stderr.String())
 	}
 }
 

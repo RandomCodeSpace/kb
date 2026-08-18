@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// doc mirrors the DOC fixture in src/lib/markdown.test.ts.
+// doc is the legacy cross-client Markdown fixture.
 const doc = `# Ops Board
 
 ## To Do
@@ -27,10 +27,8 @@ const doc = `# Ops Board
 - [x] Provision servers
 `
 
-// taskProj is the id/timestamp/position-free projection used for
-// round-trip equality, mirroring projection() in the TS tests. The JSON tags
-// name the shared codec fixtures in testdata/*.json, which both this package
-// and src/lib/markdown.test.ts decode.
+// taskProj is the id/timestamp/position-free projection used for round-trip
+// equality. The JSON tags name the frozen fixtures in testdata/*.json.
 type taskProj struct {
 	Emoji   string   `json:"emoji"`
 	Title   string   `json:"title"`

@@ -1,18 +1,8 @@
-node_modules
-
 # Local oh-my-codex runtime, workflow state, logs, and generated artifacts.
 /.omx/
 
 # Test coverage reports.
 /coverage/
-
-# Local SonarScanner analysis workspace and generated reports.
-/.scannerwork/
-
-# dist/ is a build artifact; only .gitkeep is tracked so that the
-# //go:embed all:dist directive still resolves in a fresh clone.
-/dist/*
-!/dist/.gitkeep
 
 /docs/
 !/docs/

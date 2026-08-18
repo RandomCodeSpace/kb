@@ -34,7 +34,7 @@ func newAIStorageCoverageServer(t *testing.T) (*server, *store.Store, string, *a
 	t.Cleanup(func() { _ = st.Close() })
 
 	egress := &aiCoverageEgress{}
-	s := newServer(Config{}, testStatic, st)
+	s := newServer(Config{}, st)
 	s.aiClient = blockedCoverageClient(t, &egress.ai, "AI")
 	s.forgeClient = blockedCoverageClient(t, &egress.forge, "forge")
 	return s, st, path, egress

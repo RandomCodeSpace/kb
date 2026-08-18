@@ -12,7 +12,7 @@ import (
 	"syscall"
 )
 
-// NewHTTPClient returns the guarded forge client shared by every frontend.
+// NewHTTPClient returns the guarded forge client shared by every caller.
 func NewHTTPClient() *http.Client {
 	raw := os.Getenv("KB_FORGE_ALLOW_PRIVATE")
 	allowAll := raw == "1" || raw == "*"

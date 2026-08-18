@@ -439,7 +439,7 @@ WHERE scope = ? AND external_key = ?`,
 }
 
 // CreateImportBaseline records the first observed baseline atomically. If a
-// competing frontend already recorded one, it returns that winner.
+// competing caller already recorded one, it returns that winner.
 func (s *Store) CreateImportBaseline(scope, externalKey string, baseline ImportBaseline) (ImportBaseline, bool, error) {
 	if err := validateImportBaseline(baseline); err != nil {
 		return ImportBaseline{}, false, err

@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"errors"
 	"flag"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
 func resetServerEnv(t *testing.T) {
@@ -77,7 +80,7 @@ func TestRunWebServerReportsStartupErrors(t *testing.T) {
 		var output bytes.Buffer
 		err := runWebServerWithFlagOutput([]string{"--unknown"}, &output)
 		var flagErr *webFlagError
-		if !errors.As(err, &flagErr) || !strings.Contains(output.String(), "usage: kb") {
+		if !errors.As(err, &flagErr) || !strings.Contains(output.String(), "usage: kb serve") {
 			t.Fatalf("unknown flag error/output = %v / %q", err, output.String())
 		}
 	})
@@ -86,7 +89,7 @@ func TestRunWebServerReportsStartupErrors(t *testing.T) {
 		resetServerEnv(t)
 		var output bytes.Buffer
 		err := runWebServerWithFlagOutput([]string{"-h"}, &output)
-		if !errors.Is(err, flag.ErrHelp) || !strings.Contains(output.String(), "usage: kb") {
+		if !errors.Is(err, flag.ErrHelp) || !strings.Contains(output.String(), "usage: kb serve") {
 			t.Fatalf("help error/output = %v / %q", err, output.String())
 		}
 		// The serve flags must still be printed after the overview.
@@ -140,13 +143,14 @@ func TestRunWebServerReportsStartupErrors(t *testing.T) {
 	})
 }
 
-func TestMainFlagProcessContract(t *testing.T) {
+func TestMainRootProcessContract(t *testing.T) {
 	for _, tt := range []struct {
-		name, arg string
-		wantCode  int
+		name, arg, want string
+		wantCode        int
 	}{
-		{name: "help", arg: "-h", wantCode: 0},
-		{name: "unknown", arg: "--unknown", wantCode: 2},
+		{name: "help", arg: "-h", wantCode: 0, want: "usage: kb"},
+		{name: "legacy port", arg: "--port", wantCode: 2, want: "use `kb serve"},
+		{name: "unknown", arg: "--unknown", wantCode: 2, want: "use `kb serve"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestMainFlagProcessHelper$")
@@ -160,10 +164,77 @@ func TestMainFlagProcessContract(t *testing.T) {
 				}
 				code = exitErr.ExitCode()
 			}
-			if code != tt.wantCode || !strings.Contains(string(output), "usage: kb") {
-				t.Fatalf("exit/output = %d / %q, want %d with usage", code, output, tt.wantCode)
+			if code != tt.wantCode || !strings.Contains(string(output), tt.want) {
+				t.Fatalf("exit/output = %d / %q, want %d containing %q", code, output, tt.wantCode, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunRootTTYMatrixDoesNotOpenDataForNonTTY(t *testing.T) {
+	restoreRootSeams(t)
+	restoreTUISeams(t)
+	originalInTTY, originalOutTTY := stdinIsTerminal, stdoutIsTerminal
+	originalStdout, originalStderr := rootStdout, rootStderr
+	t.Cleanup(func() {
+		stdinIsTerminal, stdoutIsTerminal = originalInTTY, originalOutTTY
+		rootStdout, rootStderr = originalStdout, originalStderr
+	})
+
+	var output bytes.Buffer
+	rootStdout = &output
+	data := filepath.Join(t.TempDir(), "must-not-exist")
+	t.Setenv("KB_DATA", data)
+	opened := 0
+	openTUIStore = func(string, io.Writer) (*store.Store, error) {
+		opened++
+		return nil, errors.New("opened")
+	}
+
+	if err := runRoot([]string{"--help"}); err != nil || !strings.Contains(output.String(), "serve      run") {
+		t.Fatalf("root help = %v / %q", err, output.String())
+	}
+	output.Reset()
+	err := runRoot([]string{"--port", "9000"})
+	var usageErr *rootUsageError
+	if !errors.As(err, &usageErr) || !strings.Contains(err.Error(), "kb serve") {
+		t.Fatalf("legacy root flags = %v, want usage guidance", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		stdin, out bool
+	}{
+		{"stdin pipe", false, true},
+		{"stdout pipe", true, false},
+		{"both pipes", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdinIsTerminal = func() bool { return tc.stdin }
+			stdoutIsTerminal = func() bool { return tc.out }
+			output.Reset()
+			if err := runRoot(nil); err != nil {
+				t.Fatalf("runRoot: %v", err)
+			}
+			if !strings.Contains(output.String(), "usage: kb") {
+				t.Fatalf("non-TTY output = %q", output.String())
+			}
+		})
+	}
+	if opened != 0 {
+		t.Fatalf("non-TTY root opened the data store %d times", opened)
+	}
+	if _, err := os.Stat(data); !os.IsNotExist(err) {
+		t.Fatalf("non-TTY root created data path: %v", err)
+	}
+
+	stdinIsTerminal = func() bool { return true }
+	stdoutIsTerminal = func() bool { return true }
+	if err := runRoot(nil); err == nil || err.Error() != "opened" {
+		t.Fatalf("TTY root error = %v, want TUI open seam", err)
+	}
+	if opened != 1 {
+		t.Fatalf("TTY root opened store %d times, want 1", opened)
 	}
 }
 
