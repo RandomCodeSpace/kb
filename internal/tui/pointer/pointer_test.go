@@ -18,6 +18,13 @@ type scrolledMsg struct {
 	delta int
 }
 
+type unknownMouseMsg tea.Mouse
+
+func (message unknownMouseMsg) String() string { return "unknown mouse message" }
+func (message unknownMouseMsg) Mouse() tea.Mouse {
+	return tea.Mouse(message)
+}
+
 func TestViewportRowProjectsAndClipsVisibleTerminalCells(t *testing.T) {
 	viewport := pointer.Viewport{
 		Rect:   pointer.Rect{X0: 10, Y0: 4, X1: 30, Y1: 7},
@@ -179,5 +186,68 @@ func TestMapBackdropExcludesTheVisiblePane(t *testing.T) {
 	}
 	if command := activate(20, 4); command != nil {
 		t.Fatalf("outside bounds dismissed: %#v", command())
+	}
+}
+
+func TestMapIgnoresInvalidAndNilRegistrations(t *testing.T) {
+	var hitMap pointer.Map
+	valid := pointer.Rect{X0: 1, Y0: 1, X1: 4, Y1: 3}
+	hitMap.Add(pointer.Rect{}, func(point pointer.Point) tea.Msg {
+		return activatedMsg{name: "empty action", point: point}
+	})
+	hitMap.Add(valid, nil)
+	hitMap.AddWheel(pointer.Rect{}, func(delta int) tea.Msg {
+		return scrolledMsg{name: "empty wheel", delta: delta}
+	})
+	hitMap.AddWheel(valid, nil)
+	hitMap.AddBackdrop(pointer.Rect{}, valid, func(point pointer.Point) tea.Msg {
+		return activatedMsg{name: "empty backdrop", point: point}
+	})
+	hitMap.AddBackdrop(valid, pointer.Rect{}, nil)
+	handler := hitMap.Handler()
+
+	handler(tea.MouseClickMsg{X: 2, Y: 2, Button: tea.MouseLeft})
+	if command := handler(tea.MouseReleaseMsg{X: 2, Y: 2, Button: tea.MouseLeft}); command != nil {
+		t.Fatalf("invalid action registration activated: %#v", command())
+	}
+	if command := handler(tea.MouseWheelMsg{X: 2, Y: 2, Button: tea.MouseWheelDown}); command != nil {
+		t.Fatalf("invalid wheel registration activated: %#v", command())
+	}
+}
+
+func TestBackdropOutsideBoundsLeavesTheEntireBoundedAreaDismissible(t *testing.T) {
+	var hitMap pointer.Map
+	hitMap.AddBackdrop(
+		pointer.Rect{X0: 2, Y0: 2, X1: 8, Y1: 6},
+		pointer.Rect{X0: 20, Y0: 20, X1: 30, Y1: 30},
+		func(point pointer.Point) tea.Msg { return activatedMsg{name: "dismiss", point: point} },
+	)
+	handler := hitMap.Handler()
+	handler(tea.MouseClickMsg{X: 5, Y: 4, Button: tea.MouseLeft})
+	command := handler(tea.MouseReleaseMsg{X: 5, Y: 4, Button: tea.MouseLeft})
+	if command == nil {
+		t.Fatal("backdrop was lost when the pane was outside its bounds")
+	}
+	if got := command().(activatedMsg); got != (activatedMsg{name: "dismiss", point: pointer.Point{X: 5, Y: 4}}) {
+		t.Fatalf("backdrop message = %#v", got)
+	}
+}
+
+func TestMapIgnoresNilActionResultsAndUnknownMouseMessages(t *testing.T) {
+	var hitMap pointer.Map
+	rect := pointer.Rect{X0: 1, Y0: 1, X1: 4, Y1: 3}
+	hitMap.Add(rect, func(pointer.Point) tea.Msg { return nil })
+	hitMap.AddWheel(rect, func(int) tea.Msg { return nil })
+	handler := hitMap.Handler()
+
+	if command := handler(unknownMouseMsg{X: 2, Y: 2, Button: tea.MouseLeft}); command != nil {
+		t.Fatalf("unknown mouse message activated: %#v", command())
+	}
+	if command := handler(tea.MouseWheelMsg{X: 2, Y: 2, Button: tea.MouseWheelUp}); command != nil {
+		t.Fatalf("nil wheel result became a command: %#v", command())
+	}
+	handler(tea.MouseClickMsg{X: 2, Y: 2, Button: tea.MouseLeft})
+	if command := handler(tea.MouseReleaseMsg{X: 2, Y: 2, Button: tea.MouseLeft}); command != nil {
+		t.Fatalf("nil action result became a command: %#v", command())
 	}
 }
