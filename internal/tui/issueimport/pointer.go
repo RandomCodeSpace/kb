@@ -12,9 +12,11 @@ import (
 )
 
 type pointerActionMsg struct {
-	target     string
-	session    uint64
-	generation uint64
+	target      string
+	session     uint64
+	generation  uint64
+	scrollDelta int
+	maxScroll   int
 }
 
 // MouseHandler returns a release-only immutable map derived from View.
@@ -23,6 +25,7 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 	view := ansi.Strip(m.View(width, height))
+	viewLines := strings.Split(view, "\n")
 	frameWidth, frameHeight := lipgloss.Width(view), lipgloss.Height(view)
 	x0 := max((max(width, 1)-frameWidth)/2, 0)
 	y0 := max((max(height, 1)-frameHeight)/2, 0)
@@ -34,7 +37,7 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 			line++
 		}
 		line++
-		start, end := rowWindow(len(m.rows), m.selection, max(1, min(height-10, 12)))
+		start, end := m.reviewWindow(max(1, min(height-10, 12)))
 		for index := start; index < end; index++ {
 			addPointerRegion(&hitMap, pointer.Rect{X0: x0, Y0: y0 + line, X1: x0 + frameWidth, Y1: y0 + line + 1}, "row:"+strconv.Itoa(index), m, width, height)
 			line++
@@ -43,31 +46,57 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 			}
 		}
 	}
-	for line, text := range strings.Split(view, "\n") {
-		target := ""
-		switch {
-		case m.stage == stageInput && strings.Contains(text, "source"):
-			target = "source"
-		case m.stage == stageInput && strings.Contains(text, "ref"):
-			target = "ref"
-		case m.stage == stageInput && strings.Contains(text, "max"):
-			target = "max"
-		case strings.Contains(text, "[ Back ]"):
-			if start := strings.Index(text, "[ Import ]"); start >= 0 {
-				addPointerRegion(&hitMap, pointer.Rect{X0: x0 + start, Y0: y0 + line, X1: x0 + start + len("[ Import ]"), Y1: y0 + line + 1}, "import", m, width, height)
-			}
-			start := strings.Index(text, "[ Back ]")
-			addPointerRegion(&hitMap, pointer.Rect{X0: x0 + start, Y0: y0 + line, X1: x0 + start + len("[ Back ]"), Y1: y0 + line + 1}, "back", m, width, height)
-			continue
-		case strings.Contains(text, "[ Import ]"):
-			target = "import"
+	pane := pointer.Rect{X0: x0, Y0: y0, X1: x0 + frameWidth, Y1: y0 + frameHeight}
+	if m.operation == "" && m.pointerBackdropSafe() {
+		hitMap.AddBackdrop(pointer.Rect{X1: max(width, 1), Y1: max(height, 1)}, pane, func(pointer.Point) tea.Msg {
+			return pointerActionMsg{target: "backdrop", session: m.session, generation: m.generation}
+		})
+	}
+	if m.stage == stageReview && m.operation == "" {
+		limit := max(1, min(height-10, 12))
+		maxScroll := max(len(m.rows)-limit, 0)
+		hitMap.AddWheel(pane, func(delta int) tea.Msg {
+			return pointerActionMsg{target: "scroll", session: m.session, generation: m.generation, scrollDelta: delta * 3, maxScroll: maxScroll}
+		})
+	}
+	for line, text := range viewLines {
+		content := strings.TrimSpace(strings.Trim(text, "│"))
+		if strings.HasPrefix(content, "> ") || strings.HasPrefix(content, "! ") {
+			content = strings.TrimSpace(content[2:])
 		}
-		if target != "" {
-			addPointerRegion(&hitMap, pointer.Rect{X0: x0, Y0: y0 + line, X1: x0 + frameWidth, Y1: y0 + line + 1}, target, m, width, height)
+		if m.stage == stageInput {
+			target := ""
+			switch {
+			case strings.HasPrefix(content, "source  "):
+				target = "source"
+			case strings.HasPrefix(content, "ref     "):
+				target = "ref"
+			case strings.HasPrefix(content, "max     "):
+				target = "max"
+			}
+			if target != "" {
+				addPointerRegion(&hitMap, pointer.Rect{X0: x0, Y0: y0 + line, X1: x0 + frameWidth, Y1: y0 + line + 1}, target, m, width, height)
+			}
+		}
+		if !strings.HasPrefix(content, "[ Import ]") && !strings.HasPrefix(content, "[>Import<]") {
 			continue
+		}
+		for _, control := range []struct {
+			label  string
+			target string
+		}{{"Import", "import"}, {"Back", "back"}, {"Close", "close"}, {"Cancel", "cancel"}} {
+			for _, needle := range []string{"[ " + control.label + " ]", "[>" + control.label + "<]"} {
+				if start := strings.Index(text, needle); start >= 0 {
+					addPointerRegion(&hitMap, pointer.Rect{X0: x0 + start, Y0: y0 + line, X1: x0 + start + ansi.StringWidth(needle), Y1: y0 + line + 1}, control.target, m, width, height)
+				}
+			}
 		}
 	}
 	return hitMap.Handler()
+}
+
+func (m Model) pointerBackdropSafe() bool {
+	return m.stage == stageInput && strings.TrimSpace(m.ref.Value()) == "" && m.source == 0 && m.max == defaultMax
 }
 
 func addPointerRegion(hitMap *pointer.Map, rect pointer.Rect, target string, m Model, width, height int) {
@@ -88,7 +117,9 @@ func addPointerRegion(hitMap *pointer.Map, rect pointer.Rect, target string, m M
 		return
 	}
 	session, generation := m.session, m.generation
-	hitMap.Add(rect, func(pointer.Point) tea.Msg {
+	hitMap.AddControl(controlID(target), rect, func(pointer.Point) tea.Msg {
 		return pointerActionMsg{target: target, session: session, generation: generation}
 	})
 }
+
+func controlID(target string) pointer.ControlID { return pointer.ControlID("issueimport." + target) }

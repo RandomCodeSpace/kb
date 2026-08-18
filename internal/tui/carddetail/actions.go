@@ -11,6 +11,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 // Writer is the direct SQLite projection used by detail actions. Reader stays
@@ -23,6 +24,8 @@ type Writer interface {
 }
 
 type actionMode uint8
+
+type actionChoicePointerMsg struct{ index int }
 
 const (
 	actionNone actionMode = iota
@@ -189,7 +192,7 @@ func (m *Model) updateActionKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	switch m.action {
 	case actionAddComment:
-		if key == "ctrl+s" {
+		if key == "ctrl+s" || key == "ctrl+enter" {
 			return m.startAddComment()
 		}
 		var command tea.Cmd
@@ -251,6 +254,26 @@ func (m *Model) updateDeleteKey(key string) tea.Cmd {
 	m.rebuildBody()
 	m.focusActionSelection()
 	return nil
+}
+
+func (m *Model) updateActionChoice(index int) {
+	count := len(m.comments)
+	if m.action == actionDeleteLink {
+		count = len(m.linkChoices())
+	}
+	if (m.action != actionDeleteComment && m.action != actionDeleteLink) || m.saving || index < 0 || index >= count {
+		return
+	}
+	m.selection = index
+	m.confirm = false
+	m.statusMessage = ""
+	m.statusIsError = false
+	m.rebuildBody()
+	m.focusActionSelection()
+}
+
+func detailActionChoiceControlID(action actionMode, index int) pointer.ControlID {
+	return pointer.ControlID(fmt.Sprintf("detail:action:%d:%d", action, index))
 }
 
 func (m *Model) focusActionSelection() {
@@ -435,7 +458,9 @@ func (m Model) actionBody(width int) string {
 		for i := start; i < end; i++ {
 			comment := m.comments[i]
 			marker := "  "
-			if i == m.selection {
+			if m.pointerState.IsPressed(detailActionChoiceControlID(m.action, i)) {
+				marker = "! "
+			} else if i == m.selection {
 				marker = "> "
 			}
 			preview := strings.ReplaceAll(safeText(comment.Body, true), "\n", " ")
@@ -465,7 +490,9 @@ func (m Model) actionBody(width int) string {
 		for i := start; i < end; i++ {
 			choice := choices[i]
 			marker := "  "
-			if i == m.selection {
+			if m.pointerState.IsPressed(detailActionChoiceControlID(m.action, i)) {
+				marker = "! "
+			} else if i == m.selection {
 				marker = "> "
 			}
 			direction := "blocks"
@@ -504,12 +531,20 @@ func selectionWindow(count, selection, limit int) (int, int) {
 
 func (m Model) actionFooter(width int) string {
 	if m.driftMode != driftNone {
-		return m.driftFooter()
+		controls := m.pointerFooterText(m.pointerFooterControls(width), width)
+		status := m.driftFooter()
+		if controls != "" && m.statusMessage != "" {
+			return fitDetailLine(controls+" | "+status, width)
+		}
+		if controls != "" {
+			return controls
+		}
+		return status
 	}
 	if m.saving {
 		return "write in progress | esc stays here"
 	}
-	controls := pointerFooterText(m.pointerFooterControls(width), width)
+	controls := m.pointerFooterText(m.pointerFooterControls(width), width)
 	if m.confirm && (m.action == actionDeleteComment || m.action == actionDeleteLink) {
 		return controls + " | enter confirm delete | esc cancel"
 	}
@@ -532,12 +567,38 @@ type detailPointerControl struct {
 	message tea.Msg
 }
 
+func detailFooterControlID(control detailPointerControl) pointer.ControlID {
+	return pointer.ControlID("detail:footer:" + control.label)
+}
+
+func detailDriftControlID(index int) pointer.ControlID {
+	return pointer.ControlID(fmt.Sprintf("detail:drift:%d", index))
+}
+
 func (m Model) pointerFooterControls(width int) []detailPointerControl {
-	if m.driftMode != driftNone || m.saving {
+	if m.saving {
 		return nil
 	}
 	key := func(code rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: code, Text: string(code)} }
 	controls := func(values ...detailPointerControl) []detailPointerControl { return values }
+	if m.driftMode != driftNone {
+		if m.driftBusy != "" {
+			return nil
+		}
+		if m.driftMode == driftSelect {
+			return controls(
+				detailPointerControl{label: "Check selected", message: tea.KeyPressMsg{Code: tea.KeyEnter}},
+				detailPointerControl{label: "Back", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
+			)
+		}
+		if m.driftResult.State == "drifted" {
+			return controls(
+				detailPointerControl{label: "Update baseline", message: key('u')},
+				detailPointerControl{label: "Back", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
+			)
+		}
+		return controls(detailPointerControl{label: "Back", message: tea.KeyPressMsg{Code: tea.KeyEscape}})
+	}
 	if m.confirm && (m.action == actionDeleteComment || m.action == actionDeleteLink) {
 		return controls(
 			detailPointerControl{label: "Confirm delete", message: tea.KeyPressMsg{Code: tea.KeyEnter}},
@@ -547,7 +608,7 @@ func (m Model) pointerFooterControls(width int) []detailPointerControl {
 	switch m.action {
 	case actionAddComment:
 		return controls(
-			detailPointerControl{label: "Save comment", message: tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}},
+			detailPointerControl{label: "Save comment", message: tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}},
 			detailPointerControl{label: "Cancel", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
 		)
 	case actionDeleteComment, actionDeleteLink:
@@ -599,10 +660,11 @@ func (m Model) pointerFooterControls(width int) []detailPointerControl {
 	return primary
 }
 
-func pointerFooterText(controls []detailPointerControl, width int) string {
+func (m Model) pointerFooterText(controls []detailPointerControl, width int) string {
 	parts := make([]string, 0, len(controls))
 	for _, control := range controls {
-		parts = append(parts, "["+control.label+"]")
+		label := "[" + control.label + "]"
+		parts = append(parts, m.pointerState.Render(detailFooterControlID(control), label))
 	}
 	return fitDetailLine(strings.Join(parts, " "), width)
 }

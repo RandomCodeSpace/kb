@@ -141,7 +141,7 @@ func TestCommentAddPreservesRefusedInputAndReloadsAcknowledgedWrite(t *testing.T
 	}
 
 	st.addErr = nil
-	save = m.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	save = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
 	reload := m.Update(save())
 	if reload == nil || m.action != actionNone || m.saving || !m.ConsumeChanged() || m.ConsumeChanged() {
 		t.Fatalf("acknowledged write = reload:%v action:%v busy:%v", reload, m.action, m.saving)

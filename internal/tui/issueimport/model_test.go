@@ -365,15 +365,31 @@ func TestRemainingStateBranches(t *testing.T) {
 
 func TestPointerControlsFocusRowsAndActionsWithoutBackgroundMutation(t *testing.T) {
 	backend := &fakeBackend{
-		sources: []store.ForgeSource{{Name: "primary"}},
+		sources: []store.ForgeSource{{Name: "primary"}, {Name: "secondary"}},
 		preview: forge.Preview{Drafts: []forge.Draft{{Draft: ai.Draft{Title: "one"}}, {Draft: ai.Draft{Title: "two"}}}},
 	}
 	m := openModel(t, backend, &fakeStore{})
 	m.ref.SetValue("acme/kb")
 	handler := m.MouseHandler(80, 24)
-	line, x := importVisibleTextPosition(t, m.View(80, 24), 80, 24, "ref")
+	line, x := importVisibleTextPosition(t, m.View(80, 24), 80, 24, "source")
+	m.Update(pointerRelease(&m, handler, x, line)())
+	if m.focus != 0 || m.sourceName() != "secondary" {
+		t.Fatalf("pointer source focus=%d value=%q", m.focus, m.sourceName())
+	}
+	handler = m.MouseHandler(80, 24)
+	line, x = importVisibleTextPosition(t, m.View(80, 24), 80, 24, "max")
+	maxCommand := pointerRelease(&m, handler, x, line)
+	if maxCommand == nil {
+		t.Fatalf("pointer max missed at x=%d y=%d:\n%s", x, line, ansi.Strip(m.View(80, 24)))
+	}
+	m.Update(maxCommand())
+	if m.focus != 2 || m.max != defaultMax+1 {
+		t.Fatalf("pointer max focus=%d value=%d", m.focus, m.max)
+	}
+	handler = m.MouseHandler(80, 24)
+	line, x = importVisibleTextPosition(t, m.View(80, 24), 80, 24, "ref")
 	before := m.focus
-	command := pointerRelease(handler, x, line)
+	command := pointerRelease(&m, handler, x, line)
 	if command == nil || m.focus != before {
 		t.Fatalf("pointer release mutated model before update: command=%v focus=%d", command, m.focus)
 	}
@@ -384,7 +400,7 @@ func TestPointerControlsFocusRowsAndActionsWithoutBackgroundMutation(t *testing.
 	m.Update(m.startPreview()())
 	handler = m.MouseHandler(80, 24)
 	line, x = importVisibleTextPosition(t, m.View(80, 24), 80, 24, "one")
-	m.Update(pointerRelease(handler, x, line)())
+	m.Update(pointerRelease(&m, handler, x, line)())
 	if m.rows[0].include {
 		t.Fatal("pointer review row did not toggle")
 	}
@@ -405,13 +421,13 @@ func TestPointerControlsFocusRowsAndActionsWithoutBackgroundMutation(t *testing.
 		t.Fatal("duplicate review titles were not rendered")
 	}
 	handler = m.MouseHandler(80, 24)
-	m.Update(pointerRelease(handler, x, line)())
+	m.Update(pointerRelease(&m, handler, x, line)())
 	if m.rows[1].include {
 		t.Fatal("pointer row identity followed title text instead of rendered row")
 	}
 	m.rows[1].include = true
 	line, x = importVisibleTextPosition(t, m.View(80, 24), 80, 24, "Import")
-	command = pointerRelease(handler, x, line)
+	command = pointerRelease(&m, handler, x, line)
 	if command == nil {
 		t.Fatal("import action had no hit region")
 	}
@@ -428,7 +444,7 @@ func TestPointerControlsFocusRowsAndActionsWithoutBackgroundMutation(t *testing.
 	m.selection = 0
 	handler = m.MouseHandler(80, 24)
 	line, x = importVisibleTextPosition(t, m.View(80, 24), 80, 24, "Back")
-	m.Update(pointerRelease(handler, x, line)())
+	m.Update(pointerRelease(&m, handler, x, line)())
 	if m.stage != stageInput {
 		t.Fatal("pointer back did not return to input")
 	}
@@ -445,14 +461,14 @@ func TestPointerControlsClipRowsAndRejectBusyOrStaleSnapshots(t *testing.T) {
 	m.Update(m.startPreview()())
 	handler := m.MouseHandler(50, 10)
 	line, x := importVisibleTextPosition(t, m.View(50, 10), 50, 10, "issue-0")
-	if command := pointerRelease(handler, x, line); command == nil {
+	if command := pointerRelease(&m, handler, x, line); command == nil {
 		t.Fatal("visible issue control had no hit region")
 	}
-	if command := pointerRelease(handler, 3, 0); command != nil {
+	if command := pointerRelease(&m, handler, 3, 0); command != nil {
 		t.Fatal("offscreen issue control activated")
 	}
 	m.operation = "create"
-	if command := pointerRelease(handler, x, line); command != nil {
+	if command := pointerRelease(&m, handler, x, line); command != nil {
 		if m.Update(command()) != nil || m.operation != "create" {
 			t.Fatal("busy issue import exposed pointer action")
 		}
@@ -461,11 +477,178 @@ func TestPointerControlsClipRowsAndRejectBusyOrStaleSnapshots(t *testing.T) {
 	stale := m.MouseHandler(50, 10)
 	m.Close()
 	m.Open()
-	if command := pointerRelease(stale, x, line); command != nil {
+	if command := pointerRelease(&m, stale, x, line); command != nil {
 		m.Update(command())
 		if m.stage != stageInput || m.operation != "" {
 			t.Fatal("stale issue pointer mutated reopened session")
 		}
+	}
+}
+
+func TestPointerPressFeedbackReleasesOnceAndDragCancels(t *testing.T) {
+	backend := &fakeBackend{sources: []store.ForgeSource{{Name: "primary"}}}
+	m := openModel(t, backend, &fakeStore{})
+	before := ansi.Strip(m.View(80, 24))
+	line, x := importVisibleTextPosition(t, before, 80, 24, "max")
+	handler := m.MouseHandler(80, 24)
+	press := handler(tea.MouseClickMsg{X: x, Y: line, Button: tea.MouseLeft})
+	if press == nil || !IsMessage(press()) {
+		t.Fatal("max press did not produce an overlay feedback message")
+	}
+	if command := m.Update(press()); command != nil || !m.pointerState.IsPressed(controlID("max")) {
+		t.Fatalf("press state command=%v pressed=%v", command, m.pointerState.IsPressed(controlID("max")))
+	}
+	pressed := ansi.Strip(m.View(80, 24))
+	if !strings.Contains(pressed, "! max     8") || ansi.StringWidth(strings.Split(before, "\n")[line-(24-len(strings.Split(before, "\n")))/2]) != ansi.StringWidth(strings.Split(pressed, "\n")[line-(24-len(strings.Split(pressed, "\n")))/2]) {
+		t.Fatalf("max press feedback was not same-width:\n%s", pressed)
+	}
+	release := m.MouseHandler(80, 24)(tea.MouseReleaseMsg{X: x, Y: line, Button: tea.MouseLeft})
+	if release == nil {
+		t.Fatal("max release had no action")
+	}
+	command := m.Update(release())
+	if command == nil || m.pointerState.IsPressed(controlID("max")) || m.max != defaultMax {
+		t.Fatalf("release feedback command=%v pressed=%v max=%d", command, m.pointerState.IsPressed(controlID("max")), m.max)
+	}
+	m.Update(command())
+	if m.max != defaultMax+1 {
+		t.Fatalf("release activation max=%d", m.max)
+	}
+	if duplicate := handler(tea.MouseReleaseMsg{X: x, Y: line, Button: tea.MouseLeft}); duplicate != nil {
+		if next := m.Update(duplicate()); next != nil {
+			m.Update(next())
+		}
+	}
+	if m.max != defaultMax+1 {
+		t.Fatalf("duplicate release activated max=%d", m.max)
+	}
+
+	drag := openModel(t, backend, &fakeStore{})
+	line, x = importVisibleTextPosition(t, drag.View(80, 24), 80, 24, "max")
+	handler = drag.MouseHandler(80, 24)
+	drag.Update(handler(tea.MouseClickMsg{X: x, Y: line, Button: tea.MouseLeft})())
+	if !drag.pointerState.IsPressed(controlID("max")) {
+		t.Fatal("drag setup did not render pressed max")
+	}
+	cancel := handler(tea.MouseMotionMsg{X: x + 1, Y: line, Button: tea.MouseLeft})
+	if cancel == nil || drag.Update(cancel()) != nil || drag.pointerState.IsPressed(controlID("max")) {
+		t.Fatal("drag did not cancel pressed feedback")
+	}
+	if release := handler(tea.MouseReleaseMsg{X: x + 1, Y: line, Button: tea.MouseLeft}); release != nil {
+		if next := drag.Update(release()); next != nil {
+			drag.Update(next())
+		}
+	}
+	if drag.max != defaultMax {
+		t.Fatalf("drag release activated max=%d", drag.max)
+	}
+}
+
+func TestInputButtonActivatesAfterPressedRerender(t *testing.T) {
+	backend := &fakeBackend{sources: []store.ForgeSource{{Name: "primary"}}}
+	m := openModel(t, backend, &fakeStore{})
+	line, x := importVisibleTextPosition(t, m.View(80, 24), 80, 24, "[ Cancel ]")
+	press := m.MouseHandler(80, 24)(tea.MouseClickMsg{X: x, Y: line, Button: tea.MouseLeft})
+	if press == nil || m.Update(press()) != nil {
+		t.Fatal("import cancel did not enter pressed state")
+	}
+	if view := ansi.Strip(m.View(80, 24)); !strings.Contains(view, "[>Cancel<]") {
+		t.Fatalf("import cancel omitted pressed feedback:\n%s", view)
+	}
+	release := m.MouseHandler(80, 24)(tea.MouseReleaseMsg{X: x, Y: line, Button: tea.MouseNone})
+	if release == nil {
+		t.Fatal("rerendered import cancel ignored release")
+	}
+	activate := m.Update(release())
+	if activate == nil {
+		t.Fatal("import cancel release produced no activation")
+	}
+	m.Update(activate())
+	if m.IsOpen() {
+		t.Fatal("import cancel did not close overlay")
+	}
+}
+
+func TestPointerWheelReachesShortReviewRowsAndVisibleDismissControls(t *testing.T) {
+	drafts := make([]forge.Draft, 20)
+	for i := range drafts {
+		drafts[i] = forge.Draft{Draft: ai.Draft{Title: fmt.Sprintf("issue-%d", i)}}
+	}
+	backend := &fakeBackend{sources: []store.ForgeSource{{Name: "primary"}}, preview: forge.Preview{Drafts: drafts}}
+	m := openModel(t, backend, &fakeStore{})
+	m.ref.SetValue("acme/kb")
+	m.Update(m.startPreview()())
+
+	for range 40 {
+		pointerWheel(t, &m, m.MouseHandler(50, 10), 25, 5, tea.MouseWheelDown)
+	}
+	if m.scroll == 0 || !m.manualScroll || m.selection != 0 {
+		t.Fatalf("wheel state scroll=%d manual=%v selection=%d", m.scroll, m.manualScroll, m.selection)
+	}
+	view := m.View(50, 10)
+	line, x := importVisibleTextPosition(t, view, 50, 10, "issue-19")
+	command := pointerRelease(&m, m.MouseHandler(50, 10), x, line)
+	if command == nil {
+		t.Fatal("scrolled final issue had no pointer action")
+	}
+	m.Update(command())
+	if m.rows[19].include || m.selection != 19 {
+		t.Fatalf("final row pointer state include=%v selection=%d", m.rows[19].include, m.selection)
+	}
+
+	input := openModel(t, backend, &fakeStore{})
+	if got := ansi.Strip(input.View(80, 24)); !strings.Contains(got, "[ Cancel ]") {
+		t.Fatalf("input cancel missing:\n%s", got)
+	}
+	cancelLine, cancelX := importVisibleTextPosition(t, input.View(80, 24), 80, 24, "[ Cancel ]")
+	input.Update(pointerRelease(&input, input.MouseHandler(80, 24), cancelX, cancelLine)())
+	if input.open {
+		t.Fatal("pointer input cancel did not close")
+	}
+
+	closeReview := openModel(t, backend, &fakeStore{})
+	closeReview.ref.SetValue("acme/kb")
+	closeReview.Update(closeReview.startPreview()())
+	if got := ansi.Strip(closeReview.View(80, 24)); !strings.Contains(got, "[ Close ]") {
+		t.Fatalf("review close missing:\n%s", got)
+	}
+	closeLine, closeX := importVisibleTextPosition(t, closeReview.View(80, 24), 80, 24, "[ Close ]")
+	closeReview.Update(pointerRelease(&closeReview, closeReview.MouseHandler(80, 24), closeX, closeLine)())
+	if closeReview.open {
+		t.Fatal("pointer review close did not close")
+	}
+
+	backdrop := openModel(t, backend, &fakeStore{})
+	backdrop.Update(pointerRelease(&backdrop, backdrop.MouseHandler(80, 24), 0, 0)())
+	if backdrop.open {
+		t.Fatal("idle input backdrop did not close")
+	}
+
+	dirty := openModel(t, backend, &fakeStore{})
+	dirty.ref.SetValue("acme/kb")
+	if command := pointerRelease(&dirty, dirty.MouseHandler(80, 24), 0, 0); command != nil {
+		dirty.Update(command())
+	}
+	if !dirty.open {
+		t.Fatal("dirty input closed through backdrop")
+	}
+
+	review := openModel(t, backend, &fakeStore{})
+	review.ref.SetValue("acme/kb")
+	review.Update(review.startPreview()())
+	if command := pointerRelease(&review, review.MouseHandler(80, 24), 0, 0); command != nil {
+		review.Update(command())
+	}
+	if !review.open || review.stage != stageReview {
+		t.Fatal("populated review closed through backdrop")
+	}
+
+	queued := openModel(t, backend, &fakeStore{})
+	backdropMessage := pointerActionMsg{target: "backdrop", session: queued.session, generation: queued.generation}
+	queued.ref.SetValue("became dirty after render")
+	queued.Update(backdropMessage)
+	if !queued.open {
+		t.Fatal("queued backdrop discarded input that became dirty")
 	}
 }
 
@@ -527,6 +710,35 @@ func TestPointerAndAsyncGuardsCoverInputEdges(t *testing.T) {
 	}
 }
 
+func TestPointerRowsCannotImpersonateFieldsOrReviewButtons(t *testing.T) {
+	backend := &fakeBackend{
+		sources: []store.ForgeSource{{Name: "primary"}},
+		preview: forge.Preview{Drafts: []forge.Draft{{Draft: ai.Draft{Title: "[ Import ] must remain review text"}}}},
+	}
+	m := openModel(t, backend, &fakeStore{})
+	m.ref.SetValue("source/project")
+	line, x := importVisibleTextPosition(t, m.View(80, 24), 80, 24, "source/project")
+	command := pointerRelease(&m, m.MouseHandler(80, 24), x, line)
+	if command == nil {
+		t.Fatal("ref row produced no pointer action")
+	}
+	m.Update(command())
+	if m.focus != 1 || m.source != 0 {
+		t.Fatalf("ref text impersonated source: focus=%d source=%d", m.focus, m.source)
+	}
+
+	m.Update(m.startPreview()())
+	line, x = importVisibleTextPosition(t, m.View(80, 24), 80, 24, "[ Import ]")
+	command = pointerRelease(&m, m.MouseHandler(80, 24), x, line)
+	if command == nil {
+		t.Fatal("review row produced no pointer action")
+	}
+	m.Update(command())
+	if backend.recordCalls != 0 || !m.open || m.operation != "" {
+		t.Fatalf("review text impersonated Import: calls=%d open=%v operation=%q", backend.recordCalls, m.open, m.operation)
+	}
+}
+
 func importVisibleTextPosition(t *testing.T, view string, width, height int, needle string) (int, int) {
 	t.Helper()
 	frameWidth, frameHeight := ansi.StringWidth(strings.Split(ansi.Strip(view), "\n")[0]), len(strings.Split(ansi.Strip(view), "\n"))
@@ -541,7 +753,32 @@ func importVisibleTextPosition(t *testing.T, view string, width, height int, nee
 	return 0, 0
 }
 
-func pointerRelease(handler func(tea.MouseMsg) tea.Cmd, x, y int) tea.Cmd {
-	handler(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-	return handler(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+func pointerRelease(model *Model, handler func(tea.MouseMsg) tea.Cmd, x, y int) tea.Cmd {
+	if command := handler(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}); command != nil {
+		model.Update(command())
+	}
+	command := handler(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if command == nil {
+		return nil
+	}
+	message := command()
+	state, next, handled := model.pointerState.Update(message)
+	if handled {
+		model.pointerState = state
+		return next
+	}
+	return func() tea.Msg { return message }
+}
+
+func pointerWheel(t *testing.T, model *Model, handler func(tea.MouseMsg) tea.Cmd, x, y int, button tea.MouseButton) {
+	t.Helper()
+	command := handler(tea.MouseWheelMsg{X: x, Y: y, Button: button})
+	if command == nil {
+		t.Fatal("wheel had no action")
+	}
+	next := model.Update(command())
+	if next == nil {
+		t.Fatal("wheel feedback did not forward its domain action")
+	}
+	model.Update(next())
 }

@@ -416,7 +416,10 @@ func TestCardDetailOpensFromKeyboardAndClick(t *testing.T) {
 		t.Fatalf("click detail state = open %v task %q row %d", m.detail.IsOpen(), m.detail.TaskID(), m.boardView.rows[0])
 	}
 	if command := m.View().OnMouse(tea.MouseClickMsg{}); command != nil {
-		t.Fatal("board mouse handler remained active behind detail")
+		updateTestModel(t, &m, command())
+	}
+	if !m.detail.IsOpen() || m.boardView.rows[0] != 1 {
+		t.Fatal("non-left detail pointer event leaked to the board")
 	}
 	if quit := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'q'}); quit == nil || !m.stopped {
 		t.Fatal("q did not preserve root quit while detail was open")
@@ -457,19 +460,29 @@ func requireMouseCommand(t *testing.T, command tea.Cmd, action string) tea.Cmd {
 	return command
 }
 
-func pointerCommandForLabel(t *testing.T, view tea.View, label string) tea.Cmd {
+func pointerCommandForLabel(t *testing.T, model *Model, label string) tea.Cmd {
 	t.Helper()
+	view := model.View()
 	handler := requireMouseHandler(t, view.OnMouse, label)
 	for row, line := range strings.Split(ansi.Strip(view.Content), "\n") {
 		if index := strings.Index(line, label); index >= 0 {
 			x := ansi.StringWidth(line[:index])
-			if command := handler(tea.MouseClickMsg{X: x, Y: row, Button: tea.MouseLeft}); command != nil {
-				return command
+			press := requireMouseCommand(t,
+				handler(tea.MouseClickMsg{X: x, Y: row, Button: tea.MouseLeft}),
+				"press "+label,
+			)
+			if command := updateTestModel(t, model, press()); command != nil {
+				t.Fatalf("press %q returned domain command", label)
 			}
-			return requireMouseCommand(t,
-				handler(tea.MouseReleaseMsg{X: x, Y: row, Button: tea.MouseLeft}),
+			pressedView := model.View()
+			if !strings.Contains(pressedView.Content, "\x1b[7m") {
+				t.Fatalf("press %q did not render feedback", label)
+			}
+			release := requireMouseCommand(t,
+				requireMouseHandler(t, pressedView.OnMouse, label)(tea.MouseReleaseMsg{X: x, Y: row, Button: tea.MouseLeft}),
 				"click "+label,
 			)
+			return updateTestModel(t, model, release())
 		}
 	}
 	t.Fatalf("rendered label %q not found:\n%s", label, ansi.Strip(view.Content))
@@ -478,11 +491,11 @@ func pointerCommandForLabel(t *testing.T, view tea.View, label string) tea.Cmd {
 
 func TestPointerOpensAndClosesHelpFromVisibleControls(t *testing.T) {
 	m := mouseRoutingTestModel(t)
-	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "? help")())
+	updateTestModel(t, &m, pointerCommandForLabel(t, &m, "? help")())
 	if !m.helpOpen {
 		t.Fatal("pointer did not open keyboard help")
 	}
-	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "close help")())
+	updateTestModel(t, &m, pointerCommandForLabel(t, &m, "close help")())
 	if m.helpOpen {
 		t.Fatal("pointer did not close keyboard help")
 	}
@@ -505,7 +518,7 @@ func TestPointerBoardFooterOpensPrimarySurfaces(t *testing.T) {
 			m.settingsNew = func() *settingsModel { return newSettingsModel(st, "alice", context.Background()) }
 			m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
 			completeBoardLoad(t, &m, m.Init())
-			updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), tc.label)())
+			updateTestModel(t, &m, pointerCommandForLabel(t, &m, tc.label)())
 			if !tc.open(m) {
 				t.Fatalf("pointer did not open %s", tc.label)
 			}
@@ -535,11 +548,262 @@ func TestPointerBoardFooterRoutesRemainingActions(t *testing.T) {
 			m.settingsNew = func() *settingsModel { return newSettingsModel(st, "alice", context.Background()) }
 			m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
 			completeBoardLoad(t, &m, m.Init())
-			updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), tc.label)())
+			updateTestModel(t, &m, pointerCommandForLabel(t, &m, tc.label)())
 			if !tc.check(m) {
 				t.Fatalf("pointer did not route %s", tc.label)
 			}
 		})
+	}
+}
+
+func TestRootRoutesPointerPressFeedbackToEveryTopmostOwner(t *testing.T) {
+	st := newSettingsTestStore(t)
+	newRoot := func() Model {
+		m := NewModel(st, nil, "alice")
+		m.width, m.height = 120, 30
+		completeBoardLoad(t, &m, m.Init())
+		return m
+	}
+	press := func(t *testing.T, m *Model, label string) {
+		t.Helper()
+		before := m.View()
+		for row, line := range strings.Split(ansi.Strip(before.Content), "\n") {
+			index := strings.Index(line, label)
+			if index < 0 {
+				continue
+			}
+			x := ansi.StringWidth(line[:index])
+			command := requireMouseCommand(t, before.OnMouse(tea.MouseClickMsg{X: x, Y: row, Button: tea.MouseLeft}), "press "+label)
+			if next := updateTestModel(t, m, command()); next != nil {
+				t.Fatalf("press %q returned domain command", label)
+			}
+			if after := m.View().Content; after == before.Content {
+				t.Fatalf("press %q produced no visible feedback", label)
+			}
+			return
+		}
+		t.Fatalf("visible control %q not found:\n%s", label, ansi.Strip(before.Content))
+	}
+
+	for _, test := range []struct {
+		name  string
+		label string
+		open  func(*Model)
+	}{
+		{name: "board", label: "? help", open: func(*Model) {}},
+		{name: "detail", label: "Comment", open: func(m *Model) {
+			_ = m.detail.Open(board.Task{ID: "detail", Title: "Detail", Status: board.StatusTodo})
+		}},
+		{name: "settings", label: "Model:", open: func(m *Model) {
+			m.settings = newSettingsModel(st, "alice", context.Background())
+			loadSettingsForTest(t, m.settings)
+		}},
+		{name: "ADR", label: "Source:", open: func(m *Model) {
+			m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
+			_ = m.adr.Open()
+		}},
+		{name: "editor", label: "Title:", open: func(m *Model) {
+			_ = m.editor.OpenAdd(board.StatusTodo)
+		}},
+		{name: "task action", label: "Ship anyway", open: func(m *Model) {
+			m.openShipPrompt(board.Task{ID: "ship", Title: "Ship", Status: board.StatusTodo}, 0)
+		}},
+		{name: "issue import", label: "source", open: func(m *Model) {
+			m.issueImport = issueimport.New(&rootImportStore{}, rootImportBackend{}, "alice", context.Background())
+			_ = m.issueImport.Open()
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := newRoot()
+			test.open(&m)
+			press(t, &m, test.label)
+		})
+	}
+}
+
+func TestQueuedBoardFooterCannotEscapeTopmostOwner(t *testing.T) {
+	st := newSettingsTestStore(t)
+	for _, test := range []struct {
+		name string
+		open func(*Model)
+	}{
+		{name: "help", open: func(m *Model) { m.helpOpen = true }},
+		{name: "detail", open: func(m *Model) {
+			_ = m.detail.Open(board.Task{ID: "detail", Title: "Detail", Status: board.StatusTodo})
+		}},
+		{name: "settings", open: func(m *Model) {
+			m.settings = newSettingsModel(st, "alice", context.Background())
+		}},
+		{name: "editor", open: func(m *Model) { _ = m.editor.OpenAdd(board.StatusTodo) }},
+		{name: "ADR", open: func(m *Model) {
+			m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
+			_ = m.adr.Open()
+		}},
+		{name: "task action", open: func(m *Model) {
+			m.openShipPrompt(board.Task{ID: "ship", Title: "Ship", Status: board.StatusTodo}, 0)
+		}},
+		{name: "issue import", open: func(m *Model) {
+			m.issueImport = issueimport.New(&rootImportStore{}, rootImportBackend{}, "alice", context.Background())
+			_ = m.issueImport.Open()
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := NewModel(st, nil, "alice")
+			m.width, m.height = 120, 30
+			completeBoardLoad(t, &m, m.Init())
+			test.open(&m)
+			if command := updateTestModel(t, &m, boardFooterClickedMsg{key: "q"}); command != nil || m.stopped {
+				t.Fatalf("queued board footer escaped %s: command=%v stopped=%v", test.name, command, m.stopped)
+			}
+		})
+	}
+}
+
+func TestBoardPrimaryControlsRenderPressAndActivateOnRelease(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		match func(boardHit) bool
+		check func(Model) bool
+	}{
+		{
+			name:  "filter text",
+			match: func(hit boardHit) bool { return hit.kind == boardHitFilterText },
+			check: func(m Model) bool { return m.filter.focus == filterText },
+		},
+		{
+			name: "column heading",
+			match: func(hit boardHit) bool {
+				return hit.kind == boardHitColumnHeading && hit.status == board.StatusDoing
+			},
+			check: func(m Model) bool { return m.boardView.column == statusIndex(board.StatusDoing) },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := mouseRoutingTestModel(t)
+			m.width, m.height = 120, 30
+			_, hits := m.renderBoard()
+			var target boardHit
+			for _, hit := range hits {
+				if test.match(hit) {
+					target = hit
+					break
+				}
+			}
+			id := boardHitControlID(target)
+			if id == "" {
+				t.Fatal("rendered board control has no stable pointer identity")
+			}
+			x, y := target.x0, target.y0
+			press := requireMouseCommand(t, m.View().OnMouse(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}), "board press")
+			if command := updateTestModel(t, &m, press()); command != nil || !m.pointerState.IsPressed(id) {
+				t.Fatalf("board press command=%v pressed=%v", command, m.pointerState.IsPressed(id))
+			}
+			if !strings.Contains(m.View().Content, "\x1b[7m") {
+				t.Fatal("board control press produced no visible feedback")
+			}
+			release := requireMouseCommand(t, m.View().OnMouse(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseNone}), "board release")
+			activate := updateTestModel(t, &m, release())
+			if activate == nil {
+				t.Fatal("board release produced no domain action")
+			}
+			updateTestModel(t, &m, activate())
+			if !test.check(m) || m.pointerState.IsPressed(id) {
+				t.Fatalf("board release state did not activate %s", test.name)
+			}
+		})
+	}
+}
+
+func TestBoardCardLabelsHavePerRegionPressedIdentity(t *testing.T) {
+	m := mouseRoutingTestModel(t)
+	m.width, m.height = 120, 30
+	m.board.Tasks[0].Tags = []string{"shared"}
+	m.board.Tasks[1].Tags = []string{"shared"}
+	_, hits := m.renderBoard()
+	var first boardHit
+	for _, hit := range hits {
+		if hit.kind == boardHitFilterLabel && hit.taskID == m.board.Tasks[0].ID {
+			first = hit
+			break
+		}
+	}
+	if first.taskID == "" {
+		t.Fatal("card label hit was not rendered")
+	}
+	firstID := boardHitControlID(first)
+	secondID := boardCardLabelControlID(m.board.Tasks[1].ID, "shared")
+	press := requireMouseCommand(t, m.View().OnMouse(tea.MouseClickMsg{X: first.x0, Y: first.y0, Button: tea.MouseLeft}), "card label press")
+	if command := updateTestModel(t, &m, press()); command != nil {
+		t.Fatalf("card label press returned domain command %v", command)
+	}
+	if !m.pointerState.IsPressed(firstID) || m.pointerState.IsPressed(secondID) {
+		t.Fatalf("card label pressed state first=%v second=%v", m.pointerState.IsPressed(firstID), m.pointerState.IsPressed(secondID))
+	}
+	if !strings.Contains(m.View().Content, "\x1b[7m") {
+		t.Fatal("pressed card label produced no visible feedback")
+	}
+}
+
+func TestBoardReleaseClearsPressedControlRemovedByRefresh(t *testing.T) {
+	m := mouseRoutingTestModel(t)
+	m.width, m.height = 120, 30
+	m.board.Tasks[0].Tags = []string{"temporary"}
+	_, hits := m.renderBoard()
+	var label boardHit
+	for _, hit := range hits {
+		if hit.kind == boardHitFilterLabel && hit.taskID == m.board.Tasks[0].ID {
+			label = hit
+			break
+		}
+	}
+	if label.taskID == "" {
+		t.Fatal("temporary card label was not rendered")
+	}
+	press := requireMouseCommand(t, m.View().OnMouse(tea.MouseClickMsg{X: label.x0, Y: label.y0, Button: tea.MouseLeft}), "temporary label press")
+	updateTestModel(t, &m, press())
+	if !m.pointerState.Active() {
+		t.Fatal("temporary label did not own the press")
+	}
+	m.board.Tasks[0].Tags = nil
+	release := requireMouseCommand(t, m.View().OnMouse(tea.MouseReleaseMsg{X: label.x0, Y: label.y0, Button: tea.MouseNone}), "removed label release")
+	updateTestModel(t, &m, release())
+	if m.pointerState.Active() {
+		t.Fatal("removed control left pressed state stuck")
+	}
+}
+
+func TestNarrowColumnHeadingStillRendersPressedFeedback(t *testing.T) {
+	m := mouseRoutingTestModel(t)
+	column := m.renderBoardColumn(board.StatusDoing, 2, 4)
+	var heading boardHit
+	for _, hit := range column.hits {
+		if hit.kind == boardHitColumnHeading {
+			heading = hit
+			break
+		}
+	}
+	handler := boardMouseHandlerWithFeedback(column.hits, false, m.pointerState)
+	press := requireMouseCommand(t, handler(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}), "narrow column press")
+	if command := updateTestModel(t, &m, press()); command != nil {
+		t.Fatalf("narrow column press returned domain command %v", command)
+	}
+	if !m.pointerState.IsPressed(boardHitControlID(heading)) {
+		t.Fatal("narrow column did not retain pressed state")
+	}
+	if rendered := strings.Join(m.renderBoardColumn(board.StatusDoing, 2, 4).lines, "\n"); !strings.Contains(rendered, "\x1b[7m") {
+		t.Fatalf("narrow column omitted pressed feedback: %q", rendered)
+	}
+}
+
+func TestPointerBoardFooterCancelsLiftBeforeChangingFocus(t *testing.T) {
+	m := mouseRoutingTestModel(t)
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+	if m.move.lifted == nil {
+		t.Fatal("test did not lift the selected card")
+	}
+	updateTestModel(t, &m, boardFooterClickedMsg{key: "?"})
+	if m.move.lifted != nil || !m.helpOpen {
+		t.Fatalf("pointer footer focus change = lifted:%v help:%v", m.move.lifted != nil, m.helpOpen)
 	}
 }
 
@@ -582,17 +846,24 @@ func TestDetailOverlayMouseWheelAndOutsideClick(t *testing.T) {
 	updateTestModel(t, &m, load())
 	detailBefore := ansi.Strip(m.View().Content)
 	detailMouse := requireMouseHandler(t, m.View().OnMouse, "detail")
-	if detailMouse(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown}) != nil {
-		t.Fatal("wheel outside detail was handled")
+	if command := detailMouse(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown}); command != nil {
+		updateTestModel(t, &m, command())
 	}
-	if detailMouse(tea.MouseClickMsg{X: 40, Y: 5, Button: tea.MouseLeft}) != nil {
+	if command := detailMouse(tea.MouseClickMsg{X: 40, Y: 5, Button: tea.MouseLeft}); command != nil {
+		updateTestModel(t, &m, command())
+	}
+	if !m.detail.IsOpen() {
 		t.Fatal("click inside detail dismissed it")
 	}
 	detailScroll := requireMouseCommand(t,
 		detailMouse(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}),
 		"detail wheel down",
 	)
-	updateTestModel(t, &m, detailScroll())
+	followup := updateTestModel(t, &m, detailScroll())
+	if followup == nil {
+		t.Fatal("detail wheel did not produce scroll action")
+	}
+	updateTestModel(t, &m, followup())
 	detailAfter := ansi.Strip(m.View().Content)
 	if detailAfter == detailBefore {
 		t.Fatal("detail wheel did not change the viewport")
@@ -782,11 +1053,11 @@ func TestPointerDetailCommentSavePersistsWithoutCtrlS(t *testing.T) {
 	m.width, m.height = 120, 30
 	completeBoardLoad(t, &m, m.Init())
 	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
-	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Comment")())
+	updateTestModel(t, &m, pointerCommandForLabel(t, &m, "Comment")())
 	for _, value := range "saved by visible button" {
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: value, Text: string(value)})
 	}
-	save := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Save comment")())
+	save := updateTestModel(t, &m, pointerCommandForLabel(t, &m, "Save comment")())
 	if save == nil {
 		t.Fatal("visible Save comment did not start the existing write path")
 	}
@@ -811,11 +1082,11 @@ func TestPointerDetailLinkLifecyclePersistsThroughVisibleControls(t *testing.T) 
 	m.width, m.height = 120, 30
 	completeBoardLoad(t, &m, m.Init())
 	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
-	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Link")())
+	updateTestModel(t, &m, pointerCommandForLabel(t, &m, "Link")())
 	for _, value := range fmt.Sprintf("%d", other.Seq) {
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: value, Text: string(value)})
 	}
-	add := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Add link")())
+	add := updateTestModel(t, &m, pointerCommandForLabel(t, &m, "Add link")())
 	if add == nil {
 		t.Fatal("visible Add link did not start the existing write path")
 	}
@@ -825,9 +1096,9 @@ func TestPointerDetailLinkLifecyclePersistsThroughVisibleControls(t *testing.T) 
 		t.Fatalf("pointer link persistence = %+v, %v", links, err)
 	}
 
-	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Unlink")())
-	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Delete")())
-	remove := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Confirm delete")())
+	updateTestModel(t, &m, pointerCommandForLabel(t, &m, "Unlink")())
+	updateTestModel(t, &m, pointerCommandForLabel(t, &m, "Delete")())
+	remove := updateTestModel(t, &m, pointerCommandForLabel(t, &m, "Confirm delete")())
 	if remove == nil {
 		t.Fatal("visible Confirm delete did not start unlink")
 	}

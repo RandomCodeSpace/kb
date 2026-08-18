@@ -256,7 +256,7 @@ func TestPointerShipChoiceUsesExistingWritePath(t *testing.T) {
 	})
 	task := tasks[0]
 	m.openShipPrompt(task, 1)
-	command := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Ship anyway")())
+	command := updateTestModel(t, &m, pointerCommandForLabel(t, &m, "Ship anyway")())
 	if command == nil {
 		t.Fatal("pointer ship did not start the existing write path")
 	}
@@ -267,15 +267,48 @@ func TestPointerShipChoiceUsesExistingWritePath(t *testing.T) {
 	}
 }
 
+func TestTaskTitleCannotImpersonatePointerShipChoice(t *testing.T) {
+	m, backend, tasks := actionTestModel(t, board.Task{
+		Title: "Ship anyway", Status: board.StatusTodo,
+		Checks: []board.Check{{Text: "still open"}},
+	})
+	m.openShipPrompt(tasks[0], 1)
+	m.width, m.height = 80, 24
+	background := strings.Repeat(strings.Repeat(" ", m.width)+"\n", m.height-1) + strings.Repeat(" ", m.width)
+	surface := m.taskActionSurface(background)
+	for row, line := range strings.Split(ansi.Strip(surface.Content), "\n") {
+		if !strings.Contains(line, "Move Ship anyway to Done?") {
+			continue
+		}
+		x := ansi.StringWidth(line[:strings.Index(line, "Ship anyway")])
+		if press := surface.Pointer(tea.MouseClickMsg{X: x, Y: row, Button: tea.MouseLeft}); press != nil {
+			if command := updateTestModel(t, &m, press()); command != nil {
+				t.Fatal("untrusted title produced a ship domain command")
+			}
+		}
+		if release := m.taskActionSurface(background).Pointer(tea.MouseReleaseMsg{X: x, Y: row, Button: tea.MouseNone}); release != nil {
+			if command := updateTestModel(t, &m, release()); command != nil {
+				t.Fatal("untrusted title release produced a ship domain command")
+			}
+		}
+		stored, err := backend.Task("alice", tasks[0].ID)
+		if err != nil || stored.Status != board.StatusTodo {
+			t.Fatalf("title click changed task = %+v, %v", stored, err)
+		}
+		return
+	}
+	t.Fatalf("ship title was not rendered:\n%s", ansi.Strip(surface.Content))
+}
+
 func TestPointerKillReasonUsesExistingWritePath(t *testing.T) {
 	m, backend, tasks := actionTestModel(t, board.Task{Title: "Pointer kill", Status: board.StatusTodo})
 	task := tasks[0]
 	m.openKillPrompt(task)
-	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Reason:")())
+	updateTestModel(t, &m, pointerCommandForLabel(t, &m, "Reason:")())
 	for _, value := range "mouse reason" {
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: value, Text: string(value)})
 	}
-	command := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Kill with reason")())
+	command := updateTestModel(t, &m, pointerCommandForLabel(t, &m, "Kill with reason")())
 	if command == nil {
 		t.Fatal("pointer kill did not start the existing write path")
 	}
@@ -293,7 +326,7 @@ func TestPointerChecklistUsesExistingWritePath(t *testing.T) {
 	})
 	task := tasks[0]
 	m.openChecklist(task)
-	command := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "click this check")())
+	command := updateTestModel(t, &m, pointerCommandForLabel(t, &m, "click this check")())
 	if command == nil {
 		t.Fatal("pointer checklist did not start the existing write path")
 	}
@@ -308,13 +341,13 @@ func TestPointerPurgeRequiresTwoVisibleActivations(t *testing.T) {
 	m, backend, tasks := actionTestModel(t, board.Task{Title: "Pointer purge", Status: board.StatusCancelled})
 	task := tasks[0]
 	m.openPurgePrompt(task)
-	if command := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Press Enter to arm permanent delete")()); command != nil {
+	if command := updateTestModel(t, &m, pointerCommandForLabel(t, &m, "Press Enter to arm permanent delete")()); command != nil {
 		t.Fatalf("first pointer purge activation started write: %v", command)
 	}
 	if !m.action.armed {
 		t.Fatal("first pointer purge activation did not arm")
 	}
-	command := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "ARMED - press Enter again to delete permanently")())
+	command := updateTestModel(t, &m, pointerCommandForLabel(t, &m, "ARMED - press Enter again to delete permanently")())
 	if command == nil {
 		t.Fatal("second pointer purge activation did not start write")
 	}
@@ -344,7 +377,7 @@ func TestPointerDetailExposesTaskLifecycleActions(t *testing.T) {
 			if load != nil {
 				m.detail.Update(load())
 			}
-			command := pointerCommandForLabel(t, m.View(), tc.label)
+			command := pointerCommandForLabel(t, &m, tc.label)
 			next := updateTestModel(t, &m, command())
 			if tc.closed {
 				if m.action.open() || next == nil {
@@ -361,6 +394,18 @@ func TestPointerDetailExposesTaskLifecycleActions(t *testing.T) {
 				t.Fatalf("pointer %s mode = %v, want %v", tc.label, m.action.mode, tc.mode)
 			}
 		})
+	}
+}
+
+func TestTaskActionRejectsPointerReleaseFromPriorPrompt(t *testing.T) {
+	m, _, tasks := actionTestModel(t, board.Task{Title: "First prompt", Status: board.StatusTodo})
+	task := tasks[0]
+	m.openKillPrompt(task)
+	stale := pointerCommandForLabel(t, &m, "Kill without reason")
+	m.action.close()
+	m.openKillPrompt(task)
+	if command := updateTestModel(t, &m, stale()); command != nil || m.action.busy {
+		t.Fatalf("stale task-action release crossed prompt: command=%v busy=%v", command, m.action.busy)
 	}
 }
 

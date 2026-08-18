@@ -48,11 +48,16 @@ func (m Model) keyboardHelpSurface(background string) pointer.Surface {
 		lines = append(lines, "i      import forge issue")
 	}
 	lines = append(lines, "", "? or esc  close help", "q         quit")
-
 	innerWidth := min(max(width-4, 1), 56)
 	maxLines := max(height-2, 1)
 	if len(lines) > maxLines {
 		lines = append(lines[:maxLines-1], "esc  close help")
+	}
+	closeID := pointer.ControlID("help:close")
+	for index, line := range lines {
+		if strings.Contains(line, "close help") {
+			lines[index] = strings.Replace(line, "close help", m.pointerState.Render(closeID, "close help"), 1)
+		}
 	}
 	for index := range lines {
 		lines[index] = fitLine(lines[index], innerWidth)
@@ -78,7 +83,7 @@ func (m Model) keyboardHelpSurface(background string) pointer.Surface {
 	for row, line := range strings.Split(ansi.Strip(frame), "\n") {
 		if index := strings.Index(line, "close help"); index >= 0 {
 			start := ansi.StringWidth(line[:index])
-			hits.Add(pointer.Rect{X0: x + start, Y0: y + row, X1: x + start + len("close help"), Y1: y + row + 1}, closeAction)
+			hits.AddControl(closeID, pointer.Rect{X0: x + start, Y0: y + row, X1: x + start + len("close help"), Y1: y + row + 1}, closeAction)
 			break
 		}
 	}

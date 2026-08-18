@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -24,14 +25,27 @@ func clickControl(t *testing.T, m *Model, label string) tea.Cmd {
 		t.Fatalf("%q rendered without a pointer handler:\n%s", label, ansi.Strip(surface.Content))
 	}
 	x, y := renderedControlPoint(t, surface.Content, label)
-	if command := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}); command != nil {
-		t.Fatalf("%q activated on pointer press", label)
+	press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if press == nil || m.Update(press()) != nil {
+		t.Fatalf("%q did not enter pressed state", label)
 	}
-	command := surface.Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	pressed := m.PointerSurface("board", pointerWidth, pointerHeight)
+	if !strings.Contains(pressed.Content, "\x1b[7m") {
+		t.Fatalf("%q did not render pressed feedback", label)
+	}
+	command := pressed.Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
 	if command == nil {
 		t.Fatalf("%q ignored pointer release at %d,%d:\n%s", label, x, y, ansi.Strip(surface.Content))
 	}
-	return m.Update(command())
+	activate := m.Update(command())
+	if activate == nil {
+		t.Fatalf("%q release produced no action", label)
+	}
+	message := activate()
+	if resolved, ok := m.ResolvePointerMessage(message); ok {
+		message = resolved
+	}
+	return m.Update(message)
 }
 
 func renderedControlPoint(t *testing.T, content, label string) (int, int) {
@@ -44,6 +58,80 @@ func renderedControlPoint(t *testing.T, content, label string) (int, int) {
 	}
 	t.Fatalf("rendered control %q missing:\n%s", needle, ansi.Strip(content))
 	return 0, 0
+}
+
+func clickDetailText(t *testing.T, m *Model, text string) tea.Cmd {
+	t.Helper()
+	surface := m.PointerSurface("board", pointerWidth, pointerHeight)
+	x, y := -1, -1
+	for row, line := range strings.Split(ansi.Strip(surface.Content), "\n") {
+		if column := strings.Index(line, text); column >= 0 {
+			x, y = ansi.StringWidth(line[:column]), row
+			break
+		}
+	}
+	if x < 0 {
+		t.Fatalf("detail text %q is not visible:\n%s", text, ansi.Strip(surface.Content))
+	}
+	press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if press == nil || m.Update(press()) != nil {
+		t.Fatalf("detail text %q did not enter pressed state", text)
+	}
+	pressed := m.PointerSurface("board", pointerWidth, pointerHeight)
+	pressedVisible := false
+	for _, line := range strings.Split(ansi.Strip(pressed.Content), "\n") {
+		if strings.Contains(line, text) && strings.Contains(line, "! ") {
+			pressedVisible = true
+			break
+		}
+	}
+	if !pressedVisible {
+		t.Fatalf("detail text %q omitted pressed feedback:\n%s", text, ansi.Strip(pressed.Content))
+	}
+	release := pressed.Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseNone})
+	if release == nil {
+		t.Fatalf("detail text %q ignored rerendered release", text)
+	}
+	activate := m.Update(release())
+	if activate == nil {
+		t.Fatalf("detail text %q release produced no activation", text)
+	}
+	message := activate()
+	if resolved, ok := m.ResolvePointerMessage(message); ok {
+		message = resolved
+	}
+	return m.Update(message)
+}
+
+func TestPointerSelectsExactCommentAndLinkRows(t *testing.T) {
+	st := &actionStore{comments: []store.Comment{
+		{ID: 4, Author: "alice", Body: "first target"},
+		{ID: 9, Author: "bob", Body: "second target"},
+	}}
+	m := openActionModel(t, st)
+	clickControl(t, m, "Del")
+	clickDetailText(t, m, "second target")
+	if m.selection != 1 || m.confirm {
+		t.Fatalf("comment row selection=%d confirm=%v", m.selection, m.confirm)
+	}
+	clickControl(t, m, "Delete")
+	write := clickControl(t, m, "Confirm delete")
+	if write == nil {
+		t.Fatal("selected comment delete did not start write")
+	}
+	m.Update(write())
+	if st.deletedID != 9 {
+		t.Fatalf("pointer deleted comment %d, want 9", st.deletedID)
+	}
+
+	m = openActionModel(t, &actionStore{links: store.TaskLinks{
+		Blocks: []board.Task{{ID: "a", Seq: 2, Title: "first link"}, {ID: "b", Seq: 3, Title: "second link"}},
+	}})
+	clickControl(t, m, "Unlink")
+	clickDetailText(t, m, "#3")
+	if m.selection != 1 || m.confirm {
+		t.Fatalf("link row selection=%d confirm=%v", m.selection, m.confirm)
+	}
 }
 
 func TestPointerSurfaceAddsCommentLinksAndDeletesThroughExistingMutations(t *testing.T) {
@@ -118,10 +206,10 @@ func TestPointerSurfaceCancelAndDestructiveBackdropHaveSafeSemantics(t *testing.
 		t.Fatal("destructive confirmation lost pointer ownership")
 	}
 	if command := surface.Pointer(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command != nil {
-		t.Fatal("destructive backdrop activated on press")
+		m.Update(command())
 	}
 	if command := surface.Pointer(tea.MouseReleaseMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command != nil {
-		t.Fatal("destructive confirmation dismissed through its backdrop")
+		m.Update(command())
 	}
 	if got := ansi.Strip(m.View(pointerWidth, pointerHeight)); !strings.Contains(got, "Confirm delete") {
 		t.Fatalf("destructive confirmation was not retained:\n%s", got)
@@ -139,12 +227,20 @@ func TestPointerSurfaceWheelAndIdleBackdropRespectPaneOwnership(t *testing.T) {
 		t.Fatal("idle detail has no pointer surface")
 	}
 	if command := surface.Pointer(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown}); command != nil {
-		t.Fatal("wheel outside the detail pane was handled")
+		m.Update(command())
+		if m.scroll != 0 {
+			t.Fatal("wheel outside the detail pane scrolled content")
+		}
 	}
 	if command := surface.Pointer(tea.MouseWheelMsg{X: 40, Y: 8, Button: tea.MouseWheelDown}); command == nil {
 		t.Fatal("wheel inside the detail pane was ignored")
 	} else {
-		m.Update(command())
+		followup := m.Update(command())
+		if followup == nil {
+			t.Fatal("detail wheel did not produce scroll action")
+		}
+		message, _ := m.ResolvePointerMessage(followup())
+		m.Update(message)
 	}
 	if m.scroll == 0 {
 		t.Fatal("detail wheel did not use its existing scroll path")
@@ -157,8 +253,34 @@ func TestPointerSurfaceWheelAndIdleBackdropRespectPaneOwnership(t *testing.T) {
 	if command == nil {
 		t.Fatal("idle backdrop did not request detail dismissal")
 	}
-	m.Update(command())
+	message, _ := m.ResolvePointerMessage(command())
+	m.Update(message)
 	if m.IsOpen() {
 		t.Fatal("idle backdrop did not close detail")
+	}
+}
+
+func TestPointerSurfaceRejectsReleaseFromPriorDetailSession(t *testing.T) {
+	m := openActionModel(t, &actionStore{})
+	surface := m.PointerSurface("board", pointerWidth, pointerHeight)
+	x, y := renderedControlPoint(t, surface.Content, "Comment")
+	press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if press == nil || m.Update(press()) != nil {
+		t.Fatal("detail control did not enter pressed state")
+	}
+	release := m.PointerSurface("board", pointerWidth, pointerHeight).Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if release == nil {
+		t.Fatal("detail release produced no message")
+	}
+	stale := m.Update(release())
+	if stale == nil {
+		t.Fatal("detail release produced no guarded action")
+	}
+	task := m.task
+	m.Close()
+	m.Open(task)
+	message, pointerMessage := m.ResolvePointerMessage(stale())
+	if !pointerMessage || message != nil || m.action != actionNone {
+		t.Fatalf("stale detail release crossed session: recognized=%v message=%#v action=%v", pointerMessage, message, m.action)
 	}
 }

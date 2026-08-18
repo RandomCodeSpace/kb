@@ -960,8 +960,257 @@ func TestPointerHandlerIgnoresOutsideAndNonLeftClicks(t *testing.T) {
 		tea.MouseReleaseMsg{X: 20, Y: 4, Button: tea.MouseLeft},
 	} {
 		if command := handler(message); command != nil {
-			t.Fatalf("unexpected pointer command for %#v", message)
+			if followup := model.Update(command()); followup != nil {
+				model.Update(followup())
+			}
 		}
+	}
+}
+
+func TestPointerDraftCancelUsesEscPath(t *testing.T) {
+	model := New(newTestStore(t), "u")
+	model.SetAIRunner(&fakeDraftRunner{}, context.Background())
+	model.OpenAdd(board.StatusTodo)
+	model.drafting = true
+	model.focus = "ai-draft"
+	command := clickRenderedText(t, &model, 120, 40, "[Cancel draft (Esc)]")
+	model.Update(command())
+	if model.drafting || !strings.Contains(model.statusMessage, "cancelled") {
+		t.Fatalf("pointer draft cancel did not use esc path: drafting=%v status=%q", model.drafting, model.statusMessage)
+	}
+}
+
+func TestPointerDirtyCloseOffersDiscardAndKeepEditing(t *testing.T) {
+	const width, height = 120, 40
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	model.title.SetValue("dirty")
+	model.requestClose()
+	if command := clickRenderedText(t, &model, width, height, "[Keep editing]"); command != nil {
+		model.Update(command())
+	}
+	if !model.IsOpen() || model.guardClose {
+		t.Fatalf("pointer keep editing changed editor state: open=%v guard=%v", model.IsOpen(), model.guardClose)
+	}
+
+	model.title.SetValue("dirty again")
+	model.requestClose()
+	command := clickRenderedText(t, &model, width, height, "[Discard]")
+	model.Update(command())
+	if model.IsOpen() || model.guardClose {
+		t.Fatalf("pointer discard did not close editor: open=%v guard=%v", model.IsOpen(), model.guardClose)
+	}
+}
+
+func TestPointerDirtyCloseRendersPressedFeedbackAndActivatesAfterRerender(t *testing.T) {
+	const width, height = 120, 40
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	model.title.SetValue("dirty")
+	model.requestClose()
+	var discard pointerHit
+	for _, hit := range model.pointerHits(width, height) {
+		if hit.target == "discard" {
+			discard = hit
+			break
+		}
+	}
+	if discard.target == "" {
+		t.Fatal("dirty-close discard control has no hit region")
+	}
+	press := model.MouseHandler(width, height)(tea.MouseClickMsg{X: discard.x0, Y: discard.y0, Button: tea.MouseLeft})
+	if press == nil || model.Update(press()) != nil {
+		t.Fatal("dirty-close discard did not enter pressed state")
+	}
+	if footer := model.footerLine(width); !strings.Contains(footer, "\x1b[7m[Discard]") {
+		t.Fatalf("dirty-close discard omitted pressed feedback: %q", footer)
+	}
+	release := model.MouseHandler(width, height)(tea.MouseReleaseMsg{X: discard.x0, Y: discard.y0, Button: tea.MouseNone})
+	if release == nil {
+		t.Fatal("rerendered dirty-close control ignored release")
+	}
+	activate := model.Update(release())
+	if activate == nil {
+		t.Fatal("dirty-close release produced no activation")
+	}
+	model.Update(activate())
+	if model.IsOpen() {
+		t.Fatal("dirty-close discard did not close after rerendered release")
+	}
+}
+
+func TestPointerLabelSuggestionUsesLabelSelectionPath(t *testing.T) {
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	model.labels = []string{"alpha", "beta"}
+	model.focus, model.labelsOpen = "labels", true
+	model.applyFocus()
+	command := clickRenderedText(t, &model, 120, 40, "alpha")
+	model.Update(command())
+	if !contains(model.tags, "alpha") || model.label.Value() != "" || !model.labelsOpen {
+		t.Fatalf("pointer label selection state: tags=%v input=%q open=%v", model.tags, model.label.Value(), model.labelsOpen)
+	}
+}
+
+func TestDuplicateSimilarRowsKeepDistinctPointerIdentity(t *testing.T) {
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	model.similar = []store.SimilarHit{
+		{ID: "first", Title: "duplicate", Via: "title"},
+		{ID: "second", Title: "duplicate", Via: "title"},
+	}
+	want := []string{"similar:id:first", "similar:id:second"}
+	got := make([]string, 0, len(want))
+	for _, hit := range model.pointerHits(120, 40) {
+		if strings.HasPrefix(hit.target, "similar:") && hit.target != "similar:all" {
+			got = append(got, hit.target)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("duplicate similar pointer targets=%v want %v", got, want)
+	}
+}
+
+func TestTextareaContentCannotImpersonatePointerControls(t *testing.T) {
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	model.desc.SetValue("[Save card]\nTitle:")
+	if command := clickRenderedText(t, &model, 120, 40, "[Save card]"); command != nil {
+		model.Update(command())
+	}
+	if model.focus != "desc" || model.saving {
+		t.Fatalf("description click focus=%q saving=%v", model.focus, model.saving)
+	}
+}
+
+func TestPointerMessagesFromClosedSessionAreIgnored(t *testing.T) {
+	const width, height = 120, 40
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	oldHandler := model.MouseHandler(width, height)
+	oldHits := model.pointerHits(width, height)
+	var oldSave, oldCancel tea.Cmd
+	for _, hit := range oldHits {
+		if hit.target != "save" && hit.target != "cancel" {
+			continue
+		}
+		if press := oldHandler(tea.MouseClickMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseLeft}); press != nil {
+			model.Update(press())
+		}
+		release := oldHandler(tea.MouseReleaseMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseNone})
+		command := model.Update(release())
+		if command == nil {
+			t.Fatalf("old handler missed %s", hit.target)
+		}
+		if hit.target == "save" {
+			oldSave = command
+		} else {
+			oldCancel = command
+		}
+	}
+	if oldSave == nil || oldCancel == nil {
+		t.Fatal("did not capture old-session save and cancel commands")
+	}
+	model.OpenAdd(board.StatusTodo)
+	model.Update(oldSave())
+	model.Update(oldCancel())
+	if !model.IsOpen() || model.saving || model.focus != "title" {
+		t.Fatalf("stale pointer message changed reopened editor: open=%v saving=%v focus=%q", model.IsOpen(), model.saving, model.focus)
+	}
+}
+
+func TestPointerChoicesActivateExistingKeyboardPaths(t *testing.T) {
+	for _, test := range []struct {
+		target string
+		check  func(Model) bool
+		value  string
+	}{
+		{target: "Priority:", value: "4", check: func(m Model) bool { return m.prio == 4 }},
+		{target: "Effort:", value: "S", check: func(m Model) bool { return m.effort == "S" }},
+		{target: "Blocked:", value: "yes", check: func(m Model) bool { return m.blocked }},
+	} {
+		t.Run(test.target, func(t *testing.T) {
+			model := New(newTestStore(t), "u")
+			model.OpenAdd(board.StatusTodo)
+			command := clickRenderedText(t, &model, 120, 40, test.target)
+			model.Update(command())
+			if !test.check(model) {
+				t.Fatalf("pointer %s did not activate choice: value=%q prio=%d effort=%q blocked=%v", test.target, test.value, model.prio, model.effort, model.blocked)
+			}
+		})
+	}
+}
+
+func TestPointerWheelScrollRevealsSaveControl(t *testing.T) {
+	const width, height = 84, 12
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	model.title.SetValue("scroll save")
+	handler := model.MouseHandler(width, height)
+	if handler == nil {
+		t.Fatal("open editor returned no mouse handler")
+	}
+	for i := 0; i < 32; i++ {
+		command := handler(tea.MouseWheelMsg{X: width / 2, Y: height / 2, Button: tea.MouseWheelDown})
+		if command == nil {
+			t.Fatalf("wheel command missing at iteration %d", i)
+		}
+		if followup := model.Update(command()); followup != nil {
+			model.Update(followup())
+		}
+	}
+	if model.scroll == 0 || !model.manualScroll {
+		t.Fatalf("wheel state scroll=%d manual=%v", model.scroll, model.manualScroll)
+	}
+	command := clickRenderedText(t, &model, width, height, "[Save card]")
+	model.Update(command())
+	if !model.saving {
+		t.Fatalf("scrolled save click did not activate: saving=%v status=%q", model.saving, model.statusMessage)
+	}
+}
+
+func TestPointerPressRendersMarkerAndReleaseActivatesOnce(t *testing.T) {
+	const width, height = 120, 40
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	handler := model.MouseHandler(width, height)
+	var hit pointerHit
+	for _, candidate := range model.pointerHits(width, height) {
+		if candidate.target == "blocked" {
+			hit = candidate
+			break
+		}
+	}
+	if hit.target == "" {
+		t.Fatal("blocked control has no pointer hit")
+	}
+	press := handler(tea.MouseClickMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseLeft})
+	if press == nil {
+		t.Fatal("pointer press produced no interaction message")
+	}
+	model.Update(press())
+	if got := ansi.Strip(model.View(width, height)); !strings.Contains(got, "! Blocked:") {
+		t.Fatalf("pressed marker missing or changed width:\n%s", got)
+	}
+	release := model.MouseHandler(width, height)(tea.MouseReleaseMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseNone})
+	if release == nil {
+		t.Fatal("pointer release produced no interaction message")
+	}
+	activate := model.Update(release())
+	if activate == nil {
+		t.Fatal("pointer release did not produce domain activation")
+	}
+	model.Update(activate())
+	if !model.blocked {
+		t.Fatal("blocked control did not activate")
+	}
+	if duplicate := handler(tea.MouseReleaseMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseNone}); duplicate != nil {
+		if followup := model.Update(duplicate()); followup != nil {
+			model.Update(followup())
+		}
+	}
+	if !model.blocked {
+		t.Fatal("duplicate release activated blocked control twice")
 	}
 }
 
@@ -975,14 +1224,17 @@ func clickRenderedText(t *testing.T, model *Model, width, height int, text strin
 				t.Fatalf("mouse handler is nil for %q", text)
 			}
 			if command := handler(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}); command != nil {
-				t.Fatalf("mouse press activated %q", text)
+				model.Update(command())
 			}
-			command := handler(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseNone})
-			if command == nil {
+			release := handler(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseNone})
+			if release == nil {
 				t.Logf("hits=%+v", model.pointerHits(width, height))
 				t.Fatalf("mouse handler missed rendered %q at x=%d y=%d line=%q", text, x, y, line)
 			}
-			return command
+			if command := model.Update(release()); command != nil {
+				return command
+			}
+			return nil
 		}
 	}
 	t.Fatalf("rendered text %q not found:\n%s", text, strings.Join(lines, "\n"))

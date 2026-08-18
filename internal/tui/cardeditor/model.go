@@ -19,6 +19,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 const (
@@ -86,7 +87,14 @@ type draftCompletedMsg struct {
 // is clicked. Keeping the target symbolic lets pointer and keyboard activation
 // share the same focus and action paths.
 type pointerClickMsg struct {
-	target string
+	session uint64
+	target  string
+}
+
+type pointerWheelMsg struct {
+	session   uint64
+	delta     int
+	maxScroll int
 }
 
 type snapshot struct {
@@ -153,6 +161,8 @@ type Model struct {
 	statusMessage     string
 	statusIsError     bool
 	scroll            int
+	manualScroll      bool
+	pointerState      pointer.State
 }
 
 // New creates a closed editor. A nil store keeps the feature unavailable in
@@ -207,8 +217,11 @@ func (m *Model) ConsumeSaved() (string, bool) {
 // IsMessage identifies editor-owned asynchronous results without exporting
 // implementation messages into the root package.
 func IsMessage(message tea.Msg) bool {
+	if pointer.IsMessage(message) {
+		return true
+	}
 	switch message.(type) {
-	case labelsLoadedMsg, similarDebounceMsg, similarLoadedMsg, saveCompletedMsg, draftCompletedMsg, pointerClickMsg:
+	case labelsLoadedMsg, similarDebounceMsg, similarLoadedMsg, saveCompletedMsg, draftCompletedMsg, pointerClickMsg, pointerWheelMsg:
 		return true
 	default:
 		return false
@@ -250,7 +263,8 @@ func (m *Model) openForm(nextMode mode, task board.Task) {
 	m.labelsErr, m.similarErr = nil, nil
 	m.similarLoading, m.similarQuery, m.similarExclusions = false, "", ""
 	m.similarCache = make(map[string][]store.SimilarHit)
-	m.statusMessage, m.statusIsError, m.scroll = "", false, 0
+	m.statusMessage, m.statusIsError, m.scroll, m.manualScroll = "", false, 0, false
+	m.pointerState = pointer.State{}
 	m.draftGen++
 	m.resetInputs()
 	m.applyTask(task)
@@ -339,6 +353,15 @@ func (m *Model) Refresh(task board.Task, found bool) tea.Cmd {
 
 // Update handles form input, store results, and stale-result generations.
 func (m *Model) Update(message tea.Msg) tea.Cmd {
+	state, command, handled := m.pointerState.Update(message)
+	if handled {
+		m.pointerState = state
+		if !m.open {
+			m.pointerState = pointer.State{}
+			return nil
+		}
+		return command
+	}
 	if !m.open {
 		return nil
 	}
@@ -407,6 +430,13 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return m.scheduleSimilar()
 	case pointerClickMsg:
 		return m.updatePointer(msg)
+	case pointerWheelMsg:
+		if msg.session != m.session || m.saving || m.guardClose {
+			return nil
+		}
+		m.manualScroll = true
+		m.scroll = min(max(m.scroll+msg.delta, 0), msg.maxScroll)
+		return nil
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
 	}
@@ -414,8 +444,18 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 }
 
 func (m *Model) updatePointer(message pointerClickMsg) tea.Cmd {
-	if m.saving || message.target == "" {
+	if m.saving || message.target == "" || message.session != m.session {
 		return nil
+	}
+	if m.guardClose {
+		switch message.target {
+		case "discard":
+			return m.updateKey(tea.KeyPressMsg(tea.Key{Code: 'd', Text: "d"}))
+		case "keep":
+			return m.updateKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+		default:
+			return nil
+		}
 	}
 	if strings.HasPrefix(message.target, "similar:") {
 		m.focus = message.target
@@ -423,8 +463,22 @@ func (m *Model) updatePointer(message pointerClickMsg) tea.Cmd {
 		m.activateSimilar()
 		return nil
 	}
+	m.manualScroll = false
+	if strings.HasPrefix(message.target, "label:") {
+		m.focus = "labels"
+		m.applyFocus()
+		m.label.SetValue(strings.TrimPrefix(message.target, "label:"))
+		cmd, _ := m.updateLabels("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
+		return cmd
+	}
 	m.focus = message.target
 	m.applyFocus()
+	if message.target == "ai-draft" && m.drafting {
+		return m.updateKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	}
+	if message.target == "prio" || message.target == "effort" || message.target == "blocked" {
+		return m.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	}
 	if message.target == "cancel" || message.target == "save" || message.target == "ai-draft" {
 		return m.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	}
@@ -433,6 +487,7 @@ func (m *Model) updatePointer(message pointerClickMsg) tea.Cmd {
 
 func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
+	m.manualScroll = false
 	if m.drafting {
 		if key == "esc" {
 			m.cancelDraft()

@@ -14,6 +14,7 @@ import (
 	kbai "github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 const settingsTestTimeout = 20 * time.Second
@@ -60,7 +61,10 @@ type forgeSettingsRemovedMsg struct {
 	id  string
 	err error
 }
-type settingsPointerMsg struct{ target string }
+type settingsPointerMsg struct {
+	owner  *settingsModel
+	target string
+}
 type settingsWheelMsg struct{ delta int }
 
 type integrationSettingsRow struct {
@@ -75,12 +79,13 @@ type integrationSettingsRow struct {
 }
 
 type settingsModel struct {
-	ctx    context.Context
-	store  settingsStore
-	ai     aiConnectionProber
-	forge  forgeConnectionProber
-	user   string
-	loaded bool
+	ctx          context.Context
+	store        settingsStore
+	ai           aiConnectionProber
+	forge        forgeConnectionProber
+	user         string
+	loaded       bool
+	pointerState pointer.State
 
 	aiBase  textinput.Model
 	aiModel textinput.Model
@@ -166,6 +171,14 @@ func (m *settingsModel) Close() {
 }
 
 func (m *settingsModel) Update(message tea.Msg) tea.Cmd {
+	if m.closed {
+		return nil
+	}
+	if pointer.IsMessage(message) {
+		next, command, _ := m.pointerState.Update(message)
+		m.pointerState = next
+		return command
+	}
 	switch msg := message.(type) {
 	case settingsLoadedMsg:
 		m.finishLoad(msg)
@@ -206,6 +219,9 @@ func (m *settingsModel) Update(message tea.Msg) tea.Cmd {
 		m.finishForgeRemove(msg)
 		return nil
 	case settingsPointerMsg:
+		if msg.owner != m {
+			return nil
+		}
 		return m.updatePointer(msg.target)
 	case settingsWheelMsg:
 		if m.loaded && m.busy == "" && msg.delta != 0 {

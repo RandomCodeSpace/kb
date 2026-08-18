@@ -16,6 +16,10 @@ type settingsRenderRow struct {
 	target string
 }
 
+func settingsControlID(target string) pointer.ControlID {
+	return pointer.ControlID("settings:" + target)
+}
+
 func (m *settingsModel) View(width, height int) string {
 	return m.Surface(width, height).Content
 }
@@ -63,6 +67,7 @@ func (m *settingsModel) Surface(width, height int) pointer.Surface {
 		status = "error: " + status
 	}
 	footer := settingsFit("[Close] | "+status+" | tab navigate | enter act", width)
+	footer = strings.Replace(footer, "[Close]", m.pointerState.Render(settingsControlID("close"), "[Close]"), 1)
 
 	bodyHeight := height - 2
 	focusLine := -1
@@ -95,18 +100,23 @@ func (m *settingsModel) Surface(width, height int) pointer.Surface {
 		}
 		if rect, ok := viewport.Row(logicalRow, 0, width); ok {
 			target := row.target
-			hitMap.Add(rect, func(pointer.Point) tea.Msg { return settingsPointerMsg{target: target} })
+			hitMap.AddControl(settingsControlID(target), rect, func(pointer.Point) tea.Msg { return settingsPointerMsg{owner: m, target: target} })
 		}
 	}
 	for _, row := range visible {
-		lines = append(lines, settingsFit(row.line, width))
+		line := settingsFit(row.line, width)
+		if row.target != "" {
+			line = m.pointerState.Render(settingsControlID(row.target), line)
+		}
+		lines = append(lines, line)
 	}
 	footerY := len(lines)
 	lines = append(lines, footer)
 	hitMap.AddWheel(viewport.Rect, func(delta int) tea.Msg { return settingsWheelMsg{delta: delta} })
-	hitMap.Add(
+	hitMap.AddControl(
+		settingsControlID("close"),
 		pointer.Rect{X0: 0, Y0: footerY, X1: min(width, 7), Y1: footerY + 1},
-		func(pointer.Point) tea.Msg { return settingsPointerMsg{target: "close"} },
+		func(pointer.Point) tea.Msg { return settingsPointerMsg{owner: m, target: "close"} },
 	)
 	return pointer.Surface{Content: strings.Join(lines, "\n"), Pointer: hitMap.Handler()}
 }
@@ -246,6 +256,9 @@ func sanitizeTerminal(value string) string {
 }
 
 func isSettingsMessage(message tea.Msg) bool {
+	if pointer.IsMessage(message) {
+		return true
+	}
 	switch message.(type) {
 	case settingsLoadedMsg, aiSettingsTestedMsg, aiSettingsSavedMsg,
 		forgeSettingsTestedMsg, forgeSettingsSavedMsg, forgeSettingsRemovedMsg,

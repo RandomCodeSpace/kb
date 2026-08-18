@@ -32,8 +32,93 @@ type Viewport struct {
 // Action builds the model message produced by one pointer activation.
 type Action func(Point) tea.Msg
 
+// ControlID is a stable identifier for one rendered control.
+type ControlID string
+
+// State tracks transient pointer feedback independently from domain state.
+type State struct {
+	pressed ControlID
+}
+
+// IsPressed reports whether the identified control owns the active pointer
+// press. Callers use this while rendering the control's pressed style.
+func (s State) IsPressed(id ControlID) bool {
+	return id != "" && s.pressed == id
+}
+
+// Active reports whether any rendered control owns the current press.
+func (s State) Active() bool { return s.pressed != "" }
+
+// Render applies same-width reverse-video feedback to the active control.
+// The caller supplies already-sanitized terminal content.
+func (s State) Render(id ControlID, content string) string {
+	if !s.IsPressed(id) {
+		return content
+	}
+	return "\x1b[7m" + content + "\x1b[27m"
+}
+
+// Update consumes pointer feedback messages. The returned command emits the
+// control's domain message after release feedback has been cleared.
+func (s State) Update(message tea.Msg) (State, tea.Cmd, bool) {
+	event, ok := message.(interactionMsg)
+	if !ok {
+		return s, nil, false
+	}
+	switch event.kind {
+	case interactionPress:
+		s.pressed = event.id
+		return s, nil, true
+	case interactionRelease:
+		matched := s.pressed != "" && s.pressed == event.id
+		s.pressed = ""
+		if !matched || event.activate == nil {
+			return s, nil, true
+		}
+		result := event.activate(event.point)
+		if result == nil {
+			return s, nil, true
+		}
+		return s, func() tea.Msg { return result }, true
+	default:
+		s.pressed = ""
+		if event.followup == nil {
+			return s, nil, true
+		}
+		return s, func() tea.Msg { return event.followup }, true
+	}
+}
+
+type interactionKind uint8
+
+const (
+	interactionPress interactionKind = iota + 1
+	interactionRelease
+	interactionCancel
+)
+
+type interactionMsg struct {
+	kind     interactionKind
+	id       ControlID
+	point    Point
+	activate Action
+	followup tea.Msg
+}
+
+// IsMessage reports whether message carries pointer feedback that State.Update
+// must consume before an active overlay routes domain messages.
+func IsMessage(message tea.Msg) bool {
+	_, ok := message.(interactionMsg)
+	return ok
+}
+
+// Cancel clears any active press when the original control disappeared between
+// render passes, for example after a resize or asynchronous refresh.
+func Cancel() tea.Cmd { return cancelCommand(nil) }
+
 type region struct {
 	rect   Rect
+	id     ControlID
 	action Action
 }
 
@@ -48,12 +133,29 @@ type Map struct {
 	wheels  []wheelRegion
 }
 
+type handlerSnapshot struct {
+	regions []region
+	wheels  []wheelRegion
+	tracked bool
+	pressed int
+	dragged bool
+}
+
 // Add registers an action region. Later regions take precedence when they overlap.
 func (m *Map) Add(rect Rect, action Action) {
 	if rect.empty() || action == nil {
 		return
 	}
 	m.regions = append(m.regions, region{rect: rect, action: action})
+}
+
+// AddControl registers an action region with opt-in pressed feedback. IDs must
+// remain stable across render passes. An empty ID retains Add's legacy behavior.
+func (m *Map) AddControl(id ControlID, rect Rect, action Action) {
+	if rect.empty() || action == nil {
+		return
+	}
+	m.regions = append(m.regions, region{rect: rect, id: id, action: action})
 }
 
 // AddBackdrop registers the portion of bounds outside pane as one action.
@@ -82,81 +184,162 @@ func (m *Map) AddWheel(rect Rect, action func(delta int) tea.Msg) {
 
 // Handler returns the immutable render snapshot's mouse callback.
 func (m Map) Handler() func(tea.MouseMsg) tea.Cmd {
-	regions := append([]region(nil), m.regions...)
-	wheels := append([]wheelRegion(nil), m.wheels...)
-	pressed := -1
-	dragged := false
-	hit := func(point Point) int {
-		for index := len(regions) - 1; index >= 0; index-- {
-			candidate := regions[index]
-			if candidate.action != nil && candidate.rect.contains(point) {
-				return index
-			}
-		}
-		return -1
+	snapshot := &handlerSnapshot{
+		regions: append([]region(nil), m.regions...),
+		wheels:  append([]wheelRegion(nil), m.wheels...),
+		pressed: -1,
 	}
-	return func(message tea.MouseMsg) tea.Cmd {
-		mouse := message.Mouse()
-		point := Point{X: mouse.X, Y: mouse.Y}
-		if _, wheel := message.(tea.MouseWheelMsg); wheel {
-			pressed = -1
-			dragged = false
-			delta := 0
-			switch mouse.Button {
-			case tea.MouseWheelUp:
-				delta = -1
-			case tea.MouseWheelDown:
-				delta = 1
-			default:
-				return nil
-			}
-			for index := len(wheels) - 1; index >= 0; index-- {
-				candidate := wheels[index]
-				if candidate.action == nil || !candidate.rect.contains(point) {
-					continue
-				}
-				result := candidate.action(delta)
-				if result == nil {
-					return nil
-				}
-				return func() tea.Msg { return result }
-			}
-			return nil
+	for _, candidate := range snapshot.regions {
+		if candidate.id != "" {
+			snapshot.tracked = true
+			break
 		}
-		switch message.(type) {
-		case tea.MouseClickMsg:
-			dragged = false
-			pressed = -1
-			if mouse.Button == tea.MouseLeft {
-				pressed = hit(point)
-			}
-			return nil
-		case tea.MouseMotionMsg:
-			if pressed >= 0 && mouse.Button == tea.MouseLeft {
-				dragged = true
-			}
-			return nil
-		case tea.MouseReleaseMsg:
-			if mouse.Button != tea.MouseLeft && mouse.Button != tea.MouseNone {
-				pressed = -1
-				dragged = false
-				return nil
-			}
-		default:
-			return nil
+	}
+	return snapshot.handle
+}
+
+func (h *handlerSnapshot) handle(message tea.MouseMsg) tea.Cmd {
+	mouse := message.Mouse()
+	point := Point{X: mouse.X, Y: mouse.Y}
+	if _, wheel := message.(tea.MouseWheelMsg); wheel {
+		return h.handleWheel(mouse, point)
+	}
+	switch message.(type) {
+	case tea.MouseClickMsg:
+		return h.handleClick(mouse, point)
+	case tea.MouseMotionMsg:
+		return h.handleMotion(mouse)
+	case tea.MouseReleaseMsg:
+		return h.handleRelease(mouse, point)
+	default:
+		return nil
+	}
+}
+
+func (h *handlerSnapshot) handleWheel(mouse tea.Mouse, point Point) tea.Cmd {
+	h.resetGesture()
+	delta, valid := wheelDelta(mouse.Button)
+	if !valid {
+		return h.cancelTracked(nil)
+	}
+	for index := len(h.wheels) - 1; index >= 0; index-- {
+		candidate := h.wheels[index]
+		if candidate.action == nil || !candidate.rect.contains(point) {
+			continue
 		}
-		pressedIndex := pressed
-		wasDragged := dragged
-		pressed = -1
-		dragged = false
-		if pressedIndex < 0 || wasDragged || hit(point) != pressedIndex {
-			return nil
+		result := candidate.action(delta)
+		if h.tracked {
+			return cancelCommand(result)
 		}
-		result := regions[pressedIndex].action(point)
-		if result == nil {
-			return nil
+		return messageCommand(result)
+	}
+	return h.cancelTracked(nil)
+}
+
+func (h *handlerSnapshot) handleClick(mouse tea.Mouse, point Point) tea.Cmd {
+	h.resetGesture()
+	if mouse.Button == tea.MouseLeft {
+		h.pressed = h.hit(point)
+	}
+	if h.pressed >= 0 && h.regions[h.pressed].id != "" {
+		return pressCommand(h.regions[h.pressed].id)
+	}
+	if h.pressed < 0 {
+		return h.cancelTracked(nil)
+	}
+	return nil
+}
+
+func (h *handlerSnapshot) handleMotion(mouse tea.Mouse) tea.Cmd {
+	if mouse.Button != tea.MouseLeft {
+		return nil
+	}
+	if h.pressed >= 0 {
+		h.dragged = true
+	}
+	return h.cancelTracked(nil)
+}
+
+func (h *handlerSnapshot) handleRelease(mouse tea.Mouse, point Point) tea.Cmd {
+	if mouse.Button != tea.MouseLeft && mouse.Button != tea.MouseNone {
+		h.resetGesture()
+		return h.cancelTracked(nil)
+	}
+	pressedIndex := h.pressed
+	wasDragged := h.dragged
+	h.resetGesture()
+	if wasDragged {
+		return h.cancelTracked(nil)
+	}
+	releaseIndex := h.hit(point)
+	if h.tracked && releaseIndex >= 0 && h.regions[releaseIndex].id != "" {
+		candidate := h.regions[releaseIndex]
+		return releaseCommand(candidate.id, point, candidate.action)
+	}
+	if h.tracked && pressedIndex < 0 {
+		return cancelCommand(nil)
+	}
+	if pressedIndex < 0 || releaseIndex != pressedIndex {
+		return nil
+	}
+	return messageCommand(h.regions[pressedIndex].action(point))
+}
+
+func (h *handlerSnapshot) cancelTracked(followup tea.Msg) tea.Cmd {
+	if !h.tracked {
+		return messageCommand(followup)
+	}
+	return cancelCommand(followup)
+}
+
+func (h *handlerSnapshot) hit(point Point) int {
+	for index := len(h.regions) - 1; index >= 0; index-- {
+		candidate := h.regions[index]
+		if candidate.action != nil && candidate.rect.contains(point) {
+			return index
 		}
-		return func() tea.Msg { return result }
+	}
+	return -1
+}
+
+func (h *handlerSnapshot) resetGesture() {
+	h.pressed = -1
+	h.dragged = false
+}
+
+func wheelDelta(button tea.MouseButton) (int, bool) {
+	switch button {
+	case tea.MouseWheelUp:
+		return -1, true
+	case tea.MouseWheelDown:
+		return 1, true
+	default:
+		return 0, false
+	}
+}
+
+func messageCommand(message tea.Msg) tea.Cmd {
+	if message == nil {
+		return nil
+	}
+	return func() tea.Msg { return message }
+}
+
+func pressCommand(id ControlID) tea.Cmd {
+	return func() tea.Msg {
+		return interactionMsg{kind: interactionPress, id: id}
+	}
+}
+
+func releaseCommand(id ControlID, point Point, action Action) tea.Cmd {
+	return func() tea.Msg {
+		return interactionMsg{kind: interactionRelease, id: id, point: point, activate: action}
+	}
+}
+
+func cancelCommand(followup tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		return interactionMsg{kind: interactionCancel, followup: followup}
 	}
 }
 

@@ -79,8 +79,15 @@ const (
 )
 
 type taskActionPointerMsg struct {
-	kind  taskActionPointerKind
-	index int
+	session uint64
+	taskID  string
+	mode    taskActionMode
+	kind    taskActionPointerKind
+	index   int
+}
+
+func taskActionControlID(kind taskActionPointerKind, index int) pointer.ControlID {
+	return pointer.ControlID(fmt.Sprintf("task-action:%d:%d", kind, index))
 }
 
 func newTaskActionState() taskActionState {
@@ -100,6 +107,7 @@ func (s *taskActionState) close() {
 
 func (m *Model) openShipPrompt(task board.Task, index int) tea.Cmd {
 	m.cancelMoveForAction()
+	m.taskActionSession++
 	m.action = newTaskActionState()
 	m.action.mode = taskActionShip
 	m.action.task = task
@@ -116,6 +124,7 @@ func (m *Model) openKillPrompt(task board.Task) tea.Cmd {
 		return nil
 	}
 	m.cancelMoveForAction()
+	m.taskActionSession++
 	m.action = newTaskActionState()
 	m.action.mode = taskActionKill
 	m.action.task = task
@@ -130,6 +139,7 @@ func (m *Model) openChecklist(task board.Task) tea.Cmd {
 		return nil
 	}
 	m.cancelMoveForAction()
+	m.taskActionSession++
 	m.action = newTaskActionState()
 	m.action.mode = taskActionChecklist
 	m.action.task = task
@@ -142,6 +152,7 @@ func (m *Model) openPurgePrompt(task board.Task) tea.Cmd {
 		return nil
 	}
 	m.cancelMoveForAction()
+	m.taskActionSession++
 	m.action = newTaskActionState()
 	m.action.mode = taskActionPurge
 	m.action.task = task
@@ -232,7 +243,8 @@ func (m *Model) updateTaskAction(message tea.Msg) tea.Cmd {
 }
 
 func (m *Model) updateTaskActionPointer(msg taskActionPointerMsg) tea.Cmd {
-	if !m.action.open() || m.action.busy {
+	if !m.action.open() || m.action.busy || msg.session != m.taskActionSession ||
+		msg.taskID != m.action.task.ID || msg.mode != m.action.mode {
 		return nil
 	}
 	m.action.errorText = ""
@@ -832,53 +844,80 @@ func (m Model) taskActionSurface(background string) pointer.Surface {
 		lipgloss.NewLayer(background),
 		lipgloss.NewLayer(frame).X(x).Y(y).Z(3),
 	).Render()
+	frameLines := strings.Split(ansi.Strip(frame), "\n")
 	var hits pointer.Map
-	addLabel := func(label string, message taskActionPointerMsg) {
-		for row, line := range strings.Split(ansi.Strip(frame), "\n") {
-			if index := strings.Index(line, label); index >= 0 {
-				start := ansi.StringWidth(line[:index])
-				hits.Add(pointer.Rect{X0: x + start, Y0: y + row, X1: x + start + ansi.StringWidth(label), Y1: y + row + 1},
-					func(pointer.Point) tea.Msg { return message })
-				return
-			}
+	pointerMessage := func(kind taskActionPointerKind, index int) taskActionPointerMsg {
+		return taskActionPointerMsg{
+			session: m.taskActionSession, taskID: m.action.task.ID, mode: m.action.mode,
+			kind: kind, index: index,
 		}
 	}
-	addLabel("Esc cancel", taskActionPointerMsg{kind: taskActionPointerCancel})
+	addLabel := func(semanticRow int, label string, message taskActionPointerMsg) {
+		// A bordered action frame adds one row before the semantic content. Do
+		// not scan other rows: titles, checklist text, and errors are untrusted.
+		row := semanticRow + 1
+		if row < 0 || row >= len(frameLines) {
+			return
+		}
+		line := frameLines[row]
+		index := strings.Index(line, label)
+		if index < 0 {
+			return
+		}
+		start := ansi.StringWidth(line[:index])
+		hits.AddControl(taskActionControlID(message.kind, message.index), pointer.Rect{X0: x + start, Y0: y + row, X1: x + start + ansi.StringWidth(label), Y1: y + row + 1},
+			func(pointer.Point) tea.Msg { return message })
+	}
 	switch m.action.mode {
 	case taskActionShip:
+		choiceRow := 2
+		if m.action.warning.open > 0 {
+			choiceRow++
+		}
+		if m.action.warning.blocked {
+			choiceRow++
+		}
 		choices := []string{"Cancel", "Ship anyway"}
 		if m.action.warning.open > 0 {
 			choices = []string{"Cancel", "Tick everything", "Ship anyway"}
 		}
 		for index, label := range choices {
-			addLabel(label, taskActionPointerMsg{kind: taskActionPointerShipChoice, index: index})
+			addLabel(choiceRow, label, pointerMessage(taskActionPointerShipChoice, index))
 		}
+		addLabel(choiceRow+1, "Esc cancel", pointerMessage(taskActionPointerCancel, 0))
 	case taskActionKill:
 		for index, label := range []string{"Cancel", "Kill without reason", "Kill with reason"} {
-			addLabel(label, taskActionPointerMsg{kind: taskActionPointerKillChoice, index: index})
+			addLabel(4, label, pointerMessage(taskActionPointerKillChoice, index))
 		}
-		addLabel("Reason:", taskActionPointerMsg{kind: taskActionPointerKillReason})
+		addLabel(2, "Reason:", pointerMessage(taskActionPointerKillReason, 0))
+		addLabel(5, "Esc cancel", pointerMessage(taskActionPointerCancel, 0))
 	case taskActionChecklist:
-		checkIndex := 0
-		for row, line := range strings.Split(ansi.Strip(frame), "\n") {
+		for checkIndex := range m.action.task.Checks {
+			row := checkIndex + 2
+			if row >= len(frameLines) {
+				break
+			}
+			line := frameLines[row]
 			marker := strings.Index(line, "[ ]")
 			if marker < 0 {
 				marker = strings.Index(line, "[x]")
 			}
-			if marker < 0 || checkIndex >= len(m.action.task.Checks) {
+			if marker < 0 {
 				continue
 			}
 			index := checkIndex
-			hits.Add(pointer.Rect{X0: x + marker, Y0: y + row, X1: x + paneWidth, Y1: y + row + 1},
-				func(pointer.Point) tea.Msg { return taskActionPointerMsg{kind: taskActionPointerCheck, index: index} })
-			checkIndex++
+			message := pointerMessage(taskActionPointerCheck, index)
+			hits.AddControl(taskActionControlID(message.kind, message.index), pointer.Rect{X0: x + marker, Y0: y + row, X1: x + paneWidth, Y1: y + row + 1},
+				func(pointer.Point) tea.Msg { return message })
 		}
+		addLabel(len(m.action.task.Checks)+2, "Esc close", pointerMessage(taskActionPointerCancel, 0))
 	case taskActionPurge:
 		label := "Press Enter to arm permanent delete"
 		if m.action.armed {
 			label = "ARMED - press Enter again to delete permanently"
 		}
-		addLabel(label, taskActionPointerMsg{kind: taskActionPointerPurge})
+		addLabel(3, label, pointerMessage(taskActionPointerPurge, 0))
+		addLabel(4, "Esc cancel", pointerMessage(taskActionPointerCancel, 0))
 	}
 	return pointer.Surface{Content: content, Pointer: hits.Handler()}
 }
@@ -932,14 +971,15 @@ func (m Model) taskActionLines(width int) []string {
 			choices = append(choices, "Tick everything")
 		}
 		choices = append(choices, "Ship anyway")
-		lines = append(lines, "", actionChoices(choices, a.choice), "Tab choose  Enter confirm  Esc cancel")
+		lines = append(lines, "", m.pointerActionChoices(choices, a.choice),
+			"Tab choose  Enter confirm  "+m.pointerState.Render(taskActionControlID(taskActionPointerCancel, 0), "Esc cancel"))
 		return appendActionError(lines, a.errorText)
 	case taskActionKill:
 		lines := []string{"Why reject " + sanitizeTerminal(a.task.Title) + "?" + busy,
 			"The card moves to Cancelled. The reason is optional.",
-			"Reason: " + settingsInputDisplay(a.reason, false, true, max(width-8, 1)), "",
-			actionChoices([]string{"Cancel", "Kill without reason", "Kill with reason"}, a.choice),
-			"Tab choose  Enter confirm  Esc cancel"}
+			m.pointerState.Render(taskActionControlID(taskActionPointerKillReason, 0), "Reason:") + " " + settingsInputDisplay(a.reason, false, true, max(width-8, 1)), "",
+			m.pointerActionChoices([]string{"Cancel", "Kill without reason", "Kill with reason"}, a.choice),
+			"Tab choose  Enter confirm  " + m.pointerState.Render(taskActionControlID(taskActionPointerCancel, 0), "Esc cancel")}
 		return appendActionError(lines, a.errorText)
 	case taskActionChecklist:
 		lines := []string{"Checklist: " + sanitizeTerminal(a.task.Title) + busy}
@@ -952,35 +992,40 @@ func (m Model) taskActionLines(width int) []string {
 			if check.Done {
 				box = "[x]"
 			}
-			lines = append(lines, marker+box+" "+sanitizeTerminal(check.Text))
+			label := box + " " + sanitizeTerminal(check.Text)
+			lines = append(lines, marker+m.pointerState.Render(taskActionControlID(taskActionPointerCheck, index), label))
 		}
-		lines = append(lines, "", "j/k choose  Space toggle  Esc close")
+		lines = append(lines, "", "j/k choose  Space toggle  "+m.pointerState.Render(taskActionControlID(taskActionPointerCancel, 0), "Esc close"))
 		return appendActionError(lines, a.errorText)
 	case taskActionPurge:
 		lines := []string{"Delete " + sanitizeTerminal(a.task.Title) + " permanently?" + busy,
 			"The card, comments, links, and kill reason are removed for good."}
 		if a.armed {
-			lines = append(lines, "", "ARMED - press Enter again to delete permanently")
+			lines = append(lines, "", m.pointerState.Render(taskActionControlID(taskActionPointerPurge, 0), "ARMED - press Enter again to delete permanently"))
 		} else {
-			lines = append(lines, "", "Press Enter to arm permanent delete")
+			lines = append(lines, "", m.pointerState.Render(taskActionControlID(taskActionPointerPurge, 0), "Press Enter to arm permanent delete"))
 		}
-		lines = append(lines, "Esc cancel")
+		lines = append(lines, m.pointerState.Render(taskActionControlID(taskActionPointerCancel, 0), "Esc cancel"))
 		return appendActionError(lines, a.errorText)
 	default:
 		return nil
 	}
 }
 
-func actionChoices(choices []string, selected int) string {
+func (m Model) pointerActionChoices(choices []string, selected int) string {
 	parts := make([]string, len(choices))
-	for index, choice := range choices {
-		if index == selected {
-			parts[index] = ">[" + choice + "]<"
-		} else {
-			parts[index] = "[" + choice + "]"
-		}
+	kind := taskActionPointerShipChoice
+	if m.action.mode == taskActionKill {
+		kind = taskActionPointerKillChoice
 	}
-	return strings.Join(parts, " ")
+	for index, choice := range choices {
+		label := choice
+		if index == selected {
+			label = "[" + choice + "]"
+		}
+		parts[index] = m.pointerState.Render(taskActionControlID(kind, index), label)
+	}
+	return strings.Join(parts, "  ")
 }
 
 func appendActionError(lines []string, message string) []string {

@@ -10,14 +10,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 
+	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/cardeditor"
 )
 
 type lockedPTYOutput struct {
@@ -92,6 +96,20 @@ func waitForPTYMarkerAfter(t *testing.T, output *lockedPTYOutput, offset int, ma
 	t.Fatalf("PTY output after byte %d did not contain %q:\n%s", offset, marker, output.string())
 }
 
+func editorSavePoint(t *testing.T, st *store.Store, task board.Task, width, height int) (int, int) {
+	t.Helper()
+	editor := cardeditor.New(st, "pointer-pty")
+	editor.SetAIRunner(ai.NewRunner(st, "", nil, nil), context.Background())
+	editor.OpenEdit(task)
+	for row, line := range strings.Split(ansi.Strip(editor.View(width, height)), "\n") {
+		if column := strings.Index(line, "[Save card]"); column >= 0 {
+			return ansi.StringWidth(line[:column]) + 1, row + 1
+		}
+	}
+	t.Fatalf("save control is not visible at %dx%d:\n%s", width, height, editor.View(width, height))
+	return 0, 0
+}
+
 func waitForTaskStatus(t *testing.T, st *store.Store, user, taskID string, status board.Status) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -150,7 +168,8 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, "tui", "--data", data, "--user", "pointer-pty")
 	command.Env = append(os.Environ(), "TERM=xterm-256color")
-	terminal, err := pty.StartWithSize(command, &pty.Winsize{Rows: 30, Cols: 120})
+	const terminalWidth, terminalHeight = 120, 40
+	terminal, err := pty.StartWithSize(command, &pty.Winsize{Rows: terminalHeight, Cols: terminalWidth})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,10 +218,40 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	// Exercise the non-Ctrl+S fallback through Bubble Tea's enhanced-key
 	// sequence for Ctrl+Enter. Move to the end explicitly; cursor placement is
 	// otherwise a terminal-input concern unrelated to the save contract.
+	boardOffset = output.length()
 	if _, err := io.WriteString(terminal, "\x1b[FY\x1b[13;5u"); err != nil {
 		t.Fatal(err)
 	}
 	waitForTaskTitle(t, st, "pointer-pty", task.ID, "Drag through raw SGRXY")
+	waitForPTYMarkerAfter(t, &output, boardOffset, "DOING")
+
+	editOffset = output.length()
+	if _, err := io.WriteString(terminal, "e"); err != nil {
+		t.Fatal(err)
+	}
+	waitForPTYMarkerAfter(t, &output, editOffset, "EDIT CARD")
+	if _, err := io.WriteString(terminal, "\x1b[FZ"); err != nil {
+		t.Fatal(err)
+	}
+	current, err := st.Task("pointer-pty", task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveX, saveY := editorSavePoint(t, st, current, terminalWidth, terminalHeight)
+	pressOffset := output.length()
+	if _, err := fmt.Fprintf(terminal, "\x1b[<0;%d;%dM", saveX, saveY); err != nil {
+		t.Fatal(err)
+	}
+	// Press feedback rerenders the editor and replaces its immutable pointer
+	// handler. Releasing through that new handler is the protocol regression.
+	// Body controls use a same-width literal marker so sanitization and narrow
+	// terminal clipping cannot erase the feedback. The terminal diff moves to
+	// that cell and writes the marker before release.
+	waitForPTYMarkerAfter(t, &output, pressOffset, "H!")
+	if _, err := fmt.Fprintf(terminal, "\x1b[<0;%d;%dm", saveX, saveY); err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskTitle(t, st, "pointer-pty", task.ID, "Drag through raw SGRXYZ")
 	if _, err := io.WriteString(terminal, "q"); err != nil {
 		t.Fatal(err)
 	}

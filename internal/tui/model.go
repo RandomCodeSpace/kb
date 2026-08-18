@@ -16,6 +16,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/carddetail"
 	"github.com/RandomCodeSpace/kb/internal/tui/cardeditor"
 	"github.com/RandomCodeSpace/kb/internal/tui/issueimport"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 const (
@@ -91,6 +92,8 @@ type Model struct {
 	settingsNew       func() *settingsModel
 	move              cardMoveState
 	action            taskActionState
+	taskActionSession uint64
+	pointerState      pointer.State
 	actionStatus      string
 	actionStatusError bool
 	actionNotice      bool
@@ -164,6 +167,32 @@ func (m Model) Init() tea.Cmd {
 // Update handles global messages before any future pane-specific routing.
 func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.stopped {
+		return m, nil
+	}
+	if pointer.IsMessage(message) {
+		switch {
+		case m.issueImport.IsOpen():
+			return m, m.issueImport.Update(message)
+		case m.action.open():
+			next, command, _ := m.pointerState.Update(message)
+			m.pointerState = next
+			return m, command
+		case m.editor.IsOpen():
+			return m, m.editor.Update(message)
+		case m.adr.IsOpen():
+			return m, m.adr.Update(message)
+		case m.settings != nil:
+			return m, m.settings.Update(message)
+		case m.detail.IsOpen():
+			return m, m.updateDetail(message)
+		default:
+			next, command, _ := m.pointerState.Update(message)
+			m.pointerState = next
+			return m, command
+		}
+	}
+	if isBoardPointerMessage(message) && (m.helpOpen || m.action.open() || m.action.busy ||
+		m.issueImport.IsOpen() || m.settings != nil || m.editor.IsOpen() || m.adr.IsOpen() || m.detail.IsOpen()) {
 		return m, nil
 	}
 	if m.helpOpen {
@@ -287,6 +316,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	var detailCmd tea.Cmd
 	if m.detail.IsOpen() {
+		if resolved, pointerMessage := m.detail.ResolvePointerMessage(message); pointerMessage {
+			if resolved == nil {
+				return m, nil
+			}
+			message = resolved
+		}
 		switch msg := message.(type) {
 		case tea.KeyPressMsg:
 			if m.detail.OwnsInput() && msg.String() != ctrlCKey {
@@ -544,6 +579,18 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, detailCmd
 }
 
+func isBoardPointerMessage(message tea.Msg) bool {
+	switch message.(type) {
+	case boardCardClickedMsg, boardColumnClickedMsg,
+		filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg,
+		boardFooterClickedMsg:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Model) updateDetail(message tea.Msg) tea.Cmd {
 	command := m.detail.Update(message)
 	if m.detail.ConsumeChanged() {
@@ -764,12 +811,18 @@ func (m Model) View() tea.View {
 	}
 	if !m.helpOpen && m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() && !m.issueImport.IsOpen() && !m.detail.OwnsInput() {
 		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
-		view.OnMouse = boardMouseHandler(hits, pointerActive)
+		view.OnMouse = boardMouseHandlerWithFeedback(hits, pointerActive, m.pointerState)
 	}
 	return view
 }
 
 func (m *Model) handleBoardFooterClick(key string) tea.Cmd {
+	if m.move.lifted != nil && key != "q" {
+		if m.move.saving {
+			return nil
+		}
+		m.cancelCardMove("focus changed")
+	}
 	switch key {
 	case "q":
 		m.stopped = true

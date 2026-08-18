@@ -52,7 +52,7 @@ func TestViewsCoverFileReviewProgressErrorsAndNarrowTerminals(t *testing.T) {
 		t.Fatalf("narrow progress view:\n%s", got)
 	}
 	m.operation, m.guardClose = "", true
-	if got := ansi.Strip(m.View(50, 12)); !strings.Contains(got, "D discard") {
+	if got := ansi.Strip(m.View(50, 12)); !strings.Contains(got, "[ Discard ]") || !strings.Contains(got, "[ Stay ]") {
 		t.Fatalf("guard footer missing:\n%s", got)
 	}
 

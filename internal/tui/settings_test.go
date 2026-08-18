@@ -117,14 +117,26 @@ func clickSettingsText(t *testing.T, model *settingsModel, width, height int, ne
 	}
 	for y, line := range strings.Split(surface.Content, "\n") {
 		if x := strings.Index(line, needle); x >= 0 {
-			if command := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}); command != nil {
-				t.Fatalf("settings control %q activated on press", needle)
+			press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+			if press == nil {
+				t.Fatalf("settings control %q ignored press", needle)
 			}
-			command := surface.Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+			if command := model.Update(press()); command != nil {
+				t.Fatalf("settings control %q returned a domain command on press", needle)
+			}
+			pressed := model.Surface(width, height)
+			if !strings.Contains(pressed.Content, "\x1b[7m") {
+				t.Fatalf("settings control %q omitted pressed feedback", needle)
+			}
+			command := pressed.Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
 			if command == nil {
 				t.Fatalf("visible settings control %q has no hit region", needle)
 			}
-			return model.Update(command())
+			activate := model.Update(command())
+			if activate == nil {
+				t.Fatalf("settings control %q release produced no action", needle)
+			}
+			return model.Update(activate())
 		}
 	}
 	t.Fatalf("settings control %q is not visible:\n%s", needle, surface.Content)
@@ -147,6 +159,45 @@ func TestSettingsPointerFocusesVisibleInput(t *testing.T) {
 	model.Update(tea.KeyPressMsg(tea.Key{Code: 'z', Text: "z"}))
 	if got := model.aiModel.Value(); got != "model-az" {
 		t.Fatalf("pointer-focused input value = %q", got)
+	}
+}
+
+func TestSettingsRejectsPointerReleaseFromClosedInstance(t *testing.T) {
+	backend := &faultSettingsStore{ai: store.AISettings{BaseURL: "https://api.example", Model: "model-a"}}
+	old := newSettingsModelWithBackends(backend, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background())
+	loadSettingsForTest(t, old)
+	surface := old.Surface(80, 40)
+	x, y := -1, -1
+	for row, line := range strings.Split(surface.Content, "\n") {
+		if column := strings.Index(line, "[Save AI settings]"); column >= 0 {
+			x, y = column, row
+			break
+		}
+	}
+	if x < 0 {
+		t.Fatalf("old settings surface omitted Save:\n%s", surface.Content)
+	}
+	press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if press == nil || old.Update(press()) != nil {
+		t.Fatal("stale settings control did not enter pressed state")
+	}
+	command := old.Surface(80, 40).Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if command == nil {
+		t.Fatal("old settings release produced no message")
+	}
+	stale := old.Update(command())
+	if stale == nil {
+		t.Fatal("old settings release produced no guarded action")
+	}
+	old.Close()
+	if next := old.Update(stale()); next != nil || old.busy != "" {
+		t.Fatalf("closed settings accepted queued release: command=%v busy=%q", next, old.busy)
+	}
+
+	current := newSettingsModelWithBackends(backend, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background())
+	loadSettingsForTest(t, current)
+	if next := current.Update(stale()); next != nil || current.busy != "" {
+		t.Fatalf("stale settings release crossed instance: command=%v busy=%q", next, current.busy)
 	}
 }
 
@@ -182,7 +233,11 @@ func TestSettingsPointerWheelMovesFocusAndViewportTogether(t *testing.T) {
 	if command == nil {
 		t.Fatal("settings body ignored pointer wheel")
 	}
-	model.Update(command())
+	followup := model.Update(command())
+	if followup == nil {
+		t.Fatal("settings wheel did not produce focus action")
+	}
+	model.Update(followup())
 	if model.focus != "ai:model" {
 		t.Fatalf("wheel focus = %q, want ai:model", model.focus)
 	}

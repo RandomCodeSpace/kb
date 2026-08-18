@@ -52,6 +52,14 @@ type markdownRenderer func(source string, width int) string
 type mouseScrollMsg struct{ delta int }
 type mouseDismissMsg struct{}
 
+type pointerControlMsg struct {
+	pointerSession  uint64
+	actionSession   uint64
+	driftSession    uint64
+	driftGeneration uint64
+	message         tea.Msg
+}
+
 // Model owns the overlay's task snapshot, enriched detail, and scroll state.
 type Model struct {
 	reader         Reader
@@ -74,6 +82,8 @@ type Model struct {
 	renderMarkdown markdownRenderer
 	bodyLines      []string
 	bodyWidth      int
+	pointerSession uint64
+	pointerState   pointer.State
 
 	action        actionMode
 	actionSession uint64
@@ -123,6 +133,8 @@ func (m Model) TaskID() string {
 // Open resets the pane to task and returns the asynchronous enrichment load.
 func (m *Model) Open(task board.Task) tea.Cmd {
 	m.cancelDrift()
+	m.pointerSession++
+	m.pointerState = pointer.State{}
 	m.actionSession++
 	m.task = task
 	m.comments = nil
@@ -173,6 +185,8 @@ func (m *Model) Refresh(task board.Task) tea.Cmd {
 // the current task identity.
 func (m *Model) Close() {
 	m.cancelDrift()
+	m.pointerSession++
+	m.pointerState = pointer.State{}
 	m.generation++
 	m.actionSession++
 	m.open = false
@@ -208,8 +222,17 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	if !m.open {
 		return nil
 	}
+	if pointer.IsMessage(message) {
+		next, command, _ := m.pointerState.Update(message)
+		m.pointerState = next
+		m.rebuildBody()
+		return command
+	}
 	switch msg := message.(type) {
-	case driftChoicesLoadedMsg, driftCheckedMsg, driftAcceptedMsg:
+	case actionChoicePointerMsg:
+		m.updateActionChoice(msg.index)
+		return nil
+	case driftChoicePointerMsg, driftChoicesLoadedMsg, driftCheckedMsg, driftAcceptedMsg:
 		return m.updateDrift(msg)
 	case mutationCompletedMsg:
 		return m.finishMutation(msg)
@@ -270,6 +293,22 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	}
 	m.clampScroll()
 	return nil
+}
+
+// ResolvePointerMessage unwraps a message only while the exact rendered detail
+// session and nested action state are still current. A release queued from an
+// older pane cannot mutate a reopened task or a later confirmation.
+func (m *Model) ResolvePointerMessage(message tea.Msg) (tea.Msg, bool) {
+	msg, ok := message.(pointerControlMsg)
+	if !ok {
+		return message, false
+	}
+	if !m.open || msg.pointerSession != m.pointerSession ||
+		msg.actionSession != m.actionSession || msg.driftSession != m.driftSession ||
+		msg.driftGeneration != m.driftGeneration {
+		return nil, true
+	}
+	return msg.message, true
 }
 
 // MouseHandler routes wheel scrolling within the pane and left-click dismissal
@@ -414,9 +453,16 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 	bounds := pointer.Rect{X0: 0, Y0: 0, X1: width, Y1: height}
 	pane := pointer.Rect{X0: x, Y0: y, X1: x + paneWidth, Y1: y + paneHeight}
 	var hitMap pointer.Map
-	hitMap.AddWheel(pane, func(delta int) tea.Msg { return mouseScrollMsg{delta: delta * 3} })
+	wrap := func(message tea.Msg) tea.Msg {
+		return pointerControlMsg{
+			pointerSession: m.pointerSession, actionSession: m.actionSession,
+			driftSession: m.driftSession, driftGeneration: m.driftGeneration,
+			message: message,
+		}
+	}
+	hitMap.AddWheel(pane, func(delta int) tea.Msg { return wrap(mouseScrollMsg{delta: delta * 3}) })
 	if m.action == actionNone && m.driftMode == driftNone {
-		hitMap.AddBackdrop(bounds, pane, func(pointer.Point) tea.Msg { return mouseDismissMsg{} })
+		hitMap.AddBackdrop(bounds, pane, func(pointer.Point) tea.Msg { return wrap(mouseDismissMsg{}) })
 	}
 
 	innerWidth, _, _ := paneGeometry(width, height)
@@ -430,9 +476,42 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 			break
 		}
 		rect := pointer.Rect{X0: xCursor, Y0: footerY, X1: xCursor + labelWidth, Y1: footerY + 1}
-		message := control.message
-		hitMap.Add(rect, func(pointer.Point) tea.Msg { return message })
+		message := wrap(control.message)
+		hitMap.AddControl(detailFooterControlID(control), rect, func(pointer.Point) tea.Msg { return message })
 		xCursor += labelWidth + 1
+	}
+	if m.driftMode == driftSelect && m.driftBusy == "" {
+		viewport := pointer.Viewport{
+			Rect:   pointer.Rect{X0: x + 2, Y0: y + 1, X1: x + paneWidth - 2, Y1: footerY},
+			Scroll: m.scroll,
+		}
+		for index := range m.driftChoices {
+			if rect, ok := viewport.Row(4+index, 0, displayWidth); ok {
+				message := wrap(driftChoicePointerMsg{index: index})
+				hitMap.AddControl(detailDriftControlID(index), rect, func(pointer.Point) tea.Msg { return message })
+			}
+		}
+	}
+	if (m.action == actionDeleteComment || m.action == actionDeleteLink) && !m.saving {
+		count := len(m.comments)
+		if m.action == actionDeleteLink {
+			count = len(m.linkChoices())
+		}
+		start, end := selectionWindow(count, m.selection, max(m.height-10, 3))
+		logicalRow := 2
+		if start > 0 {
+			logicalRow++
+		}
+		viewport := pointer.Viewport{
+			Rect:   pointer.Rect{X0: x + 2, Y0: y + 1, X1: x + paneWidth - 2, Y1: footerY},
+			Scroll: m.scroll,
+		}
+		for index := start; index < end; index++ {
+			if rect, ok := viewport.Row(logicalRow+index-start, 0, displayWidth); ok {
+				message := wrap(actionChoicePointerMsg{index: index})
+				hitMap.AddControl(detailActionChoiceControlID(m.action, index), rect, func(pointer.Point) tea.Msg { return message })
+			}
+		}
 	}
 	return pointer.Surface{Content: content, Pointer: hitMap.Handler()}
 }

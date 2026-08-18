@@ -52,6 +52,8 @@ type driftAcceptedMsg struct {
 	err        error
 }
 
+type driftChoicePointerMsg struct{ index int }
+
 func (m *Model) SetDriftBackend(backend DriftBackend, ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -106,6 +108,13 @@ func (m *Model) beginDrift() tea.Cmd {
 
 func (m *Model) updateDrift(message tea.Msg) tea.Cmd {
 	switch msg := message.(type) {
+	case driftChoicePointerMsg:
+		if m.driftMode != driftSelect || m.driftBusy != "" || msg.index < 0 || msg.index >= len(m.driftChoices) {
+			return nil
+		}
+		m.driftSelection = msg.index
+		m.rebuildBody()
+		return nil
 	case driftChoicesLoadedMsg:
 		if !m.currentDrift(msg.taskID, msg.session, msg.generation, "provenance") {
 			return nil
@@ -239,7 +248,8 @@ func (m Model) driftBody(width int) string {
 			if index == m.driftSelection {
 				cursor = "> "
 			}
-			lines = append(lines, fmt.Sprintf("%s%s  %s  %s", cursor, safeText(item.Source, false), safeText(item.Title, false), safeText(item.URL, false)))
+			line := fmt.Sprintf("%s%s  %s  %s", cursor, safeText(item.Source, false), safeText(item.Title, false), safeText(item.URL, false))
+			lines = append(lines, m.pointerState.Render(detailDriftControlID(index), line))
 		}
 		return strings.Join(lines, "\n")
 	}
