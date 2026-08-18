@@ -258,9 +258,14 @@ func (s *Store) RecordTombstone(scope, taskID, reason string) error {
 	if err := validateTombstoneReason(reason); err != nil {
 		return err
 	}
-	killedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	return s.withTx(func(tx *sql.Tx) error {
-		result, err := tx.Exec(`
+		return recordTombstoneTx(tx, scope, taskID, reason)
+	})
+}
+
+func recordTombstoneTx(tx *sql.Tx, scope, taskID, reason string) error {
+	killedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := tx.Exec(`
 	INSERT INTO tombstones (scope, task_id, reason, killed_at)
 	SELECT ?, ?, ?, ?
 	WHERE EXISTS (
@@ -270,19 +275,18 @@ func (s *Store) RecordTombstone(scope, taskID, reason string) error {
 	ON CONFLICT(scope, task_id) DO UPDATE SET
 		reason = excluded.reason,
 		killed_at = excluded.killed_at`,
-			scope, taskID, reason, killedAt, scope, taskID)
-		if err != nil {
-			return fmt.Errorf("store: record tombstone: %w", err)
-		}
-		written, err := result.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("store: inspect tombstone write: %w", err)
-		}
-		if written != 1 {
-			return ErrTombstoneTaskNotCancelled
-		}
-		return nil
-	})
+		scope, taskID, reason, killedAt, scope, taskID)
+	if err != nil {
+		return fmt.Errorf("store: record tombstone: %w", err)
+	}
+	written, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: inspect tombstone write: %w", err)
+	}
+	if written != 1 {
+		return ErrTombstoneTaskNotCancelled
+	}
+	return nil
 }
 
 // Tombstone returns the scoped graveyard reason for taskID when one exists.

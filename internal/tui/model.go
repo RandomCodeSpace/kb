@@ -52,35 +52,41 @@ type pollTickMsg struct{}
 // dimensions, and all message routing; commands perform IO and only return
 // messages, so Update remains deterministic.
 type Model struct {
-	store           boardReader
-	moveStore       taskMoveStore
-	watcher         dataVersionReader
-	user            string
-	board           board.Board
-	boardView       boardViewState
-	filter          boardFilterState
-	detail          carddetail.Model
-	editor          cardeditor.Model
-	adr             adrsplit.Model
-	selectAfterLoad string
-	width           int
-	height          int
-	loading         bool
-	reloadPending   bool
-	loadErr         error
-	pollErr         error
-	dataVersion     int64
-	haveVersion     bool
-	stopped         bool
-	readContext     context.Context
-	now             func() time.Time
-	savePreferences func(tuiPreferences) error
-	preferenceErr   error
-	prefSaving      bool
-	prefPending     *tuiPreferences
-	settings        *settingsModel
-	settingsNew     func() *settingsModel
-	move            cardMoveState
+	store             boardReader
+	moveStore         taskMoveStore
+	actionStore       taskActionStore
+	watcher           dataVersionReader
+	user              string
+	board             board.Board
+	boardView         boardViewState
+	filter            boardFilterState
+	detail            carddetail.Model
+	editor            cardeditor.Model
+	adr               adrsplit.Model
+	selectAfterLoad   string
+	width             int
+	height            int
+	loading           bool
+	reloadPending     bool
+	loadErr           error
+	pollErr           error
+	dataVersion       int64
+	haveVersion       bool
+	stopped           bool
+	readContext       context.Context
+	now               func() time.Time
+	savePreferences   func(tuiPreferences) error
+	preferenceErr     error
+	prefSaving        bool
+	prefPending       *tuiPreferences
+	settings          *settingsModel
+	settingsNew       func() *settingsModel
+	move              cardMoveState
+	action            taskActionState
+	actionStatus      string
+	actionStatusError bool
+	actionNotice      bool
+	shipped           shippedRecord
 }
 
 func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
@@ -106,9 +112,11 @@ func newModel(
 	detailReader, _ := store.(carddetail.Reader)
 	editorStore, _ := store.(cardeditor.Store)
 	moveStore, _ := store.(taskMoveStore)
+	actionStore, _ := store.(taskActionStore)
 	return Model{
 		store:       store,
 		moveStore:   moveStore,
+		actionStore: actionStore,
 		watcher:     watcher,
 		user:        user,
 		board:       board.Board{Title: "Board"},
@@ -120,6 +128,7 @@ func newModel(
 		loading:     watcher == nil,
 		readContext: ctx,
 		now:         time.Now,
+		action:      newTaskActionState(),
 	}
 }
 
@@ -142,8 +151,24 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.stopped {
 		return m, nil
 	}
+	if isTaskActionMessage(message) {
+		return m, m.updateTaskAction(message)
+	}
+	if m.action.open() || m.action.busy {
+		switch message.(type) {
+		case tea.KeyPressMsg:
+			return m, m.updateTaskAction(message)
+		case boardCardClickedMsg, boardColumnClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
+			return m, nil
+		}
+	}
 	if carddetail.IsMutationMessage(message) {
 		return m, m.updateDetail(message)
+	}
+	if m.actionNotice && isBoardUserInput(message) {
+		m.actionNotice = false
 	}
 	if m.move.lifted == nil && m.move.notice && isBoardUserInput(message) {
 		m.move.notice = false
@@ -201,30 +226,27 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.detail.IsOpen() {
 		switch msg := message.(type) {
 		case tea.KeyPressMsg:
+			if m.detail.OwnsInput() {
+				return m, m.updateDetail(message)
+			}
 			switch msg.String() {
 			case "esc":
-				if m.detail.OwnsInput() {
-					return m, m.updateDetail(message)
-				}
 				m.detail.Close()
 				return m, nil
 			case "e":
-				if m.detail.OwnsInput() {
-					return m, m.updateDetail(message)
-				}
 				if m.editor.Enabled() {
 					if task, ok := m.taskByID(m.detail.TaskID()); ok {
 						return m, m.editor.OpenEdit(task)
 					}
 				}
 				return m, nil
-			case "q":
-				if m.detail.OwnsInput() {
-					return m, m.updateDetail(message)
+			case "t", "x", "r", "D", "delete", "backspace":
+				if handled, command := m.handleSelectedTaskAction(msg.String()); handled {
+					return m, command
 				}
-				// Preserve the root quit contract while idle detail is open.
-			case "ctrl+c":
-				// The explicit terminal interrupt remains global.
+				return m, nil
+			case "q", "ctrl+c":
+				// Preserve root quit while idle detail is open.
 			default:
 				return m, m.updateDetail(message)
 			}
@@ -281,6 +303,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if handled, command := m.handleFilterKey(msg); handled {
+			return m, command
+		}
+		if handled, command := m.handleSelectedTaskAction(msg.String()); handled {
 			return m, command
 		}
 		switch msg.String() {
@@ -541,7 +566,7 @@ func (m *Model) reconcileDetail() tea.Cmd {
 // startBoardLoad starts a fallback or retry only when no load is active. The
 // active load already satisfies that obligation, so it does not queue another.
 func (m *Model) startBoardLoad() tea.Cmd {
-	if m.move.saving {
+	if m.writeBusy() {
 		m.reloadPending = true
 		return nil
 	}
@@ -555,7 +580,7 @@ func (m *Model) startBoardLoad() tea.Cmd {
 // requireFreshBoard records a new baseline/change obligation while a load is
 // active. Multiple obligations coalesce into one serialized successor.
 func (m *Model) requireFreshBoard() tea.Cmd {
-	if m.move.saving {
+	if m.writeBusy() {
 		m.reloadPending = true
 		return nil
 	}
@@ -568,6 +593,8 @@ func (m *Model) requireFreshBoard() tea.Cmd {
 	}
 	return m.startBoardLoad()
 }
+
+func (m Model) writeBusy() bool { return m.move.saving || m.action.busy }
 
 func (m *Model) cancelCardMove(reason string) {
 	if m.move.lifted == nil {
@@ -624,10 +651,14 @@ func (m Model) View() tea.View {
 		content = m.editor.Overlay(content, m.width, m.height)
 		hits = nil
 	}
+	if m.action.open() {
+		content = m.taskActionOverlay(content)
+		hits = nil
+	}
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
-	if m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() {
+	if m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() {
 		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
 		view.OnMouse = boardMouseHandler(hits, pointerActive)
 	}
