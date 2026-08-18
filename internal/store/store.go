@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,17 @@ var (
 // the client refetch rather than infer a missing count.
 type RevisionConflictError struct {
 	CurrentRevision int64
+}
+
+// TaskFieldsConflictError reports task fields that no longer match a
+// caller's expected values. Callers should keep their local edits and refresh
+// the task instead of retrying the stale patch unconditionally.
+type TaskFieldsConflictError struct {
+	Fields []string
+}
+
+func (e *TaskFieldsConflictError) Error() string {
+	return "store: task changed in " + strings.Join(e.Fields, ", ")
 }
 
 func (e *RevisionConflictError) Error() string {
@@ -978,6 +990,65 @@ func (s *Store) AddTask(user string, t board.Task) (board.Task, error) {
 // upserts labels.
 func (s *Store) UpdateTask(user, idPrefix string, patch TaskPatch) (board.Task, error) {
 	return s.UpdateAndMoveTask(user, idPrefix, patch, nil, nil, nil)
+}
+
+// UpdateTaskIfFieldsMatch applies patch only when every non-nil field in
+// expected still matches the stored task. The comparison and patch happen in
+// one transaction. Fields omitted from expected remain mergeable, so a
+// concurrent update to an unrelated field is preserved.
+func (s *Store) UpdateTaskIfFieldsMatch(user, idPrefix string, expected, patch TaskPatch) (board.Task, error) {
+	var out board.Task
+	err := s.withTx(func(tx *sql.Tx) error {
+		id, err := resolveID(tx, user, idPrefix)
+		if err != nil {
+			return err
+		}
+		current, err := getTask(tx, user, id)
+		if err != nil {
+			return err
+		}
+		if fields := taskFieldConflicts(current, expected); len(fields) > 0 {
+			return &TaskFieldsConflictError{Fields: fields}
+		}
+		out, err = s.patchTask(tx, user, id, patch)
+		return err
+	})
+	if err != nil {
+		return board.Task{}, err
+	}
+	return out, nil
+}
+
+func taskFieldConflicts(task board.Task, expected TaskPatch) []string {
+	fields := make([]string, 0, 9)
+	if expected.Emoji != nil && task.Emoji != *expected.Emoji {
+		fields = append(fields, "emoji")
+	}
+	if expected.Title != nil && task.Title != *expected.Title {
+		fields = append(fields, "title")
+	}
+	if expected.Desc != nil && task.Desc != *expected.Desc {
+		fields = append(fields, "description")
+	}
+	if expected.Blocked != nil && task.Blocked != *expected.Blocked {
+		fields = append(fields, "blocked")
+	}
+	if expected.Prio != nil && task.Prio != *expected.Prio {
+		fields = append(fields, "priority")
+	}
+	if expected.Due != nil && task.Due != *expected.Due {
+		fields = append(fields, "due")
+	}
+	if expected.Effort != nil && task.Effort != *expected.Effort {
+		fields = append(fields, "effort")
+	}
+	if expected.Tags != nil && !slices.Equal(task.Tags, *expected.Tags) {
+		fields = append(fields, "labels")
+	}
+	if expected.Checks != nil && !slices.Equal(task.Checks, *expected.Checks) {
+		fields = append(fields, "checklist")
+	}
+	return fields
 }
 
 // UpdateAndMoveTask applies patch and then, when moveTo is non-nil, moves the

@@ -264,7 +264,7 @@ func (m *Model) frame(width, height int) (string, int, int) {
 	}
 	visible := strings.Join(visibleLines, "\n")
 	visible = lipgloss.NewStyle().Width(innerWidth).Height(innerHeight).Render(visible)
-	footer := "esc close  ↑/↓ scroll"
+	footer := "e edit  esc close  ↑/↓ scroll"
 	if maxScroll > 0 {
 		footer = fmt.Sprintf("%s  %d/%d", footer, start+1, maxScroll+1)
 	}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/tui/carddetail"
+	"github.com/RandomCodeSpace/kb/internal/tui/cardeditor"
 )
 
 const (
@@ -56,6 +57,8 @@ type Model struct {
 	boardView       boardViewState
 	filter          boardFilterState
 	detail          carddetail.Model
+	editor          cardeditor.Model
+	selectAfterLoad string
 	width           int
 	height          int
 	loading         bool
@@ -87,6 +90,7 @@ func newModel(
 	ctx context.Context,
 ) Model {
 	detailReader, _ := store.(carddetail.Reader)
+	editorStore, _ := store.(cardeditor.Store)
 	return Model{
 		store:       store,
 		watcher:     watcher,
@@ -94,6 +98,7 @@ func newModel(
 		board:       board.Board{Title: "Board"},
 		filter:      newBoardFilterState(),
 		detail:      carddetail.New(detailReader, user),
+		editor:      cardeditor.New(editorStore, user),
 		width:       defaultWidth,
 		height:      defaultHeight,
 		loading:     watcher == nil,
@@ -128,6 +133,27 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, command
 	}
+	if m.editor.IsOpen() && cardeditor.IsMessage(message) {
+		command := m.editor.Update(message)
+		if taskID, saved := m.editor.ConsumeSaved(); saved {
+			m.selectAfterLoad = taskID
+			return m, batchCommands(command, m.requireFreshBoard())
+		}
+		return m, command
+	}
+	if m.editor.IsOpen() {
+		switch msg := message.(type) {
+		case tea.KeyPressMsg:
+			if msg.String() == "ctrl+c" {
+				// The explicit terminal interrupt remains global.
+				break
+			}
+			return m, m.editor.Update(msg)
+		case boardCardClickedMsg, boardColumnClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg:
+			return m, nil
+		}
+	}
 	var detailCmd tea.Cmd
 	if m.detail.IsOpen() {
 		switch msg := message.(type) {
@@ -135,6 +161,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "esc":
 				m.detail.Close()
+				return m, nil
+			case "e":
+				if m.editor.Enabled() {
+					if task, ok := m.taskByID(m.detail.TaskID()); ok {
+						return m, m.editor.OpenEdit(task)
+					}
+				}
 				return m, nil
 			case "q", "ctrl+c":
 				// Preserve the root quit contract while the overlay is open.
@@ -184,6 +217,16 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.detail.Open(task)
 			}
 			return m, nil
+		case "n":
+			if m.editor.Enabled() {
+				return m, m.editor.OpenAdd(boardStatuses[m.boardView.column])
+			}
+		case "e":
+			if m.editor.Enabled() {
+				if task, ok := m.selectedTask(); ok {
+					return m, m.editor.OpenEdit(task)
+				}
+			}
 		default:
 			if m.boardView.handleKey(msg.String(), m.filteredBoard()) == boardToggledCancelled {
 				return m, m.queuePreferences()
@@ -277,14 +320,29 @@ func (m *Model) finishBoardLoad(msg boardLoadedMsg) tea.Cmd {
 	if msg.err == nil {
 		previous := m.filteredBoard()
 		m.board = msg.board
-		m.boardView.adoptBoard(previous, m.filteredBoard())
-		detailCmd = m.reconcileDetail()
+		filtered := m.filteredBoard()
+		m.boardView.adoptBoard(previous, filtered)
+		if m.selectAfterLoad != "" {
+			focused := m.boardView.focusTask(filtered, m.selectAfterLoad)
+			if focused || !m.reloadPending {
+				m.selectAfterLoad = ""
+			}
+		}
+		detailCmd = batchCommands(m.reconcileDetail(), m.reconcileEditor())
 	}
 	if !m.reloadPending {
 		return detailCmd
 	}
 	m.reloadPending = false
 	return batchCommands(detailCmd, m.startBoardLoad())
+}
+
+func (m *Model) reconcileEditor() tea.Cmd {
+	if !m.editor.IsOpen() || m.editor.TaskID() == "" {
+		return nil
+	}
+	task, found := m.taskByID(m.editor.TaskID())
+	return m.editor.Refresh(task, found)
 }
 
 func (m *Model) reconcileDetail() tea.Cmd {
@@ -356,13 +414,26 @@ func (m Model) View() tea.View {
 		content = m.settings.View(m.width, m.height)
 		hits = nil
 	}
+	if m.editor.IsOpen() {
+		content = m.editor.Overlay(content, m.width, m.height)
+		hits = nil
+	}
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
-	if m.settings == nil {
+	if m.settings == nil && !m.editor.IsOpen() {
 		view.OnMouse = boardMouseHandler(hits)
 	}
 	return view
+}
+
+func (m Model) taskByID(id string) (board.Task, bool) {
+	for _, task := range m.board.Tasks {
+		if task.ID == id {
+			return task, true
+		}
+	}
+	return board.Task{}, false
 }
 
 func (m Model) loadBoard() tea.Cmd {

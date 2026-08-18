@@ -280,8 +280,11 @@ func (m Model) renderBoard() (string, []boardHit) {
 		cancelled = "on"
 	}
 	help := "j/k cards | h/l/tab columns | 1-4 jump | c cancelled:" + cancelled + " | q quit"
+	if m.editor.Enabled() {
+		help = "n new | e edit | " + help
+	}
 	if m.settingsNew != nil {
-		footer := settingsBoardFooter(state, cancelled, width)
+		footer := settingsBoardFooter(state, cancelled, m.editor.Enabled(), width)
 		return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
 	}
 	footer := fitLine(state+" | "+help, width)
@@ -363,7 +366,7 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 	}, "\n"), hits
 }
 
-func settingsBoardFooter(state, cancelled string, width int) string {
+func settingsBoardFooter(state, cancelled string, editorEnabled bool, width int) string {
 	candidates := [][]string{
 		{"s settings", "j/k cards", "h/l/tab columns", "1-4 jump", "c cancelled:" + cancelled, "q quit"},
 		{"s settings", "j/k cards", "h/l/tab columns", "c cancelled:" + cancelled, "q quit"},
@@ -374,6 +377,14 @@ func settingsBoardFooter(state, cancelled string, width int) string {
 		{"s", "nav", "q quit"},
 		{"s", "q quit"},
 		{"q quit"},
+	}
+	if editorEnabled {
+		candidates = append([][]string{
+			{"s settings", "n new", "e edit", "j/k cards", "h/l/tab columns", "1-4 jump", "c cancelled:" + cancelled, "q quit"},
+			{"s settings", "n new", "e edit", "j/k cards", "h/l/tab columns", "c cancelled:" + cancelled, "q quit"},
+			{"s settings", "n new", "e edit", "j/k cards", "c cancelled:" + cancelled, "q quit"},
+			{"s settings", "n new", "e edit", "j/k cards", "h/l/tab columns", "q quit"},
+		}, candidates...)
 	}
 	minimumStateWidth := min(ansi.StringWidth(state), 5)
 	for _, candidate := range candidates {
