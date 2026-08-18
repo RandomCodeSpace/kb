@@ -14,12 +14,13 @@ import (
 )
 
 type tuiPreferences struct {
-	ShowCancelled bool `json:"show_cancelled"`
+	ShowCancelled bool        `json:"show_cancelled"`
+	Filter        boardFilter `json:"filter,omitempty"`
 }
 
-type cancelledPreferenceSavedMsg struct {
-	show bool
-	err  error
+type preferenceSavedMsg struct {
+	preferences tuiPreferences
+	err         error
 }
 
 // tuiPreferencesPath keeps display state beside its SQLite board. Hashing the
@@ -37,19 +38,30 @@ func tuiPreferencesPath(databasePath, user string) (string, error) {
 	return filepath.Join(filepath.Dir(databasePath), ".kb-tui", name), nil
 }
 
-func loadCancelledPreference(path string) (bool, error) {
+func loadTUIPreferences(path string) (tuiPreferences, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return tuiPreferences{}, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("tui preferences: read: %w", err)
+		return tuiPreferences{}, fmt.Errorf("tui preferences: read: %w", err)
 	}
 	var preferences tuiPreferences
 	if err := json.Unmarshal(data, &preferences); err != nil {
-		return false, fmt.Errorf("tui preferences: decode: %w", err)
+		return tuiPreferences{}, fmt.Errorf("tui preferences: decode: %w", err)
 	}
-	return preferences.ShowCancelled, nil
+	preferences.Filter.Tags = normalizedFilterTags(preferences.Filter.Tags)
+	return preferences, nil
+}
+
+func (m *Model) restorePreferences(path string) {
+	preferences, err := loadTUIPreferences(path)
+	m.preferenceErr = err
+	if err != nil {
+		return
+	}
+	m.boardView.showCancelled = preferences.ShowCancelled
+	m.filter.restore(preferences.Filter)
 }
 
 type preferenceTempFile interface {
@@ -75,16 +87,17 @@ var osPreferenceFileOps = preferenceFileOps{
 	remove: os.Remove,
 }
 
-func saveCancelledPreference(path string, show bool) error {
-	return saveCancelledPreferenceWithOps(path, show, osPreferenceFileOps)
+func saveTUIPreferences(path string, preferences tuiPreferences) error {
+	return saveTUIPreferencesWithOps(path, preferences, osPreferenceFileOps)
 }
 
-func saveCancelledPreferenceWithOps(path string, show bool, ops preferenceFileOps) error {
+func saveTUIPreferencesWithOps(path string, preferences tuiPreferences, ops preferenceFileOps) error {
 	dir := filepath.Dir(path)
 	if err := ops.mkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("tui preferences: create directory: %w", err)
 	}
-	data, err := json.Marshal(tuiPreferences{ShowCancelled: show})
+	preferences.Filter.Tags = normalizedFilterTags(preferences.Filter.Tags)
+	data, err := json.Marshal(preferences)
 	if err != nil {
 		return fmt.Errorf("tui preferences: encode: %w", err)
 	}
@@ -125,36 +138,55 @@ func saveCancelledPreferenceWithOps(path string, show bool, ops preferenceFileOp
 	return nil
 }
 
-func (m *Model) queueCancelledPreference() tea.Cmd {
-	if m.saveCancelled == nil {
+func (m *Model) preferences() tuiPreferences {
+	return tuiPreferences{
+		ShowCancelled: m.boardView.showCancelled,
+		Filter:        m.filter.value(),
+	}
+}
+
+func (m *Model) queuePreferences() tea.Cmd {
+	if m.savePreferences == nil {
 		return nil
 	}
-	show := m.boardView.showCancelled
+	preferences := m.preferences()
 	if m.prefSaving {
-		m.prefPending = &show
+		m.prefPending = &preferences
 		return nil
 	}
 	m.prefSaving = true
-	return m.writeCancelledPreference(show)
+	return m.writePreferences(preferences)
 }
 
-func (m Model) writeCancelledPreference(show bool) tea.Cmd {
+func (m Model) writePreferences(preferences tuiPreferences) tea.Cmd {
 	return func() tea.Msg {
-		return cancelledPreferenceSavedMsg{show: show, err: m.saveCancelled(show)}
+		return preferenceSavedMsg{preferences: preferences, err: m.savePreferences(preferences)}
 	}
 }
 
-func (m *Model) finishCancelledPreference(message cancelledPreferenceSavedMsg) tea.Cmd {
+func (m *Model) finishPreferences(message preferenceSavedMsg) tea.Cmd {
 	m.prefSaving = false
 	m.preferenceErr = message.err
 	if m.prefPending == nil {
 		return nil
 	}
-	show := *m.prefPending
+	preferences := *m.prefPending
 	m.prefPending = nil
-	if show == message.show {
+	if message.err == nil && preferencesEqual(preferences, message.preferences) {
 		return nil
 	}
 	m.prefSaving = true
-	return m.writeCancelledPreference(show)
+	return m.writePreferences(preferences)
+}
+
+func preferencesEqual(left, right tuiPreferences) bool {
+	if left.ShowCancelled != right.ShowCancelled || left.Filter.Text != right.Filter.Text || len(left.Filter.Tags) != len(right.Filter.Tags) {
+		return false
+	}
+	for i := range left.Filter.Tags {
+		if left.Filter.Tags[i] != right.Filter.Tags[i] {
+			return false
+		}
+	}
+	return true
 }

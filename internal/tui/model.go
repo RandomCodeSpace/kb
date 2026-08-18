@@ -49,29 +49,30 @@ type pollTickMsg struct{}
 // dimensions, and all message routing; commands perform IO and only return
 // messages, so Update remains deterministic.
 type Model struct {
-	store         boardReader
-	watcher       dataVersionReader
-	user          string
-	board         board.Board
-	boardView     boardViewState
-	detail        carddetail.Model
-	width         int
-	height        int
-	loading       bool
-	reloadPending bool
-	loadErr       error
-	pollErr       error
-	dataVersion   int64
-	haveVersion   bool
-	stopped       bool
-	readContext   context.Context
-	now           func() time.Time
-	saveCancelled func(bool) error
-	preferenceErr error
-	prefSaving    bool
-	prefPending   *bool
-	settings      *settingsModel
-	settingsNew   func() *settingsModel
+	store           boardReader
+	watcher         dataVersionReader
+	user            string
+	board           board.Board
+	boardView       boardViewState
+	filter          boardFilterState
+	detail          carddetail.Model
+	width           int
+	height          int
+	loading         bool
+	reloadPending   bool
+	loadErr         error
+	pollErr         error
+	dataVersion     int64
+	haveVersion     bool
+	stopped         bool
+	readContext     context.Context
+	now             func() time.Time
+	savePreferences func(tuiPreferences) error
+	preferenceErr   error
+	prefSaving      bool
+	prefPending     *tuiPreferences
+	settings        *settingsModel
+	settingsNew     func() *settingsModel
 }
 
 // NewModel creates the root model for one local board owner.
@@ -91,6 +92,7 @@ func newModel(
 		watcher:     watcher,
 		user:        user,
 		board:       board.Board{Title: "Board"},
+		filter:      newBoardFilterState(),
 		detail:      carddetail.New(detailReader, user),
 		width:       defaultWidth,
 		height:      defaultHeight,
@@ -139,7 +141,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				return m, m.detail.Update(message)
 			}
-		case boardCardClickedMsg, boardColumnClickedMsg:
+		case boardCardClickedMsg, boardColumnClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg:
 			return m, nil
 		default:
 			detailCmd = m.detail.Update(message)
@@ -162,6 +165,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, command
 		}
+		if handled, command := m.handleFilterKey(msg); handled {
+			return m, command
+		}
 		switch msg.String() {
 		case "q":
 			m.stopped = true
@@ -179,21 +185,38 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		default:
-			if m.boardView.handleKey(msg.String(), m.board) == boardToggledCancelled {
-				return m, m.queueCancelledPreference()
+			if m.boardView.handleKey(msg.String(), m.filteredBoard()) == boardToggledCancelled {
+				return m, m.queuePreferences()
 			}
 		}
 	case boardCardClickedMsg:
-		if m.boardView.focusTask(m.board, msg.taskID) {
+		m.filter.blur()
+		if m.boardView.focusTask(m.filteredBoard(), msg.taskID) {
 			if task, ok := m.selectedTask(); ok {
 				m.detail.Resize(m.width, m.height)
 				return m, m.detail.Open(task)
 			}
 		}
 	case boardColumnClickedMsg:
-		m.boardView.focusColumn(msg.status, m.board)
-	case cancelledPreferenceSavedMsg:
-		return m, m.finishCancelledPreference(msg)
+		m.filter.blur()
+		m.boardView.focusColumn(msg.status, m.filteredBoard())
+	case filterTextClickedMsg:
+		if m.settings != nil {
+			return m, nil
+		}
+		return m, m.filter.focusText()
+	case filterLabelClickedMsg:
+		if m.settings != nil {
+			return m, nil
+		}
+		return m, m.mutateFilter(func(filter *boardFilterState) { filter.toggleTag(msg.tag) })
+	case filterClearClickedMsg:
+		if m.settings != nil {
+			return m, nil
+		}
+		return m, m.mutateFilter(func(filter *boardFilterState) { filter.clear() })
+	case preferenceSavedMsg:
+		return m, m.finishPreferences(msg)
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 {
 			m.width = msg.Width
@@ -252,9 +275,9 @@ func (m *Model) finishBoardLoad(msg boardLoadedMsg) tea.Cmd {
 	m.loadErr = msg.err
 	var detailCmd tea.Cmd
 	if msg.err == nil {
-		previous := m.board
+		previous := m.filteredBoard()
 		m.board = msg.board
-		m.boardView.adoptBoard(previous, m.board)
+		m.boardView.adoptBoard(previous, m.filteredBoard())
 		detailCmd = m.reconcileDetail()
 	}
 	if !m.reloadPending {

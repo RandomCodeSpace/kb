@@ -45,6 +45,13 @@ cat >"$fake_go_dir/go" <<'EOF'
 set -eu
 case "$1" in
   test)
+    if [ "$#" -eq 4 ] && \
+      [ "$2" = "./internal/tui/testdata/generate_web_lower_fixture.go" ] && \
+      [ "$3" = "./internal/tui/testdata/generate_web_lower_fixture_test.go" ] && \
+      [ "$4" = "-count=1" ]; then
+      printf '%s\n' "${FAKE_HELPER_TEST_OUTPUT:-ok  command-line-arguments  0.001s  generator helper fixture test ran}"
+      exit "${FAKE_HELPER_TEST_STATUS:-0}"
+    fi
     for argument do
       case "$argument" in
         -coverprofile=*) : >"${argument#-coverprofile=}" ;;
@@ -89,6 +96,13 @@ if ! PATH="$fake_go_dir:$PATH" GO_COVERAGE_PROFILE="$coverage_profile" \
 fi
 [ -f "$coverage_profile" ] || fail "GO_COVERAGE_PROFILE was not retained"
 assert_contains 'Go statement coverage: 96.4% (required: 96.4%)' "$coverage_output" "coverage success"
+assert_contains 'generator helper fixture test ran' "$coverage_output" "coverage helper invocation"
+
+status=0
+PATH="$fake_go_dir:$PATH" FAKE_HELPER_TEST_STATUS=19 FAKE_HELPER_TEST_OUTPUT='generator helper fixture test failed' \
+  run_capture "$coverage_output" sh "$repo_root/scripts/check-go-coverage.sh" || status=$?
+assert_status 19 "$status" "coverage helper failure"
+assert_contains 'generator helper fixture test failed' "$coverage_output" "coverage helper failure"
 
 status=0
 PATH="$fake_go_dir:$PATH" GO_PACKAGE_COVERAGE_THRESHOLD=94.9 \

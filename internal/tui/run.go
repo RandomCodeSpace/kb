@@ -68,15 +68,15 @@ func runProgram(
 	model := newModel(st, watcher, user, ctx)
 	preferencePath, preferencePathErr := tuiPreferencesPath(databasePath, user)
 	if preferencePathErr == nil {
-		model.boardView.showCancelled, model.preferenceErr = loadCancelledPreference(preferencePath)
+		model.restorePreferences(preferencePath)
 	} else {
 		model.preferenceErr = preferencePathErr
 	}
-	model.saveCancelled = func(show bool) error {
+	model.savePreferences = func(preferences tuiPreferences) error {
 		if preferencePathErr != nil {
 			return preferencePathErr
 		}
-		return saveCancelledPreference(preferencePath, show)
+		return saveTUIPreferences(preferencePath, preferences)
 	}
 	if settingsNew != nil {
 		model.settingsNew = func() *settingsModel { return settingsNew(ctx) }
