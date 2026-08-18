@@ -472,7 +472,7 @@ func TestLegacyShortLinkDuplicateRequiresMatchingQualifiedProvenance(t *testing.
 		t.Fatal(err)
 	}
 	if err := st.RecordImportLinks("alice", []store.ImportLink{{
-		Source: refA.Source.Name, Kind: refA.Kind, ExternalKey: legacyIssueExternalKey(refA, issueA),
+		Source: refA.Source.Name, Kind: refA.Kind, ExternalKey: "github:forge.test/owner/repo#93",
 		Link: issueA.Ref, URL: issueA.URL, Title: issueA.Title,
 	}}); err != nil {
 		t.Fatal(err)
@@ -485,6 +485,12 @@ func TestLegacyShortLinkDuplicateRequiresMatchingQualifiedProvenance(t *testing.
 	other, err := service.duplicates("alice", refB, []Issue{issueB})
 	if err != nil || (other[0] != nil && other[0].Via == "link") {
 		t.Fatalf("cross-source legacy duplicate = %+v, %v", other, err)
+	}
+	reconfigured := refB
+	reconfigured.Source.Name = refA.Source.Name
+	other, err = service.duplicates("alice", reconfigured, []Issue{issueB})
+	if err != nil || (other[0] != nil && other[0].Via == "link") {
+		t.Fatalf("reconfigured-path legacy duplicate = %+v, %v", other, err)
 	}
 }
 

@@ -264,12 +264,11 @@ func (s *Service) legacyDuplicate(user string, ref Ref, issue Issue, link, exter
 	if err != nil {
 		return nil, err
 	}
-	legacyKey := legacyIssueExternalKey(ref, issue)
 	for _, imported := range provenance {
 		if imported.Source != ref.Source.Name || imported.Kind != ref.Kind {
 			continue
 		}
-		if imported.ExternalKey == externalKey || imported.ExternalKey == legacyKey || imported.URL == issue.URL {
+		if imported.ExternalKey == externalKey || imported.URL == issue.URL {
 			return &Duplicate{ID: tasks[0].ID, Title: tasks[0].Title, Via: "link"}, nil
 		}
 	}

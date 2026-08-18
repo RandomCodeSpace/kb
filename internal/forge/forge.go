@@ -1037,15 +1037,6 @@ func importIssueProvenance(ref forgeRef, issue forgeIssue) (link, externalKey st
 	return link, externalKey
 }
 
-func legacyIssueExternalKey(ref Ref, issue Issue) string {
-	issueID := strings.TrimPrefix(issue.Ref, ref.Kind+"#")
-	host := ""
-	if base, err := url.Parse(ref.Source.BaseURL); err == nil {
-		host = base.Host
-	}
-	return fmt.Sprintf("%s:%s/%s#%s", ref.Kind, host, ref.Project, issueID)
-}
-
 func resolveForgeTestTarget(storedBase, storedPAT string, probe forgeTestProbe) (forgeTestTarget, error) {
 	target := forgeTestTarget{baseURL: storedBase, pat: storedPAT}
 	suppliedBase := trimmedForgeProbeValue(probe.BaseURL)
