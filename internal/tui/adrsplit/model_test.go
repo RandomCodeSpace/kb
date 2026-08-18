@@ -595,6 +595,91 @@ func TestPointerControlsClipScrolledRowsAndGuardBusyWork(t *testing.T) {
 	}
 }
 
+func TestPointerControlsActivateEveryVisibleInputAndReviewControl(t *testing.T) {
+	closed, _, _ := newTestModel()
+	closed.Close()
+	if handler := closed.MouseHandler(80, 24); handler != nil {
+		t.Fatal("closed overlay exposed a mouse handler")
+	}
+
+	input, _, _ := newTestModel()
+	pointerActivate(t, input, "Source:")
+	if input.source != sourceFile || input.focus != "file" {
+		t.Fatalf("source click state = source:%d focus:%q", input.source, input.focus)
+	}
+	pointerActivate(t, input, "ADR file:")
+	if input.focus != "file" {
+		t.Fatalf("file click focus = %q", input.focus)
+	}
+	pointerActivate(t, input, "Source:")
+	if input.source != sourcePaste || input.focus != "adr" {
+		t.Fatalf("source return state = source:%d focus:%q", input.source, input.focus)
+	}
+	pointerActivate(t, input, "Max stories:")
+	if input.focus != "max" {
+		t.Fatalf("max click focus = %q", input.focus)
+	}
+	pointerActivate(t, input, "Propose stories")
+	if !input.statusIsError || !strings.Contains(input.status, "paste an ADR") {
+		t.Fatalf("empty pointer split status = %q error=%v", input.status, input.statusIsError)
+	}
+	input.adr.SetValue("draft")
+	pointerActivate(t, input, "Cancel")
+	if !input.guardClose {
+		t.Fatal("dirty pointer cancel did not open the discard guard")
+	}
+
+	review, _, _ := newTestModel()
+	review.stage = stageReview
+	review.rows = rowsFromDrafts([]ai.Draft{testDraft("one"), testDraft("two")})
+	pointerActivate(t, review, "[x] include")
+	if review.rows[0].include {
+		t.Fatal("pointer include did not toggle the selected row")
+	}
+	pointerActivate(t, review, "Title:")
+	if review.focus != "title:0" {
+		t.Fatalf("title click focus = %q", review.focus)
+	}
+	pointerActivate(t, review, "Priority:")
+	if review.focus != "prio:0" {
+		t.Fatalf("priority click focus = %q", review.focus)
+	}
+	pointerActivate(t, review, "Effort:")
+	if review.focus != "effort:0" {
+		t.Fatalf("effort click focus = %q", review.focus)
+	}
+	pointerActivate(t, review, "Destination:")
+	if review.focus != "dest" {
+		t.Fatalf("destination click focus = %q", review.focus)
+	}
+	pointerActivate(t, review, "Back to source")
+	if review.stage != stageInput || review.focus != "source" || len(review.rows) != 0 {
+		t.Fatalf("pointer back state = stage:%d focus:%q rows:%d", review.stage, review.focus, len(review.rows))
+	}
+
+	add, store, _ := newTestModel()
+	add.stage = stageReview
+	add.rows = rowsFromDrafts([]ai.Draft{testDraft("one")})
+	command := pointerActivate(t, add, "Add selected (1)")
+	if !add.adding || command == nil {
+		t.Fatalf("pointer add state = adding:%v command:%v", add.adding, command)
+	}
+	if next := add.Update(commandMsg(t, command)); next != nil || add.adding || add.createdCount != 1 || len(store.calls) != 1 {
+		t.Fatalf("pointer add completion = next:%v adding:%v created:%d calls:%d", next, add.adding, add.createdCount, len(store.calls))
+	}
+}
+
+func pointerActivate(t *testing.T, model *Model, needle string) tea.Cmd {
+	t.Helper()
+	view := model.View(100, 30)
+	line, x := visibleTextPosition(t, view, needle)
+	command := pointerRelease(model.MouseHandler(100, 30), x, line)
+	if command == nil {
+		t.Fatalf("pointer control %q did not produce an action", needle)
+	}
+	return model.Update(commandMsg(t, command))
+}
+
 func visibleTextPosition(t *testing.T, view, needle string) (int, int) {
 	t.Helper()
 	for y, line := range strings.Split(ansi.Strip(view), "\n") {

@@ -469,6 +469,64 @@ func TestPointerControlsClipRowsAndRejectBusyOrStaleSnapshots(t *testing.T) {
 	}
 }
 
+func TestPointerAndAsyncGuardsCoverInputEdges(t *testing.T) {
+	backend := &fakeBackend{sources: []store.ForgeSource{{Name: "primary"}}, preview: forge.Preview{Drafts: []forge.Draft{{Draft: ai.Draft{Title: "one"}}}}}
+	m := openModel(t, backend, &fakeStore{})
+
+	// Results from a prior open must be ignored.
+	if m.Update(sourcesLoadedMsg{session: m.session + 1, sources: backend.sources}) != nil {
+		t.Fatal("stale source result returned a command")
+	}
+	if m.Update(pointerActionMsg{target: "source", session: m.session, generation: m.generation}) != nil || m.focus != 0 {
+		t.Fatalf("source pointer focus = %d", m.focus)
+	}
+	if m.Update(pointerActionMsg{target: "max", session: m.session, generation: m.generation}) != nil || m.focus != 2 {
+		t.Fatalf("max pointer focus = %d", m.focus)
+	}
+
+	// A preview cannot start without a configured source.
+	m.sources = nil
+	m.ref.SetValue("acme/kb")
+	if m.startPreview() != nil || m.status != "configure a forge integration first" {
+		t.Fatalf("empty-source preview status = %q", m.status)
+	}
+	m.sources = backend.sources
+	preview := m.Update(pointerActionMsg{target: "import", session: m.session, generation: m.generation})
+	if preview == nil || m.operation != "preview" {
+		t.Fatal("pointer import did not start preview")
+	}
+	m.Update(preview())
+	if m.stage != stageReview {
+		t.Fatalf("preview stage = %d", m.stage)
+	}
+
+	// Invalid, out-of-range, and already-created rows are inert.
+	m.rows[0].include = true
+	m.rows[0].created = true
+	for _, target := range []string{"row:nope", "row:-1", "row:9", "row:0"} {
+		m.Update(pointerActionMsg{target: target, session: m.session, generation: m.generation})
+	}
+	if !m.rows[0].include {
+		t.Fatal("invalid or created row pointer changed selection")
+	}
+
+	// A queued created row advances without invoking the backend.
+	m.operation, m.queue, m.queuePos = "create", []int{0}, 0
+	if command := m.nextWrite(); command != nil || m.operation != "" {
+		t.Fatalf("created row retry state = operation %q command %v", m.operation, command)
+	}
+
+	// Preview state is rendered while the asynchronous command is active.
+	m.stage, m.operation = stageInput, "preview"
+	if view := m.View(60, 16); !strings.Contains(view, "fetching configured forge data") {
+		t.Fatalf("preview progress missing:\n%s", view)
+	}
+	m.Close()
+	if m.MouseHandler(60, 16) != nil {
+		t.Fatal("closed import overlay exposed a pointer handler")
+	}
+}
+
 func importVisibleTextPosition(t *testing.T, view string, width, height int, needle string) (int, int) {
 	t.Helper()
 	frameWidth, frameHeight := ansi.StringWidth(strings.Split(ansi.Strip(view), "\n")[0]), len(strings.Split(ansi.Strip(view), "\n"))
