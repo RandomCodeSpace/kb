@@ -473,7 +473,7 @@ func TestLegacyShortLinkDuplicateRequiresMatchingQualifiedProvenance(t *testing.
 	}
 	if err := st.RecordImportLinks("alice", []store.ImportLink{{
 		Source: refA.Source.Name, Kind: refA.Kind, ExternalKey: "github:forge.test/owner/repo#93",
-		Link: issueA.Ref, URL: issueA.URL, Title: issueA.Title,
+		Link: issueA.Ref, URL: issueA.URL, Title: legacyTask.Title,
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -491,6 +491,23 @@ func TestLegacyShortLinkDuplicateRequiresMatchingQualifiedProvenance(t *testing.
 	other, err = service.duplicates("alice", reconfigured, []Issue{issueB})
 	if err != nil || (other[0] != nil && other[0].Via == "link") {
 		t.Fatalf("reconfigured-path legacy duplicate = %+v, %v", other, err)
+	}
+	_, keyB := issueProvenance(refB, issueB)
+	deleted, err := st.AddTaskWithImportLink("alice", board.Task{Title: "deleted B", Tags: []string{linkTagPrefix + issueB.Ref, importTagPrefix + keyB}}, store.ImportLink{
+		Source: refB.Source.Name, Kind: refB.Kind, ExternalKey: keyB, Link: issueB.Ref, URL: issueB.URL, Title: "deleted B",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CancelTask("alice", deleted.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DeleteCancelledTask("alice", deleted.ID); err != nil {
+		t.Fatal(err)
+	}
+	other, err = service.duplicates("alice", refB, []Issue{issueB})
+	if err != nil || (other[0] != nil && other[0].Via == "link") {
+		t.Fatalf("deleted-card provenance cross-joined surviving card = %+v, %v", other, err)
 	}
 }
 
@@ -961,11 +978,11 @@ func TestGitLabReferenceAndFetchDispatchBranches(t *testing.T) {
 func TestForgeHTTPAndProbeFailureBranches(t *testing.T) {
 	ref := forgeRef{Source: store.ForgeSource{Name: "gh", Kind: "github", BaseURL: "https://forge.test"}, Kind: "github", Project: "owner/repo", Issue: 1}
 	path := "/repos/owner/repo/issues/1"
-	if _, err := (&server{}).forgeGet(context.Background(), ref, "https://forge.test/api/v3", path, nil); err == nil {
+	if _, err := (&Service{}).forgeGet(context.Background(), ref, "https://forge.test/api/v3", path, nil); err == nil {
 		t.Fatal("nil client accepted")
 	}
 	transportErr := errors.New("transport failed")
-	service := &server{forgeClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	service := &Service{forgeClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, transportErr
 	})}}
 	if _, err := service.forgeGet(context.Background(), ref, "https://forge.test/api/v3", path, nil); err == nil {

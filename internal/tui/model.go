@@ -259,7 +259,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.detail.IsOpen() {
 		switch msg := message.(type) {
 		case tea.KeyPressMsg:
-			if m.detail.OwnsInput() {
+			if m.detail.OwnsInput() && msg.String() != "ctrl+c" {
 				return m, m.updateDetail(message)
 			}
 			switch msg.String() {

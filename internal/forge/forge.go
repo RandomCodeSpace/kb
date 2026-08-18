@@ -63,14 +63,6 @@ type Service struct {
 	importDriftLocks boardLocks
 }
 
-// server is retained as an internal receiver name while the pre-existing HTTP
-// adapters are reduced to calls into Service. It is not exported.
-type server = Service
-
-type storyDraft = ai.Draft
-
-const skillScopeReadOnly = ai.ScopeReadOnly
-
 // New constructs the direct-store forge service. Nil collaborators select
 // the guarded production clients.
 func New(st *store.Store, runner *ai.Runner, client *http.Client) *Service {
@@ -98,22 +90,6 @@ func (l *boardLocks) get(user string) *sync.Mutex {
 		l.m[user] = new(sync.Mutex)
 	}
 	return l.m[user]
-}
-
-type forgeSourceResponse struct {
-	Name     string `json:"name"`
-	Kind     string `json:"kind"`
-	BaseURL  string `json:"base_url"`
-	HasToken bool   `json:"has_token"`
-}
-
-type forgeSourcesResponse struct {
-	Sources []forgeSourceResponse `json:"sources"`
-}
-
-type forgeTestResponse struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
 }
 
 type forgeTestProbe struct {
@@ -151,90 +127,6 @@ type forgeHTTPResponse struct {
 	status int
 	header http.Header
 	body   []byte
-}
-
-type importPreviewRequest struct {
-	Source string `json:"source"`
-	Ref    string `json:"ref"`
-	Max    int    `json:"max"`
-}
-
-type importLinksRequest struct {
-	Source string            `json:"source"`
-	Items  []importLinksItem `json:"items"`
-}
-
-type importProvenanceRequest struct {
-	Link string `json:"link"`
-}
-
-type importProvenanceItem struct {
-	Source      string `json:"source"`
-	ExternalKey string `json:"external_key"`
-	Title       string `json:"title"`
-	URL         string `json:"url"`
-}
-
-type importProvenanceResponse struct {
-	Items []importProvenanceItem `json:"items"`
-}
-
-type importDriftRequest struct {
-	Source      string `json:"source"`
-	ExternalKey string `json:"external_key"`
-}
-
-type importDriftAcceptRequest struct {
-	Source      string `json:"source"`
-	ExternalKey string `json:"external_key"`
-	Revision    string `json:"revision"`
-}
-
-type importDriftAcceptResponse struct {
-	BaselineAt string `json:"baseline_at"`
-}
-
-type importDriftResponse struct {
-	State         string `json:"state"`
-	Link          string `json:"link"`
-	URL           string `json:"url"`
-	TitleChanged  *bool  `json:"title_changed,omitempty"`
-	UpstreamTitle string `json:"upstream_title"`
-	BaselineTitle string `json:"baseline_title"`
-	BaselineAt    string `json:"baseline_at"`
-	CheckedAt     string `json:"checked_at"`
-	Summary       string `json:"summary"`
-	Revision      string `json:"revision,omitempty"`
-}
-
-type importLinksItem struct {
-	ExternalKey string `json:"external_key"`
-	Link        string `json:"link"`
-	URL         string `json:"url"`
-	Title       string `json:"title"`
-}
-
-type importDuplicate struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Via   string `json:"via"`
-}
-
-type importPreviewDraft struct {
-	storyDraft
-	Link        string           `json:"link,omitempty"`
-	ExternalKey string           `json:"external_key,omitempty"`
-	URL         string           `json:"url,omitempty"`
-	DuplicateOf *importDuplicate `json:"duplicate_of,omitempty"`
-}
-
-type importPreviewResponse struct {
-	Kind      string               `json:"kind"`
-	TotalHint int                  `json:"total_hint"`
-	Fetched   int                  `json:"fetched"`
-	Truncated bool                 `json:"truncated"`
-	Note      string               `json:"note"`
-	Drafts    []importPreviewDraft `json:"drafts"`
 }
 
 type gitLabIssue struct {
@@ -462,7 +354,7 @@ func forgeRefID(raw string) (int, error) {
 
 // fetchIssue loads one forge issue and its bounded human discussion for the
 // import pipeline. The caller already chose the configured source in D1.
-func (s *server) fetchIssue(ctx context.Context, ref forgeRef) (forgeIssue, error) {
+func (s *Service) fetchIssue(ctx context.Context, ref forgeRef) (forgeIssue, error) {
 	issue, apiBase, issuePath, err := s.fetchIssueSnapshot(ctx, ref)
 	if err != nil {
 		return forgeIssue{}, err
@@ -477,7 +369,7 @@ func (s *server) fetchIssue(ctx context.Context, ref forgeRef) (forgeIssue, erro
 
 // fetchIssueSnapshot reads only the issue record. Acceptance needs no
 // discussion, so keeping this distinct prevents an unnecessary second egress.
-func (s *server) fetchIssueSnapshot(ctx context.Context, ref forgeRef) (forgeIssue, string, string, error) {
+func (s *Service) fetchIssueSnapshot(ctx context.Context, ref forgeRef) (forgeIssue, string, string, error) {
 	if ref.Issue <= 0 {
 		return forgeIssue{}, "", "", forgeRequestError(ref, "")
 	}
@@ -519,7 +411,7 @@ func (s *server) fetchIssueSnapshot(ctx context.Context, ref forgeRef) (forgeIss
 
 // fetchIssues loads open project, board, or milestone issues. Board filtering
 // deliberately remains out of scope: D1 resolves boards to their project.
-func (s *server) fetchIssues(ctx context.Context, ref forgeRef, max int) (issues []forgeIssue, totalHint int, truncated bool, note string, err error) {
+func (s *Service) fetchIssues(ctx context.Context, ref forgeRef, max int) (issues []forgeIssue, totalHint int, truncated bool, note string, err error) {
 	if ref.Issue > 0 {
 		issue, err := s.fetchIssue(ctx, ref)
 		if err != nil {
@@ -550,7 +442,7 @@ type forgeIssuePageState struct {
 	note           string
 }
 
-func (s *server) fetchIssuePages(ctx context.Context, ref forgeRef, apiBase, listPath string, query url.Values, max int) ([]forgeIssue, int, bool, string, error) {
+func (s *Service) fetchIssuePages(ctx context.Context, ref forgeRef, apiBase, listPath string, query url.Values, max int) ([]forgeIssue, int, bool, string, error) {
 	state := forgeIssuePageState{}
 	page := 1
 	for {
@@ -632,7 +524,7 @@ func (state *forgeIssuePageState) result() ([]forgeIssue, int, bool, string, err
 	return state.issues, state.totalHint, state.truncated, state.note, nil
 }
 
-func (s *server) forgeIssuesList(ctx context.Context, ref forgeRef, apiBase string) (string, url.Values, error) {
+func (s *Service) forgeIssuesList(ctx context.Context, ref forgeRef, apiBase string) (string, url.Values, error) {
 	listPath, query, err := forgeIssueListRequest(ref)
 	if err != nil {
 		return "", nil, forgeRequestError(ref, listPath)
@@ -698,7 +590,7 @@ func setForgeMilestoneQuery(kind string, query url.Values, body []byte) bool {
 	return true
 }
 
-func (s *server) fetchForgeComments(ctx context.Context, ref forgeRef, apiBase, issuePath string) ([]string, error) {
+func (s *Service) fetchForgeComments(ctx context.Context, ref forgeRef, apiBase, issuePath string) ([]string, error) {
 	commentsPath := issuePath + "/comments"
 	if ref.Kind == "gitlab" {
 		commentsPath = issuePath + "/notes"
@@ -798,7 +690,7 @@ func forgeProjectPath(ref forgeRef) (string, error) {
 	}
 }
 
-func (s *server) forgeGet(ctx context.Context, ref forgeRef, apiBase, path string, query url.Values) (forgeHTTPResponse, error) {
+func (s *Service) forgeGet(ctx context.Context, ref forgeRef, apiBase, path string, query url.Values) (forgeHTTPResponse, error) {
 	endpoint := strings.TrimRight(apiBase, "/") + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()

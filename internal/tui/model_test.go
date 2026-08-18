@@ -252,6 +252,29 @@ func TestDriftReviewBlocksTaskActionsAndBoardMouse(t *testing.T) {
 	}
 }
 
+func TestDriftReviewPreservesGlobalInterrupt(t *testing.T) {
+	for _, stage := range []string{"selection", "busy", "review"} {
+		t.Run(stage, func(t *testing.T) {
+			task := board.Task{ID: "one", Title: "One", Status: board.StatusTodo, Tags: []string{"link::github#1"}}
+			m := newModel(stubBoardReader{board: board.Board{Title: "Board", Tasks: []board.Task{task}}}, nil, "alice", context.Background())
+			m.board, m.loading = board.Board{Title: "Board", Tasks: []board.Task{task}}, false
+			m.detail.SetDriftBackend(rootDriftBackend{}, context.Background())
+			drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+			provenance := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'v', Text: "v"})
+			if stage != "busy" {
+				updateTestModel(t, &m, provenance())
+			}
+			if stage == "review" {
+				updateTestModel(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})())
+			}
+			quit := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+			if quit == nil || !m.stopped {
+				t.Fatalf("ctrl+c swallowed at %s: command=%v stopped=%t", stage, quit, m.stopped)
+			}
+		})
+	}
+}
+
 func completeBoardLoad(t *testing.T, model *Model, command tea.Cmd) tea.Cmd {
 	t.Helper()
 	if command == nil {

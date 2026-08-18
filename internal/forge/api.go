@@ -257,20 +257,18 @@ func (s *Service) duplicates(user string, ref Ref, issues []Issue) ([]*Duplicate
 
 func (s *Service) legacyDuplicate(user string, ref Ref, issue Issue, link, externalKey string) (*Duplicate, error) {
 	tasks, err := s.store.TasksByLink(user, linkTagPrefix+link)
-	if err != nil || len(tasks) == 0 {
+	if err != nil || len(tasks) != 1 {
 		return nil, err
 	}
 	provenance, err := s.store.ImportLinksByLink(user, link)
-	if err != nil {
+	if err != nil || len(provenance) != 1 {
 		return nil, err
 	}
-	for _, imported := range provenance {
-		if imported.Source != ref.Source.Name || imported.Kind != ref.Kind {
-			continue
-		}
-		if imported.ExternalKey == externalKey || imported.URL == issue.URL {
-			return &Duplicate{ID: tasks[0].ID, Title: tasks[0].Title, Via: "link"}, nil
-		}
+	imported := provenance[0]
+	if imported.Source == ref.Source.Name && imported.Kind == ref.Kind &&
+		(imported.ExternalKey == externalKey || imported.URL == issue.URL) &&
+		tasks[0].Title == imported.Title {
+		return &Duplicate{ID: tasks[0].ID, Title: tasks[0].Title, Via: "link"}, nil
 	}
 	return nil, nil
 }
