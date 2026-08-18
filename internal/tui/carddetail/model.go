@@ -1,4 +1,5 @@
-// Package carddetail renders the read-only full-card overlay for the TUI.
+// Package carddetail renders the full-card overlay and its direct-store
+// comment and blocker-link actions.
 package carddetail
 
 import (
@@ -7,6 +8,8 @@ import (
 	"time"
 	"unicode"
 
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
 	"charm.land/glamour/v2/styles"
@@ -46,6 +49,7 @@ type markdownRenderer func(source string, width int) string
 // Model owns the overlay's task snapshot, enriched detail, and scroll state.
 type Model struct {
 	reader         Reader
+	writer         Writer
 	user           string
 	task           board.Task
 	comments       []store.Comment
@@ -64,13 +68,26 @@ type Model struct {
 	renderMarkdown markdownRenderer
 	bodyLines      []string
 	bodyWidth      int
+
+	action        actionMode
+	actionSession uint64
+	commentInput  textarea.Model
+	linkInput     textinput.Model
+	currentBlocks bool
+	selection     int
+	confirm       bool
+	saving        bool
+	changed       bool
+	statusMessage string
+	statusIsError bool
 }
 
 // New creates a closed detail pane. A nil reader still shows board-resident
 // task fields; enrichment is simply unavailable to lightweight model tests.
 func New(reader Reader, user string) Model {
+	writer, _ := reader.(Writer)
 	return Model{
-		reader: reader, user: user, width: defaultWidth, height: defaultHeight,
+		reader: reader, writer: writer, user: user, width: defaultWidth, height: defaultHeight,
 		renderMarkdown: renderMarkdown,
 	}
 }
@@ -88,6 +105,7 @@ func (m Model) TaskID() string {
 
 // Open resets the pane to task and returns the asynchronous enrichment load.
 func (m *Model) Open(task board.Task) tea.Cmd {
+	m.actionSession++
 	m.task = task
 	m.comments = nil
 	m.links = store.TaskLinks{}
@@ -99,6 +117,13 @@ func (m *Model) Open(task board.Task) tea.Cmd {
 	m.linksErr = nil
 	m.tombstoneErr = nil
 	m.scroll = 0
+	m.action = actionNone
+	m.selection = 0
+	m.confirm = false
+	m.saving = false
+	m.changed = false
+	m.statusMessage = ""
+	m.statusIsError = false
 	if m.reader == nil {
 		m.rebuildBody()
 		return nil
@@ -130,6 +155,7 @@ func (m *Model) Refresh(task board.Task) tea.Cmd {
 // the current task identity.
 func (m *Model) Close() {
 	m.generation++
+	m.actionSession++
 	m.open = false
 	m.loading = false
 	m.reloadPending = false
@@ -137,6 +163,13 @@ func (m *Model) Close() {
 	m.bodyLines = nil
 	m.bodyWidth = 0
 	m.scroll = 0
+	m.action = actionNone
+	m.selection = 0
+	m.confirm = false
+	m.saving = false
+	m.changed = false
+	m.statusMessage = ""
+	m.statusIsError = false
 }
 
 // Resize updates the viewport used to bound persistent scroll state.
@@ -157,6 +190,8 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return nil
 	}
 	switch msg := message.(type) {
+	case mutationCompletedMsg:
+		return m.finishMutation(msg)
 	case detailLoadedMsg:
 		if msg.taskID != m.task.ID || msg.generation != m.generation {
 			return nil
@@ -172,8 +207,27 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		m.commentsErr = msg.commentsErr
 		m.linksErr = msg.linksErr
 		m.tombstoneErr = msg.tombstoneErr
+		m.reconcileDeleteActionAfterRefresh()
 		m.rebuildBody()
 	case tea.KeyPressMsg:
+		if m.action != actionNone {
+			return m.updateActionKey(msg)
+		}
+		if m.statusMessage != "" {
+			m.statusMessage = ""
+			m.statusIsError = false
+			m.rebuildBody()
+		}
+		switch msg.String() {
+		case "c":
+			return m.beginAction(actionAddComment)
+		case "d":
+			return m.beginAction(actionDeleteComment)
+		case "b":
+			return m.beginAction(actionAddLink)
+		case "u":
+			return m.beginAction(actionDeleteLink)
+		}
 		switch msg.String() {
 		case "up", "k", "pgup":
 			m.scroll = max(0, m.scroll-scrollAmount(msg.String()))
@@ -185,6 +239,42 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	}
 	m.clampScroll()
 	return nil
+}
+
+func (m *Model) reconcileDeleteActionAfterRefresh() {
+	count, noun := 0, ""
+	switch m.action {
+	case actionDeleteComment:
+		count, noun = len(m.comments), "comments"
+		if m.commentsErr != nil {
+			m.cancelDeleteActionAfterRefresh("comments unavailable; deletion cancelled", true)
+			return
+		}
+	case actionDeleteLink:
+		count, noun = len(m.linkChoices()), "blocker links"
+		if m.linksErr != nil {
+			m.cancelDeleteActionAfterRefresh("blocker links unavailable; deletion cancelled", true)
+			return
+		}
+	default:
+		return
+	}
+	if count == 0 {
+		m.cancelDeleteActionAfterRefresh(noun+" changed; none remain to remove", false)
+		return
+	}
+	m.selection = min(max(m.selection, 0), count-1)
+	if m.confirm {
+		m.confirm = false
+		m.setStatus(noun+" changed; review the selection and confirm again", false)
+	}
+}
+
+func (m *Model) cancelDeleteActionAfterRefresh(status string, isError bool) {
+	m.action = actionNone
+	m.selection = 0
+	m.confirm = false
+	m.setStatus(status, isError)
 }
 
 func scrollAmount(key string) int {
@@ -253,6 +343,7 @@ func (m *Model) frame(width, height int) (string, int, int) {
 	height = max(height, 1)
 	m.ensureBody(width, height)
 	innerWidth, innerHeight, paneHeight := paneGeometry(width, height)
+	displayWidth := max(innerWidth-2, 1)
 
 	lines := m.bodyLines
 	maxScroll := max(0, len(lines)-innerHeight)
@@ -264,11 +355,11 @@ func (m *Model) frame(width, height int) (string, int, int) {
 	}
 	visible := strings.Join(visibleLines, "\n")
 	visible = lipgloss.NewStyle().Width(innerWidth).Height(innerHeight).Render(visible)
-	footer := "e edit  esc close  ↑/↓ scroll"
+	footer := m.actionFooter(displayWidth)
 	if maxScroll > 0 {
 		footer = fmt.Sprintf("%s  %d/%d", footer, start+1, maxScroll+1)
 	}
-	content := visible + "\n" + ansi.Truncate(footer, innerWidth, "…")
+	content := visible + "\n" + fitDetailLine(footer, displayWidth)
 	frame := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		Padding(0, 1).
@@ -277,6 +368,17 @@ func (m *Model) frame(width, height int) (string, int, int) {
 		Render(content)
 	frame = fitTerminal(frame, width, height)
 	return frame, lipgloss.Width(frame), lipgloss.Height(frame)
+}
+
+func fitDetailLine(line string, width int) string {
+	width = max(width, 0)
+	if ansi.StringWidth(line) <= width {
+		return line
+	}
+	if width <= 1 {
+		return ansi.Cut("…", 0, width)
+	}
+	return ansi.Cut(line, 0, width-1) + "…"
 }
 
 func paneGeometry(width, height int) (innerWidth, innerHeight, paneHeight int) {
@@ -337,6 +439,9 @@ func fitTerminal(rendered string, width, height int) string {
 }
 
 func (m Model) renderBody(width int) string {
+	if m.action != actionNone {
+		return m.actionBody(width)
+	}
 	title := strings.TrimSpace(safeText(m.task.Title, false))
 	if m.task.Emoji != "" {
 		title = safeText(m.task.Emoji, false) + " " + title
@@ -367,6 +472,7 @@ func (m Model) renderBody(width int) string {
 	if refs := renderTaskLinks(m.links); refs != "" {
 		sections = append(sections, refs)
 	}
+	sections = append(sections, renderCompletionGate(m.task, m.links, m.loading, m.linksErr))
 	if m.linksErr != nil {
 		sections = append(sections, "blocker links error: "+safeText(m.linksErr.Error(), false))
 	}
@@ -482,6 +588,42 @@ func renderTaskLinks(links store.TaskLinks) string {
 		lines = append(lines, "blocked by  "+taskChips(links.BlockedBy))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func renderCompletionGate(task board.Task, links store.TaskLinks, loading bool, linksErr error) string {
+	var reasons []string
+	if warning := store.CompletionWarning(task); warning != "" {
+		reasons = append(reasons, warning)
+	}
+	var open []board.Task
+	for _, blocker := range links.BlockedBy {
+		if blocker.Status != board.StatusDone && blocker.Status != board.StatusCancelled {
+			open = append(open, blocker)
+		}
+	}
+	if len(open) > 0 {
+		noun := "open linked blocker"
+		if len(open) != 1 {
+			noun += "s"
+		}
+		reasons = append(reasons, fmt.Sprintf("%d %s %s", len(open), noun, taskChips(open)))
+	}
+	unknown := ""
+	if loading {
+		unknown = "linked blockers loading"
+	} else if linksErr != nil {
+		unknown = "linked blockers unavailable"
+	}
+	if len(reasons) > 0 {
+		if unknown != "" {
+			reasons = append(reasons, unknown)
+		}
+		return "completion gate  blocked: " + strings.Join(reasons, "; ")
+	}
+	if unknown != "" {
+		return "completion gate  unknown: " + unknown
+	}
+	return "completion gate  clear"
 }
 
 func taskChips(tasks []board.Task) string {

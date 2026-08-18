@@ -163,7 +163,7 @@ func (s *moveTestStore) UpdateAndMoveTask(
 	_ store.TaskPatch,
 	target *board.Status,
 	index *int,
-	_ func(board.Task) error,
+	guard func(board.Task) error,
 ) (board.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -175,6 +175,13 @@ func (s *moveTestStore) UpdateAndMoveTask(
 	if s.writeErr != nil {
 		return board.Task{}, s.writeErr
 	}
+	for _, task := range s.board.Tasks {
+		if task.ID == id && guard != nil {
+			if err := guard(task); err != nil {
+				return board.Task{}, err
+			}
+		}
+	}
 	s.board = oracleMoveBoard(s.board, id, *target, *index)
 	for _, task := range s.board.Tasks {
 		if task.ID == id {
@@ -182,6 +189,59 @@ func (s *moveTestStore) UpdateAndMoveTask(
 		}
 	}
 	return board.Task{}, errors.New("task not found")
+}
+
+func TestDropToDoneHonorsCompletionGuard(t *testing.T) {
+	current := moveFixture()
+	current.Tasks[0].Blocked = true
+	current.Tasks[0].Seq = 1
+	s := &moveTestStore{board: current}
+	m := loadedMoveModel(s)
+
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyRight})
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyRight})
+	drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if drop == nil {
+		t.Fatal("Done drop did not start")
+	}
+	updateTestModel(t, &m, drop())
+	if !m.move.statusError || !strings.Contains(m.move.status, "flagged blocked") {
+		t.Fatalf("Done drop bypassed local guard: error=%v status=%q", m.move.statusError, m.move.status)
+	}
+	if task := taskNamed(t, m.board, "A"); task.Status != board.StatusTodo {
+		t.Fatalf("refused task moved to %s", task.Status)
+	}
+}
+
+func TestDoneGuardActivatesStoreLinkedBlockerCheck(t *testing.T) {
+	st, err := store.Open(t.TempDir()+"/kb.db", []byte("tui-done-guard"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	blocker, err := st.AddTask("u", board.Task{Title: "Open blocker", Status: board.StatusDoing})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := st.AddTask("u", board.Task{Title: "Blocked card", Status: board.StatusTodo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.Link("u", blocker.ID, blocked.ID); err != nil {
+		t.Fatal(err)
+	}
+	to := board.StatusDone
+	if _, err := st.UpdateAndMoveTask("u", blocked.ID, store.TaskPatch{}, &to, nil, cardCompletionGuard(to)); err == nil || !strings.Contains(err.Error(), "still blocks") {
+		t.Fatalf("linked blocker gate = %v", err)
+	}
+	canonical, err := st.Board("u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task := taskNamed(t, canonical, "Blocked card"); task.Status != board.StatusTodo {
+		t.Fatalf("linked blocker refusal moved task to %s", task.Status)
+	}
 }
 
 // oracleMoveBoard is deliberately independent from the preview implementation.

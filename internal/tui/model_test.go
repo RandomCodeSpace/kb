@@ -126,6 +126,29 @@ func completeBoardLoad(t *testing.T, model *Model, command tea.Cmd) tea.Cmd {
 	return updateTestModel(t, model, message)
 }
 
+func drainModelCommands(t *testing.T, model *Model, commands ...tea.Cmd) {
+	t.Helper()
+	queue := append([]tea.Cmd(nil), commands...)
+	for steps := 0; len(queue) > 0; steps++ {
+		if steps > 30 {
+			t.Fatal("command drain did not settle")
+		}
+		command := queue[0]
+		queue = queue[1:]
+		if command == nil {
+			continue
+		}
+		message := command()
+		if batch, ok := message.(tea.BatchMsg); ok {
+			queue = append(queue, batch...)
+			continue
+		}
+		if next := updateTestModel(t, model, message); next != nil {
+			queue = append(queue, next)
+		}
+	}
+}
+
 func runPoll(t *testing.T, model *Model) tea.Cmd {
 	t.Helper()
 	read := updateTestModel(t, model, pollTickMsg{})
@@ -246,6 +269,123 @@ func TestCardDetailOpenWithoutASelectedTaskIsNoop(t *testing.T) {
 	updateTestModel(t, &m, boardCardClickedMsg{taskID: "missing"})
 	if m.detail.IsOpen() {
 		t.Fatal("missing card click opened detail")
+	}
+}
+
+func TestRootDetailCommentAndLinkActionsOwnInputAndRefresh(t *testing.T) {
+	st := newSettingsTestStore(t)
+	current, err := st.AddTask("alice", board.Task{Title: "Current", Status: board.StatusTodo, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := st.AddTask("alice", board.Task{Title: "Blocker", Status: board.StatusDoing, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(st, nil, "alice")
+	completeBoardLoad(t, &m, m.Init())
+	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'c', Text: "c"})
+	if !m.detail.IsOpen() || !m.detail.OwnsInput() || !strings.Contains(ansi.Strip(m.View().Content), "ADD COMMENT") {
+		t.Fatalf("comment composer did not own detail input:\n%s", ansi.Strip(m.View().Content))
+	}
+	for _, char := range "xdraq" {
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: char, Text: string(char)})
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyDelete})
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if !m.detail.IsOpen() || m.detail.OwnsInput() {
+		t.Fatal("first Escape did not return from composer to detail")
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.detail.IsOpen() {
+		t.Fatal("second Escape did not close detail")
+	}
+
+	// Reopen and persist the same collision-heavy text. If root shortcuts had
+	// stolen x/d/r/a/Delete, this would either mutate the task or save less text.
+	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'c', Text: "c"})
+	for _, char := range "xdraq" {
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: char, Text: string(char)})
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyDelete})
+	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}))
+	comments, err := st.Comments("alice", current.ID)
+	if err != nil || len(comments) != 1 || comments[0].Body != "xdraq" || !m.detail.IsOpen() || m.detail.OwnsInput() {
+		t.Fatalf("saved comments = %+v, err:%v detail:%v owned:%v", comments, err, m.detail.IsOpen(), m.detail.OwnsInput())
+	}
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "comment c1 added") {
+		t.Fatalf("comment acknowledgement missing from status line:\n%s", view)
+	}
+
+	// Idle d is deliberately detail-scoped comment deletion, not task kill.
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if !m.detail.OwnsInput() || !strings.Contains(ansi.Strip(m.View().Content), "DELETE COMMENT") {
+		t.Fatalf("idle d did not open comment deletion:\n%s", ansi.Strip(m.View().Content))
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+	comments, err = st.Comments("alice", current.ID)
+	if err != nil || len(comments) != 0 {
+		t.Fatalf("comments after confirmed delete = %+v, %v", comments, err)
+	}
+
+	// Add the incoming direction: target blocks the current card.
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'b', Text: "b"})
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyTab})
+	for _, char := range fmt.Sprintf("%d", other.Seq) {
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: char, Text: string(char)})
+	}
+	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+	links, err := st.TaskLinks("alice", current.ID)
+	if err != nil || len(links.BlockedBy) != 1 || links.BlockedBy[0].ID != other.ID {
+		t.Fatalf("incoming links = %+v, %v", links, err)
+	}
+	view := ansi.Strip(m.View().Content)
+	if !strings.Contains(view, "blocked by") || !strings.Contains(view, "completion gate") {
+		t.Fatalf("link and completion gate missing:\n%s", view)
+	}
+
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'u', Text: "u"})
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+	links, err = st.TaskLinks("alice", current.ID)
+	if err != nil || len(links.BlockedBy) != 0 || len(links.Blocks) != 0 {
+		t.Fatalf("links after confirmed unlink = %+v, %v", links, err)
+	}
+}
+
+func TestPurgedDetailIgnoresLateMutationResult(t *testing.T) {
+	st := newSettingsTestStore(t)
+	task, err := st.AddTask("alice", board.Task{Title: "Soon gone", Status: board.StatusTodo, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(st, nil, "alice")
+	completeBoardLoad(t, &m, m.Init())
+	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'c', Text: "c"})
+	for _, char := range "late" {
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: char, Text: string(char)})
+	}
+	save := updateTestModel(t, &m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	if save == nil || !m.detail.OwnsInput() {
+		t.Fatal("comment write did not start")
+	}
+	if _, err := st.DeleteTask("alice", task.ID); err != nil {
+		t.Fatal(err)
+	}
+	updateTestModel(t, &m, boardLoadedMsg{board: board.Board{Title: "Board"}})
+	if m.detail.IsOpen() || m.detail.TaskID() != "" {
+		t.Fatal("purged card retained a detail pane")
+	}
+	if next := updateTestModel(t, &m, save()); next != nil || m.detail.IsOpen() || m.detail.TaskID() != "" {
+		t.Fatalf("late result reopened detail: command:%v open:%v task:%q", next, m.detail.IsOpen(), m.detail.TaskID())
+	}
+	if _, err := st.Comments("alice", task.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("purged task became readable after late result: %v", err)
 	}
 }
 
