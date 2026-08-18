@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 )
 
 const maxPaneWidth = 100
@@ -201,41 +202,11 @@ func (m Model) areaBlock(target, label string, area textarea.Model, width, rows 
 }
 
 func inputDisplay(input textinput.Model, focused bool, width int) string {
-	value := input.Value()
-	if value == "" {
-		value = input.Placeholder
-	}
-	runes := []rune(value)
-	position := min(max(input.Position(), 0), len(runes))
-	safe := sanitize(value)
-	safePosition := len([]rune(sanitize(string(runes[:position]))))
-	if !focused {
-		return ansi.Truncate(safe, max(width, 0), "")
-	}
-	return cursorViewport(safe, safePosition, width)
+	return formview.Input(input, focused, width, sanitize, cursorViewport)
 }
 
 func areaDisplay(area textarea.Model, focused bool, width, rows int) []string {
-	value := area.Value()
-	if value == "" {
-		value = area.Placeholder
-	}
-	logical := strings.Split(value, "\n")
-	line := min(max(area.Line(), 0), len(logical)-1)
-	start := max(line-rows+1, 0)
-	end := min(start+rows, len(logical))
-	out := make([]string, 0, rows)
-	for i := start; i < end; i++ {
-		content := sanitize(logical[i])
-		if focused && i == line {
-			content = cursorViewport(content, min(area.Column(), len([]rune(content))), max(width-4, 1))
-		}
-		out = append(out, "    "+ansi.Truncate(content, max(width-4, 0), ""))
-	}
-	for len(out) < rows {
-		out = append(out, "    ")
-	}
-	return out
+	return formview.Area(area, focused, width, rows, sanitize, cursorViewport)
 }
 
 func cursorViewport(value string, position, width int) string {
