@@ -1168,11 +1168,47 @@ func TestAutoShipInputOwnershipMatrix(t *testing.T) {
 	}
 }
 
+var fullScreenClear = []byte("\x1b[H\x1b[2J")
+
+// finalFullScreenFrame drops terminal capability/mode negotiation and any
+// preliminary renderer clear, retaining the last complete full-screen frame.
+// Bubble Tea may order those startup writes differently under load; the frame
+// after its full-screen clear is the user-visible contract the golden owns.
+func finalFullScreenFrame(output []byte) ([]byte, bool) {
+	start := bytes.LastIndex(output, fullScreenClear)
+	if start < 0 {
+		return nil, false
+	}
+	return output[start:], true
+}
+
+func TestFinalFullScreenFrame(t *testing.T) {
+	first := append(append([]byte("negotiation"), fullScreenClear...), []byte("old")...)
+	second := append(append(first, []byte("resize-diff")...), fullScreenClear...)
+	output := append(second, []byte("stable")...)
+	frame, ok := finalFullScreenFrame(output)
+	expected := append(append([]byte(nil), fullScreenClear...), []byte("stable")...)
+	if !ok || !bytes.Equal(frame, expected) {
+		t.Fatalf("frame = %q, %v", frame, ok)
+	}
+	if frame, ok := finalFullScreenFrame([]byte("no clear")); ok || frame != nil {
+		t.Fatalf("missing clear = %q, %v", frame, ok)
+	}
+}
+
 func TestEmptyBoardGolden(t *testing.T) {
 	m := NewModel(stubBoardReader{board: board.Board{Title: "Board"}}, nil, "default")
 	// Start from a loaded snapshot so the golden records the frame, not a
 	// renderer-timing-dependent diff from "loading" to "ready".
 	m.loading = false
+	// teatest starts the Bubble Tea program before it delivers the size from
+	// WithInitialTermSize. Under race/load, the renderer can therefore write an
+	// 80-column first frame and a cursor-positioned resize diff before WaitFor
+	// returns. Size the model through its real update contract first so the
+	// first rendered frame is already the 120-column golden; teatest still sends
+	// the same WindowSizeMsg and exercises that program path.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	m = sized.(Model)
 	tm := teatest.NewTestModel(t, m,
 		teatest.WithInitialTermSize(120, 20),
 		teatest.WithProgramOptions(tea.WithColorProfile(colorprofile.ASCII)),
@@ -1182,7 +1218,11 @@ func TestEmptyBoardGolden(t *testing.T) {
 	teatest.WaitFor(t, io.TeeReader(tm.Output(), &captured), func(output []byte) bool {
 		return bytes.Contains(output, []byte("ready | j/k cards"))
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
-	teatest.RequireEqualOutput(t, captured.Bytes())
+	frame, ok := finalFullScreenFrame(captured.Bytes())
+	if !ok {
+		t.Fatal("teatest output did not contain a full-screen frame")
+	}
+	teatest.RequireEqualOutput(t, frame)
 	tm.Send(tea.KeyPressMsg{Code: 'q'})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(time.Second))
 }
