@@ -130,6 +130,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.stopped {
 		return m, nil
 	}
+	if carddetail.IsMutationMessage(message) {
+		return m, m.updateDetail(message)
+	}
 	if m.move.lifted == nil && m.move.notice && isBoardUserInput(message) {
 		m.move.notice = false
 	}
@@ -168,26 +171,37 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyPressMsg:
 			switch msg.String() {
 			case "esc":
+				if m.detail.OwnsInput() {
+					return m, m.updateDetail(message)
+				}
 				m.detail.Close()
 				return m, nil
 			case "e":
+				if m.detail.OwnsInput() {
+					return m, m.updateDetail(message)
+				}
 				if m.editor.Enabled() {
 					if task, ok := m.taskByID(m.detail.TaskID()); ok {
 						return m, m.editor.OpenEdit(task)
 					}
 				}
 				return m, nil
-			case "q", "ctrl+c":
-				// Preserve the root quit contract while the overlay is open.
+			case "q":
+				if m.detail.OwnsInput() {
+					return m, m.updateDetail(message)
+				}
+				// Preserve the root quit contract while idle detail is open.
+			case "ctrl+c":
+				// The explicit terminal interrupt remains global.
 			default:
-				return m, m.detail.Update(message)
+				return m, m.updateDetail(message)
 			}
 		case boardCardClickedMsg, boardColumnClickedMsg,
 			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
 			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
 			return m, nil
 		default:
-			detailCmd = m.detail.Update(message)
+			detailCmd = m.updateDetail(message)
 		}
 	}
 	switch msg := message.(type) {
@@ -386,6 +400,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, next
 	}
 	return m, detailCmd
+}
+
+func (m *Model) updateDetail(message tea.Msg) tea.Cmd {
+	command := m.detail.Update(message)
+	if m.detail.ConsumeChanged() {
+		return batchCommands(command, m.requireFreshBoard())
+	}
+	return command
 }
 
 func isBoardUserInput(message tea.Msg) bool {

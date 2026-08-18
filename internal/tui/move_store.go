@@ -40,9 +40,10 @@ func (m *Model) startCardDrop() tea.Cmd {
 	m.move.announcePosition("Dropping")
 	moveStore := m.moveStore
 	user := m.user
+	guard := cardCompletionGuard(lift.target)
 	return func() tea.Msg {
 		_, writeErr := moveStore.UpdateAndMoveTask(
-			user, lift.taskID, store.TaskPatch{}, &lift.target, &index, nil,
+			user, lift.taskID, store.TaskPatch{}, &lift.target, &index, guard,
 		)
 		canonical, reloadErr := moveStore.Board(user)
 		return cardMoveStoredMsg{
@@ -50,6 +51,23 @@ func (m *Model) startCardDrop() tea.Cmd {
 			board:    canonical,
 			writeErr: writeErr, reloadErr: reloadErr,
 		}
+	}
+}
+
+func cardCompletionGuard(target board.Status) func(board.Task) error {
+	if target != board.StatusDone {
+		return nil
+	}
+	return func(task board.Task) error {
+		warning := store.CompletionWarning(task)
+		if warning == "" {
+			return nil
+		}
+		ref := task.ID
+		if task.Seq > 0 {
+			ref = fmt.Sprintf("#%d", task.Seq)
+		}
+		return store.NewCompletionBlockedError(warning, ref, task.Title)
 	}
 }
 
