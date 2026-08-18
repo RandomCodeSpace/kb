@@ -677,6 +677,9 @@ func TestMoveBoardViewCoverageEdges(t *testing.T) {
 	if got := settingsBoardFooter("ready", "off", false, false, 1); got != "q" {
 		t.Fatalf("tiny footer = %q", got)
 	}
+	if got := settingsBoardFooter("ready", "off", false, false, 20); got != "s | ? help | q quit" {
+		t.Fatalf("help-only footer = %q", got)
+	}
 	hits := []boardHit{{x1: 5, y1: 5, status: board.StatusDoing}}
 	handler := boardMouseHandler(hits, false)
 	if command := handler(tea.MouseClickMsg{X: 1, Y: 1, Button: tea.MouseLeft}); command == nil {

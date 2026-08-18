@@ -433,6 +433,70 @@ func TestCardDetailOpenWithoutASelectedTaskIsNoop(t *testing.T) {
 	}
 }
 
+func TestBoardHelpOverlayDocumentsCoreMutationKeys(t *testing.T) {
+	m := NewModel(stubBoardReader{}, nil, "alice")
+	m.loading = false
+	m.board = boardViewFixture(time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC))
+	m.width, m.height = 80, 24
+
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: '?', Text: "?"})
+	view := m.View()
+	plainView := ansi.Strip(view.Content)
+	for _, want := range []string{
+		"Keyboard help", "enter  open card", "space  lift or drop card",
+		"/      text filter", "f      label filter", "x      cancel card", "X      clear filter",
+	} {
+		if !strings.Contains(plainView, want) {
+			t.Errorf("help missing %q:\n%s", want, plainView)
+		}
+	}
+	if view.OnMouse != nil {
+		t.Fatal("help overlay leaked board mouse input")
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.helpOpen {
+		t.Fatal("escape did not close help")
+	}
+}
+
+func TestBoardHelpRoutingAndAvailableFeatureHints(t *testing.T) {
+	st := newSettingsTestStore(t)
+	m := NewModel(st, nil, "alice")
+	m.loading = false
+	m.settingsNew = func() *settingsModel { return newSettingsModel(st, "alice", context.Background()) }
+	m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
+	m.helpOpen = true
+
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'j', Text: "j"})
+	updateTestModel(t, &m, boardCardClickedMsg{taskID: "ignored"})
+	if !m.helpOpen {
+		t.Fatal("help closed on ignored board input")
+	}
+	for _, want := range []string{"n      new card", "e      edit card", "s      settings", "a      split ADR", "i      import forge issue"} {
+		if view := ansi.Strip(m.View().Content); !strings.Contains(view, want) {
+			t.Errorf("enabled help missing %q:\n%s", want, view)
+		}
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: '?', Text: "?"})
+	if m.helpOpen {
+		t.Fatal("question mark did not close help")
+	}
+	m.helpOpen = true
+	if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'q', Text: "q"}); command == nil || !m.stopped {
+		t.Fatal("help did not preserve root quit")
+	}
+
+	tiny := NewModel(stubBoardReader{}, nil, "alice")
+	tiny.width, tiny.height = 3, 2
+	if got := tiny.keyboardHelpOverlay("board"); got != "board" {
+		t.Fatalf("tiny help changed background: %q", got)
+	}
+	tiny.width, tiny.height = 30, 4
+	if got := ansi.Strip(tiny.keyboardHelpOverlay("board")); !strings.Contains(got, "esc  close help") {
+		t.Fatalf("short help lost close hint:\n%s", got)
+	}
+}
+
 func TestRootDetailCommentAndLinkActionsOwnInputAndRefresh(t *testing.T) {
 	st := newSettingsTestStore(t)
 	current, err := st.AddTask("alice", board.Task{Title: "Current", Status: board.StatusTodo, Prio: 3})
@@ -1139,6 +1203,7 @@ func TestAutoShipInputOwnershipMatrix(t *testing.T) {
 		own  func(*Model)
 	}{
 		{name: "settings", own: func(m *Model) { m.settings = &settingsModel{} }},
+		{name: "help", own: func(m *Model) { m.helpOpen = true }},
 		{name: "editor", own: func(m *Model) { _ = m.editor.OpenAdd(board.StatusTodo) }},
 		{name: "ADR", own: func(m *Model) {
 			m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())

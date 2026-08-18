@@ -523,7 +523,7 @@ func (m Model) autoShipInputOwned() bool {
 	if detailOwns && m.action.mode == taskActionChecklist && m.action.task.ID == m.detail.TaskID() && !m.detail.OwnsInput() {
 		detailOwns = false
 	}
-	return m.settings != nil || m.editor.IsOpen() || m.adr.IsOpen() ||
+	return m.helpOpen || m.settings != nil || m.editor.IsOpen() || m.adr.IsOpen() ||
 		m.issueImport.IsOpen() ||
 		m.filter.focus != filterUnfocused || m.move.lifted != nil || m.move.saving ||
 		detailOwns

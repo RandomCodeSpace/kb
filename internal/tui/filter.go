@@ -237,6 +237,12 @@ func (m *Model) handleFilterKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		case "enter", " ":
 			tag := labels[m.filter.labelIndex]
 			return true, m.mutateFilter(func(filter *boardFilterState) { filter.toggleTag(tag) })
+		case "x":
+			return false, nil
+		case "X":
+			if m.filter.active() {
+				return true, m.mutateFilter(func(filter *boardFilterState) { filter.clear() })
+			}
 		}
 		return true, nil
 	default:
@@ -249,7 +255,7 @@ func (m *Model) handleFilterKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 				m.filter.input.Blur()
 			}
 			return true, nil
-		case "x":
+		case "X":
 			if m.filter.active() {
 				return true, m.mutateFilter(func(filter *boardFilterState) { filter.clear() })
 			}

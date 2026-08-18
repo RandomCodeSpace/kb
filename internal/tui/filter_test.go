@@ -121,13 +121,54 @@ func TestFilterKeyboardRoutingPersistenceAndClear(t *testing.T) {
 	if clear != nil {
 		t.Fatalf("escape returned %v", clear)
 	}
-	clear = updateTestModel(t, &m, tea.KeyPressMsg{Code: 'x'})
+	clear = updateTestModel(t, &m, tea.KeyPressMsg{Code: 'X', Text: "X"})
 	if clear == nil || m.filter.active() || !m.boardView.showCancelled {
 		t.Fatalf("clear = filter:%+v cancelled:%v command:%v", m.filter.value(), m.boardView.showCancelled, clear)
 	}
 	finishPreferenceCommand(t, &m, clear)
 	if len(saved) != 3 || saved[2].ShowCancelled != true || saved[2].Filter.Text != "" || len(saved[2].Filter.Tags) != 0 {
 		t.Fatalf("saved snapshots = %+v", saved)
+	}
+}
+
+func TestFilterClearDoesNotShadowCancelCard(t *testing.T) {
+	m := NewModel(stubBoardReader{}, nil, "alice")
+	m.loading = false
+	m.board = filterFixture()
+	m.filter.restore(boardFilter{Text: "login"})
+	m.boardView.normalizeSelection(m.filteredBoard())
+	m.savePreferences = func(tuiPreferences) error { return nil }
+
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if !m.action.open() || !m.filter.active() {
+		t.Fatalf("lowercase x = action:%#v filter:%+v", m.action, m.filter.value())
+	}
+	m.action.close()
+
+	clear := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'X', Text: "X"})
+	if clear == nil || m.action.open() || m.filter.active() {
+		t.Fatalf("uppercase X = action:%#v filter:%+v command:%v", m.action, m.filter.value(), clear)
+	}
+}
+
+func TestFilterLabelFocusUsesDistinctCancelAndClearKeys(t *testing.T) {
+	m := NewModel(stubBoardReader{}, nil, "alice")
+	m.loading = false
+	m.board = filterFixture()
+	m.filter.restore(boardFilter{Tags: []string{"bug"}})
+	m.filter.focus = filterLabels
+	m.savePreferences = func(tuiPreferences) error { return nil }
+
+	if handled, command := m.handleFilterKey(tea.KeyPressMsg{Code: 'x', Text: "x"}); handled || command != nil {
+		t.Fatalf("lowercase x stayed in label filter: handled=%v command=%v", handled, command)
+	}
+	if handled, command := m.handleFilterKey(tea.KeyPressMsg{Code: 'X', Text: "X"}); !handled || command == nil || m.filter.active() {
+		t.Fatalf("uppercase X did not clear label filter: handled=%v command=%v filter=%+v", handled, command, m.filter.value())
+	}
+
+	m.filter.focus = filterLabels
+	if handled, command := m.handleFilterKey(tea.KeyPressMsg{Code: 'X', Text: "X"}); !handled || command != nil {
+		t.Fatalf("inactive uppercase X = handled:%v command:%v", handled, command)
 	}
 }
 

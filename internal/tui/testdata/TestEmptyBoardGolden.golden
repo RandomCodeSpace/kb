@@ -17,4 +17,4 @@
 │                                      │ │                                     │ │                                     │
 │                                      │ │                                     │ │                                     │
 └──────────────────────────────────────┘ └─────────────────────────────────────┘ └─────────────────────────────────────┘
-ready | j/k cards | h/l/tab columns | 1-4 jump | c cancelled:off | q quit
+ready | j/k cards | h/l/tab columns | 1-4 jump | c cancelled:off | ? help | q quit
