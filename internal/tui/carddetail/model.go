@@ -393,13 +393,14 @@ func (m *Model) Overlay(background string, width, height int) string {
 	}
 	width = max(width, 1)
 	height = max(height, 1)
+	background = fitTerminal(background, width, height)
 	frame, paneWidth, paneHeight := m.frame(width, height)
 	x := max((width-paneWidth)/2, 0)
 	y := max((height-paneHeight)/2, 0)
-	return lipgloss.NewCompositor(
+	return fitTerminal(lipgloss.NewCompositor(
 		lipgloss.NewLayer(background),
 		lipgloss.NewLayer(frame).X(x).Y(y).Z(1),
-	).Render()
+	).Render(), width, height)
 }
 
 func (m *Model) frame(width, height int) (string, int, int) {

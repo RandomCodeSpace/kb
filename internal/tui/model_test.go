@@ -1691,15 +1691,20 @@ func (s *renderedScreen) consumeEscape(frame []byte) (int, error) {
 	}
 }
 
-func (s *renderedScreen) writeRune(value rune, width, height int) {
-	if s.cursorY >= 0 && s.cursorY < height && s.cursorX >= 0 && s.cursorX < width {
-		s.cells[s.cursorY][s.cursorX] = renderedCell{value: value, style: s.style.key()}
-	}
+func (s *renderedScreen) writeRune(value rune, width, height int) error {
 	cellWidth := ansi.StringWidth(string(value))
 	if cellWidth < 1 {
 		cellWidth = 1
 	}
+	if s.cursorX < 0 || s.cursorX+cellWidth > width {
+		return fmt.Errorf("printable cell crosses right margin at x=%d width=%d", s.cursorX, cellWidth)
+	}
+	if s.cursorY < 0 || s.cursorY >= height {
+		return fmt.Errorf("printable cell crosses bottom margin at y=%d", s.cursorY)
+	}
+	s.cells[s.cursorY][s.cursorX] = renderedCell{value: value, style: s.style.key()}
 	s.cursorX += cellWidth
+	return nil
 }
 
 func (s *renderedScreen) consumeByte(frame []byte, width, height int) (int, error) {
@@ -1725,7 +1730,9 @@ func (s *renderedScreen) consumeByte(frame []byte, width, height int) (int, erro
 		if value == utf8.RuneError && size == 1 {
 			return 0, fmt.Errorf("invalid UTF-8")
 		}
-		s.writeRune(value, width, height)
+		if err := s.writeRune(value, width, height); err != nil {
+			return 0, err
+		}
 		return size, nil
 	}
 	return 1, nil
@@ -1809,6 +1816,120 @@ func TestRenderedCellGridNormalizesEraseAndCursor(t *testing.T) {
 	if string(first) != string(second) {
 		t.Fatalf("equivalent SGR grids differ: %q != %q", first, second)
 	}
+	if _, err := renderedCellGrid(append(append([]byte{}, fullScreenClear...), []byte("abc")...), 2, 2); err == nil {
+		t.Fatal("terminal parser accepted printable output beyond the right margin")
+	}
+	if _, err := renderedCellGrid(append(append([]byte{}, fullScreenClear...), []byte("ab\nc")...), 2, 2); err != nil {
+		t.Fatalf("terminal parser rejected a full-width row followed by newline: %v", err)
+	}
+	if _, err := renderedCellGrid(append(append([]byte{}, fullScreenClear...), []byte("a\nb\nc")...), 2, 2); err == nil {
+		t.Fatal("terminal parser accepted printable output below the bottom margin")
+	}
+}
+
+func TestWideDetailFrameRemainsInsideTerminalGrid(t *testing.T) {
+	task := board.Task{
+		ID: "wide", Seq: 10, Title: strings.Repeat("wide detail ", 20),
+		Desc:   strings.Repeat("## Section\nbody with wide text and an emoji 🧭\n\n", 40),
+		Status: board.StatusTodo,
+	}
+	reader := stubDetailBoardReader{stubBoardReader{board: board.Board{Title: "Work", Tasks: []board.Task{task}}}}
+	m := NewModel(reader, nil, "alice")
+	completeBoardLoad(t, &m, m.Init())
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 427, Height: 73})
+	load := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	updateTestModel(t, &m, load())
+
+	assertGrid := func(width, height int) {
+		t.Helper()
+		content := ansi.Strip(m.View().Content)
+		lines := strings.Split(content, "\n")
+		if len(lines) > height {
+			t.Fatalf("%dx%d root detail has %d rows", width, height, len(lines))
+		}
+		for row, line := range lines {
+			if got := ansi.StringWidth(line); got > width {
+				t.Fatalf("%dx%d row %d width = %d", width, height, row, got)
+			}
+		}
+		for _, edge := range []string{"╭", "╮", "╰", "╯"} {
+			if strings.Count(content, edge) != 1 {
+				t.Fatalf("%dx%d detail edge %q count = %d", width, height, edge, strings.Count(content, edge))
+			}
+		}
+	}
+
+	assertGrid(427, 73)
+	for range 20 {
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyPgDown})
+	}
+	assertGrid(427, 73)
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 80, Height: 20})
+	assertGrid(80, 20)
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 427, Height: 73})
+	assertGrid(427, 73)
+}
+
+func TestWideDetailPTYRendersCompleteBorderInsideCellGrid(t *testing.T) {
+	task := board.Task{
+		ID: "wide", Seq: 10, Title: "Long detail",
+		Desc:   strings.Repeat("## Section\nbody with wide text and an emoji 🧭\n\n", 40),
+		Status: board.StatusTodo,
+	}
+	reader := stubDetailBoardReader{stubBoardReader{board: board.Board{Title: "Work", Tasks: []board.Task{task}}}}
+	m := NewModel(reader, nil, "alice")
+	completeBoardLoad(t, &m, m.Init())
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 427, Height: 73})
+	load := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	updateTestModel(t, &m, load())
+
+	tm := teatest.NewTestModel(t, m,
+		teatest.WithInitialTermSize(427, 73),
+		teatest.WithProgramOptions(tea.WithColorProfile(colorprofile.ASCII)),
+	)
+	t.Cleanup(func() { _ = tm.Quit() })
+	output := tm.Output()
+	var captured bytes.Buffer
+	waitFor := func(t *testing.T, marker string) {
+		t.Helper()
+		teatest.WaitFor(t, io.TeeReader(output, &captured), func(output []byte) bool {
+			return bytes.Contains(output, []byte(marker))
+		}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+	assertGrid := func(t *testing.T, width, height int) {
+		t.Helper()
+		frame, ok := finalFullScreenFrame(captured.Bytes())
+		if !ok {
+			t.Fatal("detail output did not contain a full-screen frame")
+		}
+		grid, err := renderedCellGrid(frame, width, height)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plain := ansi.Strip(string(grid))
+		for _, edge := range []string{"╭", "╮", "╰", "╯"} {
+			if strings.Count(plain, edge) != 1 {
+				t.Fatalf("cell grid detail edge %q count = %d", edge, strings.Count(plain, edge))
+			}
+		}
+	}
+
+	waitFor(t, "esc close")
+	assertGrid(t, 427, 73)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	waitFor(t, "9/")
+	assertGrid(t, 427, 73)
+	tm.Send(tea.MouseWheelMsg{X: 213, Y: 36, Button: tea.MouseWheelDown})
+	waitFor(t, "12/")
+	assertGrid(t, 427, 73)
+	tm.Send(tea.WindowSizeMsg{Width: 80, Height: 20})
+	waitFor(t, "esc close")
+	assertGrid(t, 80, 20)
+	tm.Send(tea.WindowSizeMsg{Width: 427, Height: 73})
+	waitFor(t, "esc close")
+	assertGrid(t, 427, 73)
+	tm.Send(tea.KeyPressMsg{Code: 'q'})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(5*time.Second))
 }
 
 func TestEmptyBoardGolden(t *testing.T) {
