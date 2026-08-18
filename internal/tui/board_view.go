@@ -31,6 +31,8 @@ const (
 type boardViewState struct {
 	column        int
 	rows          [len(boardStatuses)]int
+	scrolls       [len(boardStatuses)]int
+	manualScroll  [len(boardStatuses)]bool
 	showCancelled bool
 }
 
@@ -45,6 +47,10 @@ type boardPointerMoveMsg struct {
 	beforeTaskID string
 }
 type boardPointerUpMsg struct{}
+type boardColumnScrolledMsg struct {
+	status board.Status
+	offset int
+}
 
 type boardHitKind uint8
 
@@ -56,12 +62,14 @@ const (
 )
 
 type boardHit struct {
-	x0, x1 int
-	y0, y1 int
-	status board.Status
-	taskID string
-	kind   boardHitKind
-	tag    string
+	x0, x1    int
+	y0, y1    int
+	status    board.Status
+	taskID    string
+	kind      boardHitKind
+	tag       string
+	scroll    int
+	maxScroll int
 }
 
 type renderedColumn struct {
@@ -90,29 +98,35 @@ func (s *boardViewState) handleKey(key string, current board.Board) boardAction 
 			s.column--
 		}
 		s.clampRow(current)
+		s.manualScroll[s.column] = false
 		return boardToggledCancelled
 	case "left", "h", "shift+tab":
 		s.moveColumn(-1, current)
+		s.manualScroll[s.column] = false
 		return boardChanged
 	case "right", "l", "tab":
 		s.moveColumn(1, current)
+		s.manualScroll[s.column] = false
 		return boardChanged
 	case "up", "k":
 		if s.rows[s.column] > 0 {
 			s.rows[s.column]--
 		}
+		s.manualScroll[s.column] = false
 		return boardChanged
 	case "down", "j":
 		count := taskCount(current, boardStatuses[s.column])
 		if s.rows[s.column]+1 < count {
 			s.rows[s.column]++
 		}
+		s.manualScroll[s.column] = false
 		return boardChanged
 	case "1", "2", "3", "4":
 		at := int(key[0] - '1')
 		if at < len(s.visibleStatuses()) {
 			s.column = at
 			s.clampRow(current)
+			s.manualScroll[s.column] = false
 			return boardChanged
 		}
 	}
@@ -139,6 +153,7 @@ func (s *boardViewState) focusColumn(status board.Status, current board.Board) {
 		if candidate == status {
 			s.column = i
 			s.clampRow(current)
+			s.manualScroll[s.column] = false
 			return
 		}
 	}
@@ -156,6 +171,7 @@ func (s *boardViewState) focusTask(current board.Board, id string) bool {
 			if status == task.Status {
 				s.column = i
 				s.rows[i] = taskIndex(current, task.Status, id)
+				s.manualScroll[i] = false
 				return true
 			}
 		}
@@ -491,7 +507,14 @@ func (m Model) renderBoardColumn(status board.Status, width, height int) rendere
 
 	contentHeight := max(height-2, 0)
 	cardLines, owners, labelSpans := m.renderTaskLines(tasks, status, inner)
-	start := visibleCardStart(cardLines, owners, m.boardView.rows[statusIndex(status)], contentHeight)
+	columnIndex := statusIndex(status)
+	maxScroll := max(len(cardLines)-contentHeight, 0)
+	start := visibleCardStart(cardLines, owners, m.boardView.rows[columnIndex], contentHeight)
+	if m.boardView.manualScroll[columnIndex] {
+		start = min(max(m.boardView.scrolls[columnIndex], 0), maxScroll)
+	}
+	hits[0].scroll = start
+	hits[0].maxScroll = maxScroll
 	for row := 0; row < contentHeight; row++ {
 		source := start + row
 		line := ""
@@ -618,6 +641,30 @@ func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.C
 	pointerActive := len(active) > 0 && active[0]
 	return func(message tea.MouseMsg) tea.Cmd {
 		mouse := message.Mouse()
+		if _, wheel := message.(tea.MouseWheelMsg); wheel {
+			delta := 0
+			switch mouse.Button {
+			case tea.MouseWheelUp:
+				delta = -3
+			case tea.MouseWheelDown:
+				delta = 3
+			default:
+				return nil
+			}
+			for i := len(hits) - 1; i >= 0; i-- {
+				hit := hits[i]
+				if hit.kind != boardHitDefault || hit.taskID != "" ||
+					mouse.X < hit.x0 || mouse.X >= hit.x1 || mouse.Y < hit.y0 || mouse.Y >= hit.y1 {
+					continue
+				}
+				offset := min(max(hit.scroll+delta, 0), hit.maxScroll)
+				if offset == hit.scroll {
+					return nil
+				}
+				return func() tea.Msg { return boardColumnScrolledMsg{status: hit.status, offset: offset} }
+			}
+			return nil
+		}
 		if _, release := message.(tea.MouseReleaseMsg); release {
 			if mouse.Button == tea.MouseLeft || (mouse.Button == tea.MouseNone && pointerActive) {
 				return func() tea.Msg { return boardPointerUpMsg{} }

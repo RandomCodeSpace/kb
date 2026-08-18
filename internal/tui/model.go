@@ -182,7 +182,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case boardCardClickedMsg, boardColumnClickedMsg,
 			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
-			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
 			return m, nil
 		}
 	}
@@ -195,7 +195,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.updateTaskAction(message)
 		case boardCardClickedMsg, boardColumnClickedMsg,
 			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
-			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
 			return m, nil
 		}
 	}
@@ -222,7 +222,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, command
 		case boardCardClickedMsg, boardColumnClickedMsg,
 			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
-			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
 			return m, nil
 		}
 	}
@@ -257,7 +257,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.editor.Update(msg)
 		case boardCardClickedMsg, boardColumnClickedMsg,
 			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
-			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
 			return m, nil
 		}
 	}
@@ -277,7 +277,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.adr.Update(msg)
 		case boardCardClickedMsg, boardColumnClickedMsg,
 			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
-			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
 			return m, nil
 		}
 	}
@@ -311,7 +311,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case boardCardClickedMsg, boardColumnClickedMsg,
 			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
-			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
 			return m, nil
 		default:
 			detailCmd = m.updateDetail(message)
@@ -475,6 +475,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.startCardDrop()
+	case boardColumnScrolledMsg:
+		column := statusIndex(msg.status)
+		m.boardView.scrolls[column] = max(msg.offset, 0)
+		m.boardView.manualScroll[column] = true
 	case cardMoveStoredMsg:
 		return m, m.finishCardDrop(msg)
 	case filterTextClickedMsg:
@@ -546,7 +550,7 @@ func isBoardUserInput(message tea.Msg) bool {
 	switch message.(type) {
 	case tea.KeyPressMsg, boardCardClickedMsg, boardColumnClickedMsg,
 		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg,
-		filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg:
+		boardColumnScrolledMsg, filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg:
 		return true
 	default:
 		return false
@@ -737,8 +741,12 @@ func (m Model) View() tea.View {
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
 	if !m.helpOpen && m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() && !m.issueImport.IsOpen() && !m.detail.OwnsInput() {
-		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
-		view.OnMouse = boardMouseHandler(hits, pointerActive)
+		if m.detail.IsOpen() {
+			view.OnMouse = m.detail.MouseHandler(m.width, m.height)
+		} else {
+			pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
+			view.OnMouse = boardMouseHandler(hits, pointerActive)
+		}
 	}
 	return view
 }
