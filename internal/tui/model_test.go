@@ -180,7 +180,7 @@ func TestIssueImportOwnsRootInputAndCancelsLiftOnOpen(t *testing.T) {
 		t.Fatal("active import leaked board input")
 	}
 	view := m.View()
-	if view.OnMouse != nil || !strings.Contains(ansi.Strip(view.Content), "Forge issue import") {
+	if view.OnMouse == nil || !strings.Contains(ansi.Strip(view.Content), "Forge issue import") {
 		t.Fatal("active import did not own rendering/mouse")
 	}
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -457,6 +457,62 @@ func requireMouseCommand(t *testing.T, command tea.Cmd, action string) tea.Cmd {
 	return command
 }
 
+func pointerCommandForLabel(t *testing.T, view tea.View, label string) tea.Cmd {
+	t.Helper()
+	handler := requireMouseHandler(t, view.OnMouse, label)
+	for row, line := range strings.Split(ansi.Strip(view.Content), "\n") {
+		if index := strings.Index(line, label); index >= 0 {
+			x := ansi.StringWidth(line[:index])
+			if command := handler(tea.MouseClickMsg{X: x, Y: row, Button: tea.MouseLeft}); command != nil {
+				return command
+			}
+			return requireMouseCommand(t,
+				handler(tea.MouseReleaseMsg{X: x, Y: row, Button: tea.MouseLeft}),
+				"click "+label,
+			)
+		}
+	}
+	t.Fatalf("rendered label %q not found:\n%s", label, ansi.Strip(view.Content))
+	return nil
+}
+
+func TestPointerOpensAndClosesHelpFromVisibleControls(t *testing.T) {
+	m := mouseRoutingTestModel(t)
+	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "? help")())
+	if !m.helpOpen {
+		t.Fatal("pointer did not open keyboard help")
+	}
+	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "close help")())
+	if m.helpOpen {
+		t.Fatal("pointer did not close keyboard help")
+	}
+}
+
+func TestPointerBoardFooterOpensPrimarySurfaces(t *testing.T) {
+	for _, tc := range []struct {
+		label string
+		open  func(Model) bool
+	}{
+		{label: "n new", open: func(m Model) bool { return m.editor.IsOpen() }},
+		{label: "s settings", open: func(m Model) bool { return m.settings != nil }},
+		{label: "a split ADR", open: func(m Model) bool { return m.adr.IsOpen() }},
+		{label: "i import", open: func(m Model) bool { return m.issueImport.IsOpen() }},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			st := newSettingsTestStore(t)
+			m := NewModel(st, nil, "alice")
+			m.width, m.height = 427, 73
+			m.settingsNew = func() *settingsModel { return newSettingsModel(st, "alice", context.Background()) }
+			m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
+			completeBoardLoad(t, &m, m.Init())
+			updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), tc.label)())
+			if !tc.open(m) {
+				t.Fatalf("pointer did not open %s", tc.label)
+			}
+		})
+	}
+}
+
 func TestBoardMouseWheelScrollsHoveredColumn(t *testing.T) {
 	m := mouseRoutingTestModel(t)
 
@@ -550,8 +606,8 @@ func TestBoardHelpOverlayDocumentsCoreMutationKeys(t *testing.T) {
 			t.Errorf("help missing %q:\n%s", want, plainView)
 		}
 	}
-	if view.OnMouse != nil {
-		t.Fatal("help overlay leaked board mouse input")
+	if view.OnMouse == nil {
+		t.Fatal("help overlay did not own pointer input")
 	}
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m.helpOpen {
@@ -727,8 +783,8 @@ func TestRootRoutesCreateEditorAndRefreshesAcknowledgedSave(t *testing.T) {
 		t.Fatalf("new editor = open:%v command:%v", m.editor.IsOpen(), loadLabels)
 	}
 	updateTestModel(t, &m, loadLabels())
-	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "CREATE CARD / todo") || m.View().OnMouse != nil {
-		t.Fatalf("create overlay missing or board mouse active:\n%s", view)
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "CREATE CARD / todo") || m.View().OnMouse == nil {
+		t.Fatalf("create overlay missing or editor pointer inactive:\n%s", view)
 	}
 	for _, char := range "Root-created card" {
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: char, Text: string(char)})
@@ -1165,7 +1221,7 @@ func TestADRSplitRootRoutingMoveCancellationAndShutdown(t *testing.T) {
 	if !m.adr.IsOpen() || m.move.lifted != nil || m.board.Tasks[0].ID != task.ID {
 		t.Fatalf("ADR open did not restore lift: open=%v move=%#v board=%#v", m.adr.IsOpen(), m.move, m.board)
 	}
-	if view := m.View(); view.OnMouse != nil || !strings.Contains(ansi.Strip(view.Content), "SPLIT ADR INTO STORIES") {
+	if view := m.View(); view.OnMouse == nil || !strings.Contains(ansi.Strip(view.Content), "SPLIT ADR INTO STORIES") {
 		t.Fatalf("ADR view routing mouse=%v content:\n%s", view.OnMouse != nil, ansi.Strip(view.Content))
 	}
 

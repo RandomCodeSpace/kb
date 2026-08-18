@@ -168,6 +168,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.helpOpen {
 		switch msg := message.(type) {
+		case helpClosedMsg:
+			m.helpOpen = false
+			return m, nil
 		case tea.KeyPressMsg:
 			switch msg.String() {
 			case "esc", "?":
@@ -182,7 +185,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case boardCardClickedMsg, boardColumnClickedMsg,
 			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
-			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg,
+			boardFooterClickedMsg:
 			return m, nil
 		}
 	}
@@ -431,6 +435,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.detail.Open(task)
 			}
 		}
+	case boardFooterClickedMsg:
+		return m, m.handleBoardFooterClick(msg.key)
 	case boardColumnClickedMsg:
 		if m.move.saving {
 			return m, nil
@@ -709,8 +715,11 @@ func batchCommands(commands ...tea.Cmd) tea.Cmd {
 // regions back into the update loop. Editing behavior arrives in later slices.
 func (m Model) View() tea.View {
 	content, hits := m.renderBoard()
+	var overlayMouse func(tea.MouseMsg) tea.Cmd
 	if m.helpOpen {
-		content = m.keyboardHelpOverlay(content)
+		surface := m.keyboardHelpSurface(content)
+		content = surface.Content
+		overlayMouse = surface.Pointer
 		hits = nil
 	}
 	if m.detail.IsOpen() {
@@ -718,28 +727,39 @@ func (m Model) View() tea.View {
 		hits = nil
 	}
 	if m.settings != nil {
-		content = m.settings.View(m.width, m.height)
+		surface := m.settings.Surface(m.width, m.height)
+		content = surface.Content
+		overlayMouse = surface.Pointer
 		hits = nil
 	}
 	if m.adr.IsOpen() {
 		content = m.adr.Overlay(content, m.width, m.height)
+		overlayMouse = m.adr.MouseHandler(m.width, m.height)
 		hits = nil
 	}
 	if m.editor.IsOpen() {
 		content = m.editor.Overlay(content, m.width, m.height)
+		overlayMouse = m.editor.MouseHandler(m.width, m.height)
 		hits = nil
 	}
 	if m.action.open() {
-		content = m.taskActionOverlay(content)
+		surface := m.taskActionSurface(content)
+		content = surface.Content
+		overlayMouse = surface.Pointer
 		hits = nil
 	}
 	if m.issueImport.IsOpen() {
 		content = m.issueImport.Overlay(content, m.width, m.height)
+		overlayMouse = m.issueImport.MouseHandler(m.width, m.height)
 		hits = nil
 	}
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
+	if overlayMouse != nil {
+		view.OnMouse = overlayMouse
+		return view
+	}
 	if !m.helpOpen && m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() && !m.issueImport.IsOpen() && !m.detail.OwnsInput() {
 		if m.detail.IsOpen() {
 			view.OnMouse = m.detail.MouseHandler(m.width, m.height)
@@ -749,6 +769,45 @@ func (m Model) View() tea.View {
 		}
 	}
 	return view
+}
+
+func (m *Model) handleBoardFooterClick(key string) tea.Cmd {
+	switch key {
+	case "q":
+		m.stopped = true
+		m.reloadPending = false
+		return tea.Quit
+	case "?":
+		m.helpOpen = true
+	case "s":
+		if m.settingsNew != nil {
+			m.settings = m.settingsNew()
+			return m.settings.Init()
+		}
+	case "a":
+		if m.adr.Enabled() && !m.move.saving {
+			return m.adr.Open()
+		}
+	case "i":
+		if m.issueImport.Enabled() && !m.writeBusy() {
+			return m.issueImport.Open()
+		}
+	case "n":
+		if m.editor.Enabled() {
+			return m.editor.OpenAdd(boardStatuses[m.boardView.column])
+		}
+	case "e":
+		if m.editor.Enabled() {
+			if task, ok := m.selectedTask(); ok {
+				return m.editor.OpenEdit(task)
+			}
+		}
+	case "c":
+		if m.boardView.handleKey("c", m.filteredBoard()) == boardToggledCancelled {
+			return m.queuePreferences()
+		}
+	}
+	return nil
 }
 
 func (m Model) taskByID(id string) (board.Task, bool) {

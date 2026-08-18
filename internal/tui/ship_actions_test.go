@@ -249,6 +249,81 @@ func TestCancelledTaskCannotOpenKillPrompt(t *testing.T) {
 	}
 }
 
+func TestPointerShipChoiceUsesExistingWritePath(t *testing.T) {
+	m, backend, tasks := actionTestModel(t, board.Task{
+		Title: "Pointer ship", Status: board.StatusTodo,
+		Checks: []board.Check{{Text: "still open"}},
+	})
+	task := tasks[0]
+	m.openShipPrompt(task, 1)
+	command := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Ship anyway")())
+	if command == nil {
+		t.Fatal("pointer ship did not start the existing write path")
+	}
+	finishActionCommand(t, &m, command)
+	stored, err := backend.Task("alice", task.ID)
+	if err != nil || stored.Status != board.StatusDone || stored.Checks[0].Done {
+		t.Fatalf("pointer ship result = %+v, %v", stored, err)
+	}
+}
+
+func TestPointerKillReasonUsesExistingWritePath(t *testing.T) {
+	m, backend, tasks := actionTestModel(t, board.Task{Title: "Pointer kill", Status: board.StatusTodo})
+	task := tasks[0]
+	m.openKillPrompt(task)
+	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Reason:")())
+	for _, value := range "mouse reason" {
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: value, Text: string(value)})
+	}
+	command := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Kill with reason")())
+	if command == nil {
+		t.Fatal("pointer kill did not start the existing write path")
+	}
+	finishActionCommand(t, &m, command)
+	stored, err := backend.Task("alice", task.ID)
+	if err != nil || stored.Status != board.StatusCancelled {
+		t.Fatalf("pointer kill result = %+v, %v", stored, err)
+	}
+}
+
+func TestPointerChecklistUsesExistingWritePath(t *testing.T) {
+	m, backend, tasks := actionTestModel(t, board.Task{
+		Title: "Pointer checklist", Status: board.StatusTodo,
+		Checks: []board.Check{{Text: "click this check"}, {Text: "leave open"}},
+	})
+	task := tasks[0]
+	m.openChecklist(task)
+	command := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "click this check")())
+	if command == nil {
+		t.Fatal("pointer checklist did not start the existing write path")
+	}
+	finishActionCommand(t, &m, command)
+	stored, err := backend.Task("alice", task.ID)
+	if err != nil || !stored.Checks[0].Done || stored.Checks[1].Done {
+		t.Fatalf("pointer checklist result = %+v, %v", stored, err)
+	}
+}
+
+func TestPointerPurgeRequiresTwoVisibleActivations(t *testing.T) {
+	m, backend, tasks := actionTestModel(t, board.Task{Title: "Pointer purge", Status: board.StatusCancelled})
+	task := tasks[0]
+	m.openPurgePrompt(task)
+	if command := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Press Enter to arm permanent delete")()); command != nil {
+		t.Fatalf("first pointer purge activation started write: %v", command)
+	}
+	if !m.action.armed {
+		t.Fatal("first pointer purge activation did not arm")
+	}
+	command := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "ARMED - press Enter again to delete permanently")())
+	if command == nil {
+		t.Fatal("second pointer purge activation did not start write")
+	}
+	finishActionCommand(t, &m, command)
+	if _, err := backend.Task("alice", task.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("pointer purge retained task: %v", err)
+	}
+}
+
 func TestAutoShipStopsWhenCandidateDisappears(t *testing.T) {
 	m := NewModel(stubBoardReader{}, nil, "u")
 	eligible := board.Task{Status: board.StatusTodo, Checks: []board.Check{{Text: "done", Done: true}}}

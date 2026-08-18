@@ -12,6 +12,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 const autoShipDelay = 350 * time.Millisecond
@@ -64,6 +65,22 @@ type taskActionState struct {
 	armed      bool
 	busy       bool
 	errorText  string
+}
+
+type taskActionPointerKind uint8
+
+const (
+	taskActionPointerCancel taskActionPointerKind = iota
+	taskActionPointerShipChoice
+	taskActionPointerKillChoice
+	taskActionPointerKillReason
+	taskActionPointerCheck
+	taskActionPointerPurge
+)
+
+type taskActionPointerMsg struct {
+	kind  taskActionPointerKind
+	index int
 }
 
 func newTaskActionState() taskActionState {
@@ -183,7 +200,7 @@ func (m Model) actionTask() (board.Task, bool) {
 
 func isTaskActionMessage(message tea.Msg) bool {
 	switch message.(type) {
-	case taskActionStoredMsg, checklistStoredMsg, autoShipCheckMsg, autoShipReadyMsg:
+	case taskActionStoredMsg, checklistStoredMsg, autoShipCheckMsg, autoShipReadyMsg, taskActionPointerMsg:
 		return true
 	default:
 		return false
@@ -203,11 +220,42 @@ func (m *Model) updateTaskAction(message tea.Msg) tea.Cmd {
 		return m.readAutoShipCandidate(msg.taskID)
 	case autoShipReadyMsg:
 		return m.finishAutoShipRead(msg)
+	case taskActionPointerMsg:
+		return m.updateTaskActionPointer(msg)
 	case tea.KeyPressMsg:
 		if !m.action.open() {
 			return nil
 		}
 		return m.updateTaskActionKey(msg)
+	}
+	return nil
+}
+
+func (m *Model) updateTaskActionPointer(msg taskActionPointerMsg) tea.Cmd {
+	if !m.action.open() || m.action.busy {
+		return nil
+	}
+	m.action.errorText = ""
+	switch msg.kind {
+	case taskActionPointerCancel:
+		m.action.close()
+	case taskActionPointerShipChoice:
+		return m.activateShipChoice(msg.index)
+	case taskActionPointerKillChoice:
+		return m.activateKillChoice(msg.index)
+	case taskActionPointerKillReason:
+		m.action.choice = 2
+	case taskActionPointerCheck:
+		if msg.index >= 0 && msg.index < len(m.action.task.Checks) {
+			m.action.checkIndex = msg.index
+			return m.startChecklistToggle()
+		}
+	case taskActionPointerPurge:
+		if !m.action.armed {
+			m.action.armed = true
+			return nil
+		}
+		return m.startPurge()
 	}
 	return nil
 }
@@ -256,17 +304,28 @@ func (m *Model) updateShipPrompt(key string) tea.Cmd {
 	case "right", "l", "tab":
 		m.action.choice = (m.action.choice + 1) % count
 	case "enter", "space":
-		choice := m.action.choice
-		if choice == 0 {
-			m.action.close()
-			return nil
-		}
-		if m.action.warning.open > 0 && choice == 1 {
-			return m.startShip(true)
-		}
-		return m.startShip(false)
+		return m.activateShipChoice(m.action.choice)
 	}
 	return nil
+}
+
+func (m *Model) activateShipChoice(choice int) tea.Cmd {
+	count := 2
+	if m.action.warning.open > 0 {
+		count = 3
+	}
+	if choice < 0 || choice >= count {
+		return nil
+	}
+	m.action.choice = choice
+	if choice == 0 {
+		m.action.close()
+		return nil
+	}
+	if m.action.warning.open > 0 && choice == 1 {
+		return m.startShip(true)
+	}
+	return m.startShip(false)
 }
 
 func (m *Model) updateKillPrompt(msg tea.KeyPressMsg) tea.Cmd {
@@ -278,24 +337,32 @@ func (m *Model) updateKillPrompt(msg tea.KeyPressMsg) tea.Cmd {
 		m.action.choice = (m.action.choice + 2) % 3
 		return nil
 	case "enter":
-		switch m.action.choice {
-		case 0:
-			m.action.close()
-			return nil
-		case 1:
-			return m.startKill("")
-		default:
-			reason := strings.TrimSpace(m.action.reason.Value())
-			if reason == "" {
-				m.action.errorText = "Enter a reason or choose Kill without reason"
-				return nil
-			}
-			return m.startKill(reason)
-		}
+		return m.activateKillChoice(m.action.choice)
 	}
 	var command tea.Cmd
 	m.action.reason, command = m.action.reason.Update(msg)
 	return command
+}
+
+func (m *Model) activateKillChoice(choice int) tea.Cmd {
+	if choice < 0 || choice > 2 {
+		return nil
+	}
+	m.action.choice = choice
+	switch choice {
+	case 0:
+		m.action.close()
+		return nil
+	case 1:
+		return m.startKill("")
+	default:
+		reason := strings.TrimSpace(m.action.reason.Value())
+		if reason == "" {
+			m.action.errorText = "Enter a reason or choose Kill without reason"
+			return nil
+		}
+		return m.startKill(reason)
+	}
 }
 
 func (m *Model) updateChecklistPrompt(key string) tea.Cmd {
@@ -751,18 +818,73 @@ func (m Model) shippedCount() int {
 }
 
 func (m Model) taskActionOverlay(background string) string {
+	return m.taskActionSurface(background).Content
+}
+
+func (m Model) taskActionSurface(background string) pointer.Surface {
 	if !m.action.open() {
-		return background
+		return pointer.Surface{Content: background}
 	}
 	width, height := max(m.width, 1), max(m.height, 1)
 	frame := m.renderTaskAction(max(min(width-4, 72), 1))
 	frame = fitActionFrame(frame, width, height)
 	paneWidth := min(ansi.StringWidth(strings.Split(frame, "\n")[0]), width)
 	paneHeight := min(len(strings.Split(frame, "\n")), height)
-	return lipgloss.NewCompositor(
+	x := max((width-paneWidth)/2, 0)
+	y := max((height-paneHeight)/2, 0)
+	content := lipgloss.NewCompositor(
 		lipgloss.NewLayer(background),
-		lipgloss.NewLayer(frame).X(max((width-paneWidth)/2, 0)).Y(max((height-paneHeight)/2, 0)).Z(3),
+		lipgloss.NewLayer(frame).X(x).Y(y).Z(3),
 	).Render()
+	var hits pointer.Map
+	addLabel := func(label string, message taskActionPointerMsg) {
+		for row, line := range strings.Split(ansi.Strip(frame), "\n") {
+			if index := strings.Index(line, label); index >= 0 {
+				start := ansi.StringWidth(line[:index])
+				hits.Add(pointer.Rect{X0: x + start, Y0: y + row, X1: x + start + ansi.StringWidth(label), Y1: y + row + 1},
+					func(pointer.Point) tea.Msg { return message })
+				return
+			}
+		}
+	}
+	addLabel("Esc cancel", taskActionPointerMsg{kind: taskActionPointerCancel})
+	switch m.action.mode {
+	case taskActionShip:
+		choices := []string{"Cancel", "Ship anyway"}
+		if m.action.warning.open > 0 {
+			choices = []string{"Cancel", "Tick everything", "Ship anyway"}
+		}
+		for index, label := range choices {
+			addLabel(label, taskActionPointerMsg{kind: taskActionPointerShipChoice, index: index})
+		}
+	case taskActionKill:
+		for index, label := range []string{"Cancel", "Kill without reason", "Kill with reason"} {
+			addLabel(label, taskActionPointerMsg{kind: taskActionPointerKillChoice, index: index})
+		}
+		addLabel("Reason:", taskActionPointerMsg{kind: taskActionPointerKillReason})
+	case taskActionChecklist:
+		checkIndex := 0
+		for row, line := range strings.Split(ansi.Strip(frame), "\n") {
+			marker := strings.Index(line, "[ ]")
+			if marker < 0 {
+				marker = strings.Index(line, "[x]")
+			}
+			if marker < 0 || checkIndex >= len(m.action.task.Checks) {
+				continue
+			}
+			index := checkIndex
+			hits.Add(pointer.Rect{X0: x + marker, Y0: y + row, X1: x + paneWidth, Y1: y + row + 1},
+				func(pointer.Point) tea.Msg { return taskActionPointerMsg{kind: taskActionPointerCheck, index: index} })
+			checkIndex++
+		}
+	case taskActionPurge:
+		label := "Press Enter to arm permanent delete"
+		if m.action.armed {
+			label = "ARMED - press Enter again to delete permanently"
+		}
+		addLabel(label, taskActionPointerMsg{kind: taskActionPointerPurge})
+	}
+	return pointer.Surface{Content: content, Pointer: hits.Handler()}
 }
 
 func (m Model) renderTaskAction(width int) string {
