@@ -517,7 +517,7 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 		width int
 		want  string
 	}{
-		{actionNone, 80, "c add"},
+		{actionNone, 80, "[Comment]"},
 		{actionNone, 30, "esc close"},
 		{actionNone, 10, "e c d"},
 		{actionAddComment, 80, "add comment"},
@@ -540,13 +540,14 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 	}
 	footerModel.saving = false
 	footerModel.action = actionNone
+	footerModel.confirm = false
 	footerModel.statusMessage = "visible result"
-	if got := footerModel.actionFooter(80); got != "status: visible result" {
-		t.Fatalf("status footer = %q", got)
+	if got := footerModel.actionFooter(80); !strings.Contains(got, "[Comment]") {
+		t.Fatalf("idle controls disappeared after status = %q", got)
 	}
 	footerModel.statusIsError = true
-	if got := footerModel.actionFooter(80); got != "error: visible result" {
-		t.Fatalf("error footer = %q", got)
+	if got := footerModel.renderBody(80); !strings.Contains(got, "error: visible result") {
+		t.Fatalf("error status disappeared = %q", got)
 	}
 	footerModel.open = true
 	footerModel.bodyLines = []string{"one", "two"}

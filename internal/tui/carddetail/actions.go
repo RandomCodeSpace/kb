@@ -163,7 +163,7 @@ func (m *Model) cancelAction() {
 		m.rebuildBody()
 		return
 	}
-	if m.confirm {
+	if m.confirm && (m.action == actionDeleteComment || m.action == actionDeleteLink) {
 		m.confirm = false
 		m.setStatus("deletion cancelled", false)
 		m.rebuildBody()
@@ -230,7 +230,7 @@ func (m *Model) updateDeleteKey(key string) tea.Cmd {
 		m.cancelAction()
 		return nil
 	}
-	if m.confirm {
+	if m.confirm && (m.action == actionDeleteComment || m.action == actionDeleteLink) {
 		if key == "enter" {
 			if m.action == actionDeleteComment {
 				return m.startDeleteComment()
@@ -509,35 +509,106 @@ func (m Model) actionFooter(width int) string {
 	if m.saving {
 		return "write in progress | esc stays here"
 	}
-	if m.action == actionNone && m.statusMessage != "" {
-		prefix := "status: "
-		if m.statusIsError {
-			prefix = "error: "
-		}
-		return prefix + m.statusMessage
+	if m.action == actionNone && width < 26 {
+		return "e c d u b esc"
 	}
-	if m.confirm {
-		return "enter confirm delete | esc cancel"
+	controls := pointerFooterText(m.pointerFooterControls(width), width)
+	if m.confirm && (m.action == actionDeleteComment || m.action == actionDeleteLink) {
+		return controls + " | enter confirm delete | esc cancel"
 	}
 	switch m.action {
 	case actionAddComment:
-		return "ctrl+s add comment | esc back"
+		return controls + " | ctrl+s add comment | esc back"
 	case actionDeleteComment:
-		return "up/down choose | enter delete | esc back"
+		return controls + " | up/down choose | enter delete | esc back"
 	case actionAddLink:
-		return "tab direction | enter add | esc back"
+		return controls + " | tab direction | enter add | esc back"
 	case actionDeleteLink:
-		return "up/down choose | enter remove | esc back"
+		return controls + " | up/down choose | enter remove | esc back"
 	default:
-		switch {
-		case width >= 40:
-			return "e edit v drift c add d/u rm b esc close ↑/↓"
-		case width >= 26:
-			return "e c add d/u rm b esc close"
-		default:
-			return "e c d u b esc"
+		if width < 40 {
+			return controls + " esc close"
 		}
+		return fitDetailLine(controls+" esc close", width)
 	}
+}
+
+type detailPointerControl struct {
+	label   string
+	message tea.Msg
+}
+
+func (m Model) pointerFooterControls(width int) []detailPointerControl {
+	if m.driftMode != driftNone || m.saving || width < 26 {
+		return nil
+	}
+	key := func(code rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: code, Text: string(code)} }
+	controls := func(values ...detailPointerControl) []detailPointerControl { return values }
+	if m.confirm && (m.action == actionDeleteComment || m.action == actionDeleteLink) {
+		return controls(
+			detailPointerControl{label: "Confirm delete", message: tea.KeyPressMsg{Code: tea.KeyEnter}},
+			detailPointerControl{label: "Cancel", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
+		)
+	}
+	switch m.action {
+	case actionAddComment:
+		return controls(
+			detailPointerControl{label: "Save comment", message: tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}},
+			detailPointerControl{label: "Cancel", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
+		)
+	case actionDeleteComment, actionDeleteLink:
+		return controls(
+			detailPointerControl{label: "Delete", message: tea.KeyPressMsg{Code: tea.KeyEnter}},
+			detailPointerControl{label: "Cancel", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
+		)
+	case actionAddLink:
+		return controls(
+			detailPointerControl{label: "Toggle direction", message: tea.KeyPressMsg{Code: tea.KeyTab}},
+			detailPointerControl{label: "Add link", message: tea.KeyPressMsg{Code: tea.KeyEnter}},
+			detailPointerControl{label: "Cancel", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
+		)
+	}
+	if width < 40 {
+		return controls(detailPointerControl{label: "Close", message: mouseDismissMsg{}})
+	}
+	full := controls(
+		detailPointerControl{label: "Edit", message: key('e')},
+		detailPointerControl{label: "Drift", message: key('v')},
+		detailPointerControl{label: "Comment", message: key('c')},
+		detailPointerControl{label: "Delete comment", message: key('d')},
+		detailPointerControl{label: "Link", message: key('b')},
+		detailPointerControl{label: "Remove link", message: key('u')},
+		detailPointerControl{label: "Close", message: mouseDismissMsg{}},
+	)
+	if pointerFooterWidth(full)+ansi.StringWidth(" | e edit v drift c add d/u rm b esc close") <= width {
+		return full
+	}
+	return controls(
+		detailPointerControl{label: "Comment", message: key('c')},
+		detailPointerControl{label: "Delete comment", message: key('d')},
+		detailPointerControl{label: "Link", message: key('b')},
+		detailPointerControl{label: "Remove link", message: key('u')},
+		detailPointerControl{label: "Close", message: mouseDismissMsg{}},
+	)
+}
+
+func pointerFooterText(controls []detailPointerControl, width int) string {
+	parts := make([]string, 0, len(controls))
+	for _, control := range controls {
+		parts = append(parts, "["+control.label+"]")
+	}
+	return fitDetailLine(strings.Join(parts, " "), width)
+}
+
+func pointerFooterWidth(controls []detailPointerControl) int {
+	width := 0
+	for index, control := range controls {
+		if index > 0 {
+			width++
+		}
+		width += ansi.StringWidth("[" + control.label + "]")
+	}
+	return width
 }
 
 func textInputLine(input textinput.Model, width int) string {

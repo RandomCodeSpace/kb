@@ -20,6 +20,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 const (
@@ -388,19 +389,52 @@ func (m *Model) View(width, height int) string {
 // Overlay composes the pane over the board without making carddetail own the
 // board renderer. Input routing remains the root model's responsibility.
 func (m *Model) Overlay(background string, width, height int) string {
+	return m.PointerSurface(background, width, height).Content
+}
+
+// PointerSurface renders the detail overlay and returns the immutable pointer
+// map produced from this exact layout pass. The root selects it as the active
+// top-most surface, so carddetail never exposes board hit regions while open.
+func (m *Model) PointerSurface(background string, width, height int) pointer.Surface {
 	if !m.open {
-		return background
+		return pointer.Surface{Content: background}
 	}
 	width = max(width, 1)
 	height = max(height, 1)
 	background = fitTerminal(background, width, height)
-	frame, paneWidth, paneHeight := m.frame(width, height)
+	frame, paneWidth, _ := m.frame(width, height)
+	_, paneHeight := paneSize(width, height)
 	x := max((width-paneWidth)/2, 0)
 	y := max((height-paneHeight)/2, 0)
-	return fitTerminal(lipgloss.NewCompositor(
+	content := fitTerminal(lipgloss.NewCompositor(
 		lipgloss.NewLayer(background),
 		lipgloss.NewLayer(frame).X(x).Y(y).Z(1),
 	).Render(), width, height)
+
+	bounds := pointer.Rect{X0: 0, Y0: 0, X1: width, Y1: height}
+	pane := pointer.Rect{X0: x, Y0: y, X1: x + paneWidth, Y1: y + paneHeight}
+	var hitMap pointer.Map
+	hitMap.AddWheel(pane, func(delta int) tea.Msg { return mouseScrollMsg{delta: delta * 3} })
+	if m.action == actionNone && m.driftMode == driftNone {
+		hitMap.AddBackdrop(bounds, pane, func(pointer.Point) tea.Msg { return mouseDismissMsg{} })
+	}
+
+	innerWidth, _, _ := paneGeometry(width, height)
+	displayWidth := max(innerWidth-2, 1)
+	footerY := y + paneHeight - 3
+	xCursor := x + 2
+	for _, control := range m.pointerFooterControls(displayWidth) {
+		label := "[" + control.label + "]"
+		labelWidth := ansi.StringWidth(label)
+		if xCursor+labelWidth > x+paneWidth-2 || footerY < y || footerY >= y+paneHeight {
+			break
+		}
+		rect := pointer.Rect{X0: xCursor, Y0: footerY, X1: xCursor + labelWidth, Y1: footerY + 1}
+		message := control.message
+		hitMap.Add(rect, func(pointer.Point) tea.Msg { return message })
+		xCursor += labelWidth + 1
+	}
+	return pointer.Surface{Content: content, Pointer: hitMap.Handler()}
 }
 
 func (m *Model) frame(width, height int) (string, int, int) {
@@ -557,6 +591,13 @@ func (m Model) renderBody(width int) string {
 		} else {
 			sections = append(sections, "comments  none")
 		}
+	}
+	if m.statusMessage != "" {
+		prefix := "status: "
+		if m.statusIsError {
+			prefix = "error: "
+		}
+		sections = append(sections, prefix+m.statusMessage)
 	}
 	return strings.Join(sections, "\n\n")
 }
