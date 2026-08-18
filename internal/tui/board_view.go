@@ -532,7 +532,7 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 		if m.move.lifted != nil && task.ID == m.move.lifted.taskID {
 			marker = "↕ "
 		}
-		first := cardHeading(task, m.now())
+		first := cardHeading(task, m.renderedAt)
 		for lineIndex, line := range wrapTokens(first, max(width-2, 1)) {
 			prefix := "  "
 			if lineIndex == 0 {
@@ -542,7 +542,7 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 			owners = append(owners, task.ID)
 			spans = append(spans, nil)
 		}
-		metaLines, metaSpans := wrapMeta(cardMetaEntries(task, m.now()), max(width-2, 1))
+		metaLines, metaSpans := wrapMeta(cardMetaEntries(task, m.renderedAt), max(width-2, 1))
 		for lineIndex, line := range metaLines {
 			lines = append(lines, "  "+line)
 			owners = append(owners, task.ID)

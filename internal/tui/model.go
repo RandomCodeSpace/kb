@@ -82,6 +82,7 @@ type Model struct {
 	helpOpen          bool
 	readContext       context.Context
 	now               func() time.Time
+	renderedAt        time.Time
 	savePreferences   func(tuiPreferences) error
 	preferenceErr     error
 	prefSaving        bool
@@ -125,6 +126,7 @@ func newModel(
 	editorStore, _ := store.(cardeditor.Store)
 	moveStore, _ := store.(taskMoveStore)
 	actionStore, _ := store.(taskActionStore)
+	now := time.Now
 	return Model{
 		store:       store,
 		moveStore:   moveStore,
@@ -139,7 +141,8 @@ func newModel(
 		height:      defaultHeight,
 		loading:     watcher == nil,
 		readContext: ctx,
-		now:         time.Now,
+		now:         now,
+		renderedAt:  now(),
 		action:      newTaskActionState(),
 	}
 }
@@ -521,6 +524,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		next := m.finishBoardLoad(msg)
 		return m, batchCommands(detailCmd, next)
 	case pollTickMsg:
+		m.renderedAt = m.now()
+		m.normalizeShippedAt(m.renderedAt)
 		return m, m.readDataVersion()
 	case dataVersionMsg:
 		next := m.observeDataVersion(msg)
