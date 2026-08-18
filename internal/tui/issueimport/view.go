@@ -3,6 +3,7 @@ package issueimport
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -101,7 +102,7 @@ func rowWindow(count, selection, limit int) (int, int) {
 
 func fit(value string, width int) string {
 	value = strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r == '\t' || r < 0x20 || r == 0x7f {
+		if unicode.IsControl(r) {
 			return ' '
 		}
 		return r

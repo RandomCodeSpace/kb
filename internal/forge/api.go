@@ -38,45 +38,30 @@ func privateRef(value Ref) forgeRef {
 	return forgeRef{Source: value.Source, Kind: value.Kind, Project: value.Project, Issue: value.Issue, Milestone: value.Milestone, pat: value.credential}
 }
 
-// ParseRef accepts only references covered by configured sources.
-func ParseRef(sources []store.ForgeSource, source, raw string) (Ref, error) {
+func parseRef(sources []store.ForgeSource, source, raw string) (Ref, error) {
 	value, err := parseForgeRef(sources, source, raw)
 	return publicRef(value), err
 }
 
-// WithCredential returns a copy authorized with a credential resolved by the
-// caller from the same selected source.
-func (r Ref) WithCredential(value string) Ref { r.credential = value; return r }
+func (r Ref) withCredential(value string) Ref { r.credential = value; return r }
 
 // Issue is one bounded upstream forge issue.
 type Issue = forgeIssue
 
-// SourceByName performs the case-insensitive configured-source lookup.
-func SourceByName(sources []store.ForgeSource, name string) (store.ForgeSource, bool) {
+func sourceByName(sources []store.ForgeSource, name string) (store.ForgeSource, bool) {
 	return forgeSourceByName(sources, name)
 }
 
-func (s *Service) SetHTTPClient(client *http.Client) {
-	s.forgeClient = client
-}
+// ValidSourceName reports whether a source name is safe for persisted lookup.
+func ValidSourceName(name string) bool { return validForgeSourceName(name) }
 
-func (s *Service) SetRunner(runner *ai.Runner) {
-	if runner != nil {
-		s.runner = runner
-	}
-}
+// BaselineRevision identifies one accepted upstream snapshot for compare-and-swap.
+func BaselineRevision(baseline store.ImportBaseline) string { return importDriftRevision(baseline) }
 
-func (s *Service) FetchIssue(ctx context.Context, ref Ref) (Issue, error) {
-	return s.fetchIssue(ctx, privateRef(ref))
-}
+// ValidRevision reports whether a drift revision is a canonical digest.
+func ValidRevision(revision string) bool { return validImportDriftRevision(revision) }
 
-func (s *Service) FetchIssues(ctx context.Context, ref Ref, max int) ([]Issue, int, bool, string, error) {
-	return s.fetchIssues(ctx, privateRef(ref), max)
-}
-
-func StripModelLinkTags(tags []string) []string { return stripModelLinkTags(tags) }
-
-func IssueProvenance(ref Ref, issue Issue) (string, string) {
+func issueProvenance(ref Ref, issue Issue) (string, string) {
 	return importIssueProvenance(privateRef(ref), issue)
 }
 
@@ -89,11 +74,11 @@ func (s *Service) ResolveIssueDocument(ctx context.Context, user, source, raw st
 	}
 	fetchCtx, cancel := context.WithTimeout(ctx, importFetchTimeout)
 	defer cancel()
-	issue, err := s.FetchIssue(fetchCtx, ref)
+	issue, err := s.fetchIssue(fetchCtx, privateRef(ref))
 	if err != nil {
 		return Issue{}, "", "", err
 	}
-	link, _ := IssueProvenance(ref, issue)
+	link, _ := issueProvenance(ref, issue)
 	return issue, link, issue.URL, nil
 }
 
@@ -182,7 +167,7 @@ func (s *Service) Preview(ctx context.Context, user string, request PreviewReque
 		return Preview{}, err
 	}
 	fetchCtx, cancel := context.WithTimeout(ctx, importFetchTimeout)
-	issues, total, truncated, note, err := s.FetchIssues(fetchCtx, ref, request.Max)
+	issues, total, truncated, note, err := s.fetchIssues(fetchCtx, privateRef(ref), request.Max)
 	cancel()
 	if err != nil {
 		return Preview{}, err
@@ -221,11 +206,11 @@ func (s *Service) authorizeRef(user, sourceName, raw string) (Ref, error) {
 	if err != nil {
 		return Ref{}, storageFailure(err)
 	}
-	ref, err := ParseRef(sources, sourceName, raw)
+	ref, err := parseRef(sources, sourceName, raw)
 	if err != nil {
 		return Ref{}, badRequest(err.Error(), err)
 	}
-	selected, found := SourceByName(sources, sourceName)
+	selected, found := sourceByName(sources, sourceName)
 	if !found {
 		return Ref{}, badRequest(configuredSourceUnavailableMessage, nil)
 	}
@@ -236,19 +221,27 @@ func (s *Service) authorizeRef(user, sourceName, raw string) (Ref, error) {
 	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
 		return Ref{}, badRequest(configuredSourceUnavailableMessage, err)
 	}
-	return ref.WithCredential(token), nil
+	return ref.withCredential(token), nil
 }
 
 func (s *Service) duplicates(user string, ref Ref, issues []Issue) ([]*Duplicate, error) {
 	result := make([]*Duplicate, len(issues))
 	for index, issue := range issues {
-		_, externalKey := IssueProvenance(ref, issue)
+		link, externalKey := issueProvenance(ref, issue)
 		exact, err := s.store.TasksByLink(user, importTagPrefix+externalKey)
 		if err != nil {
 			return nil, err
 		}
 		if len(exact) > 0 {
 			result[index] = &Duplicate{ID: exact[0].ID, Title: exact[0].Title, Via: "link"}
+			continue
+		}
+		legacy, err := s.legacyDuplicate(user, ref, issue, link, externalKey)
+		if err != nil {
+			return nil, err
+		}
+		if legacy != nil {
+			result[index] = legacy
 			continue
 		}
 		similar, err := s.store.SearchSimilar(user, issue.Title, "", nil, 1)
@@ -262,16 +255,37 @@ func (s *Service) duplicates(user string, ref Ref, issues []Issue) ([]*Duplicate
 	return result, nil
 }
 
+func (s *Service) legacyDuplicate(user string, ref Ref, issue Issue, link, externalKey string) (*Duplicate, error) {
+	tasks, err := s.store.TasksByLink(user, linkTagPrefix+link)
+	if err != nil || len(tasks) == 0 {
+		return nil, err
+	}
+	provenance, err := s.store.ImportLinksByLink(user, link)
+	if err != nil {
+		return nil, err
+	}
+	legacyKey := legacyIssueExternalKey(ref, issue)
+	for _, imported := range provenance {
+		if imported.Source != ref.Source.Name || imported.Kind != ref.Kind {
+			continue
+		}
+		if imported.ExternalKey == externalKey || imported.ExternalKey == legacyKey || imported.URL == issue.URL {
+			return &Duplicate{ID: tasks[0].ID, Title: tasks[0].Title, Via: "link"}, nil
+		}
+	}
+	return nil, nil
+}
+
 func attachDrafts(ref Ref, drafts []ai.Draft, issues []Issue, duplicates []*Duplicate) []Draft {
 	result := make([]Draft, 0, len(drafts))
 	claimed := make(map[int]bool, len(drafts))
 	for _, proposal := range drafts {
-		proposal.Tags = StripModelLinkTags(proposal.Tags)
+		proposal.Tags = stripModelLinkTags(proposal.Tags)
 		item := Draft{Draft: proposal}
 		if proposal.Source > 0 && proposal.Source <= len(issues) && !claimed[proposal.Source] {
 			claimed[proposal.Source] = true
 			issue := issues[proposal.Source-1]
-			item.Link, item.ExternalKey = IssueProvenance(ref, issue)
+			item.Link, item.ExternalKey = issueProvenance(ref, issue)
 			item.URL = issue.URL
 			item.Duplicate = duplicates[proposal.Source-1]
 			item.Tags = append(item.Tags, linkTagPrefix+item.Link, importTagPrefix+item.ExternalKey)
@@ -311,7 +325,7 @@ func (s *Service) RecordLinks(user, sourceName string, items []LinkInput) error 
 	if err != nil {
 		return storageFailure(err)
 	}
-	source, found := SourceByName(sources, sourceName)
+	source, found := sourceByName(sources, sourceName)
 	if !found {
 		return badRequest(configuredSourceUnavailableMessage, nil)
 	}
@@ -339,7 +353,7 @@ func (s *Service) CreateTask(user, sourceName string, task board.Task, item Link
 	if err != nil {
 		return board.Task{}, storageFailure(err)
 	}
-	source, found := SourceByName(sources, sourceName)
+	source, found := sourceByName(sources, sourceName)
 	if !found {
 		return board.Task{}, badRequest(configuredSourceUnavailableMessage, nil)
 	}
@@ -418,10 +432,6 @@ func (s *Service) authorizeDrift(user, source, externalKey string) (store.Import
 	return provenance, ref, nil
 }
 
-func (s *Service) AuthorizeDrift(user, source, externalKey string) (store.ImportLink, Ref, error) {
-	return s.authorizeDrift(user, source, externalKey)
-}
-
 func (s *Service) CheckDrift(ctx context.Context, user, source, externalKey string) (Drift, error) {
 	ctx, cancel := context.WithTimeout(ctx, importFetchTimeout)
 	defer cancel()
@@ -429,7 +439,7 @@ func (s *Service) CheckDrift(ctx context.Context, user, source, externalKey stri
 	if err != nil {
 		return Drift{}, err
 	}
-	issue, err := s.FetchIssue(ctx, ref)
+	issue, err := s.fetchIssue(ctx, privateRef(ref))
 	if err != nil {
 		return Drift{}, err
 	}

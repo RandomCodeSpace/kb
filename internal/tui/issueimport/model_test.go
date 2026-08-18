@@ -170,9 +170,9 @@ func TestInputNavigationErrorsAndTerminalSafety(t *testing.T) {
 	if !m.statusError || m.status != "reference required" {
 		t.Fatalf("empty ref status = %q", m.status)
 	}
-	m.status = "bad\x1b[31m\nline"
+	m.status = "bad\x1b[31m\x9b31m\nline"
 	view := m.View(28, 8)
-	if strings.Contains(view, "\nline") || strings.Contains(view, "\x1b[31m") {
+	if strings.Contains(view, "\nline") || strings.Contains(view, "\x1b[31m") || strings.Contains(view, "\x9b") {
 		t.Fatalf("unsafe view:\n%s", view)
 	}
 	m.Close()

@@ -524,6 +524,7 @@ func (m Model) autoShipInputOwned() bool {
 		detailOwns = false
 	}
 	return m.settings != nil || m.editor.IsOpen() || m.adr.IsOpen() ||
+		m.issueImport.IsOpen() ||
 		m.filter.focus != filterUnfocused || m.move.lifted != nil || m.move.saving ||
 		detailOwns
 }

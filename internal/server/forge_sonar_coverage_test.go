@@ -10,7 +10,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	kbai "github.com/RandomCodeSpace/kb/internal/ai"
+	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -20,6 +23,16 @@ const (
 	forgeCoverageKey         = "gitlab:local/group/project#42"
 	forgeCoverageStorageBody = "storage error\n"
 )
+
+type forgeDeadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadline time.Time
+}
+
+func (w *forgeDeadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	w.deadline = deadline
+	return nil
+}
 
 func newForgeCoverageStore(t *testing.T) (*store.Store, *sql.DB) {
 	t.Helper()
@@ -90,26 +103,6 @@ func replaceImportLinksWithView(t *testing.T, db *sql.DB, projection string) {
 	execForgeCoverageSQL(t, db, "CREATE VIEW import_links AS SELECT "+projection+" FROM import_links_backing")
 }
 
-func TestForgeIssueListRequestPropagatesInvalidKind(t *testing.T) {
-	path, query, err := forgeIssueListRequest(forgeRef{Kind: "invalid", Project: "owner/repo"})
-	if path != "" || query != nil || err == nil || err.Error() != "invalid forge kind" {
-		t.Fatalf("invalid-kind list request = (%q, %v, %v)", path, query, err)
-	}
-}
-
-func TestSetForgeMilestoneQueryRejectsInvalidKind(t *testing.T) {
-	if setForgeMilestoneQuery("invalid", nil, nil) {
-		t.Fatal("invalid forge kind produced a milestone query")
-	}
-}
-
-func TestParseForgeCommentsRejectsInvalidKind(t *testing.T) {
-	comments, err := parseForgeComments("invalid", []byte(`[]`))
-	if comments != nil || err == nil || err.Error() != "invalid forge kind" {
-		t.Fatalf("invalid-kind comments = (%v, %v)", comments, err)
-	}
-}
-
 func TestImportPreviewRejectsUnavailableConfiguredCredentialWithoutEgress(t *testing.T) {
 	st, db := newForgeCoverageStore(t)
 	seedForgeCoverageSource(t, st, "https://forge.example", "secret")
@@ -126,6 +119,31 @@ func TestImportPreviewRejectsUnavailableConfiguredCredentialWithoutEgress(t *tes
 	requireForgeCoverageResponse(t, response, http.StatusBadRequest, configuredSourceUnavailableMessage+"\n")
 	if calls.Load() != 0 {
 		t.Fatalf("rejected preview made %d forge calls", calls.Load())
+	}
+}
+
+func TestImportPreviewExtendsWriteDeadlineAndMapsAIErrors(t *testing.T) {
+	st, _ := newForgeCoverageStore(t)
+	s := &server{store: st}
+	response := &forgeDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	request := httptest.NewRequest(http.MethodPost, "/api/import/preview", strings.NewReader(`{"source":"missing","ref":"group/project"}`))
+	before := time.Now()
+	s.handleImportPreview(response, request, forgeCoverageUser)
+	if response.deadline.Before(before.Add(skillRunDeadline)) {
+		t.Fatalf("preview write deadline = %v, want at least %v", response.deadline, before.Add(skillRunDeadline))
+	}
+
+	for _, test := range []struct {
+		err  error
+		code int
+		body string
+	}{
+		{err: &kbai.Error{Code: http.StatusUnprocessableEntity, Message: "model rejected request"}, code: http.StatusUnprocessableEntity, body: "model rejected request\n"},
+		{err: &kbai.Error{Code: http.StatusBadGateway, Message: "secret upstream detail"}, code: http.StatusBadGateway, body: connectionFailedMessage + "\n"},
+	} {
+		w := httptest.NewRecorder()
+		writeSharedForgeError(w, forgeCoverageUser, "preview", test.err)
+		requireForgeCoverageResponse(t, w, test.code, test.body)
 	}
 }
 
@@ -214,7 +232,7 @@ func TestImportDriftAcceptReturnsStorageErrorWhenBaselineUpdateFails(t *testing.
 	current := store.NewImportBaseline("Current", "body", "")
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/import/drift/accept", strings.NewReader(
-		`{"source":"primary","external_key":"`+forgeCoverageKey+`","revision":"`+importDriftRevision(current)+`"}`))
+		`{"source":"primary","external_key":"`+forgeCoverageKey+`","revision":"`+forge.BaselineRevision(current)+`"}`))
 	s.handleImportDriftAccept(response, request, forgeCoverageUser)
 	requireForgeCoverageResponse(t, response, http.StatusInternalServerError, forgeCoverageStorageBody)
 	if calls.Load() != 1 {
@@ -223,82 +241,5 @@ func TestImportDriftAcceptReturnsStorageErrorWhenBaselineUpdateFails(t *testing.
 	var title string
 	if err := db.QueryRow("SELECT baseline_title FROM import_links_backing WHERE external_key = ?", forgeCoverageKey).Scan(&title); err != nil || title != old.Title {
 		t.Fatalf("failed baseline update left title = %q, err=%v", title, err)
-	}
-}
-
-func TestAuthorizeImportDriftTargetReturnsStorageErrorWhenSourceListFails(t *testing.T) {
-	st, db := newForgeCoverageStore(t)
-	seedForgeCoverageDrift(t, st, "https://forge.example", "")
-	execForgeCoverageSQL(t, db, "DROP TABLE forge_sources")
-	response := httptest.NewRecorder()
-	_, _, ok := (&server{store: st}).authorizeImportDriftTarget(response, forgeCoverageUser, forgeCoverageSource, forgeCoverageKey)
-	if ok {
-		t.Fatal("source-list failure authorized drift")
-	}
-	requireForgeCoverageResponse(t, response, http.StatusInternalServerError, forgeCoverageStorageBody)
-}
-
-func TestAuthorizeImportDriftTargetRejectsMissingSelectedSource(t *testing.T) {
-	st, db := newForgeCoverageStore(t)
-	seedForgeCoverageDrift(t, st, "https://forge.example", "")
-	execForgeCoverageSQL(t, db, "UPDATE import_links SET source = ''")
-	response := httptest.NewRecorder()
-	_, _, ok := (&server{store: st}).authorizeImportDriftTarget(response, forgeCoverageUser, "", forgeCoverageKey)
-	if ok {
-		t.Fatal("missing selected source authorized drift")
-	}
-	requireForgeCoverageResponse(t, response, http.StatusBadRequest, configuredSourceUnavailableMessage+"\n")
-}
-
-func TestAuthorizeImportDriftTargetRejectsUnavailableCredential(t *testing.T) {
-	st, db := newForgeCoverageStore(t)
-	seedForgeCoverageDrift(t, st, "https://forge.example", "secret")
-	execForgeCoverageSQL(t, db, "UPDATE forge_sources SET pat_enc = X'00'")
-	response := httptest.NewRecorder()
-	_, _, ok := (&server{store: st}).authorizeImportDriftTarget(response, forgeCoverageUser, forgeCoverageSource, forgeCoverageKey)
-	if ok {
-		t.Fatal("unavailable credential authorized drift")
-	}
-	requireForgeCoverageResponse(t, response, http.StatusBadRequest, configuredSourceUnavailableMessage+"\n")
-}
-
-func TestIntegrationProbeReportsRequestBuildErrorWithoutEgress(t *testing.T) {
-	st, db := newForgeCoverageStore(t)
-	seedForgeCoverageSource(t, st, "https://forge.example", "")
-	execForgeCoverageSQL(t, db, "UPDATE forge_sources SET base_url = ''")
-	var calls atomic.Int32
-	s := &server{store: st, forgeClient: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return nil, errors.New("forbidden egress")
-	})}}
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/integrations/primary/test", nil)
-	request.SetPathValue("name", forgeCoverageSource)
-	s.handleTestIntegration(response, request, forgeCoverageUser)
-	var result forgeTestResponse
-	decodeForgeJSON(t, response, &result)
-	if response.Code != http.StatusOK || result.OK || result.Error != "invalid forge base URL" || calls.Load() != 0 {
-		t.Fatalf("request-build response = %d %+v, calls=%d", response.Code, result, calls.Load())
-	}
-}
-
-func TestNewForgeTestRequestRejectsNilContextBeforeEgress(t *testing.T) {
-	//lint:ignore SA1012 Deliberately exercise the request constructor's nil-context error.
-	request, err := newForgeTestRequest(nil, "gitlab", forgeTestTarget{baseURL: "https://gitlab.example.test"}, "")
-	if request != nil || err == nil || err.Error() != "invalid forge base URL" {
-		t.Fatalf("nil-context request = (%v, %v), want nil request and construction error", request, err)
-	}
-}
-
-func TestForgeConnectionOKRejectsResponseDrainError(t *testing.T) {
-	request, err := http.NewRequest(http.MethodGet, "https://forge.example/api/v4/version", nil)
-	if err != nil {
-		t.Fatalf("build request: %v", err)
-	}
-	s := &server{forgeClient: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: coverageReadCloser{readErr: errors.New("read failed")}}, nil
-	})}}
-	if s.forgeConnectionOK(request, forgeCoverageUser) {
-		t.Fatal("response drain error passed the integration probe")
 	}
 }

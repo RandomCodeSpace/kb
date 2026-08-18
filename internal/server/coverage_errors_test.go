@@ -8,11 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
-
-	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
 type coverageReadCloser struct {
@@ -71,138 +68,6 @@ func TestReadBodyDistinguishesOversizeAndReaderFailure(t *testing.T) {
 	w = httptest.NewRecorder()
 	if _, ok := readBody(w, broken); ok || w.Code != http.StatusBadRequest {
 		t.Fatalf("broken read = ok %v status %d", ok, w.Code)
-	}
-}
-
-func TestForgeGetMapsTransportBodyAndCloseFailures(t *testing.T) {
-	ref := forgeRef{Kind: "gitlab", pat: "secret", Source: store.ForgeSource{Name: "primary"}}
-	tests := []struct {
-		name   string
-		client *http.Client
-		ref    forgeRef
-	}{
-		{name: "nil client", ref: ref},
-		{name: "invalid kind", ref: forgeRef{Kind: "other", Source: ref.Source}, client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) { t.Fatal("unexpected egress"); return nil, nil })}},
-		{name: "transport failure", ref: ref, client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("offline") })}},
-		{name: "body read failure", ref: ref, client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: coverageReadCloser{readErr: errors.New("read failed")}}, nil
-		})}},
-		{name: "body close failure", ref: ref, client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: coverageReadCloser{readErr: io.EOF, closeErr: errors.New("close failed")}}, nil
-		})}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &server{forgeClient: tt.client}
-			if _, err := s.forgeGet(context.Background(), tt.ref, "https://forge.invalid", "/issues", nil); err == nil {
-				t.Fatal("forgeGet returned nil error")
-			}
-		})
-	}
-}
-
-func TestForgeGetBuildsBoundedAuthenticatedRequest(t *testing.T) {
-	var got *http.Request
-	s := &server{forgeClient: &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-		got = r.Clone(r.Context())
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"X-Total": []string{"1"}}, Body: io.NopCloser(strings.NewReader(`[]`))}, nil
-	})}}
-	ref := forgeRef{Kind: "github", pat: "token", Source: store.ForgeSource{Name: "primary"}}
-	response, err := s.forgeGet(context.Background(), ref, "https://forge.invalid/api", "/issues", url.Values{"page": []string{"2"}})
-	if err != nil {
-		t.Fatalf("forgeGet: %v", err)
-	}
-	if response.status != http.StatusOK || got == nil || got.URL.RawQuery != "page=2" {
-		t.Fatalf("response/request = %+v / %+v", response, got)
-	}
-	if got.Header.Get("Authorization") != "Bearer token" || got.Header.Get("Accept") != "application/vnd.github+json" {
-		t.Fatalf("forge headers = %v", got.Header)
-	}
-}
-
-func TestForgeParsersRejectMalformedPayloadsAndKinds(t *testing.T) {
-	for _, kind := range []string{"gitlab", "github", "other"} {
-		t.Run(kind, func(t *testing.T) {
-			if _, err := parseForgeIssueList(kind, []byte(`{`)); err == nil {
-				t.Fatalf("parseForgeIssueList(%q) accepted malformed payload", kind)
-			}
-		})
-	}
-	if _, err := forgeProjectPath(forgeRef{Kind: "github", Project: "missing-repo"}); err == nil {
-		t.Fatal("forgeProjectPath accepted an incomplete GitHub project")
-	}
-	if _, err := forgeProjectPath(forgeRef{Kind: "other", Project: "owner/repo"}); err == nil {
-		t.Fatal("forgeProjectPath accepted an invalid kind")
-	}
-	if got := forgeTotalHint(http.Header{"X-Total": []string{"invalid"}}); got != -1 {
-		t.Fatalf("forgeTotalHint(invalid) = %d", got)
-	}
-}
-
-func TestForgeReferenceHelpersRejectMalformedPaths(t *testing.T) {
-	gitlab := store.ForgeSource{Name: "gl", Kind: "gitlab", BaseURL: "https://gitlab.example"}
-	github := store.ForgeSource{Name: "gh", Kind: "github", BaseURL: "https://github.example"}
-	for _, path := range []string{"", "group//project", "/", "group/project/-/unknown/1", "group/project/-/issues/0", "group/project/-/issues/nope", "-/issues/1"} {
-		if _, err := parseGitLabRef(gitlab, path); err == nil {
-			t.Errorf("parseGitLabRef(%q) returned nil error", path)
-		}
-	}
-	for _, path := range []string{"", "owner", "owner/repo/pulls/1", "owner/repo/issues/0", "owner//issues/1"} {
-		if _, err := parseGitHubRef(github, path); err == nil {
-			t.Errorf("parseGitHubRef(%q) returned nil error", path)
-		}
-	}
-	for _, ref := range []forgeRef{{}, {Kind: "other", Project: "x"}, {Kind: "github", Project: "owner"}} {
-		if _, err := forgeIssuePath(ref); err == nil {
-			t.Errorf("forgeIssuePath(%+v) returned nil error", ref)
-		}
-		if _, err := forgeMilestonePath(ref); err == nil {
-			t.Errorf("forgeMilestonePath(%+v) returned nil error", ref)
-		}
-		if _, err := forgeProjectIssuesPath(ref); err == nil {
-			t.Errorf("forgeProjectIssuesPath(%+v) returned nil error", ref)
-		}
-	}
-	for _, raw := range []string{"", "0", "-1", "x"} {
-		if _, err := forgeRefID(raw); err == nil {
-			t.Errorf("forgeRefID(%q) returned nil error", raw)
-		}
-	}
-	for _, raw := range []string{"", " ", "ftp://forge.example", "https://user@forge.example", "https://forge.example?q=1", "https://forge.example#x"} {
-		if _, err := normalizeForgeProbeBase(raw); err == nil {
-			t.Errorf("normalizeForgeProbeBase(%q) returned nil error", raw)
-		}
-	}
-	if got := forgeURLPort(&url.URL{Scheme: "https", Host: "x"}); got != "443" {
-		t.Errorf("HTTPS default port = %q", got)
-	}
-	if got := forgeURLPort(&url.URL{Scheme: "http", Host: "x"}); got != "80" {
-		t.Errorf("HTTP default port = %q", got)
-	}
-	if got := forgeURLPort(&url.URL{Scheme: "https", Host: "x:8443"}); got != "8443" {
-		t.Errorf("explicit port = %q", got)
-	}
-}
-
-func TestForgeListAndCommentHelpersMapInvalidResponses(t *testing.T) {
-	deny := roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("offline") })
-	s := &server{forgeClient: &http.Client{Transport: deny}}
-	ctx := context.Background()
-	for _, ref := range []forgeRef{{Kind: "other", Project: "x"}, {Kind: "github", Project: "bad"}} {
-		if _, _, err := s.forgeIssuesList(ctx, ref, "https://forge.invalid"); err == nil {
-			t.Errorf("forgeIssuesList(%+v) returned nil error", ref)
-		}
-	}
-	if _, err := s.fetchForgeComments(ctx, forgeRef{Kind: "other", Project: "x", Source: store.ForgeSource{Name: "x"}}, "https://forge.invalid", "/issues/1"); err == nil {
-		t.Fatal("fetchForgeComments accepted invalid kind")
-	}
-	comments := make([]string, maxForgeComments)
-	if got := appendBoundedForgeComment(comments, "extra"); len(got) != maxForgeComments {
-		t.Fatalf("bounded comments len = %d", len(got))
-	}
-	long := strings.Repeat("界", maxForgeCommentLen)
-	if got := appendBoundedForgeComment(nil, long); len(got) != 1 || len(got[0]) > maxForgeCommentLen {
-		t.Fatalf("bounded unicode comment = %#v", got)
 	}
 }
 
@@ -395,39 +260,5 @@ func TestClosedStoreHandlersReturnServerErrorsWithoutEgress(t *testing.T) {
 				t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 			}
 		})
-	}
-}
-
-func TestForgeDrainReportsReadAndCloseFailures(t *testing.T) {
-	for _, body := range []io.ReadCloser{
-		coverageReadCloser{readErr: errors.New("read failed")},
-		coverageReadCloser{readErr: io.EOF, closeErr: errors.New("close failed")},
-	} {
-		if err := drainForgeResponse(&http.Response{Body: body}); err == nil {
-			t.Fatal("drainForgeResponse returned nil error")
-		}
-	}
-}
-
-func TestAIValueCoercionAndTextBoundsCoverDefensiveBranches(t *testing.T) {
-	if got := coerceDraftMap(map[string]any{"title": ""}); got.Title != "" {
-		t.Fatalf("coerceDraftMap empty title = %+v", got)
-	}
-	if got := truncateImportText("hello", 0); got != "" {
-		t.Fatalf("truncate max zero = %q", got)
-	}
-	if got := truncateImportText("hello", 10); got != "hello" {
-		t.Fatalf("truncate short = %q", got)
-	}
-	if got := truncateImportText("界界", 4); len(got) > 4 {
-		t.Fatalf("truncate unicode = %q", got)
-	}
-	if got := stripControlKeepLines("a\x00b\r\nc\td"); got != "ab\ncd" {
-		t.Fatalf("stripControlKeepLines = %q", got)
-	}
-	for in, want := range map[int]int{-1: 1, 0: 1, 3: 3, 9: 4} {
-		if got := clampPrio(in); got != want {
-			t.Errorf("clampPrio(%d) = %d, want %d", in, got, want)
-		}
 	}
 }

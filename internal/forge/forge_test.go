@@ -302,8 +302,6 @@ func TestServicePreviewProvenanceAndDuplicateDefaults(t *testing.T) {
 	}
 	runner := ai.NewRunner(st, "", aiUpstream.Client(), nil)
 	service := New(st, runner, forgeUpstream.Client())
-	service.SetHTTPClient(forgeUpstream.Client())
-	service.SetRunner(runner)
 	if sources, err := service.Sources("alice"); err != nil || len(sources) != 1 {
 		t.Fatalf("sources = %+v, %v", sources, err)
 	}
@@ -443,8 +441,8 @@ func TestQualifiedIdentityPreventsCrossForgeExactDuplicates(t *testing.T) {
 	issue := Issue{Ref: "github#93", Title: "different work"}
 	refA := Ref{Source: store.ForgeSource{Name: "a", Kind: "github", BaseURL: "https://forge.test/a"}, Kind: "github", Project: "owner/repo", Issue: 93}
 	refB := Ref{Source: store.ForgeSource{Name: "b", Kind: "github", BaseURL: "https://forge.test/b"}, Kind: "github", Project: "owner/repo", Issue: 93}
-	_, keyA := IssueProvenance(refA, issue)
-	_, keyB := IssueProvenance(refB, issue)
+	_, keyA := issueProvenance(refA, issue)
+	_, keyB := issueProvenance(refB, issue)
 	if keyA == keyB || !strings.Contains(keyA, "/a/") || !strings.Contains(keyB, "/b/") {
 		t.Fatalf("qualified keys = %q %q", keyA, keyB)
 	}
@@ -460,6 +458,33 @@ func TestQualifiedIdentityPreventsCrossForgeExactDuplicates(t *testing.T) {
 	other, err := service.duplicates("alice", refB, []Issue{issue})
 	if err != nil || other[0] != nil {
 		t.Fatalf("cross-forge duplicate = %+v, %v", other, err)
+	}
+}
+
+func TestLegacyShortLinkDuplicateRequiresMatchingQualifiedProvenance(t *testing.T) {
+	issueA := Issue{Ref: "github#93", Title: "different work", URL: "https://forge.test/a/owner/repo/issues/93"}
+	issueB := Issue{Ref: "github#93", Title: "different work", URL: "https://forge.test/b/owner/repo/issues/93"}
+	refA := Ref{Source: store.ForgeSource{Name: "a", Kind: "github", BaseURL: "https://forge.test/a"}, Kind: "github", Project: "owner/repo"}
+	refB := Ref{Source: store.ForgeSource{Name: "b", Kind: "github", BaseURL: "https://forge.test/b"}, Kind: "github", Project: "owner/repo"}
+	st := testStore(t)
+	legacyTask, err := st.AddTask("alice", board.Task{Title: "legacy existing", Tags: []string{linkTagPrefix + issueA.Ref}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordImportLinks("alice", []store.ImportLink{{
+		Source: refA.Source.Name, Kind: refA.Kind, ExternalKey: legacyIssueExternalKey(refA, issueA),
+		Link: issueA.Ref, URL: issueA.URL, Title: issueA.Title,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	service := New(st, nil, nil)
+	exact, err := service.duplicates("alice", refA, []Issue{issueA})
+	if err != nil || exact[0] == nil || exact[0].ID != legacyTask.ID || exact[0].Via != "link" {
+		t.Fatalf("legacy exact = %+v, %v", exact, err)
+	}
+	other, err := service.duplicates("alice", refB, []Issue{issueB})
+	if err != nil || (other[0] != nil && other[0].Via == "link") {
+		t.Fatalf("cross-source legacy duplicate = %+v, %v", other, err)
 	}
 }
 
@@ -564,7 +589,7 @@ func TestDriftLifecycleAndRevisionConflict(t *testing.T) {
 	if err != nil || unchanged.State != "unchanged" {
 		t.Fatalf("unchanged = %+v, %v", unchanged, err)
 	}
-	if _, _, err := service.AuthorizeDrift("alice", "wrong", key); err == nil {
+	if _, _, err := service.authorizeDrift("alice", "wrong", key); err == nil {
 		t.Fatal("wrong drift source accepted")
 	}
 	title.Store("Changed")
@@ -694,66 +719,18 @@ func TestParsingAndResponseHelpers(t *testing.T) {
 		t.Fatal("bad status accepted")
 	}
 
-	ref := Ref{Source: store.ForgeSource{Name: "primary", Kind: "github", BaseURL: "https://github.com"}, Kind: "github", Project: "owner/repo", Issue: 7, Milestone: 3}.WithCredential("secret")
-	if RefKind(ref) != "issue" || !ValidSourceName("primary") || ValidSourceName("bad name") || ValidSourceName("") {
-		t.Fatal("public reference helpers")
-	}
-	if _, err := ProjectPath(ref); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := IssuePath(ref); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := MilestonePath(ref); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ProjectIssuesPath(ref); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := IssueListRequest(ref); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ParseIssueList("github", []byte(`[{"number":7,"title":"issue"}]`)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ParseGitHubRef(ref.Source, "/owner/repo/issues/7"); err != nil {
-		t.Fatal(err)
-	}
-	gitlabSource := store.ForgeSource{Name: "gitlab", Kind: "gitlab", BaseURL: "https://gitlab.example"}
-	if _, err := ParseGitLabRef(gitlabSource, "/group/repo/-/issues/7"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := APIBase("github", "https://github.com"); err != nil {
-		t.Fatal(err)
-	}
-	if got := TotalHint(http.Header{"X-Total": []string{"4"}}); got != 4 {
-		t.Fatalf("total = %d", got)
-	}
-	if _, count := PackIssues([]Issue{{Title: "one", Ref: "github#1"}}); count != 1 {
-		t.Fatalf("pack count = %d", count)
+	if !ValidSourceName("primary") || ValidSourceName("bad name") || ValidSourceName("") {
+		t.Fatal("public source-name validation")
 	}
 	if adr := IssueADR(Issue{Title: "one", Body: "body", Comments: []string{"note"}}); !strings.Contains(adr, "## Discussion") {
 		t.Fatalf("adr = %q", adr)
 	}
-	if TruncateText("abcd", 2) != "ab" || AppendImportNote("", "note") != "note" {
-		t.Fatal("text helpers")
+	if tags := StripLinkTags([]string{"one", "link::github#1"}); len(tags) != 1 || tags[0] != "one" {
+		t.Fatalf("stripped tags = %v", tags)
 	}
-	if parsed, err := RefID("7"); err != nil || parsed != 7 {
-		t.Fatalf("ref id = %d, %v", parsed, err)
-	}
-	probeBase, err := NormalizeProbeBase("https://forge.example:8443/")
-	if err != nil || URLPort(probeBase) != "8443" {
-		t.Fatalf("probe base = %v, %v", probeBase, err)
-	}
-	if !ValidDriftRevision(DriftRevision(store.NewImportBaseline("title", "body", "now"))) {
-		t.Fatal("revision helpers")
-	}
-	gitlabRequest, err := NewTestRequest(context.Background(), "gitlab", "https://gitlab.example", "token", "")
-	if err != nil || gitlabRequest.Header.Get("PRIVATE-TOKEN") != "token" {
-		t.Fatalf("GitLab test request = %v, %v", gitlabRequest, err)
-	}
-	if _, err := NewTestRequest(context.Background(), "github", "https://github.com", "token", "owner/repo"); err != nil {
-		t.Fatal(err)
+	revision := BaselineRevision(store.NewImportBaseline("title", "body", "now"))
+	if !ValidRevision(revision) || ValidRevision("bad") {
+		t.Fatalf("revision validation = %q", revision)
 	}
 	publicErr := &Error{Code: 400, Message: "bad", Cause: errors.New("cause")}
 	if publicErr.Error() != "bad" || publicErr.Unwrap() == nil {
@@ -761,6 +738,9 @@ func TestParsingAndResponseHelpers(t *testing.T) {
 	}
 	if refKind(Ref{}) != "project" || refKind(Ref{Milestone: 1}) != "milestone" {
 		t.Fatal("kind helpers")
+	}
+	if skillBudget(999999) != ai.SkillBudget(999999) || logSafe("a\nb\u009bb") != "abb" {
+		t.Fatal("compatibility helpers")
 	}
 	if adr := forgeIssueADR(forgeIssue{Title: strings.Repeat("x", 70<<10)}); len(adr) > 64<<10 {
 		t.Fatalf("bounded adr = %d", len(adr))
@@ -771,83 +751,6 @@ func TestParsingAndResponseHelpers(t *testing.T) {
 	_ = newForgeClient()
 	_ = NewForgeProber(testStore(t))
 	_ = NewForgeProberWithClient(testStore(t), nil)
-}
-
-func TestLowLevelCompatibilitySurfaceAndErrorBranches(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.EscapedPath() {
-		case "/api/v3/repos/owner/repo/issues/7":
-			_, _ = io.WriteString(w, `{"number":7,"title":"issue","body":"body","html_url":"https://example/7"}`)
-		case "/api/v3/repos/owner/repo/issues/7/comments":
-			_, _ = io.WriteString(w, `[{"body":"comment"}]`)
-		default:
-			_, _ = io.WriteString(w, `[]`)
-		}
-	}))
-	defer upstream.Close()
-	service := New(testStore(t), nil, upstream.Client())
-	ref := Ref{Source: store.ForgeSource{Name: "primary", Kind: "github", BaseURL: upstream.URL}, Kind: "github", Project: "owner/repo", Issue: 7}
-	apiBase, err := APIBase("github", upstream.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path, err := IssuePath(ref)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response, err := service.Get(context.Background(), ref, apiBase, path, nil); err != nil || response.Status != http.StatusOK {
-		t.Fatalf("get = %+v, %v", response, err)
-	}
-	if comments, err := service.FetchComments(context.Background(), ref, apiBase, path); err != nil || len(comments) != 1 {
-		t.Fatalf("comments = %+v, %v", comments, err)
-	}
-	if issue, _, gotPath, err := service.FetchIssueSnapshot(context.Background(), ref); err != nil || issue.Title != "issue" || gotPath != path {
-		t.Fatalf("snapshot = %+v %q, %v", issue, gotPath, err)
-	}
-	projectRef := ref
-	projectRef.Issue = 0
-	if listPath, query, err := service.IssuesList(context.Background(), projectRef, apiBase); err != nil || listPath == "" || query.Get("state") != "open" {
-		t.Fatalf("list = %q %v, %v", listPath, query, err)
-	}
-	query := url.Values{}
-	if !SetMilestoneQuery("github", query, []byte(`{"number":3}`)) || query.Get("milestone") != "3" {
-		t.Fatal("milestone wrapper")
-	}
-	if comments, err := ParseComments("github", []byte(`[{"body":"one"}]`)); err != nil || len(comments) != 1 {
-		t.Fatalf("parse comments = %+v, %v", comments, err)
-	}
-	bounded := make([]string, maxForgeComments)
-	if got := AppendBoundedComment(bounded, "ignored"); len(got) != maxForgeComments {
-		t.Fatalf("bounded comments = %d", len(got))
-	}
-	if err := DrainResponse(&http.Response{Body: io.NopCloser(strings.NewReader("ok"))}); err != nil {
-		t.Fatal(err)
-	}
-	testRequest, _ := http.NewRequest(http.MethodGet, "https://forge.test", nil)
-	if err := ExecuteTest(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader(""))}, nil
-	})}, testRequest); err != nil {
-		t.Fatal(err)
-	}
-	if skillBudget(999999) != ai.SkillBudget(999999) || logSafe("a\nb") != "ab" {
-		t.Fatal("compatibility helpers")
-	}
-	if issues, err := ParseIssueList("gitlab", []byte(`[{"iid":2,"title":"gitlab"}]`)); err != nil || len(issues) != 1 {
-		t.Fatalf("gitlab list = %+v, %v", issues, err)
-	}
-
-	gitlab := store.ForgeSource{Name: "gl", Kind: "gitlab", BaseURL: "https://gitlab.example/root"}
-	for _, raw := range []string{"/root/group/project/-/issues/x", "/root/group/project/-/unknown/1"} {
-		if _, err := parseGitLabRef(gitlab, raw); err == nil {
-			t.Errorf("invalid gitlab path %q accepted", raw)
-		}
-	}
-	github := store.ForgeSource{Name: "gh", Kind: "github", BaseURL: "https://github.example/root"}
-	for _, raw := range []string{"/wrong/owner/repo/issues/1", "/root/owner/repo/issues/x", "/root/owner/repo/unknown/1"} {
-		if _, err := parseGitHubRef(github, raw); err == nil {
-			t.Errorf("invalid github path %q accepted", raw)
-		}
-	}
 }
 
 func TestAuthorizeDriftRejectsMismatchedProvenance(t *testing.T) {
@@ -868,7 +771,7 @@ func TestAuthorizeDriftRejectsMismatchedProvenance(t *testing.T) {
 	for _, test := range []struct{ source, key string }{
 		{"primary", "missing"}, {"other", "wrong-kind"}, {"primary", "wrong-kind"}, {"primary", "project"}, {"primary", "wrong-host"},
 	} {
-		if _, _, err := service.AuthorizeDrift("alice", test.source, test.key); err == nil {
+		if _, _, err := service.authorizeDrift("alice", test.source, test.key); err == nil {
 			t.Errorf("authorize drift %+v succeeded", test)
 		}
 	}

@@ -1121,6 +1121,10 @@ func TestAutoShipInputOwnershipMatrix(t *testing.T) {
 			m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
 			_ = m.adr.Open()
 		}},
+		{name: "issue import", own: func(m *Model) {
+			m.issueImport = issueimport.New(&rootImportStore{}, rootImportBackend{}, "u", context.Background())
+			_ = m.issueImport.Open()
+		}},
 		{name: "detail", own: func(m *Model) { _ = m.detail.Open(task) }},
 		{name: "filter", own: func(m *Model) { _ = m.filter.focusText() }},
 		{name: "move preview", own: func(m *Model) {

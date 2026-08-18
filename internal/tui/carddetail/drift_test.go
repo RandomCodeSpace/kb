@@ -79,6 +79,9 @@ func TestDriftSelectCheckAndAcceptConflict(t *testing.T) {
 	if m.statusMessage != upstreamConflictCopy || !m.statusIsError || backend.accepted != 1 {
 		t.Fatalf("conflict status = %q accepted=%d", m.statusMessage, backend.accepted)
 	}
+	if view := m.View(120, 18); !strings.Contains(view, "error: "+upstreamConflictCopy) {
+		t.Fatalf("conflict status not visible:\n%s", view)
+	}
 	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m.driftMode != driftNone || m.OwnsInput() {
 		t.Fatal("escape did not close drift")
@@ -108,6 +111,9 @@ func TestDriftAcceptSuccessAndStaleSessionGuards(t *testing.T) {
 	m.Update(m.startDriftAccept()())
 	if m.driftResult.State != "unchanged" || m.driftResult.BaselineAt != backend.acceptAt || m.statusMessage != "upstream baseline updated" {
 		t.Fatalf("accept result = %+v status=%q", m.driftResult, m.statusMessage)
+	}
+	if view := m.View(80, 18); !strings.Contains(view, "status: upstream baseline updated") {
+		t.Fatalf("accept status not visible:\n%s", view)
 	}
 }
 

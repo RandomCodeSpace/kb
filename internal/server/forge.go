@@ -7,16 +7,13 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"net/url"
 
+	kbai "github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
 const importFetchTimeout = forge.ImportFetchTimeout
-const maxImportIssues = forge.MaxImportIssues
-const maxForgeCommentLen = forge.MaxForgeCommentLen
-const maxForgeComments = forge.MaxForgeComments
 const importPartialTransformNote = "the assistant stopped early — some issues produced no draft"
 const invalidIntegrationNameMessage = "invalid integration name"
 
@@ -115,49 +112,6 @@ type forgeTestResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
-type forgeTestTarget struct {
-	baseURL string
-	pat     string
-}
-
-type forgeHTTPResponse struct {
-	status int
-	header http.Header
-	body   []byte
-}
-
-type forgeRef struct {
-	Source    store.ForgeSource
-	Kind      string
-	Project   string
-	Issue     int
-	Milestone int
-	pat       string
-}
-
-func sharedRef(value forgeRef) forge.Ref {
-	return forge.Ref{Source: value.Source, Kind: value.Kind, Project: value.Project, Issue: value.Issue, Milestone: value.Milestone}.WithCredential(value.pat)
-}
-
-func localRef(value forge.Ref) forgeRef {
-	return forgeRef{Source: value.Source, Kind: value.Kind, Project: value.Project, Issue: value.Issue, Milestone: value.Milestone}
-}
-
-func parseForgeRef(sources []store.ForgeSource, source, raw string) (forgeRef, error) {
-	value, err := forge.ParseRef(sources, source, raw)
-	return localRef(value), err
-}
-
-func forgeSourceByName(sources []store.ForgeSource, name string) (store.ForgeSource, bool) {
-	return forge.SourceByName(sources, name)
-}
-
-func importIssueProvenance(ref forgeRef, issue forgeIssue) (string, string) {
-	return forge.IssueProvenance(sharedRef(ref), issue)
-}
-
-func stripModelLinkTags(tags []string) []string { return forge.StripModelLinkTags(tags) }
-
 func newForgeClient() *http.Client { return forge.NewHTTPClient() }
 
 func (s *server) sharedForge() *forge.Service {
@@ -165,36 +119,6 @@ func (s *server) sharedForge() *forge.Service {
 		s.forgeEngine = forge.New(s.store, s.aiRunner(), s.forgeClient)
 	})
 	return s.forgeEngine
-}
-
-func (s *server) fetchIssue(ctx context.Context, ref forgeRef) (forgeIssue, error) {
-	issue, err := s.sharedForge().FetchIssue(ctx, sharedRef(ref))
-	return issue, serverForgeError(err)
-}
-
-func (s *server) fetchIssues(ctx context.Context, ref forgeRef, max int) ([]forgeIssue, int, bool, string, error) {
-	issues, total, truncated, note, err := s.sharedForge().FetchIssues(ctx, sharedRef(ref), max)
-	return issues, total, truncated, note, serverForgeError(err)
-}
-
-func (s *server) forgeGet(ctx context.Context, ref forgeRef, base, path string, query url.Values) (forgeHTTPResponse, error) {
-	response, err := s.sharedForge().Get(ctx, sharedRef(ref), base, path, query)
-	return forgeHTTPResponse{status: response.Status, header: response.Header, body: response.Body}, serverForgeError(err)
-}
-
-func (s *server) fetchForgeComments(ctx context.Context, ref forgeRef, base, path string) ([]string, error) {
-	comments, err := s.sharedForge().FetchComments(ctx, sharedRef(ref), base, path)
-	return comments, serverForgeError(err)
-}
-
-func (s *server) fetchIssueSnapshot(ctx context.Context, ref forgeRef) (forgeIssue, string, string, error) {
-	issue, body, path, err := s.sharedForge().FetchIssueSnapshot(ctx, sharedRef(ref))
-	return issue, body, path, serverForgeError(err)
-}
-
-func (s *server) forgeIssuesList(ctx context.Context, ref forgeRef, base string) (string, url.Values, error) {
-	path, query, err := s.sharedForge().IssuesList(ctx, sharedRef(ref), base)
-	return path, query, serverForgeError(err)
 }
 
 func serverForgeError(err error) error {
@@ -208,76 +132,12 @@ func serverForgeError(err error) error {
 	return err
 }
 
-func parseForgeIssueList(kind string, body []byte) ([]forgeIssue, error) {
-	return forge.ParseIssueList(kind, body)
-}
-func forgeProjectPath(ref forgeRef) (string, error)   { return forge.ProjectPath(sharedRef(ref)) }
-func forgeIssuePath(ref forgeRef) (string, error)     { return forge.IssuePath(sharedRef(ref)) }
-func forgeMilestonePath(ref forgeRef) (string, error) { return forge.MilestonePath(sharedRef(ref)) }
-func forgeProjectIssuesPath(ref forgeRef) (string, error) {
-	return forge.ProjectIssuesPath(sharedRef(ref))
-}
-func forgeTotalHint(header http.Header) int { return forge.TotalHint(header) }
-func parseGitLabRef(source store.ForgeSource, path string) (forgeRef, error) {
-	value, err := forge.ParseGitLabRef(source, path)
-	return localRef(value), err
-}
-func parseGitHubRef(source store.ForgeSource, path string) (forgeRef, error) {
-	value, err := forge.ParseGitHubRef(source, path)
-	return localRef(value), err
-}
-func forgeIssueListRequest(ref forgeRef) (string, url.Values, error) {
-	return forge.IssueListRequest(sharedRef(ref))
-}
-func setForgeMilestoneQuery(kind string, query url.Values, body []byte) bool {
-	return forge.SetMilestoneQuery(kind, query, body)
-}
-func parseForgeComments(kind string, body []byte) ([]string, error) {
-	return forge.ParseComments(kind, body)
-}
-func appendBoundedForgeComment(comments []string, body string) []string {
-	return forge.AppendBoundedComment(comments, body)
-}
-func forgeAPIBase(kind, base string) (string, error)       { return forge.APIBase(kind, base) }
-func appendImportNote(note, extra string) string           { return forge.AppendImportNote(note, extra) }
-func importRefKind(ref forgeRef) string                    { return forge.RefKind(sharedRef(ref)) }
-func forgeRefID(raw string) (int, error)                   { return forge.RefID(raw) }
-func normalizeForgeProbeBase(raw string) (*url.URL, error) { return forge.NormalizeProbeBase(raw) }
-func forgeURLPort(value *url.URL) string                   { return forge.URLPort(value) }
-func drainForgeResponse(response *http.Response) error     { return forge.DrainResponse(response) }
-func validForgeSourceName(name string) bool                { return forge.ValidSourceName(name) }
-func importDriftRevision(baseline store.ImportBaseline) string {
-	return forge.DriftRevision(baseline)
-}
-func validImportDriftRevision(revision string) bool { return forge.ValidDriftRevision(revision) }
-
-func (s *server) authorizeImportDriftTarget(w http.ResponseWriter, user, source, key string) (store.ImportLink, forgeRef, bool) {
-	link, ref, err := s.sharedForge().AuthorizeDrift(user, source, key)
-	if err == nil {
-		return link, localRef(ref), true
-	}
-	code, message := http.StatusInternalServerError, storageErrorMessage
-	var categorized *forge.Error
-	if errors.As(err, &categorized) {
-		code, message = categorized.Code, categorized.Message
-	}
-	http.Error(w, message, code)
-	return store.ImportLink{}, forgeRef{}, false
-}
-
-func newForgeTestRequest(ctx context.Context, kind string, target forgeTestTarget, project string) (*http.Request, error) {
-	return forge.NewTestRequest(ctx, kind, target.baseURL, target.pat, project)
-}
-
-func (s *server) forgeConnectionOK(request *http.Request, _ string) bool {
-	return forge.ExecuteTest(s.forgeClient, request) == nil
-}
-
 func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, user string) {
 	var request importPreviewRequest
 	if !decodeForgeRequest(w, r, &request) {
 		return
 	}
+	extendWriteDeadline(w)
 	preview, err := s.sharedForge().Preview(r.Context(), user, forge.PreviewRequest{Source: request.Source, Ref: request.Ref, Max: request.Max})
 	if err != nil {
 		writeSharedForgeError(w, user, "import preview", err)
@@ -372,6 +232,14 @@ func writeSharedForgeError(w http.ResponseWriter, user, operation string, err er
 		code = categorized.Code
 		if code != http.StatusBadGateway {
 			message = categorized.Message
+		}
+	} else {
+		var categorizedAI *kbai.Error
+		if errors.As(err, &categorizedAI) {
+			code = categorizedAI.Code
+			if code != http.StatusBadGateway {
+				message = categorizedAI.Message
+			}
 		}
 	}
 	if code == http.StatusBadGateway {

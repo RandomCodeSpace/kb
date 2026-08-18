@@ -258,6 +258,13 @@ func (m Model) driftFooter() string {
 	if m.driftBusy != "" {
 		return "check in progress | input locked"
 	}
+	if m.statusMessage != "" {
+		prefix := "status: "
+		if m.statusIsError {
+			prefix = "error: "
+		}
+		return prefix + m.statusMessage
+	}
 	if m.driftMode == driftSelect {
 		return "up/down choose | enter check | esc back"
 	}
