@@ -880,6 +880,38 @@ func TestInitialVersionSuccessLoadsBoard(t *testing.T) {
 	}
 }
 
+func TestWatcherRefreshDoesNotFlashLoadingFooter(t *testing.T) {
+	reader := &sequenceBoardReader{results: []boardResult{
+		{board: board.Board{Title: "Initial"}},
+		{board: board.Board{Title: "Changed"}},
+	}}
+	m := NewModel(reader, stubVersionReader{}, "u")
+
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "loading board...") {
+		t.Fatalf("first load footer = %q", view)
+	}
+	initial := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 1}))
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "loading board...") {
+		t.Fatalf("active first load footer = %q", view)
+	}
+	completeBoardLoad(t, &m, initial)
+	if !m.haveBoardSnapshot {
+		t.Fatal("successful first load did not record a board snapshot")
+	}
+
+	refresh := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 2}))
+	if !m.loading {
+		t.Fatal("watcher change did not start a board refresh")
+	}
+	if view := ansi.Strip(m.View().Content); strings.Contains(view, "loading board...") || !strings.Contains(view, "ready") {
+		t.Fatalf("watcher refresh footer = %q", view)
+	}
+	completeBoardLoad(t, &m, refresh)
+	if m.loading || m.board.Title != "Changed" {
+		t.Fatalf("watcher refresh completion = loading:%v board:%q", m.loading, m.board.Title)
+	}
+}
+
 func TestInitialLoadFailureRetriesAfterUnchangedPoll(t *testing.T) {
 	want := errors.New("transient read failure")
 	reader := &sequenceBoardReader{results: []boardResult{
