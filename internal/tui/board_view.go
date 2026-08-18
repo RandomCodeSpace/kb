@@ -300,7 +300,7 @@ func (m Model) renderBoard() (string, []boardHit) {
 		return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
 	}
 	if m.settingsNew != nil {
-		footer := settingsBoardFooter(state, cancelled, m.editor.Enabled(), width)
+		footer := settingsBoardFooter(state, cancelled, m.editor.Enabled(), m.adr.Enabled(), width)
 		return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
 	}
 	footer := fitLine(state+" | "+help, width)
@@ -382,7 +382,7 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 	}, "\n"), hits
 }
 
-func settingsBoardFooter(state, cancelled string, editorEnabled bool, width int) string {
+func settingsBoardFooter(state, cancelled string, editorEnabled, adrEnabled bool, width int) string {
 	candidates := [][]string{
 		{"s settings", "j/k cards", "h/l/tab columns", "1-4 jump", "c cancelled:" + cancelled, "q quit"},
 		{"s settings", "j/k cards", "h/l/tab columns", "c cancelled:" + cancelled, "q quit"},
@@ -401,6 +401,11 @@ func settingsBoardFooter(state, cancelled string, editorEnabled bool, width int)
 			{"s settings", "n new", "e edit", "j/k cards", "c cancelled:" + cancelled, "q quit"},
 			{"s settings", "n new", "e edit", "j/k cards", "h/l/tab columns", "q quit"},
 		}, candidates...)
+	}
+	if adrEnabled {
+		for i := range candidates {
+			candidates[i] = append([]string{"a split ADR"}, candidates[i]...)
+		}
 	}
 	minimumStateWidth := min(ansi.StringWidth(state), 5)
 	for _, candidate := range candidates {

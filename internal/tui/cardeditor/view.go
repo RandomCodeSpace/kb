@@ -11,6 +11,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 )
 
 const maxEditorWidth = 96
@@ -79,6 +80,8 @@ func (m *Model) frame(width, height int) (string, int, int) {
 	}
 	if m.guardClose {
 		footer = "D discard | esc keep editing"
+	} else if m.drafting {
+		footer = "drafting card... | esc cancel"
 	} else if m.saving {
 		footer = "saving card..."
 	}
@@ -102,6 +105,15 @@ func (m *Model) bodyLines(width int) []string {
 		}
 	}
 	lines := []string{title, ""}
+	if m.runner != nil {
+		lines = append(lines, "Draft with AI (fills the form; review before Save)")
+		lines = append(lines, m.areaBlock("ai-prompt", "Request", m.draftPrompt, width, 2)...)
+		action := "Draft"
+		if m.drafting {
+			action = "Cancel draft (Esc)"
+		}
+		lines = append(lines, m.actionLine("ai-draft", action), "")
+	}
 	lines = append(lines,
 		m.inputLine("title", "Title", m.title, width),
 		m.inputLine("emoji", "Emoji", m.emoji, width),
@@ -238,41 +250,11 @@ func similarText(hit store.SimilarHit) string {
 }
 
 func inputDisplay(input textinput.Model, focused bool, width int) string {
-	value := input.Value()
-	if value == "" {
-		value = input.Placeholder
-	}
-	runes := []rune(value)
-	position := min(max(input.Position(), 0), len(runes))
-	safe := sanitize(value)
-	safePosition := len([]rune(sanitize(string(runes[:position]))))
-	if !focused {
-		return ansi.Truncate(safe, max(width, 0), "")
-	}
-	return cursorViewport(safe, safePosition, width)
+	return formview.Input(input, focused, width, sanitize, cursorViewport)
 }
 
 func areaDisplay(area textarea.Model, focused bool, width, rows int) []string {
-	value := area.Value()
-	if value == "" {
-		value = area.Placeholder
-	}
-	logical := strings.Split(value, "\n")
-	line := min(max(area.Line(), 0), len(logical)-1)
-	start := max(line-rows+1, 0)
-	end := min(start+rows, len(logical))
-	out := make([]string, 0, rows)
-	for i := start; i < end; i++ {
-		content := sanitize(logical[i])
-		if focused && i == line {
-			content = cursorViewport(content, min(area.Column(), len([]rune(content))), max(width-4, 1))
-		}
-		out = append(out, "    "+ansi.Truncate(content, max(width-4, 0), ""))
-	}
-	for len(out) < rows {
-		out = append(out, "    ")
-	}
-	return out
+	return formview.Area(area, focused, width, rows, sanitize, cursorViewport)
 }
 
 func cursorViewport(value string, position, width int) string {

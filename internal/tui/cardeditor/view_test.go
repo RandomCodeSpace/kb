@@ -1,6 +1,7 @@
 package cardeditor
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -92,6 +93,30 @@ func TestViewCoversErrorsSuggestionsGuardsAndControlSafety(t *testing.T) {
 	model.guardClose, model.saving = false, true
 	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, "saving card") {
 		t.Fatalf("saving footer missing:\n%s", got)
+	}
+}
+
+func TestAIDraftControlsRenderProgressAndControlSafePrompt(t *testing.T) {
+	runner := &fakeDraftRunner{}
+	model := New(newTestStore(t), "u")
+	model.SetAIRunner(runner, nil)
+	model.SetAIRunner(runner, context.Background())
+	model.OpenAdd(board.StatusTodo)
+	model.focus = "ai-prompt"
+	model.draftPrompt.SetValue("draft\x1b[31m\nthis")
+	view := ansi.Strip(model.View(78, 24))
+	for _, want := range []string{"Draft with AI", "fills the form", "Request", "Draft"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("AI editor view missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "\x1b") {
+		t.Fatalf("AI prompt control reached view: %q", view)
+	}
+	model.drafting = true
+	model.focus = "ai-draft"
+	if got := ansi.Strip(model.View(78, 16)); !strings.Contains(got, "esc cancel") || !strings.Contains(got, "Cancel draft") {
+		t.Fatalf("draft progress missing:\n%s", got)
 	}
 }
 

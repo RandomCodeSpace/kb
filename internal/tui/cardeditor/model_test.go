@@ -1,7 +1,10 @@
 package cardeditor
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
@@ -24,6 +28,25 @@ type similarQuery struct {
 	user, title, exclude string
 	links                []string
 	limit                int
+}
+
+type draftRunnerCall struct {
+	ctx                context.Context
+	user, skill, input string
+	scope              ai.Scope
+	maxCards           int
+	maxTokens          int64
+}
+
+type fakeDraftRunner struct {
+	run   ai.RunResult
+	err   error
+	calls []draftRunnerCall
+}
+
+func (r *fakeDraftRunner) RunSkill(ctx context.Context, user string, scope ai.Scope, skill, input string, maxCards int, maxTokens int64) (ai.RunResult, error) {
+	r.calls = append(r.calls, draftRunnerCall{ctx: ctx, user: user, scope: scope, skill: skill, input: input, maxCards: maxCards, maxTokens: maxTokens})
+	return r.run, r.err
 }
 
 func (s *faultStore) AddTask(user string, task board.Task) (board.Task, error) {
@@ -874,4 +897,156 @@ func TestFocusTargetsHelpersAndCleanCloseBranches(t *testing.T) {
 	if got := batch(func() tea.Msg { return "one" }, func() tea.Msg { return "two" }); got == nil {
 		t.Fatal("multi command batch failed")
 	}
+}
+
+func TestAIDraftCreateUsesReadOnlyRunnerAndFillsFormForReview(t *testing.T) {
+	runner := &fakeDraftRunner{run: ai.RunResult{Cards: []ai.Draft{{
+		Title: "Drafted card", Emoji: "🧭", Desc: "generated", Prio: 1,
+		Due: "2026-08-30", Effort: "L", Tags: []string{"ai", "type::feature"},
+		Checks: []ai.DraftCheck{{Text: "review"}, {Text: "ship", Done: true}},
+	}}}}
+	model := New(newTestStore(t), "alice")
+	model.SetAIRunner(runner, context.Background())
+	run(t, &model, model.OpenAdd(board.StatusDoing))
+	model.draftPrompt.SetValue("write the release task")
+	model.focus = "ai-draft"
+	command := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if command == nil || !model.drafting || model.statusMessage != "drafting card..." {
+		t.Fatalf("draft start command=%v drafting=%v status=%q", command, model.drafting, model.statusMessage)
+	}
+	model.Update(commandMsgForEditor(t, command))
+	if len(runner.calls) != 1 {
+		t.Fatalf("runner calls = %d", len(runner.calls))
+	}
+	call := runner.calls[0]
+	if call.user != "alice" || call.scope != ai.ScopeReadOnly || call.skill != "story-draft" || call.maxCards != 1 || call.maxTokens != draftMaxTokens || !strings.HasPrefix(call.input, "Create a new kanban card") {
+		t.Fatalf("runner call = %+v", call)
+	}
+	if !errors.Is(call.ctx.Err(), context.Canceled) {
+		t.Fatalf("completed draft context = %v", call.ctx.Err())
+	}
+	if model.title.Value() != "Drafted card" || model.emoji.Value() != "🧭" || model.desc.Value() != "generated" || model.prio != 1 || model.due.Value() != "2026-08-30" || model.effort != "L" || model.blocked || !reflect.DeepEqual(model.tags, []string{"ai", "type::feature"}) || model.checks.Value() != "review\nx ship" {
+		t.Fatalf("applied form title=%q emoji=%q desc=%q prio=%d due=%q effort=%q blocked=%v tags=%v checks=%q", model.title.Value(), model.emoji.Value(), model.desc.Value(), model.prio, model.due.Value(), model.effort, model.blocked, model.tags, model.checks.Value())
+	}
+	if !model.IsOpen() || !model.Dirty() || model.drafting || model.statusIsError || !strings.Contains(model.statusMessage, "review") {
+		t.Fatalf("post-draft open=%v dirty=%v drafting=%v status=%q error=%v", model.open, model.Dirty(), model.drafting, model.statusMessage, model.statusIsError)
+	}
+}
+
+func TestAIDraftEditCarriesCurrentFormJSONAndPreservesBlocked(t *testing.T) {
+	runner := &fakeDraftRunner{run: ai.RunResult{Cards: []ai.Draft{{
+		Title: "Updated", Desc: "new", Prio: 4, Tags: []string{}, Checks: []ai.DraftCheck{},
+	}}}}
+	model := New(newTestStore(t), "u")
+	model.SetAIRunner(runner, context.Background())
+	run(t, &model, model.OpenEdit(fullEditorTask()))
+	model.title.SetValue("locally edited")
+	model.draftPrompt.SetValue("make it smaller")
+	command := model.startDraft()
+	model.Update(commandMsgForEditor(t, command))
+	if !strings.HasPrefix(runner.calls[0].input, "Update the kanban card") || !strings.Contains(runner.calls[0].input, "Current card JSON") {
+		t.Fatalf("edit prompt = %q", runner.calls[0].input)
+	}
+	jsonText := strings.Split(runner.calls[0].input, "Current card JSON:\n")[1]
+	var current map[string]any
+	if err := json.Unmarshal([]byte(jsonText), &current); err != nil {
+		t.Fatal(err)
+	}
+	if current["title"] != "locally edited" || current["desc"] != fullEditorTask().Desc || current["prio"] != float64(1) {
+		t.Fatalf("current JSON = %#v", current)
+	}
+	if _, found := current["emoji"]; found {
+		t.Fatalf("wire current card unexpectedly included emoji: %#v", current)
+	}
+	if model.title.Value() != "Updated" || !model.blocked {
+		t.Fatalf("application title=%q blocked=%v", model.title.Value(), model.blocked)
+	}
+}
+
+func TestAIDraftCancellationErrorsAndExternalDeleteCannotReviveEditor(t *testing.T) {
+	runner := &fakeDraftRunner{run: ai.RunResult{Cards: []ai.Draft{{Title: "late", Prio: 3}}}}
+	model := New(newTestStore(t), "u")
+	model.SetAIRunner(runner, context.Background())
+	run(t, &model, model.OpenEdit(fullEditorTask()))
+	model.draftPrompt.SetValue("draft")
+	command := model.startDraft()
+	generation := model.draftGen
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if model.drafting || model.draftGen == generation || model.statusMessage != "AI draft cancelled" {
+		t.Fatalf("cancel state drafting=%v gen=%d status=%q", model.drafting, model.draftGen, model.statusMessage)
+	}
+	message := commandMsgForEditor(t, command)
+	if !errors.Is(runner.calls[0].ctx.Err(), context.Canceled) {
+		t.Fatal("draft context was not cancelled")
+	}
+	model.Update(message)
+	if model.title.Value() == "late" {
+		t.Fatal("cancelled result applied")
+	}
+
+	model.draftPrompt.SetValue("again")
+	command = model.startDraft()
+	model.Refresh(board.Task{}, false)
+	if model.IsOpen() || model.drafting {
+		t.Fatalf("external delete open=%v drafting=%v", model.open, model.drafting)
+	}
+	model.Update(commandMsgForEditor(t, command))
+	if len(runner.calls) != 2 {
+		t.Fatalf("external delete runner calls=%d, want 2", len(runner.calls))
+	}
+	if err := runner.calls[1].ctx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("external delete runner context=%v", err)
+	}
+	if model.IsOpen() || model.title.Value() == "late" {
+		t.Fatal("late result revived deleted editor")
+	}
+
+	runner.err = errors.New("upstream\x1b[31m\nfailed")
+	runner.run.Cards = nil
+	run(t, &model, model.OpenAdd(board.StatusTodo))
+	model.draftPrompt.SetValue("fail")
+	model.Update(commandMsgForEditor(t, model.startDraft()))
+	if !model.statusIsError || strings.Contains(model.statusMessage, "\x1b") || strings.Contains(model.statusMessage, "\nfailed") {
+		t.Fatalf("unsafe error status = %q", model.statusMessage)
+	}
+	runner.err = nil
+	model.Update(commandMsgForEditor(t, model.startDraft()))
+	if !strings.Contains(model.statusMessage, "no usable card") {
+		t.Fatalf("empty proposal status = %q", model.statusMessage)
+	}
+}
+
+func TestAIDraftUnavailableBlankStaleAndShutdownBranches(t *testing.T) {
+	model := New(newTestStore(t), "u")
+	run(t, &model, model.OpenAdd(board.StatusTodo))
+	if command := model.startDraft(); command != nil {
+		t.Fatal("missing runner started draft")
+	}
+	runner := &fakeDraftRunner{run: ai.RunResult{Cards: []ai.Draft{{Title: "ok", Prio: 3}}}}
+	model.SetAIRunner(runner, nil)
+	if command := model.startDraft(); command != nil || !model.statusIsError || !strings.Contains(model.statusMessage, "required") {
+		t.Fatalf("blank request command=%v status=%q", command, model.statusMessage)
+	}
+	model.draftPrompt.SetValue("draft")
+	command := model.startDraft()
+	model.CancelAsync()
+	if model.drafting || model.draftCancel != nil {
+		t.Fatal("shutdown left draft active")
+	}
+	model.Update(commandMsgForEditor(t, command))
+
+	model.Update(draftCompletedMsg{session: model.session + 1, generation: model.draftGen, draft: ai.Draft{Title: "stale"}})
+	model.Update(draftCompletedMsg{session: model.session, generation: model.draftGen + 1, draft: ai.Draft{Title: "stale"}})
+	if model.title.Value() == "stale" {
+		t.Fatal("stale result applied")
+	}
+	model.SetAIRunner(nil, context.Background())
+}
+
+func commandMsgForEditor(t *testing.T, command tea.Cmd) tea.Msg {
+	t.Helper()
+	if command == nil {
+		t.Fatal("command is nil")
+	}
+	return command()
 }
