@@ -3,6 +3,7 @@
 package carddetail
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -80,6 +82,17 @@ type Model struct {
 	changed       bool
 	statusMessage string
 	statusIsError bool
+
+	driftBackend    DriftBackend
+	driftContext    context.Context
+	driftMode       driftMode
+	driftSession    uint64
+	driftGeneration uint64
+	driftBusy       string
+	driftCancel     context.CancelFunc
+	driftChoices    []store.ImportLink
+	driftSelection  int
+	driftResult     forge.Drift
 }
 
 // New creates a closed detail pane. A nil reader still shows board-resident
@@ -105,6 +118,7 @@ func (m Model) TaskID() string {
 
 // Open resets the pane to task and returns the asynchronous enrichment load.
 func (m *Model) Open(task board.Task) tea.Cmd {
+	m.cancelDrift()
 	m.actionSession++
 	m.task = task
 	m.comments = nil
@@ -154,6 +168,7 @@ func (m *Model) Refresh(task board.Task) tea.Cmd {
 // Close dismisses the pane and invalidates any in-flight result by clearing
 // the current task identity.
 func (m *Model) Close() {
+	m.cancelDrift()
 	m.generation++
 	m.actionSession++
 	m.open = false
@@ -190,6 +205,8 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return nil
 	}
 	switch msg := message.(type) {
+	case driftChoicesLoadedMsg, driftCheckedMsg, driftAcceptedMsg:
+		return m.updateDrift(msg)
 	case mutationCompletedMsg:
 		return m.finishMutation(msg)
 	case detailLoadedMsg:
@@ -210,6 +227,9 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		m.reconcileDeleteActionAfterRefresh()
 		m.rebuildBody()
 	case tea.KeyPressMsg:
+		if m.driftMode != driftNone {
+			return m.updateDrift(msg)
+		}
 		if m.action != actionNone {
 			return m.updateActionKey(msg)
 		}
@@ -219,6 +239,8 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 			m.rebuildBody()
 		}
 		switch msg.String() {
+		case "v":
+			return m.beginDrift()
 		case "c":
 			return m.beginAction(actionAddComment)
 		case "d":
@@ -439,6 +461,9 @@ func fitTerminal(rendered string, width, height int) string {
 }
 
 func (m Model) renderBody(width int) string {
+	if m.driftMode != driftNone {
+		return m.driftBody(width)
+	}
 	if m.action != actionNone {
 		return m.actionBody(width)
 	}

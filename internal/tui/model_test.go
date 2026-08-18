@@ -17,7 +17,9 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/issueimport"
 )
 
 type stubBoardReader struct {
@@ -103,6 +105,25 @@ func updateTestModel(t *testing.T, model *Model, message tea.Msg) tea.Cmd {
 	return command
 }
 
+type rootImportStore struct{ added int }
+
+func (s *rootImportStore) AddTask(string, board.Task) (board.Task, error) {
+	s.added++
+	return board.Task{ID: "created"}, nil
+}
+
+type rootImportBackend struct{}
+
+func (rootImportBackend) Sources(string) ([]store.ForgeSource, error) {
+	return []store.ForgeSource{{Name: "primary", Kind: "github"}}, nil
+}
+func (rootImportBackend) Preview(context.Context, string, forge.PreviewRequest) (forge.Preview, error) {
+	return forge.Preview{}, nil
+}
+func (rootImportBackend) CreateTask(string, string, board.Task, forge.LinkInput) (board.Task, error) {
+	return board.Task{ID: "created"}, nil
+}
+
 func boardLoadFromBatch(t *testing.T, command tea.Cmd) tea.Cmd {
 	t.Helper()
 	if command == nil {
@@ -113,6 +134,44 @@ func boardLoadFromBatch(t *testing.T, command tea.Cmd) tea.Cmd {
 		t.Fatalf("load and poll command = %#v, want two-command batch", batch)
 	}
 	return batch[0]
+}
+
+func TestIssueImportOwnsRootInputAndCancelsLiftOnOpen(t *testing.T) {
+	task := board.Task{ID: "one", Title: "One", Status: board.StatusTodo, Prio: 3}
+	m := newModel(stubBoardReader{board: board.Board{Title: "Board", Tasks: []board.Task{task}}}, nil, "alice", context.Background())
+	m.board = board.Board{Title: "Board", Tasks: []board.Task{task}}
+	m.loading = false
+	importStore := &rootImportStore{}
+	m.issueImport = issueimport.New(importStore, rootImportBackend{}, "alice", context.Background())
+	m.move.begin(m.board, task, boardStatuses[:], false)
+	command := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'i'})
+	if command == nil || m.move.lifted != nil || !m.issueImport.IsOpen() {
+		t.Fatalf("import open = cmd %v lifted %v open %t", command, m.move.lifted != nil, m.issueImport.IsOpen())
+	}
+	updateTestModel(t, &m, command())
+	before := m.boardView
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'x'})
+	updateTestModel(t, &m, boardCardClickedMsg{taskID: task.ID})
+	if m.boardView != before || m.detail.IsOpen() || !m.issueImport.IsOpen() {
+		t.Fatal("active import leaked board input")
+	}
+	view := m.View()
+	if view.OnMouse != nil || !strings.Contains(ansi.Strip(view.Content), "Forge issue import") {
+		t.Fatal("active import did not own rendering/mouse")
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.issueImport.IsOpen() {
+		t.Fatal("escape did not close import")
+	}
+}
+
+func TestIssueImportCannotOpenDuringMoveWrite(t *testing.T) {
+	m := newModel(stubBoardReader{}, nil, "alice", context.Background())
+	m.issueImport = issueimport.New(&rootImportStore{}, rootImportBackend{}, "alice", context.Background())
+	m.move.saving = true
+	if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'i'}); command != nil || m.issueImport.IsOpen() {
+		t.Fatal("import opened during move write")
+	}
 }
 
 func completeBoardLoad(t *testing.T, model *Model, command tea.Cmd) tea.Cmd {

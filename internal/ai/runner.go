@@ -244,6 +244,24 @@ func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillNa
 	return RunResult{Cards: cards, Commentary: result.Text}, nil
 }
 
+// RunText performs one tool-free completion using stored configuration
+// without exposing the decrypted API key to callers.
+func (r *Runner) RunText(ctx context.Context, user, system, prompt string, maxTokens int64) (string, error) {
+	cfg, err := r.storedConfig(user)
+	if err != nil {
+		return "", err
+	}
+	client, err := r.rigClient(cfg)
+	if err != nil {
+		return "", err
+	}
+	result, err := client.Run(ctx, rig.RunRequest{Model: cfg.Model, System: system, Prompt: prompt, MaxTokens: skillBudget(maxTokens), MaxIterations: 1})
+	if err != nil {
+		return "", runnerError(err)
+	}
+	return result.Text, nil
+}
+
 // skillBudget bounds one run's output budget to the range the endpoint is
 // known to accept. The ceiling is not advice: a model is only known by the
 // name the user typed, and asking for more than its own completion cap is

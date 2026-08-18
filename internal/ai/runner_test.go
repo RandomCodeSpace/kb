@@ -149,6 +149,41 @@ func TestRunnerReadOnlyScopeOmitsMutatingTools(t *testing.T) {
 	}
 }
 
+func TestRunnerRunTextKeepsConfigurationPrivate(t *testing.T) {
+	fake := &scriptedOpenAI{replies: []fakeReply{{content: "plain summary"}}}
+	runner, closeUpstream := configuredRunner(t, fake, "gpt-4o")
+	defer closeUpstream()
+	result, err := runner.RunText(context.Background(), "default", "system instruction", "prompt text", 123)
+	if err != nil || result != "plain summary" {
+		t.Fatalf("RunText = %q, %v", result, err)
+	}
+	requests := fake.requests()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d", len(requests))
+	}
+	request := string(requests[0])
+	for _, want := range []string{"system instruction", "prompt text", `"max_tokens":123`} {
+		if !strings.Contains(request, want) {
+			t.Errorf("request missing %q: %s", want, request)
+		}
+	}
+	if strings.Contains(request, `"tools"`) {
+		t.Fatalf("tool-free request exposed tools: %s", request)
+	}
+
+	failing := &scriptedOpenAI{replies: []fakeReply{{status: http.StatusInternalServerError}}}
+	failingRunner, closeFailing := configuredRunner(t, failing, "gpt-4o")
+	defer closeFailing()
+	if _, err := failingRunner.RunText(context.Background(), "default", "system", "prompt", 10); err == nil {
+		t.Fatal("upstream RunText failure succeeded")
+	}
+
+	unconfigured := NewRunner(newTestStore(t), "", nil, nil)
+	if _, err := unconfigured.RunText(context.Background(), "missing", "system", "prompt", 10); err == nil {
+		t.Fatal("unconfigured RunText succeeded")
+	}
+}
+
 func TestRunnerErrorsAndPartialResults(t *testing.T) {
 	t.Run("unknown skill", func(t *testing.T) {
 		fake := &scriptedOpenAI{}
@@ -227,6 +262,16 @@ func osWriteFile(path string, data []byte) error {
 }
 
 func TestRunnerHelpers(t *testing.T) {
+	if err := ValidateBaseURL("https://example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateDraft(Draft{Title: "card", Prio: 3}); err != nil {
+		t.Fatal(err)
+	}
+	coerced := CoerceDraft(map[string]any{"title": " card ", "prio": float64(9)})
+	if coerced.Title != "card" || coerced.Prio != 4 || ClampPriority(0) != 1 || NormalizeStoryCount(0) != defaultStoryCount {
+		t.Fatalf("public draft helpers = %+v", coerced)
+	}
 	for _, test := range []struct {
 		ask  int64
 		want int64

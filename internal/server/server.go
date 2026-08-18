@@ -22,6 +22,7 @@ import (
 	"time"
 
 	kbai "github.com/RandomCodeSpace/kb/internal/ai"
+	kbforge "github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -59,6 +60,8 @@ type server struct {
 	store        *store.Store
 	aiClient     *http.Client // injectable for tests
 	forgeClient  *http.Client // injectable for tests
+	forgeEngine  *kbforge.Service
+	forgeOnce    sync.Once
 	linkClient   *http.Client // injectable for tests
 	issuer       string
 	jwks         *jwksCache
@@ -70,32 +73,6 @@ type server struct {
 	// afterConditionalBoardSnapshot is a deterministic test seam for a writer
 	// between the handler's preliminary read and the store-owned predicate.
 	afterConditionalBoardSnapshot func()
-
-	// importDriftLocks serializes first-baseline creation per user so two
-	// simultaneous checks cannot both claim a different comparison anchor.
-	importDriftLocks boardLocks
-}
-
-// boardLocks hands out one mutex per board. Per-user rather than global so a
-// slow write for one identity does not serialize every other identity; the
-// map only grows with the number of distinct users the deployment serves.
-type boardLocks struct {
-	mu sync.Mutex
-	m  map[string]*sync.Mutex
-}
-
-func (l *boardLocks) get(user string) *sync.Mutex {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.m == nil {
-		l.m = make(map[string]*sync.Mutex)
-	}
-	mu, ok := l.m[user]
-	if !ok {
-		mu = new(sync.Mutex)
-		l.m[user] = mu
-	}
-	return mu
 }
 
 // New builds the full HTTP handler (API + embedded SPA) for cfg backed by st.

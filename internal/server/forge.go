@@ -3,37 +3,22 @@ package server
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"os"
-	"slices"
-	"strconv"
-	"strings"
-	"time"
-	"unicode/utf8"
 
-	"github.com/RandomCodeSpace/rig"
-
+	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
-const (
-	forgeTimeout                  = 20 * time.Second
-	maxForgeDrainBytes            = 64 << 10
-	maxForgeBodyBytes             = 2 << 20
-	maxImportIssues               = 20
-	maxForgeComments              = 20
-	maxForgeCommentLen            = 1 << 10
-	importFetchTimeout            = 25 * time.Second
-	maxImportLinks                = 100
-	invalidIntegrationNameMessage = "invalid integration name"
-)
+const importFetchTimeout = forge.ImportFetchTimeout
+const maxImportIssues = forge.MaxImportIssues
+const maxForgeCommentLen = forge.MaxForgeCommentLen
+const maxForgeComments = forge.MaxForgeComments
+const importPartialTransformNote = "the assistant stopped early — some issues produced no draft"
+const invalidIntegrationNameMessage = "invalid integration name"
 
 type forgeSourceResponse struct {
 	Name     string `json:"name"`
@@ -46,108 +31,7 @@ type forgeSourcesResponse struct {
 	Sources []forgeSourceResponse `json:"sources"`
 }
 
-type forgeTestResponse struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-}
-
-type forgeTestProbe struct {
-	BaseURL *string `json:"base_url"`
-	PAT     *string `json:"pat"`
-}
-
-type forgeTestTarget struct {
-	baseURL string
-	pat     string
-}
-
-type forgeRef struct {
-	Source    store.ForgeSource
-	Kind      string
-	Project   string
-	Issue     int
-	Milestone int
-
-	// pat is populated only after the request owner decrypts its selected source.
-	// Keeping it private prevents the parser and response paths from exposing it.
-	pat string
-}
-
-type forgeIssue struct {
-	Ref      string
-	Title    string
-	Body     string
-	URL      string
-	Labels   []string
-	Comments []string
-}
-
-type forgeHTTPResponse struct {
-	status int
-	header http.Header
-	body   []byte
-}
-
-type importPreviewRequest struct {
-	Source string `json:"source"`
-	Ref    string `json:"ref"`
-	Max    int    `json:"max"`
-}
-
-type importLinksRequest struct {
-	Source string            `json:"source"`
-	Items  []importLinksItem `json:"items"`
-}
-
-type importProvenanceRequest struct {
-	Link string `json:"link"`
-}
-
-type importProvenanceItem struct {
-	Source      string `json:"source"`
-	ExternalKey string `json:"external_key"`
-	Title       string `json:"title"`
-	URL         string `json:"url"`
-}
-
-type importProvenanceResponse struct {
-	Items []importProvenanceItem `json:"items"`
-}
-
-type importDriftRequest struct {
-	Source      string `json:"source"`
-	ExternalKey string `json:"external_key"`
-}
-
-type importDriftAcceptRequest struct {
-	Source      string `json:"source"`
-	ExternalKey string `json:"external_key"`
-	Revision    string `json:"revision"`
-}
-
-type importDriftAcceptResponse struct {
-	BaselineAt string `json:"baseline_at"`
-}
-
-type importDriftResponse struct {
-	State         string `json:"state"`
-	Link          string `json:"link"`
-	URL           string `json:"url"`
-	TitleChanged  *bool  `json:"title_changed,omitempty"`
-	UpstreamTitle string `json:"upstream_title"`
-	BaselineTitle string `json:"baseline_title"`
-	BaselineAt    string `json:"baseline_at"`
-	CheckedAt     string `json:"checked_at"`
-	Summary       string `json:"summary"`
-	Revision      string `json:"revision,omitempty"`
-}
-
-type importLinksItem struct {
-	ExternalKey string `json:"external_key"`
-	Link        string `json:"link"`
-	URL         string `json:"url"`
-	Title       string `json:"title"`
-}
+type forgeIssue = forge.Issue
 
 type importDuplicate struct {
 	ID    string `json:"id"`
@@ -172,1349 +56,358 @@ type importPreviewResponse struct {
 	Drafts    []importPreviewDraft `json:"drafts"`
 }
 
-type gitLabIssue struct {
-	IID         int      `json:"iid"`
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	WebURL      string   `json:"web_url"`
-	Labels      []string `json:"labels"`
+type importPreviewRequest struct {
+	Source string `json:"source"`
+	Ref    string `json:"ref"`
+	Max    int    `json:"max"`
 }
 
-type gitHubIssue struct {
-	Number  int    `json:"number"`
-	Title   string `json:"title"`
-	Body    string `json:"body"`
-	HTMLURL string `json:"html_url"`
-	Labels  []struct {
-		Name string `json:"name"`
-	} `json:"labels"`
-	PullRequest json.RawMessage `json:"pull_request"`
+type importLinksRequest struct {
+	Source string            `json:"source"`
+	Items  []forge.LinkInput `json:"items"`
 }
 
-type gitLabNote struct {
-	Body   string `json:"body"`
-	System bool   `json:"system"`
+type importProvenanceRequest struct {
+	Link string `json:"link"`
 }
 
-type gitHubComment struct {
-	Body string `json:"body"`
+type importDriftRequest struct {
+	Source      string `json:"source"`
+	ExternalKey string `json:"external_key"`
 }
 
-// parseForgeRef accepts only configured forge URLs so later fetches can select
-// the corresponding stored credential without ever following arbitrary hosts.
-func parseForgeRef(sources []store.ForgeSource, sourceName, raw string) (forgeRef, error) {
-	raw = strings.TrimSpace(raw)
-	if isBareForgeProject(raw) {
-		source, ok := forgeSourceByName(sources, sourceName)
-		if !ok {
-			if sourceName == "" {
-				return forgeRef{}, errors.New("no configured source named")
-			}
-			return forgeRef{}, fmt.Errorf("no configured source named %s", sourceName)
-		}
-		if source.Kind != "github" {
-			return forgeRef{}, errors.New("bare reference requires GitHub source")
-		}
-		return forgeRef{Source: source, Kind: source.Kind, Project: raw}, nil
-	}
-
-	u, err := url.ParseRequestURI(raw)
-	if err != nil || u.Scheme == "" || u.Hostname() == "" || u.User != nil ||
-		(u.Scheme != "http" && u.Scheme != "https") {
-		return forgeRef{}, errors.New("invalid forge reference")
-	}
-
-	source, path, ok := configuredForgeSource(sources, sourceName, u)
-	if !ok {
-		return forgeRef{}, fmt.Errorf("no configured source for host %s", u.Hostname())
-	}
-	switch source.Kind {
-	case "gitlab":
-		return parseGitLabRef(source, path)
-	case "github":
-		return parseGitHubRef(source, path)
-	default:
-		return forgeRef{}, errors.New("invalid forge kind")
-	}
+type importDriftResponse struct {
+	State         string `json:"state"`
+	Link          string `json:"link"`
+	URL           string `json:"url"`
+	TitleChanged  *bool  `json:"title_changed,omitempty"`
+	UpstreamTitle string `json:"upstream_title"`
+	BaselineTitle string `json:"baseline_title"`
+	BaselineAt    string `json:"baseline_at"`
+	CheckedAt     string `json:"checked_at"`
+	Summary       string `json:"summary"`
+	Revision      string `json:"revision,omitempty"`
 }
 
-func isBareForgeProject(raw string) bool {
-	if raw == "" || strings.ContainsAny(raw, ":?#") {
-		return false
-	}
-	parts := strings.Split(raw, "/")
-	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+type importDriftAcceptResponse struct {
+	BaselineAt string `json:"baseline_at"`
+}
+
+type importProvenanceItem struct {
+	Source      string `json:"source"`
+	ExternalKey string `json:"external_key"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+}
+
+type importProvenanceResponse struct {
+	Items []importProvenanceItem `json:"items"`
+}
+
+type importDriftAcceptRequest struct {
+	Source      string `json:"source"`
+	ExternalKey string `json:"external_key"`
+	Revision    string `json:"revision"`
+}
+
+type forgeTestResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+type forgeTestTarget struct {
+	baseURL string
+	pat     string
+}
+
+type forgeHTTPResponse struct {
+	status int
+	header http.Header
+	body   []byte
+}
+
+type forgeRef struct {
+	Source    store.ForgeSource
+	Kind      string
+	Project   string
+	Issue     int
+	Milestone int
+	pat       string
+}
+
+func sharedRef(value forgeRef) forge.Ref {
+	return forge.Ref{Source: value.Source, Kind: value.Kind, Project: value.Project, Issue: value.Issue, Milestone: value.Milestone}.WithCredential(value.pat)
+}
+
+func localRef(value forge.Ref) forgeRef {
+	return forgeRef{Source: value.Source, Kind: value.Kind, Project: value.Project, Issue: value.Issue, Milestone: value.Milestone}
+}
+
+func parseForgeRef(sources []store.ForgeSource, source, raw string) (forgeRef, error) {
+	value, err := forge.ParseRef(sources, source, raw)
+	return localRef(value), err
 }
 
 func forgeSourceByName(sources []store.ForgeSource, name string) (store.ForgeSource, bool) {
-	for _, source := range sources {
-		if strings.EqualFold(source.Name, name) {
-			return source, true
-		}
-	}
-	return store.ForgeSource{}, false
+	return forge.SourceByName(sources, name)
 }
 
-// configuredForgeSource compares origins and whole path segments rather than
-// raw strings, so a source at /forge cannot authorize /forgeish by accident.
-// Equal-length configured bases are disambiguated by the caller's source name;
-// a longer base always wins regardless of that selection.
-func configuredForgeSource(sources []store.ForgeSource, sourceName string, request *url.URL) (store.ForgeSource, string, bool) {
-	bestLength := -1
-	var best store.ForgeSource
-	bestPath := ""
-	requestPath := strings.TrimRight(request.Path, "/")
-	for _, source := range sources {
-		base, err := normalizeForgeProbeBase(source.BaseURL)
-		if err != nil || !sameForgeOrigin(base, request) {
-			continue
-		}
-		basePath := strings.TrimRight(base.Path, "/")
-		var path string
-		switch {
-		case basePath == "":
-			path = strings.TrimPrefix(requestPath, "/")
-		case requestPath == basePath:
-			path = ""
-		case strings.HasPrefix(requestPath, basePath+"/"):
-			path = strings.TrimPrefix(requestPath, basePath+"/")
-		default:
-			continue
-		}
-		length := len(base.Scheme) + len(base.Host) + len(basePath)
-		if length > bestLength || (length == bestLength && strings.EqualFold(source.Name, sourceName)) {
-			bestLength = length
-			best = source
-			bestPath = path
-		}
-	}
-	return best, bestPath, bestLength >= 0
+func importIssueProvenance(ref forgeRef, issue forgeIssue) (string, string) {
+	return forge.IssueProvenance(sharedRef(ref), issue)
 }
 
-func sameForgeOrigin(a, b *url.URL) bool {
-	return strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		forgeURLPort(a) == forgeURLPort(b)
+func stripModelLinkTags(tags []string) []string { return forge.StripModelLinkTags(tags) }
+
+func newForgeClient() *http.Client { return forge.NewHTTPClient() }
+
+func (s *server) sharedForge() *forge.Service {
+	s.forgeOnce.Do(func() {
+		s.forgeEngine = forge.New(s.store, s.aiRunner(), s.forgeClient)
+	})
+	return s.forgeEngine
 }
 
-func forgeURLPort(u *url.URL) string {
-	if port := u.Port(); port != "" {
-		return port
-	}
-	if u.Scheme == "https" {
-		return "443"
-	}
-	return "80"
-}
-
-func parseGitLabRef(source store.ForgeSource, path string) (forgeRef, error) {
-	parts, err := forgePathParts(path)
-	if err != nil {
-		return forgeRef{}, err
-	}
-	n := len(parts)
-	if n >= 3 && parts[n-3] == "-" {
-		return parseGitLabScopedRef(source, parts[:n-3], parts[n-2], parts[n-1])
-	}
-	if n >= 3 && (parts[n-2] == "issues" || parts[n-2] == "milestones") {
-		ref, err := parseGitLabScopedRef(source, parts[:n-2], parts[n-2], parts[n-1])
-		if err == nil {
-			return ref, nil
-		}
-	}
-	if slices.Contains(parts, "-") {
-		return forgeRef{}, errors.New("invalid forge reference")
-	}
-	return forgeRef{Source: source, Kind: source.Kind, Project: strings.Join(parts, "/")}, nil
-}
-
-func parseGitLabScopedRef(source store.ForgeSource, projectParts []string, resource, rawID string) (forgeRef, error) {
-	project := strings.Join(projectParts, "/")
-	if project == "" {
-		return forgeRef{}, errors.New("invalid forge reference")
-	}
-	id, err := forgeRefID(rawID)
-	if err != nil {
-		return forgeRef{}, err
-	}
-	ref := forgeRef{Source: source, Kind: source.Kind, Project: project}
-	switch resource {
-	case "issues":
-		ref.Issue = id
-	case "milestones":
-		ref.Milestone = id
-	case "boards":
-		// Phase 1 resolves a board to its project; list and label filters are out of scope.
-	default:
-		return forgeRef{}, errors.New("invalid forge reference")
-	}
-	return ref, nil
-}
-
-func parseGitHubRef(source store.ForgeSource, path string) (forgeRef, error) {
-	parts, err := forgePathParts(path)
-	if err != nil {
-		return forgeRef{}, err
-	}
-	if len(parts) == 2 {
-		return forgeRef{Source: source, Kind: source.Kind, Project: strings.Join(parts, "/")}, nil
-	}
-	if len(parts) != 4 || (parts[2] != "issues" && parts[2] != "milestone") {
-		return forgeRef{}, errors.New("invalid forge reference")
-	}
-	id, err := forgeRefID(parts[3])
-	if err != nil {
-		return forgeRef{}, err
-	}
-	ref := forgeRef{Source: source, Kind: source.Kind, Project: strings.Join(parts[:2], "/")}
-	if parts[2] == "issues" {
-		ref.Issue = id
-	} else {
-		ref.Milestone = id
-	}
-	return ref, nil
-}
-
-func forgePathParts(path string) ([]string, error) {
-	path = strings.Trim(path, "/")
-	if path == "" {
-		return nil, errors.New("invalid forge reference")
-	}
-	parts := strings.Split(path, "/")
-	if slices.Contains(parts, "") {
-		return nil, errors.New("invalid forge reference")
-	}
-	return parts, nil
-}
-
-func forgeRefID(raw string) (int, error) {
-	id, err := strconv.Atoi(raw)
-	if err != nil || id <= 0 {
-		return 0, errors.New("invalid forge reference")
-	}
-	return id, nil
-}
-
-// fetchIssue loads one forge issue and its bounded human discussion for the
-// import pipeline. The caller already chose the configured source in D1.
 func (s *server) fetchIssue(ctx context.Context, ref forgeRef) (forgeIssue, error) {
-	issue, apiBase, issuePath, err := s.fetchIssueSnapshot(ctx, ref)
-	if err != nil {
-		return forgeIssue{}, err
-	}
-	comments, err := s.fetchForgeComments(ctx, ref, apiBase, issuePath)
-	if err != nil {
-		return forgeIssue{}, err
-	}
-	issue.Comments = comments
-	return issue, nil
+	issue, err := s.sharedForge().FetchIssue(ctx, sharedRef(ref))
+	return issue, serverForgeError(err)
 }
 
-// fetchIssueSnapshot reads only the issue record. Acceptance needs no
-// discussion, so keeping this distinct prevents an unnecessary second egress.
+func (s *server) fetchIssues(ctx context.Context, ref forgeRef, max int) ([]forgeIssue, int, bool, string, error) {
+	issues, total, truncated, note, err := s.sharedForge().FetchIssues(ctx, sharedRef(ref), max)
+	return issues, total, truncated, note, serverForgeError(err)
+}
+
+func (s *server) forgeGet(ctx context.Context, ref forgeRef, base, path string, query url.Values) (forgeHTTPResponse, error) {
+	response, err := s.sharedForge().Get(ctx, sharedRef(ref), base, path, query)
+	return forgeHTTPResponse{status: response.Status, header: response.Header, body: response.Body}, serverForgeError(err)
+}
+
+func (s *server) fetchForgeComments(ctx context.Context, ref forgeRef, base, path string) ([]string, error) {
+	comments, err := s.sharedForge().FetchComments(ctx, sharedRef(ref), base, path)
+	return comments, serverForgeError(err)
+}
+
 func (s *server) fetchIssueSnapshot(ctx context.Context, ref forgeRef) (forgeIssue, string, string, error) {
-	if ref.Issue <= 0 {
-		return forgeIssue{}, "", "", forgeRequestError(ref, "")
-	}
-	apiBase, err := forgeAPIBase(ref.Kind, ref.Source.BaseURL)
-	if err != nil {
-		return forgeIssue{}, "", "", forgeRequestError(ref, "")
-	}
-	issuePath, err := forgeIssuePath(ref)
-	if err != nil {
-		return forgeIssue{}, "", "", forgeRequestError(ref, "")
-	}
-	response, err := s.forgeGet(ctx, ref, apiBase, issuePath, nil)
-	if err != nil {
-		return forgeIssue{}, "", "", err
-	}
-	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
-		return forgeIssue{}, "", "", forgeRequestError(ref, issuePath)
-	}
-
-	var issue forgeIssue
-	switch ref.Kind {
-	case "gitlab":
-		var raw gitLabIssue
-		if err := json.Unmarshal(response.body, &raw); err != nil {
-			return forgeIssue{}, "", "", forgeRequestError(ref, issuePath)
-		}
-		issue = forgeIssue{Ref: fmt.Sprintf("gitlab#%d", raw.IID), Title: raw.Title, Body: raw.Description, URL: raw.WebURL, Labels: raw.Labels}
-	case "github":
-		var raw gitHubIssue
-		if err := json.Unmarshal(response.body, &raw); err != nil || len(raw.PullRequest) != 0 {
-			return forgeIssue{}, "", "", forgeRequestError(ref, issuePath)
-		}
-		issue = gitHubForgeIssue(raw)
-	default:
-		return forgeIssue{}, "", "", forgeRequestError(ref, issuePath)
-	}
-	return issue, apiBase, issuePath, nil
+	issue, body, path, err := s.sharedForge().FetchIssueSnapshot(ctx, sharedRef(ref))
+	return issue, body, path, serverForgeError(err)
 }
 
-// fetchIssues loads open project, board, or milestone issues. Board filtering
-// deliberately remains out of scope: D1 resolves boards to their project.
-func (s *server) fetchIssues(ctx context.Context, ref forgeRef, max int) (issues []forgeIssue, totalHint int, truncated bool, note string, err error) {
-	if ref.Issue > 0 {
-		issue, err := s.fetchIssue(ctx, ref)
-		if err != nil {
-			return nil, 0, false, "", err
-		}
-		return []forgeIssue{issue}, 1, false, "", nil
-	}
-	if max <= 0 || max > maxImportIssues {
-		max = maxImportIssues
-	}
-	apiBase, err := forgeAPIBase(ref.Kind, ref.Source.BaseURL)
-	if err != nil {
-		return nil, 0, false, "", forgeRequestError(ref, "")
-	}
-	listPath, query, err := s.forgeIssuesList(ctx, ref, apiBase)
-	if err != nil {
-		return nil, 0, false, "", err
-	}
-	return s.fetchIssuePages(ctx, ref, apiBase, listPath, query, max)
+func (s *server) forgeIssuesList(ctx context.Context, ref forgeRef, base string) (string, url.Values, error) {
+	path, query, err := s.sharedForge().IssuesList(ctx, sharedRef(ref), base)
+	return path, query, serverForgeError(err)
 }
 
-type forgeIssuePageState struct {
-	issues         []forgeIssue
-	totalHint      int
-	fallbackTotal  int
-	hasGitLabTotal bool
-	truncated      bool
-	note           string
-}
-
-func (s *server) fetchIssuePages(ctx context.Context, ref forgeRef, apiBase, listPath string, query url.Values, max int) ([]forgeIssue, int, bool, string, error) {
-	state := forgeIssuePageState{}
-	page := 1
-	for {
-		if page > 1 {
-			query.Set("page", strconv.Itoa(page))
-		}
-		response, err := s.forgeGet(ctx, ref, apiBase, listPath, query)
-		if err != nil {
-			return nil, 0, false, "", err
-		}
-		state.observeTotal(ref.Kind, response.header)
-		if forgeRateLimited(ref.Kind, response) {
-			state.markRateLimited()
-			return state.result()
-		}
-		if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
-			return nil, 0, false, "", forgeRequestError(ref, listPath)
-		}
-
-		batch, err := parseForgeIssueList(ref.Kind, response.body)
-		if err != nil {
-			return nil, 0, false, "", forgeRequestError(ref, listPath)
-		}
-		if state.appendBatch(batch, max, forgeHasNextPage(ref.Kind, response.header)) {
-			break
-		}
-		page++
+func serverForgeError(err error) error {
+	if err == nil {
+		return nil
 	}
-	return state.result()
-}
-
-func (state *forgeIssuePageState) observeTotal(kind string, header http.Header) {
-	if kind != "gitlab" {
-		return
+	var categorized *forge.Error
+	if errors.As(err, &categorized) {
+		return &aiError{code: categorized.Code, msg: categorized.Message}
 	}
-	total := forgeTotalHint(header)
-	if total >= 0 {
-		state.totalHint = total
-		state.hasGitLabTotal = true
-	}
-}
-
-func (state *forgeIssuePageState) markRateLimited() {
-	if !state.hasGitLabTotal {
-		state.totalHint = state.fallbackTotal
-	}
-	state.truncated = true
-	state.note = fmt.Sprintf("rate limited — partial results (%d of %d)", len(state.issues), state.totalHint)
-}
-
-func (state *forgeIssuePageState) appendBatch(batch []forgeIssue, max int, hasNext bool) bool {
-	state.fallbackTotal += len(batch)
-	remaining := max - len(state.issues)
-	if len(batch) > remaining {
-		state.issues = append(state.issues, batch[:remaining]...)
-		state.truncated = true
-		return true
-	}
-	state.issues = append(state.issues, batch...)
-	if len(state.issues) >= max {
-		state.truncated = hasNext
-		return true
-	}
-	return !hasNext
-}
-
-func (state *forgeIssuePageState) result() ([]forgeIssue, int, bool, string, error) {
-	if !state.hasGitLabTotal {
-		state.totalHint = state.fallbackTotal
-	}
-	if state.totalHint > len(state.issues) {
-		state.truncated = true
-	}
-	return state.issues, state.totalHint, state.truncated, state.note, nil
-}
-
-func (s *server) forgeIssuesList(ctx context.Context, ref forgeRef, apiBase string) (string, url.Values, error) {
-	listPath, query, err := forgeIssueListRequest(ref)
-	if err != nil {
-		return "", nil, forgeRequestError(ref, listPath)
-	}
-	if ref.Milestone == 0 {
-		return listPath, query, nil
-	}
-	milestonePath, err := forgeMilestonePath(ref)
-	if err != nil {
-		return "", nil, forgeRequestError(ref, "")
-	}
-	response, err := s.forgeGet(ctx, ref, apiBase, milestonePath, nil)
-	if err != nil {
-		return "", nil, err
-	}
-	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
-		return "", nil, forgeRequestError(ref, milestonePath)
-	}
-	if !setForgeMilestoneQuery(ref.Kind, query, response.body) {
-		return "", nil, forgeRequestError(ref, milestonePath)
-	}
-	return listPath, query, nil
-}
-
-func forgeIssueListRequest(ref forgeRef) (string, url.Values, error) {
-	listPath, err := forgeProjectIssuesPath(ref)
-	if err != nil {
-		return "", nil, err
-	}
-	query := url.Values{"per_page": {"50"}}
-	switch ref.Kind {
-	case "gitlab":
-		query.Set("state", "opened")
-	case "github":
-		query.Set("state", "open")
-	default:
-		return listPath, nil, errors.New("invalid forge kind")
-	}
-	return listPath, query, nil
-}
-
-func setForgeMilestoneQuery(kind string, query url.Values, body []byte) bool {
-	switch kind {
-	case "gitlab":
-		var milestone struct {
-			Title string `json:"title"`
-		}
-		if err := json.Unmarshal(body, &milestone); err != nil || milestone.Title == "" {
-			return false
-		}
-		query.Set("milestone", milestone.Title)
-	case "github":
-		var milestone struct {
-			Number int `json:"number"`
-		}
-		if err := json.Unmarshal(body, &milestone); err != nil || milestone.Number <= 0 {
-			return false
-		}
-		query.Set("milestone", strconv.Itoa(milestone.Number))
-	default:
-		return false
-	}
-	return true
-}
-
-func (s *server) fetchForgeComments(ctx context.Context, ref forgeRef, apiBase, issuePath string) ([]string, error) {
-	commentsPath := issuePath + "/comments"
-	if ref.Kind == "gitlab" {
-		commentsPath = issuePath + "/notes"
-	}
-	response, err := s.forgeGet(ctx, ref, apiBase, commentsPath, url.Values{"per_page": {"50"}})
-	if err != nil {
-		return nil, err
-	}
-	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
-		return nil, forgeRequestError(ref, commentsPath)
-	}
-
-	comments, err := parseForgeComments(ref.Kind, response.body)
-	if err != nil {
-		return nil, forgeRequestError(ref, commentsPath)
-	}
-	return comments, nil
-}
-
-func parseForgeComments(kind string, body []byte) ([]string, error) {
-	comments := make([]string, 0, maxForgeComments)
-	switch kind {
-	case "gitlab":
-		var notes []gitLabNote
-		if err := json.Unmarshal(body, &notes); err != nil {
-			return nil, err
-		}
-		for _, note := range notes {
-			if !note.System {
-				comments = appendBoundedForgeComment(comments, note.Body)
-			}
-		}
-	case "github":
-		var raw []gitHubComment
-		if err := json.Unmarshal(body, &raw); err != nil {
-			return nil, err
-		}
-		for _, comment := range raw {
-			comments = appendBoundedForgeComment(comments, comment.Body)
-		}
-	default:
-		return nil, errors.New("invalid forge kind")
-	}
-	return comments, nil
-}
-
-func appendBoundedForgeComment(comments []string, body string) []string {
-	if len(comments) >= maxForgeComments {
-		return comments
-	}
-	for len(body) > maxForgeCommentLen {
-		_, size := utf8.DecodeLastRuneInString(body)
-		body = body[:len(body)-size]
-	}
-	return append(comments, body)
-}
-
-func forgeIssuePath(ref forgeRef) (string, error) {
-	projectPath, err := forgeProjectPath(ref)
-	if err != nil {
-		return "", err
-	}
-	return projectPath + "/issues/" + strconv.Itoa(ref.Issue), nil
-}
-
-func forgeMilestonePath(ref forgeRef) (string, error) {
-	projectPath, err := forgeProjectPath(ref)
-	if err != nil {
-		return "", err
-	}
-	return projectPath + "/milestones/" + strconv.Itoa(ref.Milestone), nil
-}
-
-func forgeProjectIssuesPath(ref forgeRef) (string, error) {
-	projectPath, err := forgeProjectPath(ref)
-	if err != nil {
-		return "", err
-	}
-	return projectPath + "/issues", nil
-}
-
-func forgeProjectPath(ref forgeRef) (string, error) {
-	if ref.Project == "" {
-		return "", errors.New("invalid forge project")
-	}
-	switch ref.Kind {
-	case "gitlab":
-		return "/projects/" + url.PathEscape(ref.Project), nil
-	case "github":
-		parts := strings.Split(ref.Project, "/")
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			return "", errors.New("invalid forge project")
-		}
-		return "/repos/" + url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1]), nil
-	default:
-		return "", errors.New("invalid forge kind")
-	}
-}
-
-func (s *server) forgeGet(ctx context.Context, ref forgeRef, apiBase, path string, query url.Values) (forgeHTTPResponse, error) {
-	endpoint := strings.TrimRight(apiBase, "/") + path
-	if len(query) > 0 {
-		endpoint += "?" + query.Encode()
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return forgeHTTPResponse{}, forgeRequestError(ref, path)
-	}
-	switch ref.Kind {
-	case "gitlab":
-		if ref.pat != "" {
-			request.Header.Set("PRIVATE-TOKEN", ref.pat)
-		}
-	case "github":
-		if ref.pat != "" {
-			request.Header.Set("Authorization", "Bearer "+ref.pat)
-		}
-		request.Header.Set("Accept", "application/vnd.github+json")
-	default:
-		return forgeHTTPResponse{}, forgeRequestError(ref, path)
-	}
-	if s.forgeClient == nil {
-		return forgeHTTPResponse{}, forgeRequestError(ref, path)
-	}
-	response, err := s.forgeClient.Do(request)
-	if err != nil {
-		return forgeHTTPResponse{}, forgeRequestError(ref, path)
-	}
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxForgeBodyBytes))
-	closeErr := response.Body.Close()
-	if readErr != nil || closeErr != nil {
-		return forgeHTTPResponse{}, forgeRequestError(ref, path)
-	}
-	return forgeHTTPResponse{status: response.StatusCode, header: response.Header.Clone(), body: body}, nil
-}
-
-// The name and path are already constrained (names match ^[a-z0-9._-]{1,64}$ and
-// paths are url.PathEscape'd), but both are stripped anyway so no future caller
-// can turn this line into a log-forging primitive.
-func forgeRequestError(ref forgeRef, path string) error {
-	log.Printf("forge: request failed source=%s path=%s", logSafe(ref.Source.Name), logSafe(path))
-	return &aiError{code: http.StatusBadGateway, msg: "forge request failed"}
-}
-
-func forgeTotalHint(header http.Header) int {
-	total, err := strconv.Atoi(header.Get("X-Total"))
-	if err != nil || total < 0 {
-		return -1
-	}
-	return total
-}
-
-func forgeRateLimited(kind string, response forgeHTTPResponse) bool {
-	return response.status == http.StatusTooManyRequests ||
-		(kind == "github" && response.status == http.StatusForbidden && response.header.Get("X-RateLimit-Remaining") == "0")
-}
-
-func forgeHasNextPage(kind string, header http.Header) bool {
-	if kind == "gitlab" {
-		return header.Get("X-Next-Page") != ""
-	}
-	return strings.Contains(header.Get("Link"), "rel=\"next\"")
+	return err
 }
 
 func parseForgeIssueList(kind string, body []byte) ([]forgeIssue, error) {
-	switch kind {
-	case "gitlab":
-		var raw []gitLabIssue
-		if err := json.Unmarshal(body, &raw); err != nil {
-			return nil, err
-		}
-		issues := make([]forgeIssue, 0, len(raw))
-		for _, issue := range raw {
-			issues = append(issues, forgeIssue{Ref: fmt.Sprintf("gitlab#%d", issue.IID), Title: issue.Title, Body: issue.Description, URL: issue.WebURL, Labels: issue.Labels})
-		}
-		return issues, nil
-	case "github":
-		var raw []gitHubIssue
-		if err := json.Unmarshal(body, &raw); err != nil {
-			return nil, err
-		}
-		issues := make([]forgeIssue, 0, len(raw))
-		for _, issue := range raw {
-			if len(issue.PullRequest) == 0 {
-				issues = append(issues, gitHubForgeIssue(issue))
-			}
-		}
-		return issues, nil
-	default:
-		return nil, errors.New("invalid forge kind")
+	return forge.ParseIssueList(kind, body)
+}
+func forgeProjectPath(ref forgeRef) (string, error)   { return forge.ProjectPath(sharedRef(ref)) }
+func forgeIssuePath(ref forgeRef) (string, error)     { return forge.IssuePath(sharedRef(ref)) }
+func forgeMilestonePath(ref forgeRef) (string, error) { return forge.MilestonePath(sharedRef(ref)) }
+func forgeProjectIssuesPath(ref forgeRef) (string, error) {
+	return forge.ProjectIssuesPath(sharedRef(ref))
+}
+func forgeTotalHint(header http.Header) int { return forge.TotalHint(header) }
+func parseGitLabRef(source store.ForgeSource, path string) (forgeRef, error) {
+	value, err := forge.ParseGitLabRef(source, path)
+	return localRef(value), err
+}
+func parseGitHubRef(source store.ForgeSource, path string) (forgeRef, error) {
+	value, err := forge.ParseGitHubRef(source, path)
+	return localRef(value), err
+}
+func forgeIssueListRequest(ref forgeRef) (string, url.Values, error) {
+	return forge.IssueListRequest(sharedRef(ref))
+}
+func setForgeMilestoneQuery(kind string, query url.Values, body []byte) bool {
+	return forge.SetMilestoneQuery(kind, query, body)
+}
+func parseForgeComments(kind string, body []byte) ([]string, error) {
+	return forge.ParseComments(kind, body)
+}
+func appendBoundedForgeComment(comments []string, body string) []string {
+	return forge.AppendBoundedComment(comments, body)
+}
+func forgeAPIBase(kind, base string) (string, error)       { return forge.APIBase(kind, base) }
+func appendImportNote(note, extra string) string           { return forge.AppendImportNote(note, extra) }
+func importRefKind(ref forgeRef) string                    { return forge.RefKind(sharedRef(ref)) }
+func forgeRefID(raw string) (int, error)                   { return forge.RefID(raw) }
+func normalizeForgeProbeBase(raw string) (*url.URL, error) { return forge.NormalizeProbeBase(raw) }
+func forgeURLPort(value *url.URL) string                   { return forge.URLPort(value) }
+func drainForgeResponse(response *http.Response) error     { return forge.DrainResponse(response) }
+func validForgeSourceName(name string) bool                { return forge.ValidSourceName(name) }
+func importDriftRevision(baseline store.ImportBaseline) string {
+	return forge.DriftRevision(baseline)
+}
+func validImportDriftRevision(revision string) bool { return forge.ValidDriftRevision(revision) }
+
+func (s *server) authorizeImportDriftTarget(w http.ResponseWriter, user, source, key string) (store.ImportLink, forgeRef, bool) {
+	link, ref, err := s.sharedForge().AuthorizeDrift(user, source, key)
+	if err == nil {
+		return link, localRef(ref), true
 	}
+	code, message := http.StatusInternalServerError, storageErrorMessage
+	var categorized *forge.Error
+	if errors.As(err, &categorized) {
+		code, message = categorized.Code, categorized.Message
+	}
+	http.Error(w, message, code)
+	return store.ImportLink{}, forgeRef{}, false
 }
 
-func gitHubForgeIssue(issue gitHubIssue) forgeIssue {
-	labels := make([]string, 0, len(issue.Labels))
-	for _, label := range issue.Labels {
-		if label.Name != "" {
-			labels = append(labels, label.Name)
-		}
-	}
-	return forgeIssue{Ref: fmt.Sprintf("github#%d", issue.Number), Title: issue.Title, Body: issue.Body, URL: issue.HTMLURL, Labels: labels}
+func newForgeTestRequest(ctx context.Context, kind string, target forgeTestTarget, project string) (*http.Request, error) {
+	return forge.NewTestRequest(ctx, kind, target.baseURL, target.pat, project)
 }
 
-func newForgeClient() *http.Client {
-	raw := os.Getenv("KB_FORGE_ALLOW_PRIVATE")
-	allowAll := raw == "1" || raw == "*"
-	var allowHosts map[string]bool
-	if !allowAll {
-		allowHosts = parseAllowedHosts(raw)
-	}
-
-	return &http.Client{
-		Timeout:       forgeTimeout,
-		Transport:     guardedTransport(allowHosts, allowAll),
-		CheckRedirect: sameHostRedirect,
-	}
+func (s *server) forgeConnectionOK(request *http.Request, _ string) bool {
+	return forge.ExecuteTest(s.forgeClient, request) == nil
 }
 
-func validForgeSourceName(name string) bool {
-	name = strings.ToLower(name)
-	if len(name) == 0 || len(name) > 64 {
-		return false
-	}
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		if (c < 'a' || c > 'z') && (c < '0' || c > '9') &&
-			c != '.' && c != '_' && c != '-' {
-			return false
-		}
-	}
-	return true
-}
-
-func normalizeForgeProbeBase(raw string) (*url.URL, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil, errors.New("invalid forge base URL")
-	}
-	if !strings.Contains(raw, "://") {
-		raw = "https://" + raw
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" {
-		return nil, errors.New("invalid forge base URL")
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, errors.New("forge base URL scheme must be http or https")
-	}
-	if u.User != nil {
-		return nil, errors.New("forge base URL must not contain userinfo")
-	}
-	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return nil, errors.New("forge base URL must not contain query or fragment")
-	}
-	return u, nil
-}
-
-// forgeAPIBase derives the stable REST prefix for each supported forge while
-// preserving enterprise installations mounted below a path prefix.
-func forgeAPIBase(kind, baseURL string) (string, error) {
-	if kind != "gitlab" && kind != "github" {
-		return "", errors.New("invalid forge kind")
-	}
-	u, err := normalizeForgeProbeBase(baseURL)
-	if err != nil {
-		return "", err
-	}
-	if kind == "github" && strings.EqualFold(u.Hostname(), "github.com") {
-		return "https://api.github.com", nil
-	}
-
-	u.Path = strings.TrimRight(u.Path, "/")
-	u.RawPath = ""
-	if kind == "gitlab" {
-		u.Path += "/api/v4"
-	} else {
-		u.Path += "/api/v3"
-	}
-	return u.String(), nil
-}
-
-// importTransformSkillName is the skill the import preview runs. The endpoint
-// keeps its own request and response shape; only the way the drafts are
-// produced is shared with the other skill callers.
-const importTransformSkillName = "import-transform"
-
-// importPartialTransformNote tells the caller the draft list is short because
-// the run ran out of room, not because the issues were judged noise.
-const importPartialTransformNote = "the assistant stopped early — some issues produced no draft"
-
-// appendImportNote joins a second note onto whatever fetchIssues already said,
-// so a rate-limited fetch and a truncated transform can both be reported.
-func appendImportNote(note, extra string) string {
-	if note == "" {
-		return extra
-	}
-	return note + "; " + extra
-}
-
-// handleImportPreview transforms a bounded, configured forge selection once;
-// it never writes cards or provenance, which remain an explicit later commit.
 func (s *server) handleImportPreview(w http.ResponseWriter, r *http.Request, user string) {
-	body, ok := readBody(w, r)
-	if !ok {
+	var request importPreviewRequest
+	if !decodeForgeRequest(w, r, &request) {
 		return
 	}
-	var req importPreviewRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
-		return
-	}
-	sources, err := s.store.ForgeSources(user)
+	preview, err := s.sharedForge().Preview(r.Context(), user, forge.PreviewRequest{Source: request.Source, Ref: request.Ref, Max: request.Max})
 	if err != nil {
-		log.Printf("forge: list sources for %s failed", user)
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
+		writeSharedForgeError(w, user, "import preview", err)
 		return
 	}
-	ref, err := parseForgeRef(sources, req.Source, req.Ref)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	response := importPreviewResponse{Kind: preview.Kind, TotalHint: preview.TotalHint, Fetched: preview.Fetched, Truncated: preview.Truncated, Note: preview.Note, Drafts: make([]importPreviewDraft, 0, len(preview.Drafts))}
+	for _, draft := range preview.Drafts {
+		item := importPreviewDraft{storyDraft: draft.Draft, Link: draft.Link, ExternalKey: draft.ExternalKey, URL: draft.URL}
+		if draft.Duplicate != nil {
+			item.DuplicateOf = &importDuplicate{ID: draft.Duplicate.ID, Title: draft.Duplicate.Title, Via: draft.Duplicate.Via}
+		}
+		response.Drafts = append(response.Drafts, item)
 	}
-	selected, found := forgeSourceByName(sources, req.Source)
-	if !found {
-		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
-		return
-	}
-	if ref.Source.Name != selected.Name {
-		http.Error(w, "reference does not match selected source", http.StatusBadRequest)
-		return
-	}
-	kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
-	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
-		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
-		return
-	}
-	ref.pat = pat
-
-	ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
-	defer cancel()
-	issues, totalHint, truncated, note, err := s.fetchIssues(ctx, ref, req.Max)
-	if err != nil {
-		writeAIError(w, user, "import preview", err)
-		return
-	}
-	duplicates, err := s.importDuplicates(user, issues)
-	if err != nil {
-		log.Printf("forge: duplicate lookup for %s failed", user)
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
-		return
-	}
-	fetched := len(issues)
-	packed, sourceCount := packImportIssues(issues)
-	issues, duplicates = issues[:sourceCount], duplicates[:sourceCount]
-	response := importPreviewResponse{
-		Kind:      importRefKind(ref),
-		TotalHint: totalHint,
-		Fetched:   fetched,
-		Truncated: truncated,
-		Note:      note,
-		Drafts:    []importPreviewDraft{},
-	}
-	if sourceCount == 0 {
-		writeJSON(w, response)
-		return
-	}
-	// Forge issues are third-party text — anyone who can comment on an issue
-	// writes part of this prompt — so the run is read-only: no board write, no
-	// outbound fetch. The card cap is stated as maxImportIssues rather than left
-	// to the default, because a pack may carry that many sources. The closing
-	// commentary is dropped; this endpoint's response shape is fixed.
-	run, err := s.runSkillForRequest(w, r, user, skillScopeReadOnly, importTransformSkillName, "Transform these numbered forge issues into kanban-card proposals:\n\n"+packed, maxImportIssues, aiImportMaxTokens)
-	if err != nil {
-		writeAIError(w, user, "import preview", err)
-		return
-	}
-	// A run cut short at a budget still returns the cards it did propose, and
-	// this endpoint drops the commentary that would have said so — so the note
-	// says it instead. Without it a truncated import is a 200 that reads as a
-	// complete one, and the issues that never became drafts look like issues
-	// the model deliberately skipped.
-	if run.Partial {
-		response.Note = appendImportNote(response.Note, importPartialTransformNote)
-	}
-	response.Drafts = buildImportPreviewDrafts(ref, run.Cards, issues, duplicates)
 	writeJSON(w, response)
 }
 
-// buildImportPreviewDrafts attaches forge provenance to the drafts the run
-// proposed. One issue yields at most one linked draft: the model is told never
-// to split an issue in two, and nothing enforces that, so a repeated source
-// number would otherwise hand two drafts the same link, external key and
-// duplicate pointer — and accepting both would put two board cards on one
-// external key. The repeat keeps its card and loses only the provenance it
-// cannot own.
-func buildImportPreviewDrafts(ref forgeRef, drafts []storyDraft, issues []forgeIssue, duplicates []*importDuplicate) []importPreviewDraft {
-	previews := make([]importPreviewDraft, 0, len(drafts))
-	claimed := make(map[int]bool, len(drafts))
-	for _, draft := range drafts {
-		preview := importPreviewDraft{storyDraft: draft}
-		preview.Tags = stripModelLinkTags(preview.Tags)
-		if draft.Source > 0 && draft.Source <= len(issues) && !claimed[draft.Source] {
-			claimed[draft.Source] = true
-			issue := issues[draft.Source-1]
-			link, externalKey := importIssueProvenance(ref, issue)
-			preview.Tags = append(preview.Tags, linkTagPrefix+link)
-			preview.Link = link
-			preview.ExternalKey = externalKey
-			preview.URL = issue.URL
-			preview.DuplicateOf = duplicates[draft.Source-1]
-		}
-		previews = append(previews, preview)
-	}
-	return previews
-}
-
-// handleImportLinks records client-selected import provenance without loading
-// credentials or contacting a forge. The named source provides the canonical
-// source and kind; the client supplies only the item identity and display data.
 func (s *server) handleImportLinks(w http.ResponseWriter, r *http.Request, user string) {
-	body, ok := readBody(w, r)
-	if !ok {
+	var request importLinksRequest
+	if !decodeForgeRequest(w, r, &request) {
 		return
 	}
-	var req importLinksRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
-		return
-	}
-	if len(req.Items) > maxImportLinks {
-		http.Error(w, "too many import links (max 100)", http.StatusBadRequest)
-		return
-	}
-	if strings.TrimSpace(req.Source) == "" {
-		http.Error(w, "source required", http.StatusBadRequest)
-		return
-	}
-	for _, item := range req.Items {
-		if strings.TrimSpace(item.ExternalKey) == "" || strings.TrimSpace(item.Link) == "" ||
-			strings.TrimSpace(item.URL) == "" || strings.TrimSpace(item.Title) == "" {
-			http.Error(w, "import link fields required", http.StatusBadRequest)
-			return
-		}
-	}
-	sources, err := s.store.ForgeSources(user)
-	if err != nil {
-		log.Printf("forge: list import sources for %s failed: %v", user, err)
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
-		return
-	}
-	source, found := forgeSourceByName(sources, req.Source)
-	if !found {
-		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
-		return
-	}
-	links := make([]store.ImportLink, len(req.Items))
-	for i, item := range req.Items {
-		links[i] = store.ImportLink{
-			Source: source.Name, Kind: source.Kind, ExternalKey: item.ExternalKey,
-			Link: item.Link, URL: item.URL, Title: item.Title,
-		}
-	}
-	if err := s.store.RecordImportLinks(user, links); err != nil {
-		if strings.HasPrefix(err.Error(), "store: import ") {
-			http.Error(w, "invalid import link", http.StatusBadRequest)
-			return
-		}
-		log.Printf("forge: record import links for %s failed: %v", user, err)
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
+	if err := s.sharedForge().RecordLinks(user, request.Source, request.Items); err != nil {
+		writeSharedForgeError(w, user, "import links", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleImportProvenance resolves every scoped import row for one exact short
-// link. It is a local lookup only: no forge or AI request is needed to expose
-// the provenance that the server already recorded.
 func (s *server) handleImportProvenance(w http.ResponseWriter, r *http.Request, user string) {
-	body, ok := readBody(w, r)
-	if !ok {
+	var request importProvenanceRequest
+	if !decodeForgeRequest(w, r, &request) {
 		return
 	}
-	var req importProvenanceRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
-		return
-	}
-	link := strings.TrimSpace(req.Link)
-	if link == "" || len(link) > 2048 || strings.ContainsAny(req.Link, "\r\n") {
-		http.Error(w, "invalid import link", http.StatusBadRequest)
-		return
-	}
-	links, err := s.store.ImportLinksByLink(user, link)
+	links, err := s.sharedForge().Provenance(user, request.Link)
 	if err != nil {
-		log.Print("forge: import provenance lookup failed")
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
-		return
-	}
-	if len(links) == 0 {
-		http.Error(w, "import link not found", http.StatusNotFound)
+		writeSharedForgeError(w, user, "import provenance", err)
 		return
 	}
 	response := importProvenanceResponse{Items: make([]importProvenanceItem, 0, len(links))}
 	for _, link := range links {
-		response.Items = append(response.Items, importProvenanceItem{
-			Source: link.Source, ExternalKey: link.ExternalKey, Title: link.Title, URL: link.URL,
-		})
+		response.Items = append(response.Items, importProvenanceItem{Source: link.Source, ExternalKey: link.ExternalKey, Title: link.Title, URL: link.URL})
 	}
 	writeJSON(w, response)
 }
 
-// handleImportDrift compares one scoped imported issue with a fresh forge
-// read. It never writes to the forge and advances the baseline only when the
-// first check has no prior server-authoritative comparison point.
 func (s *server) handleImportDrift(w http.ResponseWriter, r *http.Request, user string) {
-	body, ok := readBody(w, r)
-	if !ok {
+	var request importDriftRequest
+	if !decodeForgeRequest(w, r, &request) {
 		return
 	}
-	var req importDriftRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
-		return
-	}
-
-	provenance, ref, ok := s.authorizeImportDriftTarget(w, user, req.Source, req.ExternalKey)
-	if !ok {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
-	defer cancel()
-	issue, err := s.fetchIssue(ctx, ref)
+	result, err := s.sharedForge().CheckDrift(r.Context(), user, request.Source, request.ExternalKey)
 	if err != nil {
-		writeAIError(w, user, "import drift", err)
+		writeSharedForgeError(w, user, "import drift", err)
 		return
 	}
-	checkedAt := time.Now().UTC().Format(time.RFC3339Nano)
-	current := store.NewImportBaseline(issue.Title, issue.Body, checkedAt)
-
-	baseline, present, err := s.importDriftBaseline(user, req.ExternalKey, current)
-	if err != nil {
-		log.Print("forge: import drift baseline resolution failed")
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
-		return
-	}
-	response := importDriftResponse{
-		Link:          provenance.Link,
-		URL:           provenance.URL,
-		UpstreamTitle: issue.Title,
-		CheckedAt:     checkedAt,
-		Summary:       "",
-	}
-	if !present {
-		response.State = "baseline_recorded"
-		response.BaselineTitle = current.Title
-		response.BaselineAt = current.At
-		writeJSON(w, response)
-		return
-	}
-
-	titleChanged := current.Title != baseline.Title
-	response.TitleChanged = &titleChanged
-	response.BaselineTitle = baseline.Title
-	response.BaselineAt = baseline.At
-	if !titleChanged && current.Hash == baseline.Hash {
-		response.State = "unchanged"
-		writeJSON(w, response)
-		return
-	}
-	response.State = "drifted"
-	response.Summary = s.importDriftSummary(user, baseline, current)
-	response.Revision = importDriftRevision(current)
-	writeJSON(w, response)
+	writeJSON(w, importDriftResponse{State: result.State, Link: result.Link, URL: result.URL, TitleChanged: result.TitleChanged, UpstreamTitle: result.UpstreamTitle, BaselineTitle: result.BaselineTitle, BaselineAt: result.BaselineAt, CheckedAt: result.CheckedAt, Summary: result.Summary, Revision: result.Revision})
 }
 
-// handleImportDriftAccept advances an existing baseline only after the caller
-// confirms the exact snapshot returned by a prior drift response.
 func (s *server) handleImportDriftAccept(w http.ResponseWriter, r *http.Request, user string) {
+	var request importDriftAcceptRequest
+	if !decodeForgeRequest(w, r, &request) {
+		return
+	}
+	at, err := s.sharedForge().AcceptDrift(r.Context(), user, request.Source, request.ExternalKey, request.Revision)
+	if err != nil {
+		if errors.Is(err, forge.ErrUpstreamChanged) {
+			http.Error(w, "upstream changed; check again", http.StatusConflict)
+			return
+		}
+		writeSharedForgeError(w, user, "import drift accept", err)
+		return
+	}
+	writeJSON(w, importDriftAcceptResponse{BaselineAt: at})
+}
+
+func decodeForgeRequest(w http.ResponseWriter, r *http.Request, target any) bool {
 	body, ok := readBody(w, r)
 	if !ok {
-		return
-	}
-	var req importDriftAcceptRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
-		return
-	}
-	if !validImportDriftRevision(req.Revision) {
-		http.Error(w, "invalid revision", http.StatusBadRequest)
-		return
-	}
-
-	_, ref, ok := s.authorizeImportDriftTarget(w, user, req.Source, req.ExternalKey)
-	if !ok {
-		return
-	}
-
-	lock := s.importDriftLocks.get(user)
-	lock.Lock()
-	defer lock.Unlock()
-
-	baseline, present, err := s.store.ImportBaseline(user, req.ExternalKey)
-	if err != nil {
-		log.Print("forge: import drift accept baseline lookup failed")
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
-		return
-	}
-	if !present {
-		http.Error(w, "check again", http.StatusConflict)
-		return
-	}
-	if importDriftRevision(baseline) == req.Revision {
-		writeJSON(w, importDriftAcceptResponse{BaselineAt: baseline.At})
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
-	defer cancel()
-	issue, _, _, err := s.fetchIssueSnapshot(ctx, ref)
-	if err != nil {
-		writeAIError(w, user, "import drift accept", err)
-		return
-	}
-	current := store.NewImportBaseline(issue.Title, issue.Body, time.Now().UTC().Format(time.RFC3339Nano))
-	if importDriftRevision(current) != req.Revision {
-		http.Error(w, "upstream changed; check again", http.StatusConflict)
-		return
-	}
-	if err := s.store.SetImportBaseline(user, req.ExternalKey, current); err != nil {
-		log.Print("forge: import drift accept baseline update failed")
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, importDriftAcceptResponse{BaselineAt: current.At})
-}
-
-// authorizeImportDriftTarget keeps both drift endpoints on the same ordered
-// provenance/source/PAT/host/kind/issue authorization path before egress.
-func (s *server) authorizeImportDriftTarget(w http.ResponseWriter, user, source, externalKey string) (store.ImportLink, forgeRef, bool) {
-	imported, err := s.store.ImportedAs(user, []string{externalKey})
-	if err != nil {
-		log.Print("forge: import drift provenance lookup failed")
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
-		return store.ImportLink{}, forgeRef{}, false
-	}
-	provenance, found := imported[externalKey]
-	if !found {
-		http.Error(w, "import link not found", http.StatusNotFound)
-		return store.ImportLink{}, forgeRef{}, false
-	}
-	if !strings.EqualFold(source, provenance.Source) {
-		http.Error(w, "source does not match imported item", http.StatusBadRequest)
-		return store.ImportLink{}, forgeRef{}, false
-	}
-
-	// Keep this authorization sequence in lockstep with handleImportPreview:
-	// list, parse, select, match, decrypt, verify, then assign the PAT.
-	sources, err := s.store.ForgeSources(user)
-	if err != nil {
-		log.Print("forge: import drift source lookup failed")
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
-		return store.ImportLink{}, forgeRef{}, false
-	}
-	ref, err := parseForgeRef(sources, source, provenance.URL)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return store.ImportLink{}, forgeRef{}, false
-	}
-	selected, found := forgeSourceByName(sources, source)
-	if !found {
-		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
-		return store.ImportLink{}, forgeRef{}, false
-	}
-	if ref.Source.Name != selected.Name {
-		http.Error(w, "reference does not match selected source", http.StatusBadRequest)
-		return store.ImportLink{}, forgeRef{}, false
-	}
-	if provenance.Kind != selected.Kind {
-		http.Error(w, "imported item kind does not match selected source", http.StatusBadRequest)
-		return store.ImportLink{}, forgeRef{}, false
-	}
-	if ref.Issue <= 0 {
-		http.Error(w, "issue reference required", http.StatusBadRequest)
-		return store.ImportLink{}, forgeRef{}, false
-	}
-	kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
-	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
-		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
-		return store.ImportLink{}, forgeRef{}, false
-	}
-	ref.pat = pat
-	return provenance, ref, true
-}
-
-func importDriftRevision(baseline store.ImportBaseline) string {
-	sum := sha256.Sum256([]byte(baseline.Title + "\x00" + baseline.Hash))
-	return fmt.Sprintf("%x", sum)
-}
-
-func validImportDriftRevision(revision string) bool {
-	if len(revision) != sha256.Size*2 {
 		return false
 	}
-	for i := 0; i < len(revision); i++ {
-		if (revision[i] < '0' || revision[i] > '9') && (revision[i] < 'a' || revision[i] > 'f') {
-			return false
-		}
+	if err := json.Unmarshal(body, target); err != nil {
+		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
+		return false
 	}
 	return true
 }
 
-func (s *server) importDriftBaseline(user, externalKey string, current store.ImportBaseline) (store.ImportBaseline, bool, error) {
-	lock := s.importDriftLocks.get(user)
-	lock.Lock()
-	defer lock.Unlock()
-
-	baseline, present, err := s.store.ImportBaseline(user, externalKey)
-	if err != nil || present {
-		return baseline, present, err
+func writeSharedForgeError(w http.ResponseWriter, user, operation string, err error) {
+	code, message := http.StatusBadGateway, connectionFailedMessage
+	var categorized *forge.Error
+	if errors.As(err, &categorized) {
+		code = categorized.Code
+		if code != http.StatusBadGateway {
+			message = categorized.Message
+		}
 	}
-	if err := s.store.SetImportBaseline(user, externalKey, current); err != nil {
-		return store.ImportBaseline{}, false, err
+	if code == http.StatusBadGateway {
+		log.Printf("forge: %s for %s failed: %v", operation, user, err)
 	}
-	return current, false, nil
+	http.Error(w, message, code)
 }
 
-// importDriftSummaryPrompt is the whole instruction the drift summary gets.
-// The run carries no tools: it compares two pieces of text the caller already
-// holds, so a tool would only be another way for third-party issue text to
-// reach the board.
-const importDriftSummaryPrompt = "Summarize an imported issue change using only the supplied titles and excerpts."
-
-// importDriftSummary is best-effort prose about what changed upstream. Every
-// failure — no configuration, a bad endpoint, an upstream that never answers —
-// degrades to no summary, because a drift comparison the caller asked for is
-// valid without one. One run is one round trip: the loop is capped at a single
-// iteration, and a toolless request cannot ask for a second.
-func (s *server) importDriftSummary(user string, baseline, current store.ImportBaseline) string {
-	cfg, err := s.storedAIConfig(user)
-	if err != nil || strings.TrimSpace(cfg.baseURL) == "" {
-		return ""
-	}
-	client, err := s.rigClient(cfg)
+func (s *server) handleGetIntegrations(w http.ResponseWriter, r *http.Request, user string) {
+	sources, err := s.sharedForge().Sources(user)
 	if err != nil {
-		return ""
-	}
-	prompt := fmt.Sprintf(
-		"Summarize the material change in plain text. Do not invent details.\n\nBaseline title:\n%s\nBaseline excerpt:\n%s\n\nCurrent title:\n%s\nCurrent excerpt:\n%s",
-		truncateImportText(baseline.Title, maxImportCommentBytes),
-		baseline.Excerpt,
-		truncateImportText(current.Title, maxImportCommentBytes),
-		current.Excerpt,
-	)
-	prompt = truncateImportText(prompt, maxImportPackBytes)
-	res, err := client.Run(context.Background(), rig.RunRequest{
-		Model:         cfg.model,
-		System:        importDriftSummaryPrompt,
-		Prompt:        prompt,
-		MaxTokens:     skillBudget(aiDriftMaxTokens),
-		MaxIterations: 1,
-	})
-	if err != nil {
-		return ""
-	}
-	return truncateImportText(strings.TrimSpace(res.Text), maxImportCommentBytes)
-}
-
-func (s *server) importDuplicates(scope string, issues []forgeIssue) ([]*importDuplicate, error) {
-	duplicates := make([]*importDuplicate, len(issues))
-	for i, issue := range issues {
-		links, err := s.store.TasksByLink(scope, linkTagPrefix+issue.Ref)
-		if err != nil {
-			return nil, err
-		}
-		if len(links) > 0 {
-			duplicates[i] = &importDuplicate{ID: links[0].ID, Title: links[0].Title, Via: "link"}
-			continue
-		}
-		similar, err := s.store.SearchSimilar(scope, issue.Title, "", nil, 1)
-		if err != nil {
-			return nil, err
-		}
-		if len(similar) > 0 {
-			duplicates[i] = &importDuplicate{ID: similar[0].ID, Title: similar[0].Title, Via: "similar"}
-		}
-	}
-	return duplicates, nil
-}
-
-func importRefKind(ref forgeRef) string {
-	if ref.Issue > 0 {
-		return "issue"
-	}
-	if ref.Milestone > 0 {
-		return "milestone"
-	}
-	return "project"
-}
-
-func stripModelLinkTags(tags []string) []string {
-	filtered := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		if !strings.HasPrefix(tag, linkTagPrefix) {
-			filtered = append(filtered, tag)
-		}
-	}
-	return filtered
-}
-
-func importIssueProvenance(ref forgeRef, issue forgeIssue) (link, externalKey string) {
-	link = issue.Ref
-	issueID := strings.TrimPrefix(link, ref.Kind+"#")
-	host := ""
-	if base, err := url.Parse(ref.Source.BaseURL); err == nil {
-		host = base.Host
-	}
-	externalKey = fmt.Sprintf("%s:%s/%s#%s", ref.Kind, host, ref.Project, issueID)
-	return link, externalKey
-}
-
-func (s *server) handleGetIntegrations(w http.ResponseWriter, _ *http.Request, user string) {
-	sources, err := s.store.ForgeSources(user)
-	if err != nil {
-		log.Printf("forge: list integrations for %s failed: %v", user, err)
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
+		writeSharedForgeError(w, user, "list integrations", err)
 		return
 	}
 	response := forgeSourcesResponse{Sources: make([]forgeSourceResponse, 0, len(sources))}
 	for _, source := range sources {
-		response.Sources = append(response.Sources, forgeSourceResponse{
-			Name:     source.Name,
-			Kind:     source.Kind,
-			BaseURL:  source.BaseURL,
-			HasToken: source.HasToken,
-		})
+		response.Sources = append(response.Sources, forgeSourceResponse{Name: source.Name, Kind: source.Kind, BaseURL: source.BaseURL, HasToken: source.HasToken})
 	}
 	writeJSON(w, response)
 }
 
 func (s *server) handlePutIntegration(w http.ResponseWriter, r *http.Request, user string) {
-	name := r.PathValue("name")
-	if !validForgeSourceName(name) {
-		http.Error(w, invalidIntegrationNameMessage, http.StatusBadRequest)
-		return
-	}
-
-	body, ok := readBody(w, r)
-	if !ok {
-		return
-	}
-	var req struct {
+	var request struct {
 		Kind    string  `json:"kind"`
 		BaseURL *string `json:"base_url"`
 		PAT     *string `json:"pat"`
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
+	if !decodeForgeRequest(w, r, &request) {
 		return
 	}
-	if req.Kind != "gitlab" && req.Kind != "github" {
-		http.Error(w, "invalid forge kind", http.StatusBadRequest)
-		return
-	}
-	if req.BaseURL != nil {
-		if _, err := forgeAPIBase(req.Kind, *req.BaseURL); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-	}
-
-	tokenCleared, err := s.store.SetForgeSource(user, name, req.Kind, req.BaseURL, req.PAT)
+	cleared, err := s.sharedForge().SaveSource(user, r.PathValue("name"), request.Kind, request.BaseURL, request.PAT)
 	if err != nil {
-		switch err.Error() {
-		case "store: forge base URL is required":
-			http.Error(w, "forge base URL is required", http.StatusBadRequest)
-			return
-		case "store: forge base URL must not contain query or fragment":
-			http.Error(w, "forge base URL must not contain query or fragment", http.StatusBadRequest)
-			return
-		}
-		log.Printf("forge: save integration for %s failed: %v", user, err)
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
+		writeSharedForgeError(w, user, "save integration", err)
 		return
 	}
-	if tokenCleared {
+	if cleared {
 		writeJSON(w, map[string]bool{"token_cleared": true})
 		return
 	}
@@ -1522,169 +415,57 @@ func (s *server) handlePutIntegration(w http.ResponseWriter, r *http.Request, us
 }
 
 func (s *server) handleDeleteIntegration(w http.ResponseWriter, r *http.Request, user string) {
-	name := r.PathValue("name")
-	if !validForgeSourceName(name) {
-		http.Error(w, invalidIntegrationNameMessage, http.StatusBadRequest)
-		return
-	}
-	if err := s.store.DeleteForgeSource(user, name); err != nil {
-		log.Printf("forge: delete integration for %s failed: %v", user, err)
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
+	if err := s.sharedForge().DeleteSource(user, r.PathValue("name")); err != nil {
+		writeSharedForgeError(w, user, "delete integration", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) handleTestIntegration(w http.ResponseWriter, r *http.Request, user string) {
-	name := r.PathValue("name")
-	if !validForgeSourceName(name) {
+	if !forge.ValidSourceName(r.PathValue("name")) {
 		http.Error(w, invalidIntegrationNameMessage, http.StatusBadRequest)
 		return
 	}
-
 	body, ok := readBody(w, r)
 	if !ok {
 		return
 	}
-	probe, err := parseForgeTestProbe(body)
-	if err != nil {
-		http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
-		return
+	var request struct {
+		BaseURL *string `json:"base_url"`
+		PAT     *string `json:"pat"`
 	}
-
-	kind, storedBase, storedPAT, err := s.store.ForgePAT(user, name)
-	if err != nil {
-		log.Printf("forge: load integration for %s failed: %v", user, err)
-		writeJSON(w, forgeTestResponse{Error: "integration unavailable"})
-		return
+	if len(bytes.TrimSpace(body)) > 0 {
+		if err := json.Unmarshal(body, &request); err != nil {
+			http.Error(w, invalidJSONBodyMessage, http.StatusBadRequest)
+			return
+		}
 	}
-
-	target, err := resolveForgeTestTarget(storedBase, storedPAT, probe)
-	if err != nil {
+	config := forge.ForgeProbeConfig{Name: r.PathValue("name"), Saved: true}
+	if request.BaseURL != nil {
+		config.BaseURL = *request.BaseURL
+	}
+	if request.PAT != nil {
+		config.Token = *request.PAT
+	}
+	if err := s.sharedForge().Probe(r.Context(), user, config); err != nil {
 		writeJSON(w, forgeTestResponse{Error: err.Error()})
-		return
-	}
-
-	request, err := newForgeTestRequest(r.Context(), kind, target, "")
-	if err != nil {
-		writeJSON(w, forgeTestResponse{Error: err.Error()})
-		return
-	}
-	if !s.forgeConnectionOK(request, user) {
-		writeJSON(w, forgeTestResponse{Error: connectionFailedMessage})
 		return
 	}
 	writeJSON(w, forgeTestResponse{OK: true})
 }
 
-func parseForgeTestProbe(body []byte) (forgeTestProbe, error) {
-	var probe forgeTestProbe
-	if len(bytes.TrimSpace(body)) == 0 {
-		return probe, nil
-	}
-	err := json.Unmarshal(body, &probe)
-	return probe, err
+type ForgeProbeConfig = forge.ForgeProbeConfig
+
+type ForgeProber struct {
+	store  *store.Store
+	client *http.Client
 }
 
-func resolveForgeTestTarget(storedBase, storedPAT string, probe forgeTestProbe) (forgeTestTarget, error) {
-	target := forgeTestTarget{baseURL: storedBase, pat: storedPAT}
-	suppliedBase := trimmedForgeProbeValue(probe.BaseURL)
-	if suppliedBase != "" {
-		normalized, err := normalizeForgeProbeBase(suppliedBase)
-		if err != nil {
-			return forgeTestTarget{}, err
-		}
-		target.baseURL = normalized.String()
-	}
-	suppliedPAT := trimmedForgeProbeValue(probe.PAT)
-	if suppliedPAT != "" {
-		target.pat = suppliedPAT
-	}
-	if suppliedPAT == "" && suppliedBase != "" && storedPAT != "" &&
-		!store.SameAIOrigin(storedBase, target.baseURL) {
-		return forgeTestTarget{}, errors.New("enter the token to test a different endpoint")
-	}
-	return target, nil
+func NewForgeProber(st *store.Store) *ForgeProber {
+	return &ForgeProber{store: st, client: forge.NewHTTPClient()}
 }
 
-func trimmedForgeProbeValue(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return strings.TrimSpace(*value)
-}
-
-func newForgeTestRequest(ctx context.Context, kind string, target forgeTestTarget, project string) (*http.Request, error) {
-	apiBase, err := forgeAPIBase(kind, target.baseURL)
-	if err != nil {
-		return nil, err
-	}
-	project = strings.TrimSpace(project)
-	endpoint := apiBase
-	if project != "" {
-		projectPath, err := forgeProjectPath(forgeRef{Kind: kind, Project: project})
-		if err != nil {
-			return nil, err
-		}
-		endpoint += projectPath
-	} else {
-		switch kind {
-		case "gitlab":
-			endpoint += "/version"
-		case "github":
-			endpoint += "/user"
-		default:
-			return nil, errors.New("invalid forge kind")
-		}
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, errors.New("invalid forge base URL")
-	}
-	setForgeTestHeaders(request, kind, target.pat)
-	return request, nil
-}
-
-func setForgeTestHeaders(request *http.Request, kind, pat string) {
-	if kind == "gitlab" && pat != "" {
-		request.Header.Set("PRIVATE-TOKEN", pat)
-	}
-	if kind == "github" {
-		if pat != "" {
-			request.Header.Set("Authorization", "Bearer "+pat)
-		}
-		request.Header.Set("Accept", "application/vnd.github+json")
-	}
-}
-
-func (s *server) forgeConnectionOK(request *http.Request, user string) bool {
-	err := executeForgeTest(s.forgeClient, request)
-	if err != nil {
-		log.Printf("forge: connection test for %s failed: %v", user, err)
-		return false
-	}
-	return true
-}
-
-func executeForgeTest(client *http.Client, request *http.Request) error {
-	response, err := client.Do(request)
-	if err != nil {
-		return err
-	}
-	if err := drainForgeResponse(response); err != nil {
-		return fmt.Errorf("close response: %w", err)
-	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("upstream status %d", response.StatusCode)
-	}
-	return nil
-}
-
-func drainForgeResponse(response *http.Response) error {
-	_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, maxForgeDrainBytes))
-	closeErr := response.Body.Close()
-	if readErr != nil || closeErr != nil {
-		return fmt.Errorf("read: %v; close: %v", readErr, closeErr)
-	}
-	return nil
+func (p *ForgeProber) Probe(ctx context.Context, user string, config ForgeProbeConfig) error {
+	return forge.NewForgeProberWithClient(p.store, p.client).Probe(ctx, user, config)
 }

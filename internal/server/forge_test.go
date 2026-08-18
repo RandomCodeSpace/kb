@@ -1227,7 +1227,8 @@ func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
 	if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, &pat); err != nil {
 		t.Fatalf("seed forge source: %v", err)
 	}
-	linked, err := st.AddTask("default", board.Task{Title: "Existing linked", Tags: []string{"link::gitlab#42"}})
+	qualified42 := "gitlab:gitlab-main@" + baseURL + "/group/project#42"
+	linked, err := st.AddTask("default", board.Task{Title: "Existing linked", Tags: []string{"link::gitlab#42", "import::" + qualified42}})
 	if err != nil {
 		t.Fatalf("seed linked task: %v", err)
 	}
@@ -1274,9 +1275,8 @@ func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
 	if _, ok := raw["commentary"]; ok {
 		t.Fatalf("preview response leaked the skill commentary: %v", raw)
 	}
-	host := strings.TrimPrefix(upstream.URL, "http://")
 	first, second, unlinked := response.Drafts[0], response.Drafts[1], response.Drafts[2]
-	if first.Link != "gitlab#42" || first.ExternalKey != "gitlab:"+host+"/group/project#42" || first.URL == "" || first.DuplicateOf == nil || first.DuplicateOf.ID != linked.ID || first.DuplicateOf.Title != linked.Title || first.DuplicateOf.Via != "link" || strings.Join(first.Tags, ",") != "team::auth,link::gitlab#42" {
+	if first.Link != "gitlab#42" || first.ExternalKey != qualified42 || first.URL == "" || first.DuplicateOf == nil || first.DuplicateOf.ID != linked.ID || first.DuplicateOf.Title != linked.Title || first.DuplicateOf.Via != "link" || strings.Join(first.Tags, ",") != "team::auth,link::gitlab#42,import::"+qualified42 {
 		t.Fatalf("linked draft = %+v", first)
 	}
 	if second.Link != "gitlab#43" || second.DuplicateOf == nil || second.DuplicateOf.ID != similar.ID || second.DuplicateOf.Via != "similar" || !strings.Contains(strings.Join(second.Tags, ","), "link::gitlab#43") {
@@ -1385,7 +1385,8 @@ func TestImportPreviewLinksEachForgeIssueOnce(t *testing.T) {
 	if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, &pat); err != nil {
 		t.Fatalf("seed forge source: %v", err)
 	}
-	if _, err := st.AddTask("default", board.Task{Title: "Existing linked", Tags: []string{"link::gitlab#43"}}); err != nil {
+	qualified43 := "gitlab:gitlab-main@" + baseURL + "/group/project#43"
+	if _, err := st.AddTask("default", board.Task{Title: "Existing linked", Tags: []string{"link::gitlab#43", "import::" + qualified43}}); err != nil {
 		t.Fatalf("seed linked task: %v", err)
 	}
 

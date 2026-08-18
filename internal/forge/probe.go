@@ -1,4 +1,4 @@
-package server
+package forge
 
 import (
 	"context"
@@ -33,7 +33,14 @@ type ForgeProbeConfig struct {
 
 // NewForgeProber constructs a direct-store forge connection prober.
 func NewForgeProber(st *store.Store) *ForgeProber {
-	return &ForgeProber{store: st, client: newForgeClient()}
+	return &ForgeProber{store: st, client: NewHTTPClient()}
+}
+
+func NewForgeProberWithClient(st *store.Store, client *http.Client) *ForgeProber {
+	if client == nil {
+		client = NewHTTPClient()
+	}
+	return &ForgeProber{store: st, client: client}
 }
 
 // Probe tests one unsaved candidate. Persisted rows may retain blank stored

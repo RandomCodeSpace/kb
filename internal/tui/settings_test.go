@@ -12,7 +12,7 @@ import (
 	"github.com/charmbracelet/x/exp/golden"
 
 	kbai "github.com/RandomCodeSpace/kb/internal/ai"
-	"github.com/RandomCodeSpace/kb/internal/server"
+	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -38,7 +38,7 @@ func (p *recordingAIProber) Probe(ctx context.Context, user string, config kbai.
 
 type recordingForgeProber struct {
 	user        string
-	config      server.ForgeProbeConfig
+	config      forge.ForgeProbeConfig
 	hadDeadline bool
 	err         error
 }
@@ -73,7 +73,7 @@ func (s *faultSettingsStore) DeleteForgeSource(string, string) error {
 	return s.deleteForgeErr
 }
 
-func (p *recordingForgeProber) Probe(ctx context.Context, user string, config server.ForgeProbeConfig) error {
+func (p *recordingForgeProber) Probe(ctx context.Context, user string, config forge.ForgeProbeConfig) error {
 	p.user, p.config = user, config
 	_, p.hadDeadline = ctx.Deadline()
 	return p.err
@@ -226,7 +226,7 @@ func TestForgeSettingsTestSaveLockAndArmedRemoval(t *testing.T) {
 	row.project.SetValue("group/project")
 	row.token.SetValue(settingsUnsavedSecret)
 	runSettingsCommand(t, model, model.startForgeTest(row))
-	if forgeProbe.user != "alice" || forgeProbe.config != (server.ForgeProbeConfig{
+	if forgeProbe.user != "alice" || forgeProbe.config != (forge.ForgeProbeConfig{
 		Name: "primary", Kind: "gitlab", BaseURL: "https://unsaved.example",
 		Project: "group/project", Token: settingsUnsavedSecret, Saved: true,
 	}) || !forgeProbe.hadDeadline {
@@ -308,7 +308,7 @@ func TestForgeDraftTestsUnsavedValuesWithoutStoreMutation(t *testing.T) {
 		t.Fatal("draft test action is not focusable")
 	}
 	runSettingsCommand(t, model, model.startForgeTest(row))
-	want := server.ForgeProbeConfig{
+	want := forge.ForgeProbeConfig{
 		Name: "unsaved", Kind: "github", BaseURL: "https://candidate.example",
 		Project: "owner/project", Token: settingsUnsavedSecret,
 	}
