@@ -27,7 +27,7 @@ const (
 // mirrors the store package instead of introducing an HTTP-shaped adapter.
 type Store interface {
 	AddTask(string, board.Task) (board.Task, error)
-	UpdateTask(string, string, store.TaskPatch) (board.Task, error)
+	UpdateTaskIfFieldsMatch(string, string, store.TaskPatch, store.TaskPatch) (board.Task, error)
 	Labels(string) ([]string, error)
 	SearchSimilar(string, string, string, []string, int) ([]store.SimilarHit, error)
 }
@@ -60,8 +60,9 @@ type similarLoadedMsg struct {
 }
 
 type saveCompletedMsg struct {
-	task board.Task
-	err  error
+	session uint64
+	task    board.Task
+	err     error
 }
 
 type snapshot struct {
@@ -325,6 +326,9 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		}
 		return nil
 	case saveCompletedMsg:
+		if msg.session != m.session {
+			return nil
+		}
 		m.saving = false
 		if msg.err != nil {
 			m.statusMessage = "save refused: " + safeError(msg.err)
@@ -630,17 +634,60 @@ func (m *Model) startSave() tea.Cmd {
 	}
 	m.saving = true
 	m.statusMessage, m.statusIsError = "saving card...", false
+	session := m.session
 	if m.mode == modeAdd {
 		return func() tea.Msg {
 			created, saveErr := m.store.AddTask(m.user, task)
-			return saveCompletedMsg{task: created, err: saveErr}
+			return saveCompletedMsg{session: session, task: created, err: saveErr}
 		}
 	}
 	id := m.base.ID
+	expected := expectedTaskFields(m.canonical, m.changedFields())
 	return func() tea.Msg {
-		updated, saveErr := m.store.UpdateTask(m.user, id, patch)
-		return saveCompletedMsg{task: updated, err: saveErr}
+		updated, saveErr := m.store.UpdateTaskIfFieldsMatch(m.user, id, expected, patch)
+		return saveCompletedMsg{session: session, task: updated, err: saveErr}
 	}
+}
+
+func expectedTaskFields(task board.Task, changed editedFields) store.TaskPatch {
+	var expected store.TaskPatch
+	if changed.emoji {
+		value := task.Emoji
+		expected.Emoji = &value
+	}
+	if changed.title {
+		value := task.Title
+		expected.Title = &value
+	}
+	if changed.desc {
+		value := task.Desc
+		expected.Desc = &value
+	}
+	if changed.due {
+		value := task.Due
+		expected.Due = &value
+	}
+	if changed.effort {
+		value := task.Effort
+		expected.Effort = &value
+	}
+	if changed.prio {
+		value := task.Prio
+		expected.Prio = &value
+	}
+	if changed.blocked {
+		value := task.Blocked
+		expected.Blocked = &value
+	}
+	if changed.tags {
+		value := append([]string(nil), task.Tags...)
+		expected.Tags = &value
+	}
+	if changed.checks {
+		value := append([]board.Check(nil), task.Checks...)
+		expected.Checks = &value
+	}
+	return expected
 }
 
 func (m Model) buildSave() (board.Task, store.TaskPatch, error) {

@@ -16,6 +16,7 @@ import (
 type faultStore struct {
 	*store.Store
 	addErr, updateErr, labelsErr, similarErr error
+	beforeUpdate                             func()
 	queries                                  []similarQuery
 }
 
@@ -37,6 +38,18 @@ func (s *faultStore) UpdateTask(user, id string, patch store.TaskPatch) (board.T
 		return board.Task{}, s.updateErr
 	}
 	return s.Store.UpdateTask(user, id, patch)
+}
+
+func (s *faultStore) UpdateTaskIfFieldsMatch(user, id string, expected, patch store.TaskPatch) (board.Task, error) {
+	if s.updateErr != nil {
+		return board.Task{}, s.updateErr
+	}
+	if s.beforeUpdate != nil {
+		beforeUpdate := s.beforeUpdate
+		s.beforeUpdate = nil
+		beforeUpdate()
+	}
+	return s.Store.UpdateTaskIfFieldsMatch(user, id, expected, patch)
 }
 
 func (s *faultStore) Labels(user string) ([]string, error) {
@@ -300,6 +313,131 @@ func TestEditRejectsSameFieldConflictAfterDirtyRefresh(t *testing.T) {
 	}
 }
 
+func TestEditSaveCASRejectsLateSameFieldWriteAndPreservesLateUnrelatedWrite(t *testing.T) {
+	t.Run("same field", func(t *testing.T) {
+		backend := newTestStore(t)
+		created, err := backend.Store.AddTask("u", board.Task{
+			Title: "Original", Desc: "original description", Status: board.StatusTodo, Prio: 3,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		model := New(backend, "u")
+		model.OpenEdit(created)
+		model.title.SetValue("Local title")
+		backend.beforeUpdate = func() {
+			remoteTitle := "Remote title"
+			if _, updateErr := backend.Store.UpdateTask("u", created.ID, store.TaskPatch{Title: &remoteTitle}); updateErr != nil {
+				t.Fatalf("late remote update: %v", updateErr)
+			}
+		}
+
+		save := model.startSave()
+		if save == nil {
+			t.Fatalf("start save: %s", model.statusMessage)
+		}
+		model.Update(save())
+		latest, readErr := backend.Store.Task("u", created.ID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if latest.Title != "Remote title" || !model.IsOpen() || model.saving ||
+			!strings.Contains(model.statusMessage, "title") || model.title.Value() != "Local title" {
+			t.Fatalf("late conflict = stored:%q open:%v saving:%v status:%q form:%q",
+				latest.Title, model.IsOpen(), model.saving, model.statusMessage, model.title.Value())
+		}
+	})
+
+	t.Run("converged field diverges before transaction", func(t *testing.T) {
+		backend := newTestStore(t)
+		created, err := backend.Store.AddTask("u", board.Task{
+			Title: "Original", Status: board.StatusTodo, Prio: 3,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		model := New(backend, "u")
+		model.OpenEdit(created)
+		model.title.SetValue("Local title")
+		convergedTitle := "Local title"
+		converged, err := backend.Store.UpdateTask("u", created.ID, store.TaskPatch{Title: &convergedTitle})
+		if err != nil {
+			t.Fatal(err)
+		}
+		model.Refresh(converged, true)
+		if _, patch, buildErr := model.buildSave(); buildErr != nil || patch != (store.TaskPatch{}) {
+			t.Fatalf("converged save = patch:%+v err:%v", patch, buildErr)
+		}
+		backend.beforeUpdate = func() {
+			divergedTitle := "Diverged title"
+			if _, updateErr := backend.Store.UpdateTask("u", created.ID, store.TaskPatch{Title: &divergedTitle}); updateErr != nil {
+				t.Fatalf("late divergent update: %v", updateErr)
+			}
+		}
+
+		save := model.startSave()
+		model.Update(save())
+		latest, readErr := backend.Store.Task("u", created.ID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if latest.Title != "Diverged title" || !model.IsOpen() || model.saving ||
+			!strings.Contains(model.statusMessage, "title") || model.title.Value() != "Local title" {
+			t.Fatalf("converge/diverge conflict = stored:%q open:%v saving:%v status:%q form:%q",
+				latest.Title, model.IsOpen(), model.saving, model.statusMessage, model.title.Value())
+		}
+	})
+
+	t.Run("unrelated field", func(t *testing.T) {
+		backend := newTestStore(t)
+		created, err := backend.Store.AddTask("u", board.Task{
+			Title: "Original", Desc: "original description", Status: board.StatusTodo, Prio: 3,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		model := New(backend, "u")
+		model.OpenEdit(created)
+		model.title.SetValue("Local title")
+		backend.beforeUpdate = func() {
+			remoteDescription := "Remote description"
+			if _, updateErr := backend.Store.UpdateTask("u", created.ID, store.TaskPatch{Desc: &remoteDescription}); updateErr != nil {
+				t.Fatalf("late remote update: %v", updateErr)
+			}
+		}
+
+		save := model.startSave()
+		model.Update(save())
+		latest, readErr := backend.Store.Task("u", created.ID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if latest.Title != "Local title" || latest.Desc != "Remote description" || model.IsOpen() {
+			t.Fatalf("late merge = %+v, open:%v status:%q", latest, model.IsOpen(), model.statusMessage)
+		}
+	})
+}
+
+func TestSaveCompletionIsScopedToEditorSession(t *testing.T) {
+	backend := newTestStore(t)
+	model := New(backend, "u")
+	model.OpenAdd(board.StatusTodo)
+	model.title.SetValue("Old session")
+	oldSave := model.startSave()
+	oldSession := model.session
+
+	model.OpenAdd(board.StatusDoing)
+	model.title.SetValue("New session")
+	model.Update(oldSave())
+	if model.session == oldSession || !model.IsOpen() || model.title.Value() != "New session" || model.saving {
+		t.Fatalf("stale save changed new session: session:%d open:%v title:%q saving:%v",
+			model.session, model.IsOpen(), model.title.Value(), model.saving)
+	}
+	if id, saved := model.ConsumeSaved(); saved || id != "" {
+		t.Fatalf("stale save acknowledged in new session: id:%q saved:%v", id, saved)
+	}
+}
+
 func TestSelectiveTaskPatchCoversEveryEditableField(t *testing.T) {
 	original := board.Task{
 		Emoji: "🧭", Title: "old", Desc: "old desc", Due: "2026-08-20", Effort: "S",
@@ -317,6 +455,21 @@ func TestSelectiveTaskPatchCoversEveryEditableField(t *testing.T) {
 	if err != nil || patch.Emoji == nil || patch.Title == nil || patch.Desc == nil || patch.Due == nil ||
 		patch.Effort == nil || patch.Prio == nil || patch.Blocked == nil || patch.Tags == nil || patch.Checks == nil {
 		t.Fatalf("complete selective patch = %+v, %v", patch, err)
+	}
+	expected := expectedTaskFields(original, allChanged)
+	if expected.Emoji == nil || *expected.Emoji != original.Emoji ||
+		expected.Title == nil || *expected.Title != original.Title ||
+		expected.Desc == nil || *expected.Desc != original.Desc ||
+		expected.Due == nil || *expected.Due != original.Due ||
+		expected.Effort == nil || *expected.Effort != original.Effort ||
+		expected.Prio == nil || *expected.Prio != original.Prio ||
+		expected.Blocked == nil || *expected.Blocked != original.Blocked ||
+		expected.Tags == nil || !stringSlicesEqual(*expected.Tags, original.Tags) ||
+		expected.Checks == nil || !checksEqual(*expected.Checks, original.Checks) {
+		t.Fatalf("complete expected fields = %+v", expected)
+	}
+	if empty := expectedTaskFields(original, editedFields{}); empty != (store.TaskPatch{}) {
+		t.Fatalf("empty patch produced expectations = %+v", empty)
 	}
 
 	alreadyCanonical, err := selectiveTaskPatch(original, desired, desired, allChanged)

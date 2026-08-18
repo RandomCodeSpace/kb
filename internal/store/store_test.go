@@ -266,6 +266,65 @@ func TestTaskCRUD(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskIfFieldsMatchIsAtomicAndSelective(t *testing.T) {
+	s := newStore(t)
+	original, err := s.AddTask("u", board.Task{
+		Emoji: "🧭", Title: "Original", Desc: "original description", Status: board.StatusTodo,
+		Blocked: false, Prio: 3, Due: "2026-08-20", Effort: "S", Tags: []string{"old"},
+		Checks: []board.Check{{Text: "old check"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	remoteDescription := "remote description"
+	if _, err := s.UpdateTask("u", original.ID, TaskPatch{Desc: &remoteDescription}); err != nil {
+		t.Fatal(err)
+	}
+	expectedTitle, localTitle := original.Title, "Local title"
+	updated, err := s.UpdateTaskIfFieldsMatch("u", original.ID,
+		TaskPatch{Title: &expectedTitle}, TaskPatch{Title: &localTitle})
+	if err != nil {
+		t.Fatalf("selective compare-and-update: %v", err)
+	}
+	if updated.Title != localTitle || updated.Desc != remoteDescription {
+		t.Fatalf("selective update = %+v", updated)
+	}
+
+	remote := board.Task{
+		Emoji: "🧪", Title: "Remote title", Desc: "remote desc", Blocked: true, Prio: 1,
+		Due: "2026-09-01", Effort: "L", Tags: []string{"remote"},
+		Checks: []board.Check{{Text: "remote check", Done: true}},
+	}
+	if _, err := s.UpdateTask("u", original.ID, TaskPatch{
+		Emoji: &remote.Emoji, Title: &remote.Title, Desc: &remote.Desc, Blocked: &remote.Blocked,
+		Prio: &remote.Prio, Due: &remote.Due, Effort: &remote.Effort, Tags: &remote.Tags, Checks: &remote.Checks,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expected := TaskPatch{
+		Emoji: &original.Emoji, Title: &localTitle, Desc: &remoteDescription, Blocked: &original.Blocked,
+		Prio: &original.Prio, Due: &original.Due, Effort: &original.Effort, Tags: &original.Tags, Checks: &original.Checks,
+	}
+	desiredTitle := "Must not persist"
+	_, err = s.UpdateTaskIfFieldsMatch("u", original.ID, expected, TaskPatch{Title: &desiredTitle})
+	var conflict *TaskFieldsConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("conflict error = %v", err)
+	}
+	wantFields := []string{"emoji", "title", "description", "blocked", "priority", "due", "effort", "labels", "checklist"}
+	if !reflect.DeepEqual(conflict.Fields, wantFields) {
+		t.Fatalf("conflict fields = %v, want %v", conflict.Fields, wantFields)
+	}
+	after, err := s.Task("u", original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Title != remote.Title || after.Desc != remote.Desc {
+		t.Fatalf("refused compare-and-update mutated task: %+v", after)
+	}
+}
+
 // TestMigrateExistingDatabase opens a database left at schema v1 by an
 // earlier release and checks the pending migrations run over it, giving the
 // old row the blocked default rather than failing or losing data.
