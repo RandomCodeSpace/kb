@@ -675,7 +675,7 @@ func TestMoveBoardViewCoverageEdges(t *testing.T) {
 	if body, hits := joinColumns(nil); body != "" || hits != nil {
 		t.Fatalf("empty columns = %q,%v", body, hits)
 	}
-	if got := settingsBoardFooter("ready", "off", false, 1); got != "q" {
+	if got := settingsBoardFooter("ready", "off", false, false, 1); got != "q" {
 		t.Fatalf("tiny footer = %q", got)
 	}
 	hits := []boardHit{{x1: 5, y1: 5, status: board.StatusDoing}}

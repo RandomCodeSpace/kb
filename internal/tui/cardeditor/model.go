@@ -2,6 +2,8 @@
 package cardeditor
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -14,14 +16,22 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
 const (
-	similarDelay = 400 * time.Millisecond
-	similarLimit = 10
+	similarDelay   = 400 * time.Millisecond
+	similarLimit   = 10
+	draftMaxTokens = 4096
 )
+
+// SkillRunner is the shared direct-store AI runner used by the editor. The
+// narrow interface keeps model tests deterministic without an HTTP adapter.
+type SkillRunner interface {
+	RunSkill(context.Context, string, ai.Scope, string, string, int, int64) (ai.RunResult, error)
+}
 
 // Store is the direct SQLite projection used by the editor. It deliberately
 // mirrors the store package instead of introducing an HTTP-shaped adapter.
@@ -65,6 +75,13 @@ type saveCompletedMsg struct {
 	err     error
 }
 
+type draftCompletedMsg struct {
+	session    uint64
+	generation uint64
+	draft      ai.Draft
+	err        error
+}
+
 type snapshot struct {
 	title, emoji, desc, due, effort, checks string
 	prio                                    int
@@ -78,9 +95,11 @@ type editedFields struct {
 
 // Model owns every mutable editor field and all asynchronous generations.
 type Model struct {
-	store Store
-	user  string
-	now   func() time.Time
+	store  Store
+	user   string
+	now    func() time.Time
+	runner SkillRunner
+	ctx    context.Context
 
 	open           bool
 	mode           mode
@@ -95,17 +114,21 @@ type Model struct {
 	saving         bool
 	savedTaskID    string
 	stale          bool
+	drafting       bool
+	draftCancel    context.CancelFunc
+	draftGen       uint64
 
-	title   textinput.Model
-	emoji   textinput.Model
-	desc    textarea.Model
-	due     textinput.Model
-	label   textinput.Model
-	checks  textarea.Model
-	prio    int
-	effort  string
-	blocked bool
-	tags    []string
+	title       textinput.Model
+	emoji       textinput.Model
+	desc        textarea.Model
+	due         textinput.Model
+	label       textinput.Model
+	checks      textarea.Model
+	draftPrompt textarea.Model
+	prio        int
+	effort      string
+	blocked     bool
+	tags        []string
 
 	labels            []string
 	labelsOpen        bool
@@ -128,9 +151,20 @@ type Model struct {
 // New creates a closed editor. A nil store keeps the feature unavailable in
 // lightweight root-model tests.
 func New(st Store, user string) Model {
-	m := Model{store: st, user: user, now: time.Now}
+	m := Model{store: st, user: user, now: time.Now, ctx: context.Background()}
 	m.resetInputs()
 	return m
+}
+
+// SetAIRunner wires the shared runner and the root program context. A nil
+// runner hides the draft controls while leaving ordinary editing available.
+func (m *Model) SetAIRunner(runner SkillRunner, ctx context.Context) {
+	m.cancelDraft()
+	m.runner = runner
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.ctx = ctx
 }
 
 // Enabled reports whether the root has a writable direct-store backend.
@@ -138,6 +172,10 @@ func (m Model) Enabled() bool { return m.store != nil }
 
 // IsOpen reports whether the overlay owns input and rendering.
 func (m Model) IsOpen() bool { return m.open }
+
+// CancelAsync stops work whose result no longer has a live program to receive
+// it. It is used by the root shutdown path and is otherwise idempotent.
+func (m *Model) CancelAsync() { m.cancelDraft() }
 
 // TaskID returns the edited durable task id, or empty for add/closed modes.
 func (m Model) TaskID() string {
@@ -163,7 +201,7 @@ func (m *Model) ConsumeSaved() (string, bool) {
 // implementation messages into the root package.
 func IsMessage(message tea.Msg) bool {
 	switch message.(type) {
-	case labelsLoadedMsg, similarDebounceMsg, similarLoadedMsg, saveCompletedMsg:
+	case labelsLoadedMsg, similarDebounceMsg, similarLoadedMsg, saveCompletedMsg, draftCompletedMsg:
 		return true
 	default:
 		return false
@@ -192,10 +230,11 @@ func (m *Model) OpenEdit(task board.Task) tea.Cmd {
 }
 
 func (m *Model) openForm(nextMode mode, task board.Task) {
+	m.cancelDraft()
 	m.session++
 	m.mode, m.base, m.canonical, m.status = nextMode, task, task, task.Status
 	m.canonicalFound = nextMode == modeEdit
-	m.open, m.guardClose, m.saving, m.stale = true, false, false, false
+	m.open, m.guardClose, m.saving, m.stale, m.drafting = true, false, false, false, false
 	m.savedTaskID = ""
 	m.labels, m.similar = nil, nil
 	m.dismissed = make(map[string]struct{})
@@ -205,6 +244,7 @@ func (m *Model) openForm(nextMode mode, task board.Task) {
 	m.similarLoading, m.similarQuery, m.similarExclusions = false, "", ""
 	m.similarCache = make(map[string][]store.SimilarHit)
 	m.statusMessage, m.statusIsError, m.scroll = "", false, 0
+	m.draftGen++
 	m.resetInputs()
 	m.applyTask(task)
 	m.focus = "title"
@@ -219,6 +259,7 @@ func (m *Model) resetInputs() {
 	m.label = editorInput("label or scope::value")
 	m.desc = editorArea("Description", 4)
 	m.checks = editorArea("one per line; prefix x when done", 4)
+	m.draftPrompt = editorArea("Describe what to draft or change", 3)
 	m.prio = 3
 	m.effort = ""
 	m.blocked = false
@@ -277,6 +318,7 @@ func (m *Model) Refresh(task board.Task, found bool) tea.Cmd {
 	}
 	if !found {
 		m.canonicalFound = false
+		m.cancelDraft()
 		m.open = false
 		return nil
 	}
@@ -337,8 +379,25 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		}
 		m.base, m.canonical, m.canonicalFound = msg.task, msg.task, true
 		m.initial = m.currentSnapshot()
+		m.cancelDraft()
 		m.savedTaskID, m.open = msg.task.ID, false
 		return nil
+	case draftCompletedMsg:
+		if msg.session != m.session || msg.generation != m.draftGen {
+			return nil
+		}
+		if m.draftCancel != nil {
+			m.draftCancel()
+		}
+		m.drafting, m.draftCancel = false, nil
+		if msg.err != nil {
+			m.statusMessage = "AI draft failed: " + safeError(msg.err)
+			m.statusIsError = true
+			return nil
+		}
+		m.applyDraft(msg.draft)
+		m.statusMessage, m.statusIsError = "AI draft applied; review before saving", false
+		return m.scheduleSimilar()
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
 	}
@@ -347,12 +406,20 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 
 func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
+	if m.drafting {
+		if key == "esc" {
+			m.cancelDraft()
+			m.statusMessage, m.statusIsError = "AI draft cancelled", false
+		}
+		return nil
+	}
 	if m.saving {
 		return nil
 	}
 	if m.guardClose {
 		switch key {
 		case "d", "D":
+			m.cancelDraft()
 			m.open, m.guardClose = false, false
 		case "esc":
 			m.guardClose = false
@@ -386,6 +453,11 @@ func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	}
 	switch m.focus {
+	case "ai-draft":
+		if key == "enter" || key == " " || key == "space" {
+			return m.startDraft()
+		}
+		return nil
 	case "prio":
 		return m.updatePriority(key)
 	case "effort":
@@ -417,6 +489,92 @@ func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	return m.updateFocusedInput(msg)
 }
 
+func (m *Model) startDraft() tea.Cmd {
+	if m.runner == nil || m.drafting {
+		return nil
+	}
+	prompt := strings.TrimSpace(m.draftPrompt.Value())
+	if prompt == "" {
+		m.statusMessage, m.statusIsError = "AI draft request is required", true
+		return nil
+	}
+	input := "Create a new kanban card for this request:\n" + prompt
+	if m.mode == modeEdit {
+		input = "Update the kanban card according to this request:\n" + prompt
+		if current, err := m.currentCardJSON(); err == nil {
+			input += "\n\nCurrent card JSON:\n" + string(current)
+		}
+	}
+	m.draftGen++
+	generation, session := m.draftGen, m.session
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.draftCancel, m.drafting = cancel, true
+	m.statusMessage, m.statusIsError = "drafting card...", false
+	return func() tea.Msg {
+		run, err := m.runner.RunSkill(ctx, m.user, ai.ScopeReadOnly, "story-draft", input, 1, draftMaxTokens)
+		if err == nil && len(run.Cards) == 0 {
+			err = errors.New("the model returned no usable card")
+		}
+		var draft ai.Draft
+		if len(run.Cards) > 0 {
+			draft = run.Cards[0]
+		}
+		return draftCompletedMsg{session: session, generation: generation, draft: draft, err: err}
+	}
+}
+
+func (m *Model) currentCardJSON() ([]byte, error) {
+	checks := textToChecks(m.checks.Value())
+	type wireCheck struct {
+		Text string `json:"text"`
+		Done bool   `json:"done"`
+	}
+	wireChecks := make([]wireCheck, len(checks))
+	for i, check := range checks {
+		wireChecks[i] = wireCheck{Text: check.Text, Done: check.Done}
+	}
+	return json.Marshal(struct {
+		Title  string      `json:"title"`
+		Desc   string      `json:"desc"`
+		Prio   int         `json:"prio"`
+		Due    string      `json:"due"`
+		Effort string      `json:"effort"`
+		Tags   []string    `json:"tags"`
+		Checks []wireCheck `json:"checks"`
+	}{
+		Title: strings.TrimSpace(m.title.Value()), Desc: strings.TrimSpace(m.desc.Value()),
+		Prio: m.prio, Due: strings.TrimSpace(m.due.Value()), Effort: m.effort,
+		Tags: append([]string(nil), m.tags...), Checks: wireChecks,
+	})
+}
+
+func (m *Model) applyDraft(draft ai.Draft) {
+	if draft.Title != "" {
+		m.title.SetValue(draft.Title)
+	}
+	m.emoji.SetValue(draft.Emoji)
+	m.desc.SetValue(draft.Desc)
+	m.prio, m.effort = draft.Prio, draft.Effort
+	m.due.SetValue(draft.Due)
+	m.tags = append([]string(nil), draft.Tags...)
+	checks := make([]board.Check, len(draft.Checks))
+	for i, check := range draft.Checks {
+		checks[i] = board.Check{Text: check.Text, Done: check.Done}
+	}
+	m.checks.SetValue(checksToText(checks))
+}
+
+func (m *Model) cancelDraft() {
+	if m.draftCancel != nil {
+		m.draftCancel()
+	}
+	m.draftCancel = nil
+	if m.drafting {
+		m.draftGen++
+	}
+	m.drafting = false
+}
+
 func (m *Model) requestClose() {
 	if m.Dirty() {
 		m.guardClose = true
@@ -424,6 +582,7 @@ func (m *Model) requestClose() {
 		m.statusIsError = true
 		return
 	}
+	m.cancelDraft()
 	m.open = false
 }
 
@@ -554,6 +713,8 @@ func (m *Model) updateFocusedInput(msg tea.Msg) tea.Cmd {
 		m.due, cmd = m.due.Update(msg)
 	case "checks":
 		m.checks, cmd = m.checks.Update(msg)
+	case "ai-prompt":
+		m.draftPrompt, cmd = m.draftPrompt.Update(msg)
 	}
 	return cmd
 }
@@ -576,7 +737,11 @@ func (m *Model) moveFocus(delta int) {
 }
 
 func (m Model) focusTargets() []string {
-	targets := []string{"title", "emoji", "desc", "prio", "due", "effort", "blocked", "labels", "checks"}
+	targets := make([]string, 0, 16)
+	if m.runner != nil {
+		targets = append(targets, "ai-prompt", "ai-draft")
+	}
+	targets = append(targets, "title", "emoji", "desc", "prio", "due", "effort", "blocked", "labels", "checks")
 	if !m.dismissedAll {
 		for _, hit := range m.visibleSimilar() {
 			targets = append(targets, "similar:"+similarKey(hit))
@@ -595,6 +760,7 @@ func (m *Model) applyFocus() tea.Cmd {
 	m.due.Blur()
 	m.label.Blur()
 	m.checks.Blur()
+	m.draftPrompt.Blur()
 	switch m.focus {
 	case "title":
 		return m.title.Focus()
@@ -609,6 +775,8 @@ func (m *Model) applyFocus() tea.Cmd {
 		return m.label.Focus()
 	case "checks":
 		return m.checks.Focus()
+	case "ai-prompt":
+		return m.draftPrompt.Focus()
 	}
 	return nil
 }

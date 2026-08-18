@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest/v2"
 
+	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
@@ -786,6 +787,61 @@ func TestShutdownIgnoresLateResults(t *testing.T) {
 	}
 	if m.board.Title == "Late" || m.dataVersion != 1 || m.reloadPending || m.Init() != nil {
 		t.Fatalf("late results changed stopped model: %#v", m)
+	}
+}
+
+func TestADRSplitRootRoutingMoveCancellationAndShutdown(t *testing.T) {
+	st := newSettingsTestStore(t)
+	task, err := st.AddTask("u", board.Task{Title: "card", Status: board.StatusTodo, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(st, nil, "u")
+	m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
+	m.board = board.Board{Title: "Work", Tasks: []board.Task{task}}
+	m.boardView.adoptBoard(m.board, m.board)
+	m.loading = false
+	if !m.adr.Enabled() || m.adr.IsOpen() {
+		t.Fatalf("ADR wiring enabled=%v open=%v", m.adr.Enabled(), m.adr.IsOpen())
+	}
+	m.move.beginVisible(m.board, m.board, task, m.boardView.visibleStatuses(), false)
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'a'})
+	if !m.adr.IsOpen() || m.move.lifted != nil || m.board.Tasks[0].ID != task.ID {
+		t.Fatalf("ADR open did not restore lift: open=%v move=%#v board=%#v", m.adr.IsOpen(), m.move, m.board)
+	}
+	if view := m.View(); view.OnMouse != nil || !strings.Contains(ansi.Strip(view.Content), "SPLIT ADR INTO STORIES") {
+		t.Fatalf("ADR view routing mouse=%v content:\n%s", view.OnMouse != nil, ansi.Strip(view.Content))
+	}
+
+	m.adr.Close()
+	m.move.beginVisible(m.board, m.board, task, m.boardView.visibleStatuses(), false)
+	m.move.saving = true
+	if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'a'}); command != nil || m.adr.IsOpen() || m.move.lifted == nil {
+		t.Fatalf("move save allowed ADR command=%v open=%v lifted=%v", command, m.adr.IsOpen(), m.move.lifted != nil)
+	}
+	m.move.saving = false
+	m.cancelCardMove("")
+	m.move.status, m.move.notice = "", false
+
+	detailLoad := m.detail.Open(task)
+	if detailLoad == nil {
+		t.Fatal("detail did not open")
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'a'})
+	if m.adr.IsOpen() || !m.detail.IsOpen() {
+		t.Fatalf("ADR opened behind detail: adr=%v detail=%v", m.adr.IsOpen(), m.detail.IsOpen())
+	}
+	m.detail.Close()
+	m.settingsNew = func() *settingsModel { return newSettingsModel(st, "u", context.Background()) }
+	footer := ansi.Strip(m.View().Content)
+	if !strings.Contains(footer, "a split ADR") {
+		t.Fatalf("ADR shortcut undiscoverable:\n%s", footer)
+	}
+
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'a'})
+	quit := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if quit == nil || !m.stopped || m.adr.IsOpen() {
+		t.Fatalf("ctrl-c shutdown command=%v stopped=%v adr=%v", quit, m.stopped, m.adr.IsOpen())
 	}
 }
 

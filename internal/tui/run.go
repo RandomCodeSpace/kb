@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -32,9 +34,10 @@ func runWithSettings(
 	openWatcher watcherOpener,
 	options ...tea.ProgramOption,
 ) (err error) {
+	runner := ai.NewRunner(st, filepath.Join(filepath.Dir(databasePath), "skills"), nil, nil)
 	return runProgram(st, databasePath, user, openWatcher, func(ctx context.Context) *settingsModel {
 		return newSettingsModel(st, user, ctx)
-	}, options...)
+	}, runner, options...)
 }
 
 func run(
@@ -44,7 +47,7 @@ func run(
 	openWatcher watcherOpener,
 	options ...tea.ProgramOption,
 ) (err error) {
-	return runProgram(st, databasePath, user, openWatcher, nil, options...)
+	return runProgram(st, databasePath, user, openWatcher, nil, nil, options...)
 }
 
 func runProgram(
@@ -53,6 +56,7 @@ func runProgram(
 	user string,
 	openWatcher watcherOpener,
 	settingsNew func(context.Context) *settingsModel,
+	aiRunner *ai.Runner,
 	options ...tea.ProgramOption,
 ) (err error) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -66,6 +70,7 @@ func runProgram(
 		err = errors.Join(err, watcher.Close())
 	}()
 	model := newModel(st, watcher, user, ctx)
+	model.configureAI(aiRunner, ctx)
 	preferencePath, preferencePathErr := tuiPreferencesPath(databasePath, user)
 	if preferencePathErr == nil {
 		model.restorePreferences(preferencePath)

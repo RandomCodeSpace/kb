@@ -8,7 +8,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/tui/adrsplit"
 	"github.com/RandomCodeSpace/kb/internal/tui/carddetail"
 	"github.com/RandomCodeSpace/kb/internal/tui/cardeditor"
 )
@@ -59,6 +61,7 @@ type Model struct {
 	filter          boardFilterState
 	detail          carddetail.Model
 	editor          cardeditor.Model
+	adr             adrsplit.Model
 	selectAfterLoad string
 	width           int
 	height          int
@@ -78,6 +81,15 @@ type Model struct {
 	settings        *settingsModel
 	settingsNew     func() *settingsModel
 	move            cardMoveState
+}
+
+func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
+	if runner == nil {
+		return
+	}
+	m.editor.SetAIRunner(runner, ctx)
+	adrStore, _ := m.store.(adrsplit.Store)
+	m.adr = adrsplit.New(adrStore, runner, m.user, ctx)
 }
 
 // NewModel creates the root model for one local board owner.
@@ -165,6 +177,26 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.adr.IsOpen() && adrsplit.IsMessage(message) {
+		command := m.adr.Update(message)
+		if m.adr.ConsumeChanged() {
+			return m, batchCommands(command, m.requireFreshBoard())
+		}
+		return m, command
+	}
+	if m.adr.IsOpen() {
+		switch msg := message.(type) {
+		case tea.KeyPressMsg:
+			if msg.String() == "ctrl+c" {
+				break
+			}
+			return m, m.adr.Update(msg)
+		case boardCardClickedMsg, boardColumnClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
+			return m, nil
+		}
+	}
 	var detailCmd tea.Cmd
 	if m.detail.IsOpen() {
 		switch msg := message.(type) {
@@ -210,6 +242,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if m.settings != nil {
 				m.settings.Close()
 			}
+			m.editor.CancelAsync()
+			m.adr.Close()
 			m.stopped = true
 			m.reloadPending = false
 			return m, tea.Quit
@@ -240,7 +274,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.boardView.focusTask(m.filteredBoard(), m.move.lifted.taskID)
 				}
 				return m, nil
-			case "s", "c", "1", "2", "3", "4", "tab", "shift+tab", "n", "e", "/", "f", "x":
+			case "s", "c", "1", "2", "3", "4", "tab", "shift+tab", "n", "e", "a", "/", "f", "x":
 				m.cancelCardMove("focus changed")
 			default:
 				return m, nil
@@ -258,6 +292,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if m.settingsNew != nil {
 				m.settings = m.settingsNew()
 				return m, m.settings.Init()
+			}
+		case "a":
+			if m.adr.Enabled() && !m.move.saving {
+				return m, m.adr.Open()
 			}
 		case "enter":
 			if task, ok := m.selectedTask(); ok {
@@ -578,6 +616,10 @@ func (m Model) View() tea.View {
 		content = m.settings.View(m.width, m.height)
 		hits = nil
 	}
+	if m.adr.IsOpen() {
+		content = m.adr.Overlay(content, m.width, m.height)
+		hits = nil
+	}
 	if m.editor.IsOpen() {
 		content = m.editor.Overlay(content, m.width, m.height)
 		hits = nil
@@ -585,7 +627,7 @@ func (m Model) View() tea.View {
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
-	if m.settings == nil && !m.editor.IsOpen() {
+	if m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() {
 		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
 		view.OnMouse = boardMouseHandler(hits, pointerActive)
 	}

@@ -79,6 +79,8 @@ func (m *Model) frame(width, height int) (string, int, int) {
 	}
 	if m.guardClose {
 		footer = "D discard | esc keep editing"
+	} else if m.drafting {
+		footer = "drafting card... | esc cancel"
 	} else if m.saving {
 		footer = "saving card..."
 	}
@@ -102,6 +104,15 @@ func (m *Model) bodyLines(width int) []string {
 		}
 	}
 	lines := []string{title, ""}
+	if m.runner != nil {
+		lines = append(lines, "Draft with AI (fills the form; review before Save)")
+		lines = append(lines, m.areaBlock("ai-prompt", "Request", m.draftPrompt, width, 2)...)
+		action := "Draft"
+		if m.drafting {
+			action = "Cancel draft (Esc)"
+		}
+		lines = append(lines, m.actionLine("ai-draft", action), "")
+	}
 	lines = append(lines,
 		m.inputLine("title", "Title", m.title, width),
 		m.inputLine("emoji", "Emoji", m.emoji, width),
