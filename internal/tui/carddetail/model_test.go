@@ -92,6 +92,47 @@ func TestModelLoadsAndRendersFullDetail(t *testing.T) {
 	}
 }
 
+func TestDetailMouseHandlerRoutesOnlyPaneWheelAndOutsideLeftClick(t *testing.T) {
+	m := New(nil, "alice")
+	if m.MouseHandler(80, 20) != nil {
+		t.Fatal("closed detail exposed a mouse handler")
+	}
+	m.Open(fullTask())
+	m.Resize(80, 12)
+	m.bodyLines = make([]string, 30)
+	handler := m.MouseHandler(80, 12)
+	if handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseLeft}) != nil {
+		t.Fatal("non-wheel button was handled as a wheel")
+	}
+	if handler(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseRight}) != nil {
+		t.Fatal("outside right click dismissed detail")
+	}
+	if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command == nil {
+		t.Fatal("inside wheel down was ignored")
+	} else {
+		m.Update(command())
+	}
+	if m.scroll != 3 {
+		t.Fatalf("wheel down scroll = %d", m.scroll)
+	}
+	if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelUp}); command == nil {
+		t.Fatal("inside wheel up was ignored")
+	} else {
+		m.Update(command())
+	}
+	if m.scroll != 0 {
+		t.Fatalf("wheel up scroll = %d", m.scroll)
+	}
+	if command := handler(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command == nil {
+		t.Fatal("outside left click was ignored")
+	} else {
+		m.Update(command())
+	}
+	if m.IsOpen() {
+		t.Fatal("outside left click did not close detail")
+	}
+}
+
 func TestModelHandlesErrorsStaleLoadsScrollAndClose(t *testing.T) {
 	loadErr := errors.New("comments broke")
 	m := New(stubReader{commentsErr: loadErr, linksErr: errors.New("links broke")}, "u")

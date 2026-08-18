@@ -48,6 +48,9 @@ type detailLoadedMsg struct {
 
 type markdownRenderer func(source string, width int) string
 
+type mouseScrollMsg struct{ delta int }
+type mouseDismissMsg struct{}
+
 // Model owns the overlay's task snapshot, enriched detail, and scroll state.
 type Model struct {
 	reader         Reader
@@ -226,6 +229,11 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		m.tombstoneErr = msg.tombstoneErr
 		m.reconcileDeleteActionAfterRefresh()
 		m.rebuildBody()
+	case mouseScrollMsg:
+		m.scroll += msg.delta
+	case mouseDismissMsg:
+		m.Close()
+		return nil
 	case tea.KeyPressMsg:
 		if m.driftMode != driftNone {
 			return m.updateDrift(msg)
@@ -261,6 +269,40 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	}
 	m.clampScroll()
 	return nil
+}
+
+// MouseHandler routes wheel scrolling within the pane and left-click dismissal
+// outside it. The root disables this handler while nested detail input is active.
+func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
+	if !m.open {
+		return nil
+	}
+	paneWidth, paneHeight := paneSize(width, height)
+	x0 := max((max(width, 1)-paneWidth)/2, 0)
+	y0 := max((max(height, 1)-paneHeight)/2, 0)
+	return func(message tea.MouseMsg) tea.Cmd {
+		mouse := message.Mouse()
+		inside := mouse.X >= x0 && mouse.X < x0+paneWidth && mouse.Y >= y0 && mouse.Y < y0+paneHeight
+		if _, wheel := message.(tea.MouseWheelMsg); wheel {
+			if !inside {
+				return nil
+			}
+			delta := 0
+			switch mouse.Button {
+			case tea.MouseWheelUp:
+				delta = -3
+			case tea.MouseWheelDown:
+				delta = 3
+			default:
+				return nil
+			}
+			return func() tea.Msg { return mouseScrollMsg{delta: delta} }
+		}
+		if _, click := message.(tea.MouseClickMsg); click && mouse.Button == tea.MouseLeft && !inside {
+			return func() tea.Msg { return mouseDismissMsg{} }
+		}
+		return nil
+	}
 }
 
 func (m *Model) reconcileDeleteActionAfterRefresh() {
@@ -404,11 +446,14 @@ func fitDetailLine(line string, width int) string {
 }
 
 func paneGeometry(width, height int) (innerWidth, innerHeight, paneHeight int) {
+	paneWidth, paneHeight := paneSize(width, height)
+	return max(paneWidth-4, 1), max(paneHeight-4, 1), paneHeight
+}
+
+func paneSize(width, height int) (paneWidth, paneHeight int) {
 	width = max(width, 1)
 	height = max(height, 1)
-	paneWidth := min(max(width-4, 12), maxPaneWidth, width)
-	paneHeight = min(max(min(height-2, height), 5), height)
-	return max(paneWidth-4, 1), max(paneHeight-4, 1), paneHeight
+	return min(max(width-4, 12), maxPaneWidth, width), min(max(min(height-2, height), 5), height)
 }
 
 func (m *Model) clampScroll() {

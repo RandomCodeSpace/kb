@@ -421,6 +421,104 @@ func TestCardDetailOpensFromKeyboardAndClick(t *testing.T) {
 	}
 }
 
+func mouseRoutingTestModel(t *testing.T) Model {
+	t.Helper()
+	tasks := make([]board.Task, 0, 8)
+	for i := range 8 {
+		tasks = append(tasks, board.Task{
+			ID:     fmt.Sprintf("task-%d", i),
+			Seq:    i + 1,
+			Title:  fmt.Sprintf("Card %d", i),
+			Desc:   strings.Repeat(fmt.Sprintf("detail line %d\n", i), 8),
+			Status: board.StatusTodo,
+		})
+	}
+	m := NewModel(stubDetailBoardReader{stubBoardReader{board: board.Board{Title: "Work", Tasks: tasks}}}, nil, "alice")
+	m.width, m.height = 80, 10
+	completeBoardLoad(t, &m, m.Init())
+	return m
+}
+
+func requireMouseHandler(t *testing.T, handler func(tea.MouseMsg) tea.Cmd, surface string) func(tea.MouseMsg) tea.Cmd {
+	t.Helper()
+	if handler == nil {
+		t.Fatalf("%s mouse handler is nil", surface)
+	}
+	return handler
+}
+
+func requireMouseCommand(t *testing.T, command tea.Cmd, action string) tea.Cmd {
+	t.Helper()
+	if command == nil {
+		t.Fatalf("%s was ignored", action)
+	}
+	return command
+}
+
+func TestBoardMouseWheelScrollsHoveredColumn(t *testing.T) {
+	m := mouseRoutingTestModel(t)
+
+	beforeBoard := ansi.Strip(m.View().Content)
+	boardMouse := requireMouseHandler(t, m.View().OnMouse, "board")
+	scrollDown := requireMouseCommand(t,
+		boardMouse(tea.MouseWheelMsg{X: 1, Y: 4, Button: tea.MouseWheelDown}),
+		"board wheel down",
+	)
+	if command := updateTestModel(t, &m, scrollDown()); command != nil {
+		t.Fatalf("board wheel started command %v", command)
+	}
+	if !m.boardView.manualScroll[0] || m.boardView.scrolls[0] == 0 {
+		t.Fatalf("board scroll state = manual %v offset %d", m.boardView.manualScroll[0], m.boardView.scrolls[0])
+	}
+	afterBoard := ansi.Strip(m.View().Content)
+	if afterBoard == beforeBoard || strings.Contains(afterBoard, "Card 0") {
+		t.Fatalf("board did not scroll the hovered column:\n%s", afterBoard)
+	}
+	if command := m.View().OnMouse(tea.MouseWheelMsg{X: 1, Y: 4, Button: tea.MouseWheelUp}); command == nil {
+		t.Fatal("board wheel up was ignored")
+	} else {
+		updateTestModel(t, &m, command())
+	}
+	if m.boardView.scrolls[0] != 0 {
+		t.Fatalf("board wheel up offset = %d", m.boardView.scrolls[0])
+	}
+}
+
+func TestDetailOverlayMouseWheelAndOutsideClick(t *testing.T) {
+	m := mouseRoutingTestModel(t)
+
+	load := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if load == nil {
+		t.Fatal("detail open did not start enrichment")
+	}
+	updateTestModel(t, &m, load())
+	detailBefore := ansi.Strip(m.View().Content)
+	detailMouse := requireMouseHandler(t, m.View().OnMouse, "detail")
+	if detailMouse(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown}) != nil {
+		t.Fatal("wheel outside detail was handled")
+	}
+	if detailMouse(tea.MouseClickMsg{X: 40, Y: 5, Button: tea.MouseLeft}) != nil {
+		t.Fatal("click inside detail dismissed it")
+	}
+	detailScroll := requireMouseCommand(t,
+		detailMouse(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}),
+		"detail wheel down",
+	)
+	updateTestModel(t, &m, detailScroll())
+	detailAfter := ansi.Strip(m.View().Content)
+	if detailAfter == detailBefore {
+		t.Fatal("detail wheel did not change the viewport")
+	}
+	if command := m.View().OnMouse(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command == nil {
+		t.Fatal("outside click was ignored")
+	} else {
+		updateTestModel(t, &m, command())
+	}
+	if m.detail.IsOpen() {
+		t.Fatal("outside click did not close detail")
+	}
+}
+
 func TestCardDetailOpenWithoutASelectedTaskIsNoop(t *testing.T) {
 	m := NewModel(stubBoardReader{board: board.Board{Title: "Empty"}}, nil, "u")
 	completeBoardLoad(t, &m, m.Init())
