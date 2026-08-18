@@ -227,21 +227,13 @@ func (s *Service) authorizeRef(user, sourceName, raw string) (Ref, error) {
 func (s *Service) duplicates(user string, ref Ref, issues []Issue) ([]*Duplicate, error) {
 	result := make([]*Duplicate, len(issues))
 	for index, issue := range issues {
-		link, externalKey := issueProvenance(ref, issue)
+		_, externalKey := issueProvenance(ref, issue)
 		exact, err := s.store.TasksByLink(user, importTagPrefix+externalKey)
 		if err != nil {
 			return nil, err
 		}
 		if len(exact) > 0 {
 			result[index] = &Duplicate{ID: exact[0].ID, Title: exact[0].Title, Via: "link"}
-			continue
-		}
-		legacy, err := s.legacyDuplicate(user, ref, issue, link, externalKey)
-		if err != nil {
-			return nil, err
-		}
-		if legacy != nil {
-			result[index] = legacy
 			continue
 		}
 		similar, err := s.store.SearchSimilar(user, issue.Title, "", nil, 1)
@@ -253,24 +245,6 @@ func (s *Service) duplicates(user string, ref Ref, issues []Issue) ([]*Duplicate
 		}
 	}
 	return result, nil
-}
-
-func (s *Service) legacyDuplicate(user string, ref Ref, issue Issue, link, externalKey string) (*Duplicate, error) {
-	tasks, err := s.store.TasksByLink(user, linkTagPrefix+link)
-	if err != nil || len(tasks) != 1 {
-		return nil, err
-	}
-	provenance, err := s.store.ImportLinksByLink(user, link)
-	if err != nil || len(provenance) != 1 {
-		return nil, err
-	}
-	imported := provenance[0]
-	if imported.Source == ref.Source.Name && imported.Kind == ref.Kind &&
-		(imported.ExternalKey == externalKey || imported.URL == issue.URL) &&
-		tasks[0].Title == imported.Title {
-		return &Duplicate{ID: tasks[0].ID, Title: tasks[0].Title, Via: "link"}, nil
-	}
-	return nil, nil
 }
 
 func attachDrafts(ref Ref, drafts []ai.Draft, issues []Issue, duplicates []*Duplicate) []Draft {

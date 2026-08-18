@@ -461,53 +461,24 @@ func TestQualifiedIdentityPreventsCrossForgeExactDuplicates(t *testing.T) {
 	}
 }
 
-func TestLegacyShortLinkDuplicateRequiresMatchingQualifiedProvenance(t *testing.T) {
-	issueA := Issue{Ref: "github#93", Title: "different work", URL: "https://forge.test/a/owner/repo/issues/93"}
-	issueB := Issue{Ref: "github#93", Title: "different work", URL: "https://forge.test/b/owner/repo/issues/93"}
-	refA := Ref{Source: store.ForgeSource{Name: "a", Kind: "github", BaseURL: "https://forge.test/a"}, Kind: "github", Project: "owner/repo"}
-	refB := Ref{Source: store.ForgeSource{Name: "b", Kind: "github", BaseURL: "https://forge.test/b"}, Kind: "github", Project: "owner/repo"}
+func TestLegacyShortLinkAndStaleProvenanceNeverBecomeExact(t *testing.T) {
+	issue := Issue{Ref: "github#93", Title: "Fix login", URL: "https://forge.test/b/owner/repo/issues/93"}
+	ref := Ref{Source: store.ForgeSource{Name: "primary", Kind: "github", BaseURL: "https://forge.test/b"}, Kind: "github", Project: "owner/repo"}
 	st := testStore(t)
-	legacyTask, err := st.AddTask("alice", board.Task{Title: "legacy existing", Tags: []string{linkTagPrefix + issueA.Ref}})
+	legacyTask, err := st.AddTask("alice", board.Task{Title: issue.Title, Tags: []string{linkTagPrefix + issue.Ref}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := st.RecordImportLinks("alice", []store.ImportLink{{
-		Source: refA.Source.Name, Kind: refA.Kind, ExternalKey: "github:forge.test/owner/repo#93",
-		Link: issueA.Ref, URL: issueA.URL, Title: legacyTask.Title,
+		Source: ref.Source.Name, Kind: ref.Kind, ExternalKey: "github:forge.test/owner/repo#93",
+		Link: issue.Ref, URL: issue.URL, Title: legacyTask.Title,
 	}}); err != nil {
 		t.Fatal(err)
 	}
 	service := New(st, nil, nil)
-	exact, err := service.duplicates("alice", refA, []Issue{issueA})
-	if err != nil || exact[0] == nil || exact[0].ID != legacyTask.ID || exact[0].Via != "link" {
-		t.Fatalf("legacy exact = %+v, %v", exact, err)
-	}
-	other, err := service.duplicates("alice", refB, []Issue{issueB})
-	if err != nil || (other[0] != nil && other[0].Via == "link") {
-		t.Fatalf("cross-source legacy duplicate = %+v, %v", other, err)
-	}
-	reconfigured := refB
-	reconfigured.Source.Name = refA.Source.Name
-	other, err = service.duplicates("alice", reconfigured, []Issue{issueB})
-	if err != nil || (other[0] != nil && other[0].Via == "link") {
-		t.Fatalf("reconfigured-path legacy duplicate = %+v, %v", other, err)
-	}
-	_, keyB := issueProvenance(refB, issueB)
-	deleted, err := st.AddTaskWithImportLink("alice", board.Task{Title: "deleted B", Tags: []string{linkTagPrefix + issueB.Ref, importTagPrefix + keyB}}, store.ImportLink{
-		Source: refB.Source.Name, Kind: refB.Kind, ExternalKey: keyB, Link: issueB.Ref, URL: issueB.URL, Title: "deleted B",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.CancelTask("alice", deleted.ID, nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.DeleteCancelledTask("alice", deleted.ID); err != nil {
-		t.Fatal(err)
-	}
-	other, err = service.duplicates("alice", refB, []Issue{issueB})
-	if err != nil || (other[0] != nil && other[0].Via == "link") {
-		t.Fatalf("deleted-card provenance cross-joined surviving card = %+v, %v", other, err)
+	duplicate, err := service.duplicates("alice", ref, []Issue{issue})
+	if err != nil || duplicate[0] == nil || duplicate[0].ID != legacyTask.ID || duplicate[0].Via != "similar" {
+		t.Fatalf("legacy review classification = %+v, %v", duplicate, err)
 	}
 }
 
