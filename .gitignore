@@ -10,6 +10,9 @@
 !/docs/research/
 /docs/research/*
 !/docs/research/bubbletea-stack.md
+!/docs/releases/
+/docs/releases/*
+!/docs/releases/v1.0.0.md
 
 # compiled binary
 /kb

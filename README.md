@@ -9,10 +9,11 @@ There is no web UI, JavaScript bundle, or browser runtime in the binary.
 
 ## Install
 
-With Go 1.25 or newer:
+With Go 1.25.8 or newer, install the stable release:
 
 ```sh
-go install github.com/RandomCodeSpace/kb@latest
+go install github.com/RandomCodeSpace/kb@v1.0.0
+kb version
 ```
 
 Or build a checkout:
@@ -23,6 +24,19 @@ CGO_ENABLED=0 go build -o kb .
 ```
 
 No Node.js, npm, Vite, or generated asset directory is required.
+
+Prebuilt CGO-free binaries for Linux amd64/arm64, macOS amd64/arm64, and
+Windows amd64 are attached to the
+[v1.0.0 release](https://github.com/RandomCodeSpace/kb/releases/tag/v1.0.0).
+Download `SHA256SUMS` with the binary and verify the files before installation:
+
+```sh
+grep ' kb-linux-amd64$' SHA256SUMS | sha256sum -c -
+```
+
+Substitute the downloaded asset name. On macOS use
+`shasum -a 256 -c -`; on Windows compare `Get-FileHash -Algorithm SHA256`
+with the matching manifest line.
 
 ## Start
 
@@ -348,14 +362,26 @@ node scripts/ci/test_ci_monitor.cjs
 The CI monitor test uses only Node built-ins. It remains because it validates
 the repository's workflow monitor; it is not a frontend dependency.
 
-Release builds are Go-only and start from a clean plain clone:
+Release builds are Go-only and start from a clean plain clone. The v1.0.0
+release notes document the breaking command change and the v0.14.2 upgrade:
+
+```text
+docs/releases/v1.0.0.md
+```
+
+The local dry run creates a temporary annotated tag, builds and inspects all
+five binaries, verifies their checksums, and exercises the native binary. It
+then removes the temporary tag and proves that HEAD, the tree, the index, and
+status did not change. Release provenance is pinned to the exact Go directive;
+select Go 1.25.8 even when a newer compiler is installed:
 
 ```sh
-bash scripts/release.sh vX.Y.Z --dry-run
+GOTOOLCHAIN=go1.25.8 bash scripts/release.sh v1.0.0 docs/releases/v1.0.0.md --dry-run
 ```
 
 The release tag points directly at the clean source commit. There is no
-generated `dist` tree, synthetic release commit, or destructive checkout reset.
+generated `dist` tree, synthetic release commit, destructive checkout reset,
+or retagging. A failed published release is corrected with the next patch.
 
 ## License
 

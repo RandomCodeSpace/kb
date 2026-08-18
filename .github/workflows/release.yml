@@ -12,7 +12,7 @@ on:
         description: 'Release version (vX.Y.Z)'
         required: true
       notes:
-        description: 'Release notes (markdown); empty generates notes from commits'
+        description: 'Release notes (markdown); empty uses docs/releases/<version>.md'
         required: false
         default: ''
       dry_run:
@@ -20,17 +20,55 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
-
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  release:
+  dry-run:
+    if: ${{ inputs.dry_run }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Configure temporary tag identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Verify release locally
+        env:
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          notes_file="docs/releases/$VERSION.md"
+          if [ -n "$NOTES" ]; then
+            printf '%s' "$NOTES" > "$RUNNER_TEMP/notes.md"
+            notes_file="$RUNNER_TEMP/notes.md"
+          fi
+          bash scripts/release.sh "$VERSION" "$notes_file" --dry-run
+
+  release:
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
 
     steps:
       - name: Check out repository
@@ -56,15 +94,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           NOTES: ${{ inputs.notes }}
-          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          args=("$VERSION")
+          notes_file="docs/releases/$VERSION.md"
           if [ -n "$NOTES" ]; then
             printf '%s' "$NOTES" > "$RUNNER_TEMP/notes.md"
-            args+=("$RUNNER_TEMP/notes.md")
+            notes_file="$RUNNER_TEMP/notes.md"
           fi
-          if [ "$DRY_RUN" = "true" ]; then
-            args+=(--dry-run)
-          fi
+          args=("$VERSION" "$notes_file")
           bash scripts/release.sh "${args[@]}"

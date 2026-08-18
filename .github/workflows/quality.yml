@@ -54,5 +54,8 @@ jobs:
       - name: Check Go formatting
         run: sh scripts/check-go-format.sh
 
+      - name: Test release safeguards
+        run: bash scripts/release.test.sh
+
       - name: Test CI monitor
         run: node scripts/ci/test_ci_monitor.cjs
