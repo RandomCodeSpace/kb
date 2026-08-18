@@ -845,6 +845,165 @@ func TestADRSplitRootRoutingMoveCancellationAndShutdown(t *testing.T) {
 	}
 }
 
+func TestTaskActionsRespectDetailEditorAndADRInputOwnership(t *testing.T) {
+	st := newSettingsTestStore(t)
+	_, err := st.AddTask("u", board.Task{
+		Title: "routing", Status: board.StatusTodo, Prio: 3,
+		Checks: []board.Check{{Text: "check"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(st, nil, "u")
+	m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
+	completeBoardLoad(t, &m, m.Init())
+
+	loadLabels := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'e'})
+	if loadLabels != nil {
+		updateTestModel(t, &m, loadLabels())
+	}
+	for _, key := range []tea.KeyPressMsg{
+		{Code: 'x', Text: "x"}, {Code: 'r', Text: "r"}, {Code: 't', Text: "t"}, {Code: tea.KeyDelete},
+	} {
+		updateTestModel(t, &m, key)
+	}
+	if m.action.open() || !m.editor.IsOpen() {
+		t.Fatalf("editor input leaked to task action: action=%#v editor=%v", m.action, m.editor.IsOpen())
+	}
+
+	adrModel := NewModel(st, nil, "u")
+	adrModel.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
+	completeBoardLoad(t, &adrModel, adrModel.Init())
+	updateTestModel(t, &adrModel, tea.KeyPressMsg{Code: 'a'})
+	if !adrModel.adr.IsOpen() {
+		t.Fatal("ADR input did not open")
+	}
+	for _, key := range []tea.KeyPressMsg{
+		{Code: 'x', Text: "x"}, {Code: 'r', Text: "r"}, {Code: 't', Text: "t"}, {Code: tea.KeyDelete},
+	} {
+		updateTestModel(t, &adrModel, key)
+	}
+	if adrModel.action.open() || !adrModel.adr.IsOpen() {
+		t.Fatalf("ADR input leaked to task action: action=%#v adr=%v", adrModel.action, adrModel.adr.IsOpen())
+	}
+
+	actionModel := NewModel(st, nil, "u")
+	actionModel.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
+	completeBoardLoad(t, &actionModel, actionModel.Init())
+	drainModelCommands(t, &actionModel, updateTestModel(t, &actionModel, tea.KeyPressMsg{Code: tea.KeyEnter}))
+	updateTestModel(t, &actionModel, tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if actionModel.action.mode != taskActionKill || !actionModel.detail.IsOpen() {
+		t.Fatalf("idle detail x route = action:%#v detail:%v", actionModel.action, actionModel.detail.IsOpen())
+	}
+	updateTestModel(t, &actionModel, tea.KeyPressMsg{Code: 'a', Text: "a"})
+	if actionModel.adr.IsOpen() || actionModel.action.reason.Value() != "a" {
+		t.Fatalf("task dialog lost priority: adr=%v reason=%q", actionModel.adr.IsOpen(), actionModel.action.reason.Value())
+	}
+	updateTestModel(t, &actionModel, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if actionModel.action.open() || !actionModel.detail.IsOpen() {
+		t.Fatalf("task dialog close disturbed detail: action=%#v detail=%v", actionModel.action, actionModel.detail.IsOpen())
+	}
+}
+
+func TestDelayedAutoShipDoesNotStealNestedDetailInput(t *testing.T) {
+	setup := func(t *testing.T) (Model, *store.Store, board.Task, tea.Cmd) {
+		t.Helper()
+		st := newSettingsTestStore(t)
+		task, err := st.AddTask("u", board.Task{
+			Title: "delayed", Status: board.StatusTodo, Prio: 3,
+			Checks: []board.Check{{Text: "last"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := NewModel(st, nil, "u")
+		completeBoardLoad(t, &m, m.Init())
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: 't', Text: "t"})
+		write := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
+		timer := finishActionCommand(t, &m, write)
+		if timer == nil {
+			t.Fatal("last checklist tick did not schedule auto-ship")
+		}
+		return m, st, task, timer
+	}
+
+	t.Run("timer check", func(t *testing.T) {
+		m, st, task, timer := setup(t)
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
+		drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: 'c', Text: "c"})
+		if !m.detail.OwnsInput() {
+			t.Fatal("comment input did not own focus")
+		}
+		if command := updateTestModel(t, &m, timer()); command != nil {
+			t.Fatalf("auto-ship read started behind detail input: %v", command)
+		}
+		current, err := st.Task("u", task.ID)
+		if err != nil || current.Status != board.StatusTodo || m.action.open() || !m.detail.OwnsInput() {
+			t.Fatalf("timer stole nested input: task=%+v err=%v action=%#v owned=%v", current, err, m.action, m.detail.OwnsInput())
+		}
+	})
+
+	t.Run("ready result", func(t *testing.T) {
+		m, st, task, timer := setup(t)
+		read := updateTestModel(t, &m, timer())
+		if read == nil {
+			t.Fatal("eligible timer did not start canonical read")
+		}
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
+		drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: 'c', Text: "c"})
+		if command := updateTestModel(t, &m, read()); command != nil {
+			t.Fatalf("auto-ship write started behind detail input: %v", command)
+		}
+		current, err := st.Task("u", task.ID)
+		if err != nil || current.Status != board.StatusTodo || m.action.open() || !m.detail.OwnsInput() {
+			t.Fatalf("ready result stole nested input: task=%+v err=%v action=%#v owned=%v", current, err, m.action, m.detail.OwnsInput())
+		}
+	})
+}
+
+func TestAutoShipInputOwnershipMatrix(t *testing.T) {
+	st := newSettingsTestStore(t)
+	task, err := st.AddTask("u", board.Task{Title: "owner", Status: board.StatusTodo, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRoot := func() Model {
+		m := NewModel(st, nil, "u")
+		completeBoardLoad(t, &m, m.Init())
+		return m
+	}
+	for _, test := range []struct {
+		name string
+		own  func(*Model)
+	}{
+		{name: "settings", own: func(m *Model) { m.settings = &settingsModel{} }},
+		{name: "editor", own: func(m *Model) { _ = m.editor.OpenAdd(board.StatusTodo) }},
+		{name: "ADR", own: func(m *Model) {
+			m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
+			_ = m.adr.Open()
+		}},
+		{name: "detail", own: func(m *Model) { _ = m.detail.Open(task) }},
+		{name: "filter", own: func(m *Model) { _ = m.filter.focusText() }},
+		{name: "move preview", own: func(m *Model) {
+			m.move.beginVisible(m.board, m.board, task, m.boardView.visibleStatuses(), false)
+		}},
+		{name: "move write", own: func(m *Model) { m.move.saving = true }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := newRoot()
+			if m.autoShipInputOwned() {
+				t.Fatal("idle root unexpectedly owned auto-ship input")
+			}
+			test.own(&m)
+			if !m.autoShipInputOwned() {
+				t.Fatal("active owner did not block delayed auto-ship")
+			}
+		})
+	}
+}
+
 func TestEmptyBoardGolden(t *testing.T) {
 	m := NewModel(stubBoardReader{board: board.Board{Title: "Board"}}, nil, "default")
 	// Start from a loaded snapshot so the golden records the frame, not a

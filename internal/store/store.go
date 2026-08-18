@@ -27,9 +27,10 @@ import (
 
 // Sentinel errors for task ID prefix resolution.
 var (
-	ErrNotFound       = errors.New("task not found")
-	ErrAmbiguous      = errors.New("ambiguous task id prefix")
-	ErrInvalidTaskIDs = errors.New("invalid canonical task ids")
+	ErrNotFound         = errors.New("task not found")
+	ErrAmbiguous        = errors.New("ambiguous task id prefix")
+	ErrInvalidTaskIDs   = errors.New("invalid canonical task ids")
+	ErrTaskNotCancelled = errors.New("task is not cancelled")
 )
 
 // RevisionConflictError reports a failed board compare-and-swap. Revisions
@@ -1019,6 +1020,44 @@ func (s *Store) UpdateTaskIfFieldsMatch(user, idPrefix string, expected, patch T
 	return out, nil
 }
 
+// UpdateAndMoveTaskIfFieldsMatch applies patch and move only when every
+// non-nil expected field still matches. The comparison, patch, guard, and move
+// share one transaction, so a stale modal cannot overwrite a concurrent edit.
+func (s *Store) UpdateAndMoveTaskIfFieldsMatch(
+	user, idPrefix string,
+	expected, patch TaskPatch,
+	moveTo *board.Status,
+	index *int,
+	guard func(board.Task) error,
+) (board.Task, error) {
+	if moveTo != nil && !moveTo.Valid() {
+		return board.Task{}, fmt.Errorf("store: invalid status %q", *moveTo)
+	}
+	if index != nil && *index < 0 {
+		return board.Task{}, fmt.Errorf("store: invalid index %d", *index)
+	}
+	var out board.Task
+	err := s.withTx(func(tx *sql.Tx) error {
+		id, err := resolveID(tx, user, idPrefix)
+		if err != nil {
+			return err
+		}
+		current, err := getTask(tx, user, id)
+		if err != nil {
+			return err
+		}
+		if fields := taskFieldConflicts(current, expected); len(fields) > 0 {
+			return &TaskFieldsConflictError{Fields: fields}
+		}
+		out, err = s.updateAndMoveTaskTx(tx, user, id, patch, moveTo, index, guard)
+		return err
+	})
+	if err != nil {
+		return board.Task{}, err
+	}
+	return out, nil
+}
+
 func taskFieldConflicts(task board.Task, expected TaskPatch) []string {
 	fields := make([]string, 0, 9)
 	if expected.Emoji != nil && task.Emoji != *expected.Emoji {
@@ -1239,6 +1278,36 @@ func (s *Store) MoveTask(user, idPrefix string, to board.Status) (board.Task, er
 	return s.UpdateAndMoveTask(user, idPrefix, TaskPatch{}, &to, nil, nil)
 }
 
+// CancelTask soft-deletes a task and optionally records its kill reason in one
+// transaction. The status transition happens before the tombstone insert, as
+// required by the tombstone invariant, but neither write can escape alone.
+func (s *Store) CancelTask(user, idPrefix string, reason *string) (board.Task, error) {
+	if reason != nil {
+		trimmed := strings.TrimSpace(*reason)
+		if err := validateTombstoneReason(trimmed); err != nil {
+			return board.Task{}, err
+		}
+		reason = &trimmed
+	}
+	var out board.Task
+	err := s.withTx(func(tx *sql.Tx) error {
+		cancelled := board.StatusCancelled
+		var err error
+		out, err = s.updateAndMoveTaskTx(tx, user, idPrefix, TaskPatch{}, &cancelled, nil, nil)
+		if err != nil {
+			return err
+		}
+		if reason != nil {
+			return recordTombstoneTx(tx, user, out.ID, *reason)
+		}
+		return nil
+	})
+	if err != nil {
+		return board.Task{}, err
+	}
+	return out, nil
+}
+
 // repositionTask splices id into column st at index, clamped to the column
 // length, and rewrites that column's positions to 0..n-1. Columns hold a
 // handful of tasks, so a full rewrite is cheaper to reason about than sparse
@@ -1322,6 +1391,18 @@ func moveTask(tx *sql.Tx, user string, t board.Task, to board.Status) (board.Tas
 
 // DeleteTask removes the task matching idPrefix and returns it.
 func (s *Store) DeleteTask(user, idPrefix string) (board.Task, error) {
+	return s.deleteTask(user, idPrefix, false)
+}
+
+// DeleteCancelledTask permanently deletes a task only while it is in the
+// Cancelled column. This is the direct-store hard-delete seam used by the TUI:
+// checking the status and removing the row happen in one transaction, so a
+// concurrent restore cannot race an already-confirmed purge.
+func (s *Store) DeleteCancelledTask(user, idPrefix string) (board.Task, error) {
+	return s.deleteTask(user, idPrefix, true)
+}
+
+func (s *Store) deleteTask(user, idPrefix string, requireCancelled bool) (board.Task, error) {
 	var out board.Task
 	err := s.withTx(func(tx *sql.Tx) error {
 		id, err := resolveID(tx, user, idPrefix)
@@ -1331,6 +1412,9 @@ func (s *Store) DeleteTask(user, idPrefix string) (board.Task, error) {
 		t, err := getTask(tx, user, id)
 		if err != nil {
 			return err
+		}
+		if requireCancelled && t.Status != board.StatusCancelled {
+			return ErrTaskNotCancelled
 		}
 		if _, err := tx.Exec(`DELETE FROM tasks WHERE user = ? AND id = ?`, user, id); err != nil {
 			return fmt.Errorf("store: delete task: %w", err)

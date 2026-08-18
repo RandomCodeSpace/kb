@@ -251,6 +251,9 @@ func (m Model) renderBoard() (string, []boardHit) {
 		title = "Board"
 	}
 	header := fitLine(fmt.Sprintf("kb / %s / %s", title, m.user), width)
+	if shipped := m.shippedCount(); shipped > 0 {
+		header = fitLine(fmt.Sprintf("kb / %s / %s / ×%d shipped today", title, m.user, shipped), width)
+	}
 	filterLine, filterHits := m.renderFilterBar(width)
 
 	statuses := m.boardView.visibleStatuses()
@@ -276,6 +279,8 @@ func (m Model) renderBoard() (string, []boardHit) {
 	showMoveStatus := movePriority && m.move.status != ""
 	if showMoveStatus {
 		state = sanitizeTerminal(m.move.status)
+	} else if m.actionNotice && m.actionStatus != "" {
+		state = sanitizeTerminal(m.actionStatus)
 	} else if m.loadErr != nil {
 		state = "error: " + m.loadErr.Error()
 	} else if m.pollErr != nil {
@@ -295,7 +300,7 @@ func (m Model) renderBoard() (string, []boardHit) {
 	if m.editor.Enabled() {
 		help = "n new | e edit | " + help
 	}
-	if showMoveStatus || (m.move.status != "" && m.loadErr == nil && m.pollErr == nil && m.preferenceErr == nil) {
+	if showMoveStatus || m.actionNotice || (m.move.status != "" && m.loadErr == nil && m.pollErr == nil && m.preferenceErr == nil) {
 		footer := fitLine(state, width)
 		return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
 	}
@@ -384,6 +389,7 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 
 func settingsBoardFooter(state, cancelled string, editorEnabled, adrEnabled bool, width int) string {
 	candidates := [][]string{
+		{"s settings", "t/x/r/D actions", "j/k cards", "h/l/tab columns", "c cancelled:" + cancelled, "q quit"},
 		{"s settings", "j/k cards", "h/l/tab columns", "1-4 jump", "c cancelled:" + cancelled, "q quit"},
 		{"s settings", "j/k cards", "h/l/tab columns", "c cancelled:" + cancelled, "q quit"},
 		{"s settings", "j/k cards", "h/l/tab columns", "q quit"},
@@ -396,6 +402,7 @@ func settingsBoardFooter(state, cancelled string, editorEnabled, adrEnabled bool
 	}
 	if editorEnabled {
 		candidates = append([][]string{
+			{"s settings", "n new", "e edit", "t/x/r/D actions", "j/k cards", "h/l/tab columns", "c cancelled:" + cancelled, "q quit"},
 			{"s settings", "n new", "e edit", "j/k cards", "h/l/tab columns", "1-4 jump", "c cancelled:" + cancelled, "q quit"},
 			{"s settings", "n new", "e edit", "j/k cards", "h/l/tab columns", "c cancelled:" + cancelled, "q quit"},
 			{"s settings", "n new", "e edit", "j/k cards", "c cancelled:" + cancelled, "q quit"},

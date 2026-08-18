@@ -301,6 +301,10 @@ func TestBoardFooterPrioritizesProductionSettingsActions(t *testing.T) {
 		notWant []string
 	}{
 		{
+			width: 120,
+			want:  []string{"s settings", "t/x/r/D actions", "j/k cards", "h/l/tab columns", "c cancelled:off", "q quit"},
+		},
+		{
 			width: 80,
 			want:  []string{"s settings", "j/k cards", "h/l/tab columns", "c cancelled:off", "q quit"},
 			notWant: []string{

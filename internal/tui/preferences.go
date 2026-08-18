@@ -14,8 +14,9 @@ import (
 )
 
 type tuiPreferences struct {
-	ShowCancelled bool        `json:"show_cancelled"`
-	Filter        boardFilter `json:"filter,omitempty"`
+	ShowCancelled bool          `json:"show_cancelled"`
+	Filter        boardFilter   `json:"filter,omitempty"`
+	Shipped       shippedRecord `json:"shipped,omitempty"`
 }
 
 type preferenceSavedMsg struct {
@@ -62,6 +63,8 @@ func (m *Model) restorePreferences(path string) {
 	}
 	m.boardView.showCancelled = preferences.ShowCancelled
 	m.filter.restore(preferences.Filter)
+	m.shipped = preferences.Shipped
+	m.normalizeShipped()
 }
 
 type preferenceTempFile interface {
@@ -139,9 +142,11 @@ func saveTUIPreferencesWithOps(path string, preferences tuiPreferences, ops pref
 }
 
 func (m *Model) preferences() tuiPreferences {
+	m.normalizeShipped()
 	return tuiPreferences{
 		ShowCancelled: m.boardView.showCancelled,
 		Filter:        m.filter.value(),
+		Shipped:       m.shipped,
 	}
 }
 
@@ -180,11 +185,18 @@ func (m *Model) finishPreferences(message preferenceSavedMsg) tea.Cmd {
 }
 
 func preferencesEqual(left, right tuiPreferences) bool {
-	if left.ShowCancelled != right.ShowCancelled || left.Filter.Text != right.Filter.Text || len(left.Filter.Tags) != len(right.Filter.Tags) {
+	if left.ShowCancelled != right.ShowCancelled || left.Filter.Text != right.Filter.Text ||
+		left.Shipped.Date != right.Shipped.Date || len(left.Filter.Tags) != len(right.Filter.Tags) ||
+		len(left.Shipped.IDs) != len(right.Shipped.IDs) {
 		return false
 	}
 	for i := range left.Filter.Tags {
 		if left.Filter.Tags[i] != right.Filter.Tags[i] {
+			return false
+		}
+	}
+	for i := range left.Shipped.IDs {
+		if left.Shipped.IDs[i] != right.Shipped.IDs[i] {
 			return false
 		}
 	}

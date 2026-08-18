@@ -191,7 +191,7 @@ func (s *moveTestStore) UpdateAndMoveTask(
 	return board.Task{}, errors.New("task not found")
 }
 
-func TestDropToDoneHonorsCompletionGuard(t *testing.T) {
+func TestDropToDoneOpensShipPromptForBlockedCard(t *testing.T) {
 	current := moveFixture()
 	current.Tasks[0].Blocked = true
 	current.Tasks[0].Seq = 1
@@ -202,12 +202,11 @@ func TestDropToDoneHonorsCompletionGuard(t *testing.T) {
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyRight})
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyRight})
 	drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if drop == nil {
-		t.Fatal("Done drop did not start")
+	if drop != nil {
+		t.Fatalf("blocked Done drop wrote before confirmation: %v", drop)
 	}
-	updateTestModel(t, &m, drop())
-	if !m.move.statusError || !strings.Contains(m.move.status, "flagged blocked") {
-		t.Fatalf("Done drop bypassed local guard: error=%v status=%q", m.move.statusError, m.move.status)
+	if m.action.mode != taskActionShip || !m.action.warning.blocked {
+		t.Fatalf("blocked Done drop action = %#v", m.action)
 	}
 	if task := taskNamed(t, m.board, "A"); task.Status != board.StatusTodo {
 		t.Fatalf("refused task moved to %s", task.Status)

@@ -16,6 +16,8 @@ type taskMoveStore interface {
 type cardMoveStoredMsg struct {
 	taskID    string
 	title     string
+	from      board.Status
+	to        board.Status
 	board     board.Board
 	writeErr  error
 	reloadErr error
@@ -36,18 +38,30 @@ func (m *Model) startCardDrop() tea.Cmd {
 		m.move.statusError = true
 		return nil
 	}
+	from := lift.target
+	if task, found := boardTaskByID(lift.canonical, lift.taskID); found {
+		from = task.Status
+		if lift.target == board.StatusDone && from != board.StatusDone {
+			if warningForShip(task).needed() {
+				return m.openShipPrompt(task, index)
+			}
+		}
+	}
 	m.move.saving = true
 	m.move.announcePosition("Dropping")
 	moveStore := m.moveStore
 	user := m.user
-	guard := cardCompletionGuard(lift.target)
+	var guard func(board.Task) error
+	if lift.target == board.StatusDone && from != board.StatusDone {
+		guard = cardCompletionGuard(lift.target)
+	}
 	return func() tea.Msg {
 		_, writeErr := moveStore.UpdateAndMoveTask(
 			user, lift.taskID, store.TaskPatch{}, &lift.target, &index, guard,
 		)
 		canonical, reloadErr := moveStore.Board(user)
 		return cardMoveStoredMsg{
-			taskID: lift.taskID, title: lift.title,
+			taskID: lift.taskID, title: lift.title, from: from, to: lift.target,
 			board:    canonical,
 			writeErr: writeErr, reloadErr: reloadErr,
 		}
@@ -110,12 +124,24 @@ func (m *Model) finishCardDrop(msg cardMoveStoredMsg) tea.Cmd {
 		m.move.status = fmt.Sprintf("Dropped %s, %s, position %d of %d", canonicalTask.Title,
 			statusLabelTitle(canonicalTask.Status), position+1, count)
 	}
+	preference := tea.Cmd(nil)
+	if msg.writeErr == nil {
+		switch {
+		case msg.from != board.StatusDone && msg.to == board.StatusDone:
+			m.recordShipped(msg.taskID)
+			m.move.status = "Shipped " + msg.title
+			preference = m.queuePreferences()
+		case msg.from == board.StatusDone && msg.to != board.StatusDone:
+			m.unrecordShipped(msg.taskID)
+			preference = m.queuePreferences()
+		}
+	}
 
 	if m.reloadPending || msg.reloadErr != nil {
 		m.reloadPending = false
-		return m.startBoardLoad()
+		return batchCommands(preference, m.startBoardLoad())
 	}
-	return nil
+	return preference
 }
 
 func boardTaskByID(current board.Board, taskID string) (board.Task, bool) {
