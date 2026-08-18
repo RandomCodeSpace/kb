@@ -14,7 +14,10 @@ func TestAddTaskWithImportLinkIsAtomicAndDeletionKeepsProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DeleteTask("alice", created.ID); err != nil {
+	if _, err := s.CancelTask("alice", created.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteCancelledTask("alice", created.ID); err != nil {
 		t.Fatal(err)
 	}
 	provenance, err := s.ImportedAs("alice", []string{link.ExternalKey})
@@ -121,5 +124,17 @@ func TestImportAtomicOperationsRejectMissingAndInvalidState(t *testing.T) {
 	}
 	if _, err := s.AddTaskWithImportLink("alice", board.Task{Title: "issue"}, link); err == nil {
 		t.Fatal("closed store accepted atomic import")
+	}
+	if _, _, err := s.CreateImportBaseline("alice", "qualified", valid); err == nil {
+		t.Fatal("closed store created baseline")
+	}
+	if _, err := s.CompareAndSwapImportBaseline("alice", "qualified", valid, valid); err == nil {
+		t.Fatal("closed store swapped baseline")
+	}
+	if err := s.SetImportBaseline("alice", "qualified", valid); err == nil {
+		t.Fatal("closed store set baseline")
+	}
+	if _, _, err := s.ImportBaseline("alice", "qualified"); err == nil {
+		t.Fatal("closed store read baseline")
 	}
 }

@@ -124,6 +124,18 @@ func (rootImportBackend) CreateTask(string, string, board.Task, forge.LinkInput)
 	return board.Task{ID: "created"}, nil
 }
 
+type rootDriftBackend struct{}
+
+func (rootDriftBackend) Provenance(string, string) ([]store.ImportLink, error) {
+	return []store.ImportLink{{Source: "primary", ExternalKey: "qualified", Link: "github#1", URL: "https://example.test/1", Title: "issue"}}, nil
+}
+func (rootDriftBackend) CheckDrift(context.Context, string, string, string) (forge.Drift, error) {
+	return forge.Drift{State: "drifted", Revision: strings.Repeat("a", 64)}, nil
+}
+func (rootDriftBackend) AcceptDrift(context.Context, string, string, string, string) (string, error) {
+	return "now", nil
+}
+
 func boardLoadFromBatch(t *testing.T, command tea.Cmd) tea.Cmd {
 	t.Helper()
 	if command == nil {
@@ -150,9 +162,19 @@ func TestIssueImportOwnsRootInputAndCancelsLiftOnOpen(t *testing.T) {
 	}
 	updateTestModel(t, &m, command())
 	before := m.boardView
-	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'x'})
-	updateTestModel(t, &m, boardCardClickedMsg{taskID: task.ID})
-	if m.boardView != before || m.detail.IsOpen() || !m.issueImport.IsOpen() {
+	for _, key := range []tea.KeyPressMsg{
+		{Code: 't', Text: "t"}, {Code: 'x', Text: "x"}, {Code: 'r', Text: "r"},
+		{Code: 'D', Text: "D"}, {Code: tea.KeyDelete}, {Code: tea.KeyBackspace},
+	} {
+		updateTestModel(t, &m, key)
+	}
+	for _, message := range []tea.Msg{
+		boardCardClickedMsg{taskID: task.ID}, boardColumnClickedMsg{status: board.StatusDoing},
+		boardPointerDownMsg{taskID: task.ID}, boardPointerMoveMsg{status: board.StatusDoing}, boardPointerUpMsg{},
+	} {
+		updateTestModel(t, &m, message)
+	}
+	if m.boardView != before || m.detail.IsOpen() || m.action.open() || !m.issueImport.IsOpen() {
 		t.Fatal("active import leaked board input")
 	}
 	view := m.View()
@@ -166,11 +188,67 @@ func TestIssueImportOwnsRootInputAndCancelsLiftOnOpen(t *testing.T) {
 }
 
 func TestIssueImportCannotOpenDuringMoveWrite(t *testing.T) {
+	for _, busy := range []func(*Model){
+		func(m *Model) { m.move.saving = true },
+		func(m *Model) { m.action.busy = true },
+	} {
+		m := newModel(stubBoardReader{}, nil, "alice", context.Background())
+		m.issueImport = issueimport.New(&rootImportStore{}, rootImportBackend{}, "alice", context.Background())
+		busy(&m)
+		if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'i'}); command != nil || m.issueImport.IsOpen() {
+			t.Fatal("import opened during active write")
+		}
+	}
+}
+
+func TestIssueImportPreservesGlobalInterrupt(t *testing.T) {
 	m := newModel(stubBoardReader{}, nil, "alice", context.Background())
 	m.issueImport = issueimport.New(&rootImportStore{}, rootImportBackend{}, "alice", context.Background())
-	m.move.saving = true
-	if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'i'}); command != nil || m.issueImport.IsOpen() {
-		t.Fatal("import opened during move write")
+	if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'i'}); command == nil || !m.issueImport.IsOpen() {
+		t.Fatal("import did not open")
+	}
+	quit := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if quit == nil || !m.stopped || m.issueImport.IsOpen() {
+		t.Fatalf("global interrupt = command:%v stopped:%t open:%t", quit, m.stopped, m.issueImport.IsOpen())
+	}
+}
+
+func TestDriftReviewBlocksTaskActionsAndBoardMouse(t *testing.T) {
+	task := board.Task{ID: "one", Title: "One", Status: board.StatusTodo, Prio: 3, Tags: []string{"link::github#1"}}
+	m := newModel(stubBoardReader{board: board.Board{Title: "Board", Tasks: []board.Task{task}}}, nil, "alice", context.Background())
+	m.board = board.Board{Title: "Board", Tasks: []board.Task{task}}
+	m.loading = false
+	m.detail.SetDriftBackend(rootDriftBackend{}, context.Background())
+	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+	provenance := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'v', Text: "v"})
+	if provenance == nil {
+		t.Fatal("drift provenance command is nil")
+	}
+	updateTestModel(t, &m, provenance())
+	check := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if check == nil {
+		t.Fatal("drift check command is nil")
+	}
+	updateTestModel(t, &m, check())
+	if !m.detail.OwnsInput() {
+		t.Fatal("drift review does not own detail input")
+	}
+	before := m.boardView
+	for _, key := range []tea.KeyPressMsg{
+		{Code: 't', Text: "t"}, {Code: 'x', Text: "x"}, {Code: 'r', Text: "r"},
+		{Code: 'D', Text: "D"}, {Code: tea.KeyDelete}, {Code: tea.KeyBackspace},
+	} {
+		updateTestModel(t, &m, key)
+	}
+	for _, message := range []tea.Msg{
+		boardCardClickedMsg{taskID: task.ID}, boardColumnClickedMsg{status: board.StatusDoing},
+		boardPointerDownMsg{taskID: task.ID}, boardPointerMoveMsg{status: board.StatusDoing}, boardPointerUpMsg{},
+	} {
+		updateTestModel(t, &m, message)
+	}
+	if m.action.open() || m.boardView != before || !m.detail.IsOpen() || !m.detail.OwnsInput() || m.View().OnMouse != nil {
+		t.Fatalf("active drift review leaked input: action=%#v boardChanged=%t detailOpen=%t owns=%t mouse=%t",
+			m.action, m.boardView != before, m.detail.IsOpen(), m.detail.OwnsInput(), m.View().OnMouse != nil)
 	}
 }
 

@@ -700,7 +700,7 @@ func (m Model) View() tea.View {
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
-	if m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() && !m.issueImport.IsOpen() {
+	if m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() && !m.issueImport.IsOpen() && !m.detail.OwnsInput() {
 		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
 		view.OnMouse = boardMouseHandler(hits, pointerActive)
 	}

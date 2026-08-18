@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
@@ -73,6 +74,15 @@ func TestReferenceParsingAndPaths(t *testing.T) {
 		if _, err := parseForgeRef(sources, "github", raw); err == nil {
 			t.Errorf("parseForgeRef(%q) succeeded", raw)
 		}
+	}
+	if _, err := parseGitHubRef(sources[0], ""); err == nil {
+		t.Fatal("empty GitHub path accepted")
+	}
+	if _, err := parseGitLabRef(sources[1], "group/-/x"); err == nil {
+		t.Fatal("unscoped GitLab dash accepted")
+	}
+	if _, err := parseForgeRef(sources, "gitlab", "https://gitlab.example/forge"); err == nil {
+		t.Fatal("source root accepted as a project")
 	}
 	github := forgeRef{Kind: "github", Project: "owner/repo", Issue: 7, Milestone: 3}
 	gitlab := forgeRef{Kind: "gitlab", Project: "group/project", Issue: 8, Milestone: 4}
@@ -240,7 +250,10 @@ func TestFetchPaginationHasFiniteNoProgressCap(t *testing.T) {
 	}
 }
 
-type scriptedAI struct{ calls int }
+type scriptedAI struct {
+	calls   int
+	partial bool
+}
 
 func (s *scriptedAI) handler(w http.ResponseWriter, r *http.Request) {
 	s.calls++
@@ -253,7 +266,11 @@ func (s *scriptedAI) handler(w http.ResponseWriter, r *http.Request) {
 			"function": map[string]any{"name": "propose_card", "arguments": `{"title":"Imported card","source":1,"prio":2}`},
 		}}
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "stop"}}})
+	finish := "stop"
+	if s.partial && s.calls == 2 {
+		finish = "length"
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finish}}})
 }
 
 func TestServicePreviewProvenanceAndDuplicateDefaults(t *testing.T) {
@@ -298,6 +315,12 @@ func TestServicePreviewProvenanceAndDuplicateDefaults(t *testing.T) {
 	if err != nil || len(preview.Drafts) != 1 || preview.Drafts[0].ExternalKey == "" || preview.Drafts[0].Link != "github#93" || model.calls != 2 {
 		t.Fatalf("preview = %+v calls=%d err=%v cause=%v", preview, model.calls, err, errors.Unwrap(err))
 	}
+	model.calls, model.partial = 0, true
+	partial, err := service.Preview(context.Background(), "alice", PreviewRequest{Source: "primary", Ref: "owner/repo", Max: 1})
+	if err != nil || len(partial.Drafts) != 1 || !strings.Contains(partial.Note, "stopped early") {
+		t.Fatalf("partial preview = %+v, %v", partial, err)
+	}
+	model.partial = false
 	draft := preview.Drafts[0]
 	if err := service.RecordLinks("alice", "primary", []LinkInput{{ExternalKey: draft.ExternalKey, Link: draft.Link, URL: draft.URL, Title: draft.Title}}); err != nil {
 		t.Fatal(err)
@@ -403,6 +426,9 @@ func TestPreviewHandlesEmptySelectionAndAIConfigurationFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := New(st, nil, upstream.Client())
+	if _, err := service.Preview(context.Background(), "alice", PreviewRequest{Source: "missing", Ref: "owner/repo"}); err == nil {
+		t.Fatal("preview with missing source succeeded")
+	}
 	preview, err := service.Preview(context.Background(), "alice", PreviewRequest{Source: "primary", Ref: "owner/repo", Max: 1})
 	if err != nil || preview.Fetched != 0 || len(preview.Drafts) != 0 {
 		t.Fatalf("empty preview = %+v, %v", preview, err)
@@ -591,13 +617,13 @@ func TestProbeAndSourceLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	prober := NewForgeProberWithClient(st, upstream.Client())
-	if err := prober.Probe(context.Background(), "alice", ForgeProbeConfig{Name: "primary", Kind: "github", Saved: true}); err != nil {
+	if err := prober.Probe(context.Background(), "alice", ForgeProbeConfig{Name: "primary", Saved: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := prober.Probe(context.Background(), "alice", ForgeProbeConfig{Name: "draft", Kind: "github", BaseURL: base, Project: "owner/repo", Token: "token"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, config := range []ForgeProbeConfig{{}, {Name: "missing", Saved: true}, {Name: "draft", Kind: "other", BaseURL: base}} {
+	for _, config := range []ForgeProbeConfig{{}, {Name: "missing", Saved: true}, {Name: "draft", Kind: "other", BaseURL: base}, {Name: "draft", Kind: "github", BaseURL: "ftp://forge.test"}} {
 		if err := prober.Probe(context.Background(), "alice", config); err == nil {
 			t.Errorf("probe %+v succeeded", config)
 		}
@@ -669,7 +695,7 @@ func TestParsingAndResponseHelpers(t *testing.T) {
 	}
 
 	ref := Ref{Source: store.ForgeSource{Name: "primary", Kind: "github", BaseURL: "https://github.com"}, Kind: "github", Project: "owner/repo", Issue: 7, Milestone: 3}.WithCredential("secret")
-	if RefKind(ref) != "issue" || !ValidSourceName("primary") || ValidSourceName("bad name") {
+	if RefKind(ref) != "issue" || !ValidSourceName("primary") || ValidSourceName("bad name") || ValidSourceName("") {
 		t.Fatal("public reference helpers")
 	}
 	if _, err := ProjectPath(ref); err != nil {
@@ -722,6 +748,10 @@ func TestParsingAndResponseHelpers(t *testing.T) {
 	if !ValidDriftRevision(DriftRevision(store.NewImportBaseline("title", "body", "now"))) {
 		t.Fatal("revision helpers")
 	}
+	gitlabRequest, err := NewTestRequest(context.Background(), "gitlab", "https://gitlab.example", "token", "")
+	if err != nil || gitlabRequest.Header.Get("PRIVATE-TOKEN") != "token" {
+		t.Fatalf("GitLab test request = %v, %v", gitlabRequest, err)
+	}
 	if _, err := NewTestRequest(context.Background(), "github", "https://github.com", "token", "owner/repo"); err != nil {
 		t.Fatal(err)
 	}
@@ -734,6 +764,9 @@ func TestParsingAndResponseHelpers(t *testing.T) {
 	}
 	if adr := forgeIssueADR(forgeIssue{Title: strings.Repeat("x", 70<<10)}); len(adr) > 64<<10 {
 		t.Fatalf("bounded adr = %d", len(adr))
+	}
+	if adr := forgeIssueADR(forgeIssue{Title: "title", Body: "body", Comments: []string{strings.Repeat("x", 70<<10)}}); len(adr) > 64<<10 || !strings.Contains(adr, "Discussion") {
+		t.Fatalf("bounded discussion = %d", len(adr))
 	}
 	_ = newForgeClient()
 	_ = NewForgeProber(testStore(t))
@@ -930,6 +963,14 @@ func TestFetchIssueRejectsBadStatusCommentsAndPullRequests(t *testing.T) {
 	if _, err := service.fetchIssue(context.Background(), badKind); err == nil {
 		t.Fatal("bad kind issue fetched")
 	}
+	mode.Store(3)
+	gitlab := ref
+	gitlab.Kind = "gitlab"
+	gitlab.Source.Kind = "gitlab"
+	gitlab.Project = "group/repo"
+	if _, _, _, err := service.fetchIssueSnapshot(context.Background(), gitlab); err == nil {
+		t.Fatal("invalid GitLab issue fetched")
+	}
 }
 
 func TestPackAndPathBoundaryBranches(t *testing.T) {
@@ -1049,6 +1090,11 @@ func TestForgeHTTPAndProbeFailureBranches(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Body: failingReadCloser{readErr: errors.New("read"), closeErr: errors.New("close")}}, nil
 	})}, request); err == nil {
 		t.Fatal("execute drain failure ignored")
+	}
+	if err := executeForgeTest(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader("bad"))}, nil
+	})}, request); err == nil {
+		t.Fatal("execute bad status ignored")
 	}
 	if err := drainForgeResponse(&http.Response{Body: failingReadCloser{closeErr: errors.New("close")}}); err == nil {
 		t.Fatal("close failure ignored")
@@ -1248,9 +1294,23 @@ func TestRemainingServiceAuthorizationAndFetchErrors(t *testing.T) {
 	if _, _, _, err := service.ResolveIssueDocument(context.Background(), "alice", "root", root+"/owner/repo/issues/1"); err == nil {
 		t.Fatal("document fetch transport failure succeeded")
 	}
+	if _, err := service.Preview(context.Background(), "alice", PreviewRequest{Source: "root", Ref: "owner/repo", Max: 1}); err == nil {
+		t.Fatal("preview fetch transport failure succeeded")
+	}
+	if err := st.RecordImportLinks("alice", []store.ImportLink{{Source: "root", Kind: "github", ExternalKey: "qualified", Link: "github#1", URL: root + "/owner/repo/issues/1", Title: "issue"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CheckDrift(context.Background(), "alice", "root", "qualified"); err == nil {
+		t.Fatal("drift fetch transport failure succeeded")
+	}
 	ref := forgeRef{Source: store.ForgeSource{Name: "root", Kind: "github", BaseURL: root}, Kind: "github", Project: "owner/repo"}
 	if _, _, _, err := service.fetchIssueSnapshot(context.Background(), ref); err == nil {
 		t.Fatal("snapshot without issue succeeded")
+	}
+	badIssue := ref
+	badIssue.Issue, badIssue.Project = 1, "owner"
+	if _, _, _, _, err := service.fetchIssues(context.Background(), badIssue, 1); err == nil {
+		t.Fatal("issue with invalid project fetched")
 	}
 	ref.Milestone = 1
 	apiBase, err := forgeAPIBase("github", root)
@@ -1259,6 +1319,16 @@ func TestRemainingServiceAuthorizationAndFetchErrors(t *testing.T) {
 	}
 	if _, _, err := service.forgeIssuesList(context.Background(), ref, apiBase); err == nil {
 		t.Fatal("milestone transport failure succeeded")
+	}
+	if _, err := service.fetchForgeComments(context.Background(), ref, apiBase, "/repos/owner/repo/issues/1"); err == nil {
+		t.Fatal("comment transport failure succeeded")
+	}
+	if _, err := parseForgeIssueList("gitlab", []byte(`{`)); err == nil {
+		t.Fatal("invalid GitLab issue list accepted")
+	}
+	badBase := "ftp://forge.test"
+	if _, err := resolveForgeTestTarget("", "", forgeTestProbe{BaseURL: &badBase}); err == nil {
+		t.Fatal("invalid test target accepted")
 	}
 }
 
@@ -1306,5 +1376,105 @@ func TestAcceptDriftConcurrentCASIsIdempotent(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("fetch calls = %d", calls.Load())
+	}
+}
+
+func TestAcceptDriftRejectsConcurrentDifferentBaseline(t *testing.T) {
+	arrived, release := make(chan struct{}), make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/issues/1") {
+			http.NotFound(w, r)
+			return
+		}
+		close(arrived)
+		<-release
+		_, _ = io.WriteString(w, `{"number":1,"title":"new","body":"body"}`)
+	}))
+	defer upstream.Close()
+	st := testStore(t)
+	base := upstream.URL
+	if _, err := st.SetForgeSource("alice", "primary", "github", &base, nil); err != nil {
+		t.Fatal(err)
+	}
+	key := "qualified"
+	if err := st.RecordImportLinks("alice", []store.ImportLink{{Source: "primary", Kind: "github", ExternalKey: key, Link: "github#1", URL: base + "/owner/repo/issues/1", Title: "old"}}); err != nil {
+		t.Fatal(err)
+	}
+	old := store.NewImportBaseline("old", "body", "old-at")
+	if _, _, err := st.CreateImportBaseline("alice", key, old); err != nil {
+		t.Fatal(err)
+	}
+	revision := importDriftRevision(store.NewImportBaseline("new", "body", "new-at"))
+	result := make(chan error, 1)
+	go func() {
+		_, err := New(st, nil, upstream.Client()).AcceptDrift(context.Background(), "alice", "primary", key, revision)
+		result <- err
+	}()
+	select {
+	case <-arrived:
+	case <-time.After(time.Second):
+		t.Fatal("accept did not reach upstream")
+	}
+	if err := st.SetImportBaseline("alice", key, store.NewImportBaseline("other", "body", "other-at")); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrUpstreamChanged) {
+			t.Fatalf("concurrent different baseline = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("accept did not finish")
+	}
+}
+
+func TestAcceptDriftReportsCASStorageFailure(t *testing.T) {
+	arrived, release := make(chan struct{}), make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/issues/1") {
+			http.NotFound(w, r)
+			return
+		}
+		close(arrived)
+		<-release
+		_, _ = io.WriteString(w, `{"number":1,"title":"new","body":"body"}`)
+	}))
+	defer upstream.Close()
+	st := testStore(t)
+	base := upstream.URL
+	if _, err := st.SetForgeSource("alice", "primary", "github", &base, nil); err != nil {
+		t.Fatal(err)
+	}
+	key := "qualified"
+	if err := st.RecordImportLinks("alice", []store.ImportLink{{Source: "primary", Kind: "github", ExternalKey: key, Link: "github#1", URL: base + "/owner/repo/issues/1", Title: "old"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.CreateImportBaseline("alice", key, store.NewImportBaseline("old", "body", "old-at")); err != nil {
+		t.Fatal(err)
+	}
+	revision := importDriftRevision(store.NewImportBaseline("new", "body", "new-at"))
+	result := make(chan error, 1)
+	go func() {
+		_, err := New(st, nil, upstream.Client()).AcceptDrift(context.Background(), "alice", "primary", key, revision)
+		result <- err
+	}()
+	select {
+	case <-arrived:
+	case <-time.After(time.Second):
+		t.Fatal("accept did not reach upstream")
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case err := <-result:
+		var public *Error
+		if !errors.As(err, &public) || public.Code != http.StatusInternalServerError {
+			t.Fatalf("CAS storage failure = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("accept did not finish")
 	}
 }
