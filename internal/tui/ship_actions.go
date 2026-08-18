@@ -683,8 +683,14 @@ type shippedRecord struct {
 	IDs  []string `json:"ids,omitempty"`
 }
 
+const shippedDateLayout = "2006-01-02"
+
 func (m *Model) normalizeShipped() {
-	today := m.now().Format("2006-01-02")
+	m.normalizeShippedAt(m.now())
+}
+
+func (m *Model) normalizeShippedAt(now time.Time) {
+	today := now.Format(shippedDateLayout)
 	if m.shipped.Date == "" && len(m.shipped.IDs) == 0 {
 		return
 	}
@@ -711,7 +717,7 @@ func (m *Model) normalizeShipped() {
 func (m *Model) recordShipped(taskID string) {
 	m.normalizeShipped()
 	if m.shipped.Date == "" {
-		m.shipped.Date = m.now().Format("2006-01-02")
+		m.shipped.Date = m.now().Format(shippedDateLayout)
 	}
 	for _, id := range m.shipped.IDs {
 		if id == taskID {
@@ -732,8 +738,16 @@ func (m *Model) unrecordShipped(taskID string) {
 }
 
 func (m Model) shippedCount() int {
-	m.normalizeShipped()
-	return len(m.shipped.IDs)
+	if m.shipped.Date != m.renderedAt.Format(shippedDateLayout) {
+		return 0
+	}
+	seen := make(map[string]struct{}, len(m.shipped.IDs))
+	for _, id := range m.shipped.IDs {
+		if id != "" {
+			seen[id] = struct{}{}
+		}
+	}
+	return len(seen)
 }
 
 func (m Model) taskActionOverlay(background string) string {

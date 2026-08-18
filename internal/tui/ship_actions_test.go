@@ -335,6 +335,7 @@ func TestShippedRecordPersistenceRolloverAndIdentity(t *testing.T) {
 	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
 	m := NewModel(stubBoardReader{}, nil, "alice")
 	m.now = func() time.Time { return now }
+	m.renderedAt = now
 	m.shipped = shippedRecord{Date: "2026-08-18", IDs: []string{"a", "a", "", "b"}}
 	if got := m.shippedCount(); got != 2 {
 		t.Fatalf("normalized shipped count = %d", got)
@@ -349,6 +350,7 @@ func TestShippedRecordPersistenceRolloverAndIdentity(t *testing.T) {
 		t.Fatalf("identity tally = %d", got)
 	}
 	now = now.Add(24 * time.Hour)
+	m.renderedAt = now
 	if got := m.shippedCount(); got != 0 || m.shipped.Date != "2026-08-18" {
 		// shippedCount uses a value receiver so rendering cannot mutate state;
 		// the next actual record operation performs the rollover.

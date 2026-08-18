@@ -238,6 +238,7 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	m.loading = false
 	m.board = boardViewFixture(now)
 	m.now = func() time.Time { return now }
+	m.renderedAt = now
 	m.width, m.height = 160, 22
 	m.boardView.showCancelled = true
 
@@ -288,6 +289,72 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 		if ansi.StringWidth(line) > m.width {
 			t.Fatalf("narrow line width %d: %q", ansi.StringWidth(line), line)
 		}
+	}
+}
+
+func TestViewIsByteStableAcrossMovingWallClock(t *testing.T) {
+	stamp := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	m := NewModel(stubBoardReader{}, nil, "alice")
+	m.loading = false
+	m.width, m.height = 100, 12
+	m.renderedAt = stamp
+	m.board = board.Board{Title: "Clock", Tasks: []board.Task{{
+		ID: "task", Title: "Task", Status: board.StatusTodo, Due: "2026-08-18",
+		CreatedAt: stamp.Add(-23 * time.Hour), MovedAt: stamp.Add(-23 * time.Hour),
+	}}}
+	wallReads := 0
+	m.now = func() time.Time {
+		wallReads++
+		return stamp.Add(time.Duration(wallReads) * time.Hour)
+	}
+
+	first := m.View().Content
+	second := m.View().Content
+	if first != second {
+		t.Fatalf("consecutive View output changed with unchanged model state:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+	if wallReads != 0 {
+		t.Fatalf("View read the wall clock %d times", wallReads)
+	}
+}
+
+func TestPollTickRefreshesRenderTimeAtRolloverBoundary(t *testing.T) {
+	before := time.Date(2026, 8, 18, 23, 59, 59, 0, time.UTC)
+	after := before.Add(time.Second)
+	m := NewModel(stubBoardReader{}, stubVersionReader{}, "alice")
+	m.loading = false
+	m.width, m.height = 100, 12
+	m.renderedAt = before
+	m.now = func() time.Time { return after }
+	m.shipped = shippedRecord{Date: "2026-08-18", IDs: []string{"shipped"}}
+	m.board = board.Board{Title: "Clock", Tasks: []board.Task{{
+		ID: "task", Title: "Task", Status: board.StatusTodo, Due: "2026-08-18",
+		CreatedAt: before.Add(-23*time.Hour - 59*time.Minute - 59*time.Second),
+		MovedAt:   before.Add(-23*time.Hour - 59*time.Minute - 59*time.Second),
+	}}}
+
+	initial := plain(m.View().Content)
+	for _, want := range []string{"new", "today", "×1 shipped today"} {
+		if !strings.Contains(initial, want) {
+			t.Fatalf("pre-tick render missing %q:\n%s", want, initial)
+		}
+	}
+	command := updateTestModel(t, &m, pollTickMsg{})
+	if command == nil {
+		t.Fatal("poll tick did not schedule its data-version read")
+	}
+	if !m.renderedAt.Equal(after) {
+		t.Fatalf("poll timestamp = %s, want %s", m.renderedAt, after)
+	}
+
+	rolled := plain(m.View().Content)
+	for _, want := range []string{"1d old", "overdue · 1d"} {
+		if !strings.Contains(rolled, want) {
+			t.Fatalf("post-tick render missing %q:\n%s", want, rolled)
+		}
+	}
+	if strings.Contains(rolled, "shipped today") {
+		t.Fatalf("post-tick render retained previous-day shipped count:\n%s", rolled)
 	}
 }
 
@@ -359,6 +426,7 @@ func TestBoardRenderScrollsSelectionIntoShortColumn(t *testing.T) {
 	m := NewModel(stubBoardReader{}, nil, "u")
 	m.loading = false
 	m.now = func() time.Time { return now }
+	m.renderedAt = now
 	m.width, m.height = 80, 8
 	for i := 0; i < 8; i++ {
 		m.board.Tasks = append(m.board.Tasks, board.Task{ID: fmt.Sprintf("t-%d", i), Title: fmt.Sprintf("task %d", i), Status: board.StatusTodo, Prio: 3, CreatedAt: now})
@@ -392,7 +460,7 @@ func TestBoardViewSmallHelpers(t *testing.T) {
 	if got := visibleCardStart([]string{"a", "", "b"}, []string{"a", "", "b"}, 1, 2); got != 1 {
 		t.Fatalf("visible start = %d", got)
 	}
-	column := Model{board: board.Board{Tasks: []board.Task{{ID: "x", Title: "x", Status: board.StatusTodo}}}, boardView: boardViewState{}, now: time.Now}.renderBoardColumn(board.StatusTodo, 2, 4)
+	column := Model{board: board.Board{Tasks: []board.Task{{ID: "x", Title: "x", Status: board.StatusTodo}}}, boardView: boardViewState{}, renderedAt: time.Now()}.renderBoardColumn(board.StatusTodo, 2, 4)
 	if len(column.lines) != 4 || !strings.Contains(column.lines[0], "TO") {
 		t.Fatalf("tiny column = %+v", column)
 	}
