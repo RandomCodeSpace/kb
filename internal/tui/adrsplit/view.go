@@ -44,13 +44,15 @@ func (m *Model) frame(width, height int) (string, int, int) {
 	innerWidth := max(paneWidth-4, 1)
 	bodyHeight := max(paneHeight-4, 1)
 	body := m.bodyLines(innerWidth)
-	focusLine := focusedLine(body)
 	maxScroll := max(len(body)-bodyHeight, 0)
-	if focusLine < m.scroll {
-		m.scroll = focusLine
-	}
-	if focusLine >= m.scroll+bodyHeight {
-		m.scroll = focusLine - bodyHeight + 1
+	if !m.manualScroll {
+		focusLine := focusedLine(body)
+		if focusLine < m.scroll {
+			m.scroll = focusLine
+		}
+		if focusLine >= m.scroll+bodyHeight {
+			m.scroll = focusLine - bodyHeight + 1
+		}
 	}
 	m.scroll = min(max(m.scroll, 0), maxScroll)
 	end := min(m.scroll+bodyHeight, len(body))
@@ -63,7 +65,7 @@ func (m *Model) frame(width, height int) (string, int, int) {
 	}
 	footer := "tab navigate | esc close"
 	if m.guardClose {
-		footer = "D discard | esc stay"
+		footer = m.confirmFooter()
 	} else if m.operation != "" {
 		footer = m.operation + "... | esc cancel"
 	} else if m.adding {
@@ -168,37 +170,54 @@ func (m Model) selectedCount() int {
 }
 
 func (m Model) inputLine(target, label string, input textinput.Model, width int) string {
-	prefix := "  "
-	if m.focus == target {
-		prefix = "> "
-	}
+	prefix := m.controlPrefix(target)
 	available := max(width-len([]rune(prefix+label+": ")), 1)
 	return prefix + label + ": " + inputDisplay(input, m.focus == target, available)
 }
 
 func (m Model) choiceLine(target, label, value string) string {
-	prefix := "  "
-	if m.focus == target {
-		prefix = "> "
-	}
+	prefix := m.controlPrefix(target)
 	return prefix + label + ": " + sanitize(value)
 }
 
 func (m Model) actionLine(target, label string) string {
 	prefix := "  [ "
-	if m.focus == target {
+	suffix := " ]"
+	if m.pressed(target) {
+		prefix, suffix = "  [>", "<]"
+	} else if m.focus == target {
 		prefix = "> [ "
 	}
-	return prefix + sanitize(label) + " ]"
+	return prefix + sanitize(label) + suffix
 }
 
 func (m Model) areaBlock(target, label string, area textarea.Model, width, rows int) []string {
-	prefix := "  "
-	if m.focus == target {
-		prefix = "> "
-	}
+	prefix := m.controlPrefix(target)
 	lines := []string{prefix + label + ":"}
 	return append(lines, areaDisplay(area, m.focus == target, width, rows)...)
+}
+
+func (m Model) controlPrefix(target string) string {
+	if m.pressed(target) {
+		return "! "
+	}
+	if m.focus == target {
+		return "> "
+	}
+	return "  "
+}
+
+func (m Model) pressed(target string) bool { return m.pointerState.IsPressed(controlID(target)) }
+
+func (m Model) confirmFooter() string {
+	discard, stay := "[ Discard ]", "[ Stay ]"
+	if m.pressed("discard") {
+		discard = "[>Discard<]"
+	}
+	if m.pressed("stay") {
+		stay = "[>Stay<]"
+	}
+	return discard + "  " + stay
 }
 
 func inputDisplay(input textinput.Model, focused bool, width int) string {

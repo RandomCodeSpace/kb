@@ -14,6 +14,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 const (
@@ -79,19 +80,21 @@ type Model struct {
 	operation  string
 	changed    bool
 
-	sources     []store.ForgeSource
-	source      int
-	ref         textinput.Model
-	max         int
-	focus       int
-	preview     forge.Preview
-	rows        []row
-	selection   int
-	queue       []int
-	queuePos    int
-	status      string
-	statusError bool
-	scroll      int
+	sources      []store.ForgeSource
+	source       int
+	ref          textinput.Model
+	max          int
+	focus        int
+	preview      forge.Preview
+	rows         []row
+	selection    int
+	queue        []int
+	queuePos     int
+	status       string
+	statusError  bool
+	scroll       int
+	manualScroll bool
+	pointerState pointer.State
 }
 
 func New(st Store, backend Backend, user string, ctx context.Context) Model {
@@ -109,8 +112,11 @@ func (m Model) Enabled() bool { return m.store != nil && m.backend != nil }
 func (m Model) IsOpen() bool  { return m.open }
 
 func IsMessage(message tea.Msg) bool {
+	if pointer.IsMessage(message) {
+		return true
+	}
 	switch message.(type) {
-	case sourcesLoadedMsg, previewCompletedMsg, cardCreatedMsg:
+	case sourcesLoadedMsg, previewCompletedMsg, cardCreatedMsg, pointerActionMsg:
 		return true
 	default:
 		return false
@@ -127,7 +133,7 @@ func (m *Model) Open() tea.Cmd {
 	m.open, m.stage, m.max, m.focus = true, stageInput, defaultMax, 0
 	m.sources, m.source, m.rows, m.queue = nil, 0, nil, nil
 	m.preview, m.selection, m.queuePos = forge.Preview{}, 0, 0
-	m.status, m.statusError, m.changed, m.scroll = "", false, false, 0
+	m.status, m.statusError, m.changed, m.scroll, m.manualScroll, m.pointerState = "", false, false, 0, false, pointer.State{}
 	m.ref.SetValue("")
 	m.ref.Blur()
 	session := m.session
@@ -147,6 +153,7 @@ func (m *Model) closeNow() {
 	m.generation++
 	m.open, m.operation = false, ""
 	m.ref.Blur()
+	m.pointerState = pointer.State{}
 }
 
 func (m *Model) ConsumeChanged() bool {
@@ -158,6 +165,11 @@ func (m *Model) ConsumeChanged() bool {
 func (m *Model) Update(message tea.Msg) tea.Cmd {
 	if !m.open {
 		return nil
+	}
+	state, command, handled := m.pointerState.Update(message)
+	if handled {
+		m.pointerState = state
+		return command
 	}
 	switch msg := message.(type) {
 	case sourcesLoadedMsg:
@@ -187,10 +199,12 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 			include := draft.Duplicate == nil || draft.Duplicate.Via != "link"
 			m.rows[index] = row{draft: draft, include: include}
 		}
-		m.selection, m.scroll = 0, 0
+		m.selection, m.scroll, m.manualScroll = 0, 0, false
 		m.setStatus("review proposals; exact duplicates start unticked", false)
 	case cardCreatedMsg:
 		return m.finishCard(msg)
+	case pointerActionMsg:
+		return m.updatePointer(msg)
 	case tea.KeyPressMsg:
 		if m.operation != "" {
 			if msg.String() == "esc" && m.operation == "preview" {
@@ -202,6 +216,61 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 			return m.updateInput(msg)
 		}
 		return m.updateReview(msg)
+	}
+	return nil
+}
+
+func (m *Model) updatePointer(msg pointerActionMsg) tea.Cmd {
+	if msg.session != m.session || msg.generation != m.generation || m.operation != "" {
+		return nil
+	}
+	switch msg.target {
+	case "backdrop":
+		if !m.pointerBackdropSafe() {
+			return nil
+		}
+		m.Close()
+		return nil
+	case "cancel", "close":
+		m.Close()
+		return nil
+	case "scroll":
+		if m.stage == stageReview {
+			m.scroll = min(max(m.scroll+msg.scrollDelta, 0), msg.maxScroll)
+			m.manualScroll = true
+		}
+		return nil
+	case "source":
+		m.focus = 0
+		m.applyFocus()
+		return m.updateInput(tea.KeyPressMsg{Code: tea.KeyRight})
+	case "ref":
+		m.focus = 1
+		return m.applyFocus()
+	case "max":
+		m.focus = 2
+		m.applyFocus()
+		return m.updateInput(tea.KeyPressMsg{Code: tea.KeyRight})
+	case "import":
+		if m.stage == stageInput {
+			return m.startPreview()
+		}
+		return m.startCreate()
+	case "back":
+		if m.stage == stageReview {
+			m.stage, m.rows, m.status, m.manualScroll = stageInput, nil, "", false
+			m.applyFocus()
+		}
+		return nil
+	}
+	if strings.HasPrefix(msg.target, "row:") {
+		index, err := strconv.Atoi(strings.TrimPrefix(msg.target, "row:"))
+		if err != nil || index < 0 || index >= len(m.rows) || m.rows[index].created {
+			return nil
+		}
+		m.selection = index
+		m.manualScroll = false
+		m.rows[index].include = !m.rows[index].include
 	}
 	return nil
 }
@@ -282,12 +351,14 @@ func (m *Model) startPreview() tea.Cmd {
 func (m *Model) updateReview(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
-		m.stage, m.rows, m.status = stageInput, nil, ""
+		m.stage, m.rows, m.status, m.manualScroll = stageInput, nil, "", false
 		m.applyFocus()
 	case "up", "k":
 		m.selection = max(0, m.selection-1)
+		m.manualScroll = false
 	case "down", "j":
 		m.selection = min(len(m.rows)-1, m.selection+1)
+		m.manualScroll = false
 	case "space":
 		if len(m.rows) > 0 && !m.rows[m.selection].created {
 			m.rows[m.selection].include = !m.rows[m.selection].include

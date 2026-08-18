@@ -7,9 +7,24 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
+type settingsRenderRow struct {
+	line   string
+	target string
+}
+
+func settingsControlID(target string) pointer.ControlID {
+	return pointer.ControlID("settings:" + target)
+}
+
 func (m *settingsModel) View(width, height int) string {
+	return m.Surface(width, height).Content
+}
+
+func (m *settingsModel) Surface(width, height int) pointer.Surface {
 	width = max(width, 1)
 	height = max(height, 3)
 	inputWidth := max(width-18, 8)
@@ -24,25 +39,25 @@ func (m *settingsModel) View(width, height int) string {
 	}
 
 	header := settingsFit("kb / settings / "+m.user, width)
-	body := []string{"", "AI SETTINGS"}
+	body := []settingsRenderRow{{line: ""}, {line: "AI SETTINGS"}}
 	if !m.loaded {
-		body = append(body, "loading settings...")
+		body = append(body, settingsRenderRow{line: "loading settings..."})
 	} else {
 		body = append(body,
-			m.inputModelLine("ai:base", "Base URL", m.aiBase, false, width),
-			m.inputModelLine("ai:model", "Model", m.aiModel, false, width),
-			m.inputModelLine("ai:key", keyLabel("API key", m.hasKey), m.aiKey, true, width),
-			m.actionLine("ai:test", "Test connection", width),
-			m.actionLine("ai:save", "Save AI settings", width),
-			"", "FORGE INTEGRATIONS",
+			settingsRenderRow{line: m.inputModelLine("ai:base", "Base URL", m.aiBase, false, width), target: "ai:base"},
+			settingsRenderRow{line: m.inputModelLine("ai:model", "Model", m.aiModel, false, width), target: "ai:model"},
+			settingsRenderRow{line: m.inputModelLine("ai:key", keyLabel("API key", m.hasKey), m.aiKey, true, width), target: "ai:key"},
+			settingsRenderRow{line: m.actionLine("ai:test", "Test connection", width), target: "ai:test"},
+			settingsRenderRow{line: m.actionLine("ai:save", "Save AI settings", width), target: "ai:save"},
+			settingsRenderRow{line: ""}, settingsRenderRow{line: "FORGE INTEGRATIONS"},
 		)
 		if len(m.rows) == 0 {
-			body = append(body, "(none configured)")
+			body = append(body, settingsRenderRow{line: "(none configured)"})
 		}
 		for i := range m.rows {
 			body = append(body, m.renderForgeRow(&m.rows[i], width)...)
 		}
-		body = append(body, m.actionLine("forge:add", "+ Add integration", width))
+		body = append(body, settingsRenderRow{line: m.actionLine("forge:add", "+ Add integration", width), target: "forge:add"})
 	}
 	status := m.status
 	if status == "" {
@@ -51,12 +66,13 @@ func (m *settingsModel) View(width, height int) string {
 	if m.statusIsError {
 		status = "error: " + status
 	}
-	footer := settingsFit(status+" | tab navigate | enter act | esc back", width)
+	footer := settingsFit("[Close] | "+status+" | tab navigate | enter act", width)
+	footer = strings.Replace(footer, "[Close]", m.pointerState.Render(settingsControlID("close"), "[Close]"), 1)
 
 	bodyHeight := height - 2
 	focusLine := -1
-	for i, line := range body {
-		if strings.HasPrefix(line, ">") {
+	for i, row := range body {
+		if strings.HasPrefix(row.line, ">") {
 			focusLine = i
 			break
 		}
@@ -73,44 +89,76 @@ func (m *settingsModel) View(width, height int) string {
 	visible := body[m.scroll:end]
 	lines := make([]string, 0, height)
 	lines = append(lines, header)
-	for _, line := range visible {
-		lines = append(lines, settingsFit(line, width))
+	var hitMap pointer.Map
+	viewport := pointer.Viewport{
+		Rect:   pointer.Rect{X0: 0, Y0: 1, X1: width, Y1: height - 1},
+		Scroll: m.scroll,
 	}
+	for logicalRow, row := range body {
+		if row.target == "" {
+			continue
+		}
+		if rect, ok := viewport.Row(logicalRow, 0, width); ok {
+			target := row.target
+			hitMap.AddControl(settingsControlID(target), rect, func(pointer.Point) tea.Msg { return settingsPointerMsg{owner: m, target: target} })
+		}
+	}
+	for _, row := range visible {
+		line := settingsFit(row.line, width)
+		if row.target != "" {
+			line = m.pointerState.Render(settingsControlID(row.target), line)
+		}
+		lines = append(lines, line)
+	}
+	footerY := len(lines)
 	lines = append(lines, footer)
-	return strings.Join(lines, "\n")
+	hitMap.AddWheel(viewport.Rect, func(delta int) tea.Msg { return settingsWheelMsg{delta: delta} })
+	hitMap.AddControl(
+		settingsControlID("close"),
+		pointer.Rect{X0: 0, Y0: footerY, X1: min(width, 7), Y1: footerY + 1},
+		func(pointer.Point) tea.Msg { return settingsPointerMsg{owner: m, target: "close"} },
+	)
+	return pointer.Surface{Content: strings.Join(lines, "\n"), Pointer: hitMap.Handler()}
 }
 
-func (m *settingsModel) renderForgeRow(row *integrationSettingsRow, width int) []string {
+func (m *settingsModel) renderForgeRow(row *integrationSettingsRow, width int) []settingsRenderRow {
 	prefix := "forge:" + row.id + ":"
 	marker := "new"
 	if row.persisted {
 		marker = "saved"
 	}
-	lines := []string{"", settingsFit("-- "+row.name.Value()+" ("+marker+") --", width)}
+	rowTarget := prefix + "kind"
+	if row.persisted {
+		rowTarget = prefix + "base"
+	}
+	lines := []settingsRenderRow{
+		{line: ""},
+		{line: settingsFit("-- "+row.name.Value()+" ("+marker+") --", width), target: rowTarget},
+	}
 	if row.persisted {
 		lines = append(lines,
-			settingsFit("  Name: "+row.name.Value()+" (locked)", width),
-			settingsFit("  Kind: "+row.kind+" (locked)", width),
+			settingsRenderRow{line: settingsFit("  Name: "+row.name.Value()+" (locked)", width)},
+			settingsRenderRow{line: settingsFit("  Kind: "+row.kind+" (locked)", width)},
 		)
 	} else {
 		lines = append(lines,
-			m.inputLine(prefix+"kind", "Kind", row.kind, width),
-			m.inputModelLine(prefix+"name", "Name", row.name, false, width),
+			settingsRenderRow{line: m.inputLine(prefix+"kind", "Kind", row.kind, width), target: prefix + "kind"},
+			settingsRenderRow{line: m.inputModelLine(prefix+"name", "Name", row.name, false, width), target: prefix + "name"},
 		)
 	}
 	lines = append(lines,
-		m.inputModelLine(prefix+"base", "Base URL", row.baseURL, false, width),
-		m.inputModelLine(prefix+"project", "Project", row.project, false, width),
-		m.inputModelLine(prefix+"token", keyLabel("Token", row.hasToken), row.token, true, width),
-		m.actionLine(prefix+"test", "Test", width),
+		settingsRenderRow{line: m.inputModelLine(prefix+"base", "Base URL", row.baseURL, false, width), target: prefix + "base"},
+		settingsRenderRow{line: m.inputModelLine(prefix+"project", "Project", row.project, false, width), target: prefix + "project"},
+		settingsRenderRow{line: m.inputModelLine(prefix+"token", keyLabel("Token", row.hasToken), row.token, true, width), target: prefix + "token"},
+		settingsRenderRow{line: m.actionLine(prefix+"test", "Test", width), target: prefix + "test"},
 	)
 	remove := "Remove"
 	if m.armedRemove == row.id {
 		remove = "Confirm remove"
 	}
 	return append(lines,
-		m.actionLine(prefix+"save", "Save", width),
-		m.actionLine(prefix+"remove", remove, width),
+		settingsRenderRow{line: m.actionLine(prefix+"save", "Save", width), target: prefix + "save"},
+		settingsRenderRow{line: m.actionLine(prefix+"remove", remove, width), target: prefix + "remove"},
 	)
 }
 
@@ -208,9 +256,13 @@ func sanitizeTerminal(value string) string {
 }
 
 func isSettingsMessage(message tea.Msg) bool {
+	if pointer.IsMessage(message) {
+		return true
+	}
 	switch message.(type) {
 	case settingsLoadedMsg, aiSettingsTestedMsg, aiSettingsSavedMsg,
-		forgeSettingsTestedMsg, forgeSettingsSavedMsg, forgeSettingsRemovedMsg:
+		forgeSettingsTestedMsg, forgeSettingsSavedMsg, forgeSettingsRemovedMsg,
+		settingsPointerMsg, settingsWheelMsg:
 		return true
 	default:
 		return false

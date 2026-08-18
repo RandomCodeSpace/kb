@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/forge"
@@ -69,7 +70,7 @@ func TestDriftSelectCheckAndAcceptConflict(t *testing.T) {
 		t.Fatalf("drift result = %+v checked=%v", m.driftResult, backend.checked)
 	}
 	view := m.View(80, 18)
-	for _, want := range []string{"kb does not sync", "material change", "u update baseline"} {
+	for _, want := range []string{"kb does not sync", "material change", "[Update baseline]"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view omitted %q:\n%s", want, view)
 		}
@@ -79,12 +80,68 @@ func TestDriftSelectCheckAndAcceptConflict(t *testing.T) {
 	if m.statusMessage != upstreamConflictCopy || !m.statusIsError || backend.accepted != 1 {
 		t.Fatalf("conflict status = %q accepted=%d", m.statusMessage, backend.accepted)
 	}
-	if view := m.View(120, 18); !strings.Contains(view, "error: "+upstreamConflictCopy) {
+	if view := m.View(120, 18); !strings.Contains(view, "error: Upstream changed again") {
 		t.Fatalf("conflict status not visible:\n%s", view)
 	}
 	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m.driftMode != driftNone || m.OwnsInput() {
 		t.Fatal("escape did not close drift")
+	}
+}
+
+func TestPointerDriftSelectCheckAcceptAndBack(t *testing.T) {
+	backend := &fakeDriftBackend{
+		provenance: map[string][]store.ImportLink{
+			"github#93": {{Source: "github", ExternalKey: "gh-key", Title: "GitHub issue"}},
+			"gitlab#93": {{Source: "gitlab", ExternalKey: "gl-key", Title: "GitLab issue"}},
+		},
+		result:   forge.Drift{State: "drifted", Revision: strings.Repeat("a", 64)},
+		acceptAt: "2026-08-18T00:00:00Z",
+	}
+	m := New(nil, "alice")
+	m.SetDriftBackend(backend, context.Background())
+	m.Open(driftTask("task-pointer"))
+	m.Update(m.beginDrift()())
+
+	surface := m.PointerSurface("board", pointerWidth, pointerHeight)
+	x, y := -1, -1
+	for row, line := range strings.Split(ansi.Strip(surface.Content), "\n") {
+		if column := strings.Index(line, "GitLab issue"); column >= 0 {
+			x, y = ansi.StringWidth(line[:column]), row
+			break
+		}
+	}
+	if x < 0 {
+		t.Fatalf("second provenance is not visible:\n%s", ansi.Strip(surface.Content))
+	}
+	press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if press == nil || m.Update(press()) != nil {
+		t.Fatal("provenance did not enter pressed state")
+	}
+	pressed := m.PointerSurface("board", pointerWidth, pointerHeight)
+	if !strings.Contains(pressed.Content, "\x1b[7m") {
+		t.Fatal("provenance did not render pressed feedback")
+	}
+	release := pressed.Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	activate := m.Update(release())
+	message, _ := m.ResolvePointerMessage(activate())
+	m.Update(message)
+	if m.driftSelection != 1 {
+		t.Fatalf("pointer provenance selection = %d", m.driftSelection)
+	}
+
+	check := clickControl(t, &m, "Check selected")
+	m.Update(check())
+	if m.driftMode != driftReview || backend.checked[0] != "gitlab:gl-key" {
+		t.Fatalf("pointer drift check = mode:%v checked:%v", m.driftMode, backend.checked)
+	}
+	accept := clickControl(t, &m, "Update baseline")
+	m.Update(accept())
+	if backend.accepted != 1 || m.driftResult.State != "unchanged" {
+		t.Fatalf("pointer baseline update = accepted:%d result:%+v", backend.accepted, m.driftResult)
+	}
+	if command := clickControl(t, &m, "Back"); command != nil || m.driftMode != driftNone {
+		t.Fatalf("pointer drift Back = command:%v mode:%v", command, m.driftMode)
 	}
 }
 

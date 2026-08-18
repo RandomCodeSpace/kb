@@ -141,7 +141,7 @@ func TestCommentAddPreservesRefusedInputAndReloadsAcknowledgedWrite(t *testing.T
 	}
 
 	st.addErr = nil
-	save = m.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	save = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
 	reload := m.Update(save())
 	if reload == nil || m.action != actionNone || m.saving || !m.ConsumeChanged() || m.ConsumeChanged() {
 		t.Fatalf("acknowledged write = reload:%v action:%v busy:%v", reload, m.action, m.saving)
@@ -517,9 +517,9 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 		width int
 		want  string
 	}{
-		{actionNone, 80, "c add"},
-		{actionNone, 30, "esc close"},
-		{actionNone, 10, "e c d"},
+		{actionNone, 80, "[Comment]"},
+		{actionNone, 30, "[Close]"},
+		{actionNone, 10, "[Close]"},
 		{actionAddComment, 80, "add comment"},
 		{actionDeleteComment, 80, "enter delete"},
 		{actionAddLink, 80, "direction"},
@@ -540,13 +540,14 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 	}
 	footerModel.saving = false
 	footerModel.action = actionNone
+	footerModel.confirm = false
 	footerModel.statusMessage = "visible result"
-	if got := footerModel.actionFooter(80); got != "status: visible result" {
-		t.Fatalf("status footer = %q", got)
+	if got := footerModel.actionFooter(80); !strings.Contains(got, "[Comment]") {
+		t.Fatalf("idle controls disappeared after status = %q", got)
 	}
 	footerModel.statusIsError = true
-	if got := footerModel.actionFooter(80); got != "error: visible result" {
-		t.Fatalf("error footer = %q", got)
+	if got := footerModel.renderBody(80); !strings.Contains(got, "error: visible result") {
+		t.Fatalf("error status disappeared = %q", got)
 	}
 	footerModel.open = true
 	footerModel.bodyLines = []string{"one", "two"}

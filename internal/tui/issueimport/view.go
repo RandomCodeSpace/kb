@@ -25,14 +25,14 @@ func (m Model) View(width, height int) string {
 	lines := []string{"Forge issue import"}
 	if m.stage == stageInput {
 		lines = append(lines,
-			focusMark(m.focus == 0)+"source  "+m.sourceName(),
-			focusMark(m.focus == 1)+"ref     "+m.ref.View(),
-			focusMark(m.focus == 2)+fmt.Sprintf("max     %d", m.max),
+			m.controlMark("source", m.focus == 0)+"source  "+m.sourceName(),
+			m.controlMark("ref", m.focus == 1)+"ref     "+m.ref.View(),
+			m.controlMark("max", m.focus == 2)+fmt.Sprintf("max     %d", m.max),
 		)
 		if m.operation == "preview" {
 			lines = append(lines, "", "fetching configured forge data and drafting...")
 		}
-		lines = append(lines, "", "Tab fields  Left/Right change  Enter preview  Esc close")
+		lines = append(lines, "", m.button("import", "Import")+"    "+m.button("cancel", "Cancel"), "Tab fields  Left/Right change  Enter preview  Esc close")
 	} else {
 		if m.preview.Truncated {
 			lines = append(lines, fmt.Sprintf("fetched %d of about %d; results truncated", m.preview.Fetched, m.preview.TotalHint))
@@ -43,13 +43,10 @@ func (m Model) View(width, height int) string {
 			lines = append(lines, "note  "+m.preview.Note)
 		}
 		lines = append(lines, "")
-		start, end := rowWindow(len(m.rows), m.selection, max(1, min(height-10, 12)))
+		start, end := m.reviewWindow(max(1, min(height-10, 12)))
 		for index := start; index < end; index++ {
 			item := m.rows[index]
-			cursor := "  "
-			if index == m.selection {
-				cursor = "> "
-			}
+			cursor := m.controlMark(fmt.Sprintf("row:%d", index), index == m.selection)
 			check := "[ ]"
 			if item.include {
 				check = "[x]"
@@ -69,7 +66,7 @@ func (m Model) View(width, height int) string {
 		if progress := m.progress(); progress != "" {
 			lines = append(lines, "", progress)
 		}
-		lines = append(lines, "", "Up/Down select  Space toggle  Enter import/retry  Esc back")
+		lines = append(lines, "", m.button("import", "Import")+"    "+m.button("back", "Back")+"    "+m.button("close", "Close"), "Up/Down select  Space toggle  Enter import/retry  Esc back")
 	}
 	if m.status != "" {
 		prefix := "status  "
@@ -84,12 +81,24 @@ func (m Model) View(width, height int) string {
 	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).Width(paneWidth - 2).Render(strings.Join(lines, "\n"))
 }
 
-func focusMark(active bool) string {
+func (m Model) controlMark(target string, active bool) string {
+	if m.pressed(target) {
+		return "! "
+	}
 	if active {
 		return "> "
 	}
 	return "  "
 }
+
+func (m Model) button(target, label string) string {
+	if m.pressed(target) {
+		return "[>" + label + "<]"
+	}
+	return "[ " + label + " ]"
+}
+
+func (m Model) pressed(target string) bool { return m.pointerState.IsPressed(controlID(target)) }
 
 func rowWindow(count, selection, limit int) (int, int) {
 	if count <= limit {
@@ -97,6 +106,18 @@ func rowWindow(count, selection, limit int) (int, int) {
 	}
 	start := max(0, selection-limit/2)
 	start = min(start, count-limit)
+	return start, start + limit
+}
+
+func (m Model) reviewWindow(limit int) (int, int) {
+	count := len(m.rows)
+	if !m.manualScroll {
+		return rowWindow(count, m.selection, limit)
+	}
+	if count <= limit {
+		return 0, count
+	}
+	start := min(max(m.scroll, 0), count-limit)
 	return start, start + limit
 }
 

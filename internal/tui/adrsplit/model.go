@@ -19,6 +19,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 const (
@@ -123,6 +124,8 @@ type Model struct {
 	status        string
 	statusIsError bool
 	scroll        int
+	manualScroll  bool
+	pointerState  pointer.State
 }
 
 // New creates a closed overlay. Nil dependencies keep the feature unavailable
@@ -153,7 +156,7 @@ func (m *Model) Open() tea.Cmd {
 	m.open, m.stage, m.source = true, stageInput, sourcePaste
 	m.focus, m.guardClose, m.status, m.statusIsError = "source", false, "", false
 	m.max, m.dest, m.rows = defaultMax, board.StatusTodo, nil
-	m.changed, m.scroll = false, 0
+	m.changed, m.scroll, m.manualScroll, m.pointerState = false, 0, false, pointer.State{}
 	m.resetInputs()
 	return m.applyFocus()
 }
@@ -171,6 +174,7 @@ func (m *Model) closeNow() {
 	m.open, m.guardClose = false, false
 	m.adding = false
 	m.addQueue = nil
+	m.pointerState = pointer.State{}
 }
 
 // ConsumeChanged reports durable creations to the root exactly once.
@@ -185,8 +189,11 @@ func (m *Model) ConsumeChanged() bool {
 
 // IsMessage identifies overlay-owned asynchronous results.
 func IsMessage(message tea.Msg) bool {
+	if pointer.IsMessage(message) {
+		return true
+	}
 	switch message.(type) {
-	case fileLoadedMsg, splitCompletedMsg, cardAddedMsg:
+	case fileLoadedMsg, splitCompletedMsg, cardAddedMsg, pointerActionMsg:
 		return true
 	default:
 		return false
@@ -197,6 +204,11 @@ func IsMessage(message tea.Msg) bool {
 func (m *Model) Update(message tea.Msg) tea.Cmd {
 	if !m.open {
 		return nil
+	}
+	state, command, handled := m.pointerState.Update(message)
+	if handled {
+		m.pointerState = state
+		return command
 	}
 	switch msg := message.(type) {
 	case fileLoadedMsg:
@@ -231,8 +243,75 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return m.applyFocus()
 	case cardAddedMsg:
 		return m.finishAdd(msg)
+	case pointerActionMsg:
+		return m.updatePointer(msg)
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
+	}
+	return nil
+}
+
+func (m *Model) updatePointer(msg pointerActionMsg) tea.Cmd {
+	if msg.session != m.session || msg.generation != m.generation {
+		return nil
+	}
+	if m.guardClose {
+		switch msg.target {
+		case "discard":
+			m.closeNow()
+		case "stay", "backdrop":
+			m.guardClose = false
+			m.status, m.statusIsError = "close cancelled", false
+		}
+		return nil
+	}
+	if m.operation != "" || m.adding {
+		return nil
+	}
+	if msg.target == "backdrop" {
+		m.requestClose()
+		return nil
+	}
+	if msg.target == "scroll" {
+		m.scroll = min(max(m.scroll+msg.scrollDelta, 0), msg.maxScroll)
+		m.manualScroll = true
+		return nil
+	}
+	m.focus = msg.target
+	switch msg.target {
+	case "source":
+		if m.source == sourcePaste {
+			m.source = sourceFile
+		} else {
+			m.source = sourcePaste
+		}
+		m.focus = m.inputTarget()
+		return m.applyFocus()
+	case "adr", "file":
+		return m.applyFocus()
+	case "max":
+		return m.updateInputKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
+	case "cancel", "split":
+		return m.updateInputKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
+	case "back", "add":
+		return m.updateReviewKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
+	}
+	if index, field, ok := parseRowFocus(msg.target); ok {
+		if field == "title" {
+			return m.applyFocus()
+		}
+		if field == "include" {
+			return m.updateReviewKey("space", tea.KeyPressMsg{Code: tea.KeySpace})
+		}
+		if field == "prio" || field == "effort" {
+			return m.updateReviewKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
+		}
+		if index >= 0 && index < len(m.rows) {
+			return m.applyFocus()
+		}
+	}
+	if msg.target == "dest" {
+		return m.updateReviewKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
 	}
 	return nil
 }
@@ -584,7 +663,7 @@ func (m *Model) resetInputs() {
 func (m *Model) requestClose() {
 	if m.dirty() {
 		m.guardClose = true
-		m.status, m.statusIsError = "reviewed work would be discarded: D discard, Esc stay", true
+		m.status, m.statusIsError = "reviewed work would be discarded", true
 		return
 	}
 	m.closeNow()
@@ -668,10 +747,12 @@ func (m *Model) moveFocus(delta int) {
 	}
 	m.focus = targets[(index+delta+len(targets))%len(targets)]
 	m.guardClose = false
+	m.manualScroll = false
 	m.applyFocus()
 }
 
 func (m *Model) applyFocus() tea.Cmd {
+	m.manualScroll = false
 	m.adr.Blur()
 	m.filePath.Blur()
 	for i := range m.rows {

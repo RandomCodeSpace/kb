@@ -109,6 +109,320 @@ func runSettingsCommand(t *testing.T, model *settingsModel, command tea.Cmd) {
 	model.Update(command())
 }
 
+func clickSettingsText(t *testing.T, model *settingsModel, width, height int, needle string) tea.Cmd {
+	t.Helper()
+	surface := model.Surface(width, height)
+	if surface.Pointer == nil {
+		t.Fatal("settings surface has no pointer handler")
+	}
+	for y, line := range strings.Split(surface.Content, "\n") {
+		if x := strings.Index(line, needle); x >= 0 {
+			press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+			if press == nil {
+				t.Fatalf("settings control %q ignored press", needle)
+			}
+			if command := model.Update(press()); command != nil {
+				t.Fatalf("settings control %q returned a domain command on press", needle)
+			}
+			pressed := model.Surface(width, height)
+			if !strings.Contains(pressed.Content, "\x1b[7m") {
+				t.Fatalf("settings control %q omitted pressed feedback", needle)
+			}
+			command := pressed.Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+			if command == nil {
+				t.Fatalf("visible settings control %q has no hit region", needle)
+			}
+			activate := model.Update(command())
+			if activate == nil {
+				t.Fatalf("settings control %q release produced no action", needle)
+			}
+			return model.Update(activate())
+		}
+	}
+	t.Fatalf("settings control %q is not visible:\n%s", needle, surface.Content)
+	return nil
+}
+
+func TestSettingsPointerFocusesVisibleInput(t *testing.T) {
+	backend := &faultSettingsStore{ai: store.AISettings{
+		BaseURL: "https://api.example", Model: "model-a",
+	}}
+	model := newSettingsModelWithBackends(
+		backend, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background(),
+	)
+	loadSettingsForTest(t, model)
+
+	clickSettingsText(t, model, 80, 30, "Model:")
+	if model.focus != "ai:model" {
+		t.Fatalf("pointer focus = %q, want ai:model", model.focus)
+	}
+	model.Update(tea.KeyPressMsg(tea.Key{Code: 'z', Text: "z"}))
+	if got := model.aiModel.Value(); got != "model-az" {
+		t.Fatalf("pointer-focused input value = %q", got)
+	}
+}
+
+func TestSettingsRejectsPointerReleaseFromClosedInstance(t *testing.T) {
+	backend := &faultSettingsStore{ai: store.AISettings{BaseURL: "https://api.example", Model: "model-a"}}
+	old := newSettingsModelWithBackends(backend, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background())
+	loadSettingsForTest(t, old)
+	surface := old.Surface(80, 40)
+	x, y := -1, -1
+	for row, line := range strings.Split(surface.Content, "\n") {
+		if column := strings.Index(line, "[Save AI settings]"); column >= 0 {
+			x, y = column, row
+			break
+		}
+	}
+	if x < 0 {
+		t.Fatalf("old settings surface omitted Save:\n%s", surface.Content)
+	}
+	press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if press == nil || old.Update(press()) != nil {
+		t.Fatal("stale settings control did not enter pressed state")
+	}
+	command := old.Surface(80, 40).Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if command == nil {
+		t.Fatal("old settings release produced no message")
+	}
+	stale := old.Update(command())
+	if stale == nil {
+		t.Fatal("old settings release produced no guarded action")
+	}
+	old.Close()
+	if next := old.Update(stale()); next != nil || old.busy != "" {
+		t.Fatalf("closed settings accepted queued release: command=%v busy=%q", next, old.busy)
+	}
+
+	current := newSettingsModelWithBackends(backend, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background())
+	loadSettingsForTest(t, current)
+	if next := current.Update(stale()); next != nil || current.busy != "" {
+		t.Fatalf("stale settings release crossed instance: command=%v busy=%q", next, current.busy)
+	}
+}
+
+func TestSettingsPointerFocusesSourceRowFromItsVisibleHeader(t *testing.T) {
+	backend := &faultSettingsStore{
+		ai: store.AISettings{BaseURL: "https://api.example", Model: "model-a"},
+		sources: []store.ForgeSource{{
+			Name: "work", Kind: "gitlab", BaseURL: "https://forge.example",
+		}},
+	}
+	model := newSettingsModelWithBackends(
+		backend, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background(),
+	)
+	loadSettingsForTest(t, model)
+
+	clickSettingsText(t, model, 80, 30, "-- work (saved) --")
+	if model.focus != "forge:source:work:base" {
+		t.Fatalf("source header focus = %q, want first editable source field", model.focus)
+	}
+}
+
+func TestSettingsPointerWheelMovesFocusAndViewportTogether(t *testing.T) {
+	backend := &faultSettingsStore{ai: store.AISettings{
+		BaseURL: "https://api.example", Model: "model-a",
+	}}
+	model := newSettingsModelWithBackends(
+		backend, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background(),
+	)
+	loadSettingsForTest(t, model)
+	surface := model.Surface(42, 7)
+
+	command := surface.Pointer(tea.MouseWheelMsg{X: 10, Y: 3, Button: tea.MouseWheelDown})
+	if command == nil {
+		t.Fatal("settings body ignored pointer wheel")
+	}
+	followup := model.Update(command())
+	if followup == nil {
+		t.Fatal("settings wheel did not produce focus action")
+	}
+	model.Update(followup())
+	if model.focus != "ai:model" {
+		t.Fatalf("wheel focus = %q, want ai:model", model.focus)
+	}
+	if view := model.Surface(42, 7).Content; !strings.Contains(view, "> Model:") {
+		t.Fatalf("wheel-selected control is outside viewport:\n%s", view)
+	}
+}
+
+func TestSettingsPointerActivatesVisibleActionsThroughExistingStateMachines(t *testing.T) {
+	aiProbe := &recordingAIProber{}
+	forgeProbe := &recordingForgeProber{}
+	backend := &faultSettingsStore{
+		ai: store.AISettings{BaseURL: "https://api.example", Model: "model-a"},
+		sources: []store.ForgeSource{{
+			Name: "work", Kind: "gitlab", BaseURL: "https://forge.example",
+		}},
+	}
+	model := newSettingsModelWithBackends(backend, aiProbe, forgeProbe, "alice", context.Background())
+	loadSettingsForTest(t, model)
+
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Test connection]"))
+	if aiProbe.user != "alice" || model.status != "connection ok" {
+		t.Fatalf("pointer AI test = user:%q status:%q", aiProbe.user, model.status)
+	}
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Save AI settings]"))
+	if model.status != "AI settings saved" {
+		t.Fatalf("pointer AI save status = %q", model.status)
+	}
+
+	clickSettingsText(t, model, 80, 40, "Project:")
+	if model.focus != "forge:source:work:project" {
+		t.Fatalf("pointer source input focus = %q", model.focus)
+	}
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Test]"))
+	if forgeProbe.config.Name != "work" || model.status != "connection ok" {
+		t.Fatalf("pointer forge test = config:%+v status:%q", forgeProbe.config, model.status)
+	}
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Save]"))
+	if model.status != "integration saved" {
+		t.Fatalf("pointer forge save status = %q", model.status)
+	}
+
+	if command := clickSettingsText(t, model, 80, 40, "[Remove]"); command != nil {
+		t.Fatalf("first pointer remove dispatched a write: %#v", command())
+	}
+	if model.armedRemove != "source:work" {
+		t.Fatalf("pointer remove armed %q", model.armedRemove)
+	}
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Confirm remove]"))
+	if len(model.rows) != 0 {
+		t.Fatalf("pointer-confirmed remove retained rows: %+v", model.rows)
+	}
+
+	if command := clickSettingsText(t, model, 80, 40, "[+ Add integration]"); command != nil {
+		t.Fatalf("pointer add returned an async command: %#v", command())
+	}
+	if len(model.rows) != 1 || model.focus != "forge:draft:1:name" {
+		t.Fatalf("pointer add = rows:%d focus:%q", len(model.rows), model.focus)
+	}
+	clickSettingsText(t, model, 80, 40, "Kind:")
+	if model.rows[0].kind != "github" || model.focus != "forge:draft:1:kind" {
+		t.Fatalf("pointer kind = kind:%q focus:%q", model.rows[0].kind, model.focus)
+	}
+	clickSettingsText(t, model, 80, 40, "Name:")
+	if model.focus != "forge:draft:1:name" {
+		t.Fatalf("pointer draft input focus = %q", model.focus)
+	}
+
+	if command := clickSettingsText(t, model, 80, 40, "[Close]"); command != nil {
+		t.Fatalf("pointer close returned an async command: %#v", command())
+	}
+	if !model.closed {
+		t.Fatal("pointer close left settings open")
+	}
+}
+
+func TestSettingsPointerViewportOnlyActivatesTheVisibleSourceRow(t *testing.T) {
+	sources := make([]store.ForgeSource, 10)
+	for i := range sources {
+		sources[i] = store.ForgeSource{
+			Name: fmt.Sprintf("source-%02d", i), Kind: "gitlab", BaseURL: "https://forge.example",
+		}
+	}
+	backend := &faultSettingsStore{
+		ai: store.AISettings{BaseURL: "https://api.example", Model: "model-a"}, sources: sources,
+	}
+	model := newSettingsModelWithBackends(
+		backend, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background(),
+	)
+	loadSettingsForTest(t, model)
+	model.focus = "forge:source:source-09:project"
+	model.applyFocus()
+
+	surface := model.Surface(42, 7)
+	if strings.Contains(surface.Content, "source-00") || !strings.Contains(surface.Content, "source-09") {
+		t.Fatalf("settings viewport projected the wrong source:\n%s", surface.Content)
+	}
+	clickSettingsText(t, model, 42, 7, "Project:")
+	if model.focus != "forge:source:source-09:project" {
+		t.Fatalf("visible projected row activated %q", model.focus)
+	}
+}
+
+func TestSettingsPointerFocusesEveryVisibleEditableField(t *testing.T) {
+	backend := &faultSettingsStore{
+		ai: store.AISettings{BaseURL: "https://api.ai.example", Model: "model-a", HasKey: true},
+		sources: []store.ForgeSource{{
+			Name: "work", Kind: "gitlab", BaseURL: "https://forge.source.example", HasToken: true,
+		}},
+	}
+	model := newSettingsModelWithBackends(
+		backend, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background(),
+	)
+	loadSettingsForTest(t, model)
+	model.rows[0].project.SetValue("source/project")
+	model.addForgeDraft()
+	draft := &model.rows[1]
+	draft.kind = "github"
+	draft.name.SetValue("draft-name")
+	draft.baseURL.SetValue("https://forge.draft.example")
+	draft.project.SetValue("draft/project")
+	draft.token.SetValue("draft-token")
+
+	tests := []struct {
+		needle string
+		focus  string
+	}{
+		{needle: "https://api.ai.example", focus: "ai:base"},
+		{needle: "model-a", focus: "ai:model"},
+		{needle: "API key (saved):", focus: "ai:key"},
+		{needle: "https://forge.source.example", focus: "forge:source:work:base"},
+		{needle: "source/project", focus: "forge:source:work:project"},
+		{needle: "Token (saved):", focus: "forge:source:work:token"},
+		{needle: "Kind: github", focus: "forge:draft:1:kind"},
+		{needle: "Name: draft-name", focus: "forge:draft:1:name"},
+		{needle: "https://forge.draft.example", focus: "forge:draft:1:base"},
+		{needle: "draft/project", focus: "forge:draft:1:project"},
+		{needle: "Token: ***********", focus: "forge:draft:1:token"},
+	}
+	for _, test := range tests {
+		t.Run(test.focus, func(t *testing.T) {
+			clickSettingsText(t, model, 100, 60, test.needle)
+			if model.focus != test.focus {
+				t.Fatalf("pointer focus = %q, want %q", model.focus, test.focus)
+			}
+		})
+	}
+}
+
+func TestSettingsPointerPersistsAndRemovesDraftIntegration(t *testing.T) {
+	st := newSettingsTestStore(t)
+	model := newSettingsModelWithBackends(
+		st, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background(),
+	)
+	loadSettingsForTest(t, model)
+	clickSettingsText(t, model, 80, 40, "[+ Add integration]")
+	draft := &model.rows[0]
+	draft.name.SetValue("work")
+	draft.baseURL.SetValue("https://gitlab.example")
+	draft.token.SetValue("token")
+
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Save]"))
+	if len(model.rows) != 1 || !model.rows[0].persisted || model.rows[0].id != "source:work" {
+		t.Fatalf("pointer-saved draft = %+v", model.rows)
+	}
+	if sources, err := st.ForgeSources("alice"); err != nil || len(sources) != 1 || sources[0].Name != "work" {
+		t.Fatalf("pointer-saved source = %+v, %v", sources, err)
+	}
+
+	clickSettingsText(t, model, 80, 40, "[Remove]")
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Confirm remove]"))
+	if sources, err := st.ForgeSources("alice"); err != nil || len(sources) != 0 || len(model.rows) != 0 {
+		t.Fatalf("pointer-removed source = store:%+v model:%+v err:%v", sources, model.rows, err)
+	}
+
+	clickSettingsText(t, model, 80, 40, "[+ Add integration]")
+	clickSettingsText(t, model, 80, 40, "[Remove]")
+	if command := clickSettingsText(t, model, 80, 40, "[Confirm remove]"); command != nil {
+		t.Fatalf("draft removal unexpectedly became asynchronous: %#v", command())
+	}
+	if len(model.rows) != 0 || model.focus != "forge:add" {
+		t.Fatalf("pointer-removed draft = rows:%+v focus:%q", model.rows, model.focus)
+	}
+}
+
 func TestAISettingsUseUnsavedProbeAndStorePatchSemantics(t *testing.T) {
 	st := newSettingsTestStore(t)
 	storedBase, storedModel := "https://stored.example/v1", "stored-model"

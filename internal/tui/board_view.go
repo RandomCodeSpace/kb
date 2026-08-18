@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 const wideBoardWidth = 100
@@ -41,6 +42,7 @@ type boardColumnClickedMsg struct{ status board.Status }
 type filterTextClickedMsg struct{}
 type filterLabelClickedMsg struct{ tag string }
 type filterClearClickedMsg struct{}
+type boardFooterClickedMsg struct{ key string }
 type boardPointerDownMsg struct{ taskID string }
 type boardPointerMoveMsg struct {
 	status       board.Status
@@ -59,6 +61,8 @@ const (
 	boardHitFilterText
 	boardHitFilterLabel
 	boardHitFilterClear
+	boardHitFooterAction
+	boardHitColumnHeading
 )
 
 type boardHit struct {
@@ -68,6 +72,7 @@ type boardHit struct {
 	taskID    string
 	kind      boardHitKind
 	tag       string
+	key       string
 	scroll    int
 	maxScroll int
 }
@@ -328,10 +333,89 @@ func (m Model) renderBoard() (string, []boardHit) {
 		if m.issueImport.Enabled() && width >= 24 {
 			footer = fitLine("i import | "+footer, width)
 		}
+		hits = append(hits, boardFooterHits(footer, height-1, width)...)
+		footer = m.styleBoardFooter(footer)
 		return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
 	}
 	footer := fitLine(state+" | "+help, width)
+	hits = append(hits, boardFooterHits(footer, height-1, width)...)
+	footer = m.styleBoardFooter(footer)
 	return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
+}
+
+func boardFooterHits(footer string, row, width int) []boardHit {
+	parts := strings.Split(footer, " | ")
+	hits := make([]boardHit, 0, len(parts))
+	x := 0
+	for _, part := range parts {
+		key := boardFooterKey(part)
+		partWidth := ansi.StringWidth(part)
+		if key != "" && x < width {
+			hits = append(hits, boardHit{x0: x, x1: min(x+partWidth, width), y0: row, y1: row + 1, kind: boardHitFooterAction, key: key})
+		}
+		x += partWidth + 3
+	}
+	return hits
+}
+
+func boardFooterKey(part string) string {
+	switch {
+	case part == "s" || strings.HasPrefix(part, "s settings"):
+		return "s"
+	case strings.HasPrefix(part, "? help"):
+		return "?"
+	case strings.HasPrefix(part, "q quit"):
+		return "q"
+	case strings.HasPrefix(part, "n new"):
+		return "n"
+	case strings.HasPrefix(part, "e edit"):
+		return "e"
+	case strings.HasPrefix(part, "a split ADR"):
+		return "a"
+	case strings.HasPrefix(part, "i import"):
+		return "i"
+	case strings.HasPrefix(part, "c cancelled:"):
+		return "c"
+	default:
+		return ""
+	}
+}
+
+func boardFooterControlID(key string) pointer.ControlID {
+	return pointer.ControlID("board-footer:" + key)
+}
+
+func boardHitControlID(hit boardHit) pointer.ControlID {
+	switch hit.kind {
+	case boardHitFooterAction:
+		return boardFooterControlID(hit.key)
+	case boardHitFilterText:
+		return pointer.ControlID("board-filter:text")
+	case boardHitFilterLabel:
+		if hit.taskID != "" {
+			return boardCardLabelControlID(hit.taskID, hit.tag)
+		}
+		return pointer.ControlID("board-filter:label:" + hit.tag)
+	case boardHitFilterClear:
+		return pointer.ControlID("board-filter:clear")
+	case boardHitColumnHeading:
+		return pointer.ControlID("board-column:" + string(hit.status))
+	}
+	return ""
+}
+
+func boardCardLabelControlID(taskID, tag string) pointer.ControlID {
+	return pointer.ControlID("board-card-label:" + taskID + ":" + tag)
+}
+
+func (m Model) styleBoardFooter(footer string) string {
+	parts := strings.Split(footer, " | ")
+	for index, part := range parts {
+		if key := boardFooterKey(part); key != "" {
+			parts[index] = m.pointerState.Render(boardFooterControlID(key), part)
+		}
+	}
+	return strings.Join(parts, " | ")
 }
 
 func (m Model) renderFilterBar(width int) (string, []boardHit) {
@@ -345,10 +429,13 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 			x += 3
 		}
 		start := x
+		partWidth := ansi.StringWidth(part)
+		hit := boardHit{x0: start, x1: min(start+partWidth, width), y0: row + 1, y1: row + 2, kind: kind, tag: tag}
+		part = m.pointerState.Render(boardHitControlID(hit), part)
 		lines[row] = append(lines[row], part)
-		x += ansi.StringWidth(part)
+		x += partWidth
 		if kind != boardHitDefault && start < width {
-			hits = append(hits, boardHit{x0: start, x1: min(x, width), y0: row + 1, y1: row + 2, kind: kind, tag: tag})
+			hits = append(hits, hit)
 		}
 	}
 
@@ -492,8 +579,11 @@ func (m Model) renderBoardColumn(status board.Status, width, height int) rendere
 	if width < 3 {
 		label := statusLabel(status)
 		lines := make([]string, height)
-		lines[0] = fitLine(label, width)
-		return renderedColumn{lines: lines, hits: []boardHit{{x1: width, y1: height, status: status}}}
+		lines[0] = m.pointerState.Render(pointer.ControlID("board-column:"+string(status)), fitLine(label, width))
+		return renderedColumn{lines: lines, hits: []boardHit{
+			{x1: width, y1: height, status: status},
+			{x1: width, y1: 1, status: status, kind: boardHitColumnHeading},
+		}}
 	}
 	inner := width - 2
 	tasks := tasksInStatus(m.filteredBoard(), status)
@@ -502,8 +592,12 @@ func (m Model) renderBoardColumn(status board.Status, width, height int) rendere
 	if focused {
 		heading = "[" + heading + "]"
 	}
+	heading = m.pointerState.Render(pointer.ControlID("board-column:"+string(status)), heading)
 	lines := []string{"┌" + padLine(heading, inner, "─") + "┐"}
-	hits := []boardHit{{x1: width, y1: height, status: status}}
+	hits := []boardHit{
+		{x1: width, y1: height, status: status},
+		{x1: width, y1: 1, status: status, kind: boardHitColumnHeading},
+	}
 
 	contentHeight := max(height-2, 0)
 	cardLines, owners, labelSpans := m.renderTaskLines(tasks, status, inner)
@@ -530,7 +624,7 @@ func (m Model) renderBoardColumn(status board.Status, width, height int) rendere
 				hits = append(hits, boardHit{
 					x0: 1 + span.x0, x1: min(1+span.x1, width-1),
 					y0: row + 1, y1: row + 2, status: status,
-					kind: boardHitFilterLabel, tag: span.tag,
+					kind: boardHitFilterLabel, tag: span.tag, taskID: owners[source],
 				})
 			}
 		}
@@ -567,6 +661,12 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 		}
 		metaLines, metaSpans := wrapMeta(cardMetaEntries(task, m.renderedAt), max(width-2, 1))
 		for lineIndex, line := range metaLines {
+			for spanIndex := len(metaSpans[lineIndex]) - 1; spanIndex >= 0; spanIndex-- {
+				span := metaSpans[lineIndex][spanIndex]
+				line = ansi.Cut(line, 0, span.x0) +
+					m.pointerState.Render(boardCardLabelControlID(task.ID, span.tag), ansi.Cut(line, span.x0, span.x1)) +
+					ansi.Cut(line, span.x1, ansi.StringWidth(line))
+			}
 			lines = append(lines, "  "+line)
 			owners = append(owners, task.ID)
 			lineSpans := make([]labelSpan, len(metaSpans[lineIndex]))
@@ -700,6 +800,8 @@ func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.C
 				return func() tea.Msg { return filterLabelClickedMsg{tag: matched.tag} }
 			case boardHitFilterClear:
 				return func() tea.Msg { return filterClearClickedMsg{} }
+			case boardHitFooterAction:
+				return func() tea.Msg { return boardFooterClickedMsg{key: matched.key} }
 			}
 			if matched.taskID != "" {
 				return func() tea.Msg { return boardPointerDownMsg{taskID: matched.taskID} }
@@ -713,6 +815,73 @@ func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.C
 			}
 		}
 		return nil
+	}
+}
+
+func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.State) func(tea.MouseMsg) tea.Cmd {
+	base := boardMouseHandler(hits, active)
+	var controls pointer.Map
+	gesture := state.Active()
+	for _, hit := range hits {
+		id := boardHitControlID(hit)
+		if id == "" {
+			continue
+		}
+		if state.IsPressed(id) {
+			gesture = true
+		}
+		message := boardControlMessage(hit)
+		controls.AddControl(id, pointer.Rect{X0: hit.x0, Y0: hit.y0, X1: hit.x1, Y1: hit.y1}, func(pointer.Point) tea.Msg {
+			return message
+		})
+	}
+	controlHandler := controls.Handler()
+	controlHit := func(mouse tea.Mouse) bool {
+		for index := len(hits) - 1; index >= 0; index-- {
+			hit := hits[index]
+			if boardHitControlID(hit) != "" && mouse.X >= hit.x0 && mouse.X < hit.x1 && mouse.Y >= hit.y0 && mouse.Y < hit.y1 {
+				return true
+			}
+		}
+		return false
+	}
+	return func(message tea.MouseMsg) tea.Cmd {
+		mouse := message.Mouse()
+		switch message.(type) {
+		case tea.MouseClickMsg:
+			if controlHit(mouse) {
+				gesture = true
+				return controlHandler(message)
+			}
+		case tea.MouseMotionMsg:
+			if gesture {
+				return controlHandler(message)
+			}
+		case tea.MouseReleaseMsg:
+			if gesture {
+				gesture = false
+				if command := controlHandler(message); command != nil {
+					return command
+				}
+				return pointer.Cancel()
+			}
+		}
+		return base(message)
+	}
+}
+
+func boardControlMessage(hit boardHit) tea.Msg {
+	switch hit.kind {
+	case boardHitFooterAction:
+		return boardFooterClickedMsg{key: hit.key}
+	case boardHitFilterText:
+		return filterTextClickedMsg{}
+	case boardHitFilterLabel:
+		return filterLabelClickedMsg{tag: hit.tag}
+	case boardHitFilterClear:
+		return filterClearClickedMsg{}
+	default:
+		return boardColumnClickedMsg{status: hit.status}
 	}
 }
 

@@ -16,3 +16,7 @@
 
 # compiled binary
 /kb
+
+# Removed web UI build and dependency artifacts may remain in old checkouts.
+/dist/
+/node_modules/

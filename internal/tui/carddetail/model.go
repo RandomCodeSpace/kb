@@ -20,6 +20,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 const (
@@ -51,6 +52,14 @@ type markdownRenderer func(source string, width int) string
 type mouseScrollMsg struct{ delta int }
 type mouseDismissMsg struct{}
 
+type pointerControlMsg struct {
+	pointerSession  uint64
+	actionSession   uint64
+	driftSession    uint64
+	driftGeneration uint64
+	message         tea.Msg
+}
+
 // Model owns the overlay's task snapshot, enriched detail, and scroll state.
 type Model struct {
 	reader         Reader
@@ -73,6 +82,8 @@ type Model struct {
 	renderMarkdown markdownRenderer
 	bodyLines      []string
 	bodyWidth      int
+	pointerSession uint64
+	pointerState   pointer.State
 
 	action        actionMode
 	actionSession uint64
@@ -122,6 +133,8 @@ func (m Model) TaskID() string {
 // Open resets the pane to task and returns the asynchronous enrichment load.
 func (m *Model) Open(task board.Task) tea.Cmd {
 	m.cancelDrift()
+	m.pointerSession++
+	m.pointerState = pointer.State{}
 	m.actionSession++
 	m.task = task
 	m.comments = nil
@@ -172,6 +185,8 @@ func (m *Model) Refresh(task board.Task) tea.Cmd {
 // the current task identity.
 func (m *Model) Close() {
 	m.cancelDrift()
+	m.pointerSession++
+	m.pointerState = pointer.State{}
 	m.generation++
 	m.actionSession++
 	m.open = false
@@ -207,8 +222,17 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	if !m.open {
 		return nil
 	}
+	if pointer.IsMessage(message) {
+		next, command, _ := m.pointerState.Update(message)
+		m.pointerState = next
+		m.rebuildBody()
+		return command
+	}
 	switch msg := message.(type) {
-	case driftChoicesLoadedMsg, driftCheckedMsg, driftAcceptedMsg:
+	case actionChoicePointerMsg:
+		m.updateActionChoice(msg.index)
+		return nil
+	case driftChoicePointerMsg, driftChoicesLoadedMsg, driftCheckedMsg, driftAcceptedMsg:
 		return m.updateDrift(msg)
 	case mutationCompletedMsg:
 		return m.finishMutation(msg)
@@ -269,6 +293,22 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	}
 	m.clampScroll()
 	return nil
+}
+
+// ResolvePointerMessage unwraps a message only while the exact rendered detail
+// session and nested action state are still current. A release queued from an
+// older pane cannot mutate a reopened task or a later confirmation.
+func (m *Model) ResolvePointerMessage(message tea.Msg) (tea.Msg, bool) {
+	msg, ok := message.(pointerControlMsg)
+	if !ok {
+		return message, false
+	}
+	if !m.open || msg.pointerSession != m.pointerSession ||
+		msg.actionSession != m.actionSession || msg.driftSession != m.driftSession ||
+		msg.driftGeneration != m.driftGeneration {
+		return nil, true
+	}
+	return msg.message, true
 }
 
 // MouseHandler routes wheel scrolling within the pane and left-click dismissal
@@ -388,19 +428,92 @@ func (m *Model) View(width, height int) string {
 // Overlay composes the pane over the board without making carddetail own the
 // board renderer. Input routing remains the root model's responsibility.
 func (m *Model) Overlay(background string, width, height int) string {
+	return m.PointerSurface(background, width, height).Content
+}
+
+// PointerSurface renders the detail overlay and returns the immutable pointer
+// map produced from this exact layout pass. The root selects it as the active
+// top-most surface, so carddetail never exposes board hit regions while open.
+func (m *Model) PointerSurface(background string, width, height int) pointer.Surface {
 	if !m.open {
-		return background
+		return pointer.Surface{Content: background}
 	}
 	width = max(width, 1)
 	height = max(height, 1)
 	background = fitTerminal(background, width, height)
-	frame, paneWidth, paneHeight := m.frame(width, height)
+	frame, paneWidth, _ := m.frame(width, height)
+	_, paneHeight := paneSize(width, height)
 	x := max((width-paneWidth)/2, 0)
 	y := max((height-paneHeight)/2, 0)
-	return fitTerminal(lipgloss.NewCompositor(
+	content := fitTerminal(lipgloss.NewCompositor(
 		lipgloss.NewLayer(background),
 		lipgloss.NewLayer(frame).X(x).Y(y).Z(1),
 	).Render(), width, height)
+
+	bounds := pointer.Rect{X0: 0, Y0: 0, X1: width, Y1: height}
+	pane := pointer.Rect{X0: x, Y0: y, X1: x + paneWidth, Y1: y + paneHeight}
+	var hitMap pointer.Map
+	wrap := func(message tea.Msg) tea.Msg {
+		return pointerControlMsg{
+			pointerSession: m.pointerSession, actionSession: m.actionSession,
+			driftSession: m.driftSession, driftGeneration: m.driftGeneration,
+			message: message,
+		}
+	}
+	hitMap.AddWheel(pane, func(delta int) tea.Msg { return wrap(mouseScrollMsg{delta: delta * 3}) })
+	if m.action == actionNone && m.driftMode == driftNone {
+		hitMap.AddBackdrop(bounds, pane, func(pointer.Point) tea.Msg { return wrap(mouseDismissMsg{}) })
+	}
+
+	innerWidth, _, _ := paneGeometry(width, height)
+	displayWidth := max(innerWidth-2, 1)
+	footerY := y + paneHeight - 3
+	xCursor := x + 2
+	for _, control := range m.pointerFooterControls(displayWidth) {
+		label := "[" + control.label + "]"
+		labelWidth := ansi.StringWidth(label)
+		if xCursor+labelWidth > x+paneWidth-2 || footerY < y || footerY >= y+paneHeight {
+			break
+		}
+		rect := pointer.Rect{X0: xCursor, Y0: footerY, X1: xCursor + labelWidth, Y1: footerY + 1}
+		message := wrap(control.message)
+		hitMap.AddControl(detailFooterControlID(control), rect, func(pointer.Point) tea.Msg { return message })
+		xCursor += labelWidth + 1
+	}
+	if m.driftMode == driftSelect && m.driftBusy == "" {
+		viewport := pointer.Viewport{
+			Rect:   pointer.Rect{X0: x + 2, Y0: y + 1, X1: x + paneWidth - 2, Y1: footerY},
+			Scroll: m.scroll,
+		}
+		for index := range m.driftChoices {
+			if rect, ok := viewport.Row(4+index, 0, displayWidth); ok {
+				message := wrap(driftChoicePointerMsg{index: index})
+				hitMap.AddControl(detailDriftControlID(index), rect, func(pointer.Point) tea.Msg { return message })
+			}
+		}
+	}
+	if (m.action == actionDeleteComment || m.action == actionDeleteLink) && !m.saving {
+		count := len(m.comments)
+		if m.action == actionDeleteLink {
+			count = len(m.linkChoices())
+		}
+		start, end := selectionWindow(count, m.selection, max(m.height-10, 3))
+		logicalRow := 2
+		if start > 0 {
+			logicalRow++
+		}
+		viewport := pointer.Viewport{
+			Rect:   pointer.Rect{X0: x + 2, Y0: y + 1, X1: x + paneWidth - 2, Y1: footerY},
+			Scroll: m.scroll,
+		}
+		for index := start; index < end; index++ {
+			if rect, ok := viewport.Row(logicalRow+index-start, 0, displayWidth); ok {
+				message := wrap(actionChoicePointerMsg{index: index})
+				hitMap.AddControl(detailActionChoiceControlID(m.action, index), rect, func(pointer.Point) tea.Msg { return message })
+			}
+		}
+	}
+	return pointer.Surface{Content: content, Pointer: hitMap.Handler()}
 }
 
 func (m *Model) frame(width, height int) (string, int, int) {
@@ -557,6 +670,13 @@ func (m Model) renderBody(width int) string {
 		} else {
 			sections = append(sections, "comments  none")
 		}
+	}
+	if m.statusMessage != "" {
+		prefix := "status: "
+		if m.statusIsError {
+			prefix = "error: "
+		}
+		sections = append(sections, prefix+m.statusMessage)
 	}
 	return strings.Join(sections, "\n\n")
 }

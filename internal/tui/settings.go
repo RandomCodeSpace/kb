@@ -14,6 +14,7 @@ import (
 	kbai "github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 const settingsTestTimeout = 20 * time.Second
@@ -60,6 +61,11 @@ type forgeSettingsRemovedMsg struct {
 	id  string
 	err error
 }
+type settingsPointerMsg struct {
+	owner  *settingsModel
+	target string
+}
+type settingsWheelMsg struct{ delta int }
 
 type integrationSettingsRow struct {
 	id        string
@@ -73,12 +79,13 @@ type integrationSettingsRow struct {
 }
 
 type settingsModel struct {
-	ctx    context.Context
-	store  settingsStore
-	ai     aiConnectionProber
-	forge  forgeConnectionProber
-	user   string
-	loaded bool
+	ctx          context.Context
+	store        settingsStore
+	ai           aiConnectionProber
+	forge        forgeConnectionProber
+	user         string
+	loaded       bool
+	pointerState pointer.State
 
 	aiBase  textinput.Model
 	aiModel textinput.Model
@@ -164,6 +171,14 @@ func (m *settingsModel) Close() {
 }
 
 func (m *settingsModel) Update(message tea.Msg) tea.Cmd {
+	if m.closed {
+		return nil
+	}
+	if pointer.IsMessage(message) {
+		next, command, _ := m.pointerState.Update(message)
+		m.pointerState = next
+		return command
+	}
 	switch msg := message.(type) {
 	case settingsLoadedMsg:
 		m.finishLoad(msg)
@@ -203,10 +218,46 @@ func (m *settingsModel) Update(message tea.Msg) tea.Cmd {
 		}
 		m.finishForgeRemove(msg)
 		return nil
+	case settingsPointerMsg:
+		if msg.owner != m {
+			return nil
+		}
+		return m.updatePointer(msg.target)
+	case settingsWheelMsg:
+		if m.loaded && m.busy == "" && msg.delta != 0 {
+			m.moveFocus(msg.delta)
+		}
+		return nil
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
 	}
 	return nil
+}
+
+func (m *settingsModel) updatePointer(target string) tea.Cmd {
+	if target == "close" {
+		return m.updateKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	}
+	if !m.loaded || m.busy != "" {
+		return nil
+	}
+	if m.focus != target {
+		m.disarmRemove()
+	}
+	m.focus = target
+	m.applyFocus()
+	if settingsPointerActivates(target) {
+		return m.activateFocus()
+	}
+	return nil
+}
+
+func settingsPointerActivates(target string) bool {
+	if target == "ai:test" || target == "ai:save" || target == "forge:add" {
+		return true
+	}
+	return strings.HasSuffix(target, ":kind") || strings.HasSuffix(target, ":test") ||
+		strings.HasSuffix(target, ":save") || strings.HasSuffix(target, ":remove")
 }
 
 func (m *settingsModel) finishLoad(msg settingsLoadedMsg) {
