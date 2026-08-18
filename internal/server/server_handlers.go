@@ -7,11 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"mime"
 	"net/http"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -496,26 +494,20 @@ func etagMatches(ifMatch, etag string) bool {
 	return false
 }
 
-// configResponse carries the browser-side Entra IDs and the server's auth
-// mode. The IDs are public by design — every MSAL SPA ships them in its
-// bundle — and the mode only names which credential the API will demand,
+// configResponse carries the public Entra IDs and the server's auth mode. The
+// mode only names which credential the API will demand,
 // which an unauthenticated probe learns from a 401 anyway. The endpoint is
-// unauthenticated (the SPA needs it before login), so nothing sensitive may
-// ever be added here.
+// unauthenticated so remote clients can configure login; nothing sensitive
+// may ever be added here.
 type configResponse struct {
 	AzureClientID string `json:"azure_client_id"`
 	AzureTenantID string `json:"azure_tenant_id"`
-	// AuthMode is "open", "token", or "entra". The SPA skips the identity
-	// gate entirely in open mode: with no credential to collect, the gate
-	// was only choosing a board namespace, and open mode uses "default" —
-	// the same namespace the CLI writes to without --user.
+	// AuthMode is "open", "token", or "entra".
 	AuthMode string `json:"auth_mode"`
 }
 
-// handleConfig serves the runtime Entra configuration and auth mode. The
-// released binary is built without VITE_* values, so the SPA cannot learn
-// them at build time; it reads them here instead. Unset env yields empty
-// strings, which the SPA treats as "no Entra configured".
+// handleConfig serves the runtime Entra configuration and auth mode. Unset
+// environment values produce empty IDs.
 func (s *server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	mode := "open"
 	switch {
@@ -609,25 +601,6 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 		return nil, false
 	}
 	return body, true
-}
-
-// handleStatic serves the embedded SPA with an index.html fallback for
-// unknown non-/api paths (client-side routing).
-func (s *server) handleStatic(w http.ResponseWriter, r *http.Request) {
-	if isAPIPath(r.URL.Path) {
-		http.NotFound(w, r)
-		return
-	}
-	s.setSecurityHeaders(w.Header())
-	name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
-	if name == "" {
-		name = "index.html"
-	}
-	if _, err := fs.Stat(s.static, name); err == nil {
-		s.fileServer.ServeHTTP(w, r)
-		return
-	}
-	http.ServeFileFS(w, r, s.static, "index.html")
 }
 
 // --- logging ---

@@ -1,5 +1,5 @@
 // Package ai implements kb's model probe, skill runner, and board tools.
-// It depends on the store directly so local frontends do not need an HTTP
+// It depends on the store directly so local UIs do not need an HTTP
 // server to use AI features.
 package ai
 

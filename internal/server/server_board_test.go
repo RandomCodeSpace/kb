@@ -216,7 +216,7 @@ func TestGetBoardTaskIDAcknowledgement(t *testing.T) {
 	}
 }
 
-func TestHealthAndStatic(t *testing.T) {
+func TestHealthAndAPINotFoundRouting(t *testing.T) {
 	h, _ := newTestServer(t, Config{})
 
 	w := doReq(t, h, "GET", "/api/health", "", nil)
@@ -226,27 +226,40 @@ func TestHealthAndStatic(t *testing.T) {
 	if w.Body.String() != `{"ok":true}` {
 		t.Errorf("health body = %q", w.Body.String())
 	}
-	if w := doReq(t, h, "GET", "/", "", nil); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "spa") {
-		t.Errorf("GET /: got %d body %q", w.Code, w.Body.String())
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/", ""},
+		{http.MethodGet, "/some/client/route", ""},
+		{http.MethodGet, "/assets/app.js", ""},
+		{http.MethodGet, "/api", ""},
+		{http.MethodGet, "/api/nope", ""},
+		{http.MethodGet, "/api//health", ""},
+		{http.MethodGet, "/api/nope/../health", ""},
+		{http.MethodGet, "/api/health/", ""},
+		{http.MethodHead, "/api/health", ""},
+		{http.MethodOptions, "/api/health", ""},
+		{http.MethodPost, "/api/health", ""},
+		{http.MethodPost, "/api/board", "x"},
+	} {
+		w := doReq(t, h, tc.method, tc.path, tc.body, nil)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s %s: got %d body %q, want 404", tc.method, tc.path, w.Code, w.Body.String())
+		}
+		if allow := w.Header().Get("Allow"); allow != "" {
+			t.Errorf("%s %s Allow = %q, want empty 404 response", tc.method, tc.path, allow)
+		}
 	}
-	// SPA fallback for unknown non-/api paths.
-	if w := doReq(t, h, "GET", "/some/client/route", "", nil); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "spa") {
-		t.Errorf("SPA fallback: got %d body %q", w.Code, w.Body.String())
-	}
-	// Unknown /api paths must 404, not fall back to index.html.
-	if w := doReq(t, h, "GET", "/api/nope", "", nil); w.Code != http.StatusNotFound {
-		t.Errorf("GET /api/nope: got %d, want 404", w.Code)
-	}
-	// Wrong method on /api/board falls through to the catch-all, whose /api
-	// guard rejects it rather than serving the SPA.
-	if w := doReq(t, h, "POST", "/api/board", "x", nil); w.Code != http.StatusNotFound {
-		t.Errorf("POST /api/board: got %d, want 404", w.Code)
+	w = doReq(t, h, http.MethodPost, "/api/health", "x", map[string]string{"Content-Type": "text/plain"})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("wrong method with rejected media type: got %d body %q, want 404", w.Code, w.Body.String())
 	}
 }
 
-// The released binary is built without VITE_* values, so the SPA reads the
-// Entra IDs here. Both are public by design, but the endpoint is
-// unauthenticated, so it must expose those two and nothing else.
+// Entra clients read the public IDs here. The endpoint is unauthenticated, so
+// it must expose those two values and nothing else.
 func TestConfigEndpoint(t *testing.T) {
 	t.Run("unset yields empty strings", func(t *testing.T) {
 		h, _ := newTestServer(t, Config{})
@@ -282,7 +295,7 @@ func TestConfigEndpoint(t *testing.T) {
 		// Token mode as well, to prove the secret never appears here and that
 		// the endpoint answers with no Authorization header — the SPA needs
 		// these IDs before it can log in.
-		h := New(Config{TenantID: tenant, ClientID: "app-client-id", Token: "s3cret"}, testStatic, st)
+		h := New(Config{TenantID: tenant, ClientID: "app-client-id", Token: "s3cret"}, st)
 		w := doReq(t, h, "GET", "/api/config", "", nil)
 		if w.Code != http.StatusOK {
 			t.Fatalf("GET config: got %d, want 200 (body=%s)", w.Code, w.Body)
@@ -304,9 +317,9 @@ func TestConfigEndpoint(t *testing.T) {
 
 // The phase-3 additions (the %blocked title token and the Cancelled section)
 // have to survive the whole loop: store -> server -> wire -> client -> wire ->
-// server -> store. The client leg is the shared codec fixture that
-// src/lib/markdown.test.ts and internal/board/fixtures_test.go both pin, so
-// replaying that exact file through the API covers the rest of the loop.
+// server -> store. The frozen cross-client fixture and
+// internal/board/fixtures_test.go pin the client leg, so replaying that exact
+// file through the API covers the rest of the loop.
 func TestBlockedAndCancelledSurviveTheAPIRoundTrip(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "board", "testdata", "phase3.md"))
 	if err != nil {
@@ -656,7 +669,7 @@ func TestIfMatchStarPredicateIsTransactional(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer b.Close()
-		srv := newServer(Config{}, testStatic, a)
+		srv := newServer(Config{}, a)
 		srv.afterConditionalBoardSnapshot = func() {
 			srv.afterConditionalBoardSnapshot = nil
 			if err := b.ReplaceBoard("default", board.Parse("# Peer\n")); err != nil {
@@ -687,7 +700,7 @@ func TestIfMatchStarPredicateIsTransactional(t *testing.T) {
 		if err := a.ReplaceBoard("default", board.Parse("# B\n\n## To Do\n\n- [ ] Seed\n")); err != nil {
 			t.Fatal(err)
 		}
-		srv := newServer(Config{}, testStatic, a)
+		srv := newServer(Config{}, a)
 		srv.afterConditionalBoardSnapshot = func() {
 			srv.afterConditionalBoardSnapshot = nil
 			if _, err := b.AddTask("default", board.Task{Title: "Concurrent"}); err != nil {
@@ -714,7 +727,7 @@ func TestIfMatchStarPredicateIsTransactional(t *testing.T) {
 		if err := a.ReplaceBoard("default", board.Parse("# B\n\n## To Do\n\n- [ ] Seed\n")); err != nil {
 			t.Fatal(err)
 		}
-		srv := newServer(Config{}, testStatic, a)
+		srv := newServer(Config{}, a)
 		srv.afterConditionalBoardSnapshot = func() {
 			srv.afterConditionalBoardSnapshot = nil
 			if err := b.DeleteBoard("default"); err != nil {
@@ -801,8 +814,8 @@ func TestJSONBoardReceiptReplayWinsAfterPeerCommit(t *testing.T) {
 	if err := a.ReplaceBoard("default", board.Parse("# B\n")); err != nil {
 		t.Fatal(err)
 	}
-	srv := newServer(Config{}, testStatic, a)
-	h2 := New(Config{}, testStatic, b)
+	srv := newServer(Config{}, a)
+	h2 := New(Config{}, b)
 	etag := doReq(t, srv.handler(), http.MethodGet, "/api/board", "", nil).Header().Get("ETag")
 	body := `{"board":"# B\n\n## To Do\n\n- [ ] New\n","task_ids":[null]}`
 	headers := map[string]string{
@@ -861,7 +874,7 @@ func TestConditionalBoardPutAcrossServerInstances(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	h1, h2 := New(Config{}, testStatic, a), New(Config{}, testStatic, b)
+	h1, h2 := New(Config{}, a), New(Config{}, b)
 	if err := a.ReplaceBoard("default", board.Parse("# B\n\n## To Do\n\n- [ ] Seed\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -1019,7 +1032,7 @@ func TestConditionalPutReturnsItsOwnCommittedIDsAndRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	srv := newServer(Config{}, testStatic, a)
+	srv := newServer(Config{}, a)
 	h := srv.handler()
 	token := doReq(t, h, http.MethodGet, "/api/board", "", nil).Header().Get("ETag")
 	w := doReq(t, h, http.MethodPut, "/api/board", "# Mine\n\n## To Do\n\n- [ ] Mine\n", map[string]string{
@@ -1072,7 +1085,7 @@ func TestJSONBoardPutConflictsWithWriterAfterSnapshot(t *testing.T) {
 	}
 	defer st.Close()
 
-	srv := newServer(Config{}, testStatic, st)
+	srv := newServer(Config{}, st)
 	h := srv.handler()
 	seed := putBoard(t, h, "# Seed\n\n## To Do\n\n- [ ] Keep\n", map[string]string{"Accept": "application/json"})
 	if seed.Code != http.StatusOK {

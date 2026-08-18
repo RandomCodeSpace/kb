@@ -9,15 +9,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"testing/fstest"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
-
-var testStatic = fstest.MapFS{
-	"index.html": &fstest.MapFile{Data: []byte("<html>spa</html>")},
-}
 
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
@@ -32,7 +27,7 @@ func newTestStore(t *testing.T) *store.Store {
 func newTestServer(t *testing.T, cfg Config) (http.Handler, *store.Store) {
 	t.Helper()
 	st := newTestStore(t)
-	return New(cfg, testStatic, st), st
+	return New(cfg, st), st
 }
 
 // doReq drives a request the way a legitimate client does: a loopback Host
@@ -352,7 +347,7 @@ func TestSimilarEndpoint(t *testing.T) {
 
 	t.Run("returns initialized empty items without querying a closed store for fewer than three runes", func(t *testing.T) {
 		st := newTestStore(t)
-		h := New(Config{}, testStatic, st)
+		h := New(Config{}, st)
 		if err := st.Close(); err != nil {
 			t.Fatalf("close store: %v", err)
 		}

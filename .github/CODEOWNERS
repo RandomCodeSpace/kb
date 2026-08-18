@@ -3,16 +3,5 @@
 /scripts/check-* @aksOps
 /scripts/ci/ @aksOps
 /scripts/ci_monitor.cjs @aksOps
-/sonar-project.properties @aksOps
-/package.json @aksOps
-/package-lock.json @aksOps
-/npm-shrinkwrap.json @aksOps
-/yarn.lock @aksOps
-/pnpm-lock.yaml @aksOps
-/bun.lock @aksOps
-/bun.lockb @aksOps
-/.npmrc @aksOps
-/vite.config.* @aksOps
-/vitest.config.* @aksOps
 /go.mod @aksOps
 /go.sum @aksOps

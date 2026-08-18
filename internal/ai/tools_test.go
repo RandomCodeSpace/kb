@@ -560,7 +560,9 @@ func TestGetTaskTool(t *testing.T) {
 	})
 	tool := s.getTaskTool("default")
 
-	for _, ref := range []string{created.ID, created.ID[:8], strconv.Itoa(created.Seq), "#" + strconv.Itoa(created.Seq)} {
+	// Include the first hyphen so the UUID prefix can never be interpreted as
+	// an all-digit stable sequence number.
+	for _, ref := range []string{created.ID, created.ID[:9], strconv.Itoa(created.Seq), "#" + strconv.Itoa(created.Seq)} {
 		body, _ := json.Marshal(map[string]string{"ref": ref})
 		var got toolTask
 		if err := json.Unmarshal([]byte(mustRunTool(t, tool, string(body))), &got); err != nil {

@@ -8,7 +8,7 @@ import (
 
 // The kb task CLI (internal/cliapp) registers its verbs in the dispatch
 // table (dispatch.go), so `kb add|list|update|move|done|cancel|restore|rm|help`
-// runs the CLI and anything else serves as before. Each verb exits with
+// runs the CLI while the bare command opens the TUI. Each verb exits with
 // cliapp.Run's code directly to preserve the CLI's 0/1/2 (ok/runtime
 // error/usage error) exit-code contract; cliapp writes its own error output.
 func init() {

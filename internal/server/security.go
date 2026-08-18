@@ -9,8 +9,9 @@ import (
 )
 
 // Open mode has no authentication and binds loopback, which is only a
-// boundary if the browser cannot be tricked into crossing it. Two attacks do
-// exactly that, so every /api/* request is screened before it reaches auth:
+// boundary if a client can be tricked into crossing it. Two attacks do exactly
+// that, so every request matching a registered API route is screened before it
+// reaches auth. Unknown paths and wrong methods return 404 directly:
 //
 //  1. DNS rebinding — an attacker-controlled name resolving to 127.0.0.1
 //     makes any page the user visits same-origin with the API. The Host
@@ -151,83 +152,4 @@ func contentTypeAllowed(r *http.Request) bool {
 		return mt == "text/markdown" || mt == "application/json"
 	}
 	return mt == "application/json"
-}
-
-// entraOrigin is the only cross-origin host the SPA is ever allowed to talk
-// to, and only when Entra sign-in is configured.
-const entraOrigin = "https://login.microsoftonline.com"
-
-// contentSecurityPolicy builds the SPA's policy. kb is an on-device app with
-// zero telemetry, so the policy exists to stop egress rather than to describe
-// its absence: every fetch-directive falls back to same-origin, and the one
-// cross-origin exception is the Entra sign-in handshake, added only when
-// Azure auth is configured (azure).
-//
-// It is not a total seal, and pretending otherwise would be worse than the
-// gap. CSP governs fetch directives, so two channels stay outside it:
-//
-//   - WebRTC. connect-src does not cover RTCPeerConnection in any browser, and
-//     a STUN/TURN URL is not http(s) either. CSP3 defines `webrtc 'block'`,
-//     but no shipping engine implements it — Chrome 151 constructs a peer
-//     connection under it and logs "Unrecognized Content-Security-Policy
-//     directive 'webrtc'", so sending it buys nothing and dirties the console.
-//     It is deliberately not in the policy below.
-//   - Resource hints (<link rel="preconnect">, dns-prefetch). No directive
-//     covers them in any engine.
-//
-// Both are caught by src/egress.test.ts instead, which is the layer that
-// actually enforces them.
-//
-// Directive by directive:
-//
-//	default-src 'self'      backstop for anything not named below
-//	connect-src             the same-origin API only; in Azure mode also the
-//	                        Entra token/discovery endpoints MSAL calls
-//	script-src 'self'       bundled modules only — no inline, no eval
-//	style-src               'self' plus 'unsafe-inline', required twice over:
-//	                        the app's own React style={{…}} attributes carry
-//	                        load-bearing values (drag clone position, progress
-//	                        bar widths, tag colours), which are style-src-attr
-//	                        and fall back to here; and emoji-mart styles its
-//	                        shadow-DOM picker by inserting a <style> element
-//	                        whose textContent it sets. Dropping emoji-mart
-//	                        would therefore *not* make this removable. Vite's
-//	                        own build output is a linked stylesheet and needs
-//	                        nothing.
-//	img-src 'self' data:    bundled assets and inline data: URIs; no CDN
-//	font-src 'self'         bundled fonts only — no Google Fonts, no CDN
-//	frame-src               same-origin; in Azure mode also Entra, which MSAL
-//	                        renews tokens through in a hidden iframe when the
-//	                        refresh token no longer works
-//	object-src 'none'       no plugins
-//	base-uri 'none'         an injected <base> cannot re-point relative URLs
-//	form-action 'none'      no form may post anywhere; the app uses fetch
-//	frame-ancestors 'none'  clickjacking the board would let a hostile page
-//	                        drive already-authenticated actions
-func contentSecurityPolicy(azure bool) string {
-	connectSrc, frameSrc := "'self'", "'self'"
-	if azure {
-		connectSrc += " " + entraOrigin
-		frameSrc += " " + entraOrigin
-	}
-	return strings.Join([]string{
-		"default-src 'self'",
-		"connect-src " + connectSrc,
-		"script-src 'self'",
-		"style-src 'self' 'unsafe-inline'",
-		"img-src 'self' data:",
-		"font-src 'self'",
-		"frame-src " + frameSrc,
-		"object-src 'none'",
-		"base-uri 'none'",
-		"form-action 'none'",
-		"frame-ancestors 'none'",
-	}, "; ")
-}
-
-// setSecurityHeaders applies the SPA's content policy plus the legacy framing
-// header, which older browsers honour where frame-ancestors is ignored.
-func (s *server) setSecurityHeaders(h http.Header) {
-	h.Set("Content-Security-Policy", s.csp)
-	h.Set("X-Frame-Options", "DENY")
 }

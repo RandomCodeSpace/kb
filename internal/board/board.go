@@ -1,7 +1,6 @@
 // Package board holds the kanban board model and its markdown wire codec.
 //
-// The markdown grammar mirrors src/lib/markdown.ts exactly; the two codecs
-// must stay in lockstep.
+// The markdown grammar preserves the frozen wire format used by older clients.
 package board
 
 import "time"

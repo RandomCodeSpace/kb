@@ -1,17 +1,13 @@
-// Command kb serves the embedded kanban SPA and its API on top of the
-// SQLite store. All HTTP behavior — auth modes (Entra ID bearer tokens,
-// shared-secret token, open; see internal/server), board/labels/settings/AI
-// endpoints, SPA serving — lives in internal/server; storage lives in
-// internal/store. Subcommands (kb mcp, kb tui) dispatch in dispatch.go.
+// Command kb opens the local terminal UI by default. The optional `kb serve`
+// subcommand exposes the HTTP API; task CLI and MCP subcommands use the same
+// SQLite store directly.
 package main
 
 import (
-	"embed"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -23,9 +19,6 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/server"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
-
-//go:embed all:dist
-var distFS embed.FS
 
 // minSecretBytes is the shortest settings-encryption secret that is accepted;
 // the generated one is 32 random bytes. It tracks the threshold the shared
@@ -121,8 +114,7 @@ var (
 	loadOrCreateSecret = store.LoadOrCreateSecret
 	openDataStore      = store.Open
 	importMarkdownDir  = func(st *store.Store, dir string) (int, error) { return st.ImportMarkdownDir(dir) }
-	subDistFS          = fs.Sub
-	runMainServer      = runWebServer
+	runMainRoot        = runRoot
 	fatalLog           = log.Fatal
 )
 
@@ -131,20 +123,24 @@ type webFlagError struct{ err error }
 func (e *webFlagError) Error() string { return e.err.Error() }
 func (e *webFlagError) Unwrap() error { return e.err }
 
-// rootUsageText is what `kb --help` prints before the serve flags. Every
+// rootUsageText is what `kb --help` and a non-interactive bare `kb` print. Every
 // registered subcommand must appear here; TestRootUsageNamesEverySubcommand
 // fails when the dispatch table and this text drift apart.
-const rootUsageText = `usage: kb [flags]            serve the web UI (default)
+const rootUsageText = `usage: kb                    open the local board in the terminal
        kb <command> [args]   work with tasks from the terminal
 
 commands:
   add, list, view, update, move, done, cancel, restore, rm, users,
   comment, link, unlink
-             the task CLI — run "kb help" for the full reference
+             the task CLI - run "kb help" for the full reference
+  serve      run the optional HTTP API server
   mcp        serve the board to AI agents over MCP stdio
   tui        open the local board in a full-screen terminal UI
   version    print the kb version
   help       task CLI reference
+`
+
+const serveUsageText = `usage: kb serve [flags]
 
 serve flags:
 `
@@ -157,16 +153,13 @@ func runWebServer(args []string) error {
 }
 
 func runWebServerWithFlagOutput(args []string, output io.Writer) error {
-	flags := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	flags := flag.NewFlagSet("kb serve", flag.ContinueOnError)
 	flags.SetOutput(output)
 	port := flags.String("port", envOr("KB_PORT", "8080"), "listen port (env KB_PORT)")
 	dataDir := flags.String("data", defaultDataDir(), "board storage directory (env KB_DATA)")
 	logPath := flags.String("log", envOr("KB_LOG_FILE", ""), "write logs to this file instead of stderr (env KB_LOG_FILE)")
-	// The default FlagSet usage only lists the serve flags, which hid the
-	// entire subcommand surface from `kb --help`; the task CLI was only
-	// discoverable by already knowing to type `kb help`.
 	flags.Usage = func() {
-		fmt.Fprint(flags.Output(), rootUsageText)
+		fmt.Fprint(flags.Output(), serveUsageText)
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -209,11 +202,6 @@ func runWebServerWithFlagOutput(args []string, output io.Writer) error {
 		return fmt.Errorf("import markdown boards: %w", err)
 	}
 	log.Printf("imported %d markdown board(s)", imported)
-	static, err := subDistFS(distFS, "dist")
-	if err != nil {
-		return fmt.Errorf("embedded dist: %w", err)
-	}
-
 	mode := "open"
 	switch {
 	case cfg.TenantID != "":
@@ -233,19 +221,17 @@ func runWebServerWithFlagOutput(args []string, output io.Writer) error {
 	if mode == "open" && cfg.AllowedHosts == "" && host != "127.0.0.1" && host != "localhost" {
 		log.Printf("warning: open mode accepts only loopback Host headers; set KB_ALLOWED_HOSTS to serve the API on another hostname")
 	}
-	return listenHTTPServer(newHTTPServer(addr, server.New(cfg, static, st)))
+	return listenHTTPServer(newHTTPServer(addr, server.New(cfg, st)))
 }
 
 func main() {
 	if dispatch() {
 		return
 	}
-	if err := runMainServer(os.Args[1:]); err != nil {
-		var flagErr *webFlagError
-		if errors.As(err, &flagErr) {
-			if errors.Is(flagErr, flag.ErrHelp) {
-				return
-			}
+	if err := runMainRoot(os.Args[1:]); err != nil {
+		var usageErr *rootUsageError
+		if errors.As(err, &usageErr) {
+			fmt.Fprintf(rootStderr, "kb: %v\n", err)
 			exitProcess(2)
 			return
 		}

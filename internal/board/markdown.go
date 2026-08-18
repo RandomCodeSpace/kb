@@ -9,9 +9,9 @@ import (
 	"unicode/utf8"
 )
 
-// This file is a line-for-line port of src/lib/markdown.ts. Every rule here
-// (token syntax, header fallback by position, trimming, checkbox prefixes)
-// must match the TypeScript codec byte-for-byte on the wire format.
+// This parser preserves the frozen Markdown wire format. Token syntax, header
+// fallback by position, trimming, and checkbox prefixes are compatibility
+// contracts.
 
 var (
 	dateRe   = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)

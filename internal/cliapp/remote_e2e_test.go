@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"testing/fstest"
 
 	"github.com/RandomCodeSpace/kb/internal/server"
 	"github.com/RandomCodeSpace/kb/internal/store"
@@ -21,8 +20,7 @@ func remoteEnv(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	static := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<!doctype html>")}}
-	srv := httptest.NewServer(server.New(server.Config{Token: "sekrit"}, static, st))
+	srv := httptest.NewServer(server.New(server.Config{Token: "sekrit"}, st))
 	t.Cleanup(srv.Close)
 	t.Setenv("KB_SERVER", srv.URL)
 	t.Setenv("KB_SERVER_TOKEN", "sekrit")

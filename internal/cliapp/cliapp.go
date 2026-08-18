@@ -58,9 +58,9 @@ commands:
   help                   show this help
 
 other modes (not task commands):
-  kb                     with no command: serve the web UI (kb --help
-                         lists the serve flags)
+  kb                     open the local board in a full-screen terminal UI
   kb tui                 open the local board in a full-screen terminal UI
+  kb serve               run the optional HTTP API server
   kb mcp                 serve the board to AI agents over MCP stdio
 
 common flags (every command):
@@ -382,8 +382,8 @@ func doneGuardErr(ref string, t board.Task) error {
 // parseCheckFlag decodes one --check value with the convention the card
 // modal's checklist box already teaches ("one per line, prefix \"x \" when
 // done"): "x reproduce locally" is a ticked item, "write failing test" is an
-// open one. It mirrors src/components/CardModal.tsx's textToChecks, and the
-// "- [x]" form the markdown wire uses underneath.
+// open one. The same convention is used by the TUI editor and the "- [x]"
+// form in the Markdown wire format.
 //
 // The space after the x is required, so an item that merely starts with the
 // letter ("xml parser fails") keeps its text and stays open. A leading

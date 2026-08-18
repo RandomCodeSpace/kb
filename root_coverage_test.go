@@ -2,8 +2,6 @@ package main
 
 import (
 	"errors"
-	"flag"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -19,8 +17,7 @@ func restoreRootSeams(t *testing.T) {
 	originalLoad := loadOrCreateSecret
 	originalOpen := openDataStore
 	originalImport := importMarkdownDir
-	originalSub := subDistFS
-	originalRun := runMainServer
+	originalRun := runMainRoot
 	originalFatal := fatalLog
 	originalExit := exitProcess
 	originalFatalf := fatalLogf
@@ -31,8 +28,7 @@ func restoreRootSeams(t *testing.T) {
 		loadOrCreateSecret = originalLoad
 		openDataStore = originalOpen
 		importMarkdownDir = originalImport
-		subDistFS = originalSub
-		runMainServer = originalRun
+		runMainRoot = originalRun
 		fatalLog = originalFatal
 		exitProcess = originalExit
 		fatalLogf = originalFatalf
@@ -85,12 +81,6 @@ func TestRunWebServerInjectedPostOpenFailures(t *testing.T) {
 		t.Fatalf("import error = %v", err)
 	}
 
-	importMarkdownDir = func(*store.Store, string) (int, error) { return 0, nil }
-	subDistFS = func(fs.FS, string) (fs.FS, error) { return nil, want }
-	err = runWebServer([]string{"--data", data})
-	if !errors.Is(err, want) || !strings.Contains(err.Error(), "embedded dist") {
-		t.Fatalf("embedded-dist error = %v", err)
-	}
 }
 
 func TestRunWebServerOpenExternalBindAndDefaultListener(t *testing.T) {
@@ -134,22 +124,22 @@ func TestDispatchAndMainProcessBoundaries(t *testing.T) {
 	main()
 
 	called := false
-	runMainServer = func(args []string) error {
+	runMainRoot = func(args []string) error {
 		called = true
 		if len(args) != 0 {
-			t.Fatalf("server args = %v", args)
+			t.Fatalf("root args = %v", args)
 		}
 		return nil
 	}
 	os.Args = []string{"kb"}
 	main()
 	if !called {
-		t.Fatal("main did not run the web server")
+		t.Fatal("main did not run the root command")
 	}
 
-	want := errors.New("server failed")
+	want := errors.New("root failed")
 	var fatalArgs []any
-	runMainServer = func([]string) error { return want }
+	runMainRoot = func([]string) error { return want }
 	fatalLog = func(args ...any) { fatalArgs = append([]any(nil), args...) }
 	main()
 	if len(fatalArgs) != 1 || !errors.Is(fatalArgs[0].(error), want) {
@@ -157,18 +147,12 @@ func TestDispatchAndMainProcessBoundaries(t *testing.T) {
 	}
 
 	exitCode = 0
-	runMainServer = func([]string) error { return &webFlagError{err: errors.New("bad flag")} }
+	runMainRoot = func([]string) error { return &rootUsageError{message: "bad flag"} }
 	main()
 	if exitCode != 2 {
 		t.Fatalf("invalid flag exit = %d, want 2", exitCode)
 	}
 
-	exitCode = -1
-	runMainServer = func([]string) error { return &webFlagError{err: flag.ErrHelp} }
-	main()
-	if exitCode != -1 {
-		t.Fatalf("help invoked exit with %d", exitCode)
-	}
 }
 
 func TestRegisteredCLICommandUsesProcessBoundary(t *testing.T) {

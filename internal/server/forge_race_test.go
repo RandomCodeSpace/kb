@@ -8,7 +8,7 @@ import (
 )
 
 func TestSharedForgeInitializesOnceUnderConcurrency(t *testing.T) {
-	s := newServer(Config{}, testStatic, newTestStore(t))
+	s := newServer(Config{}, newTestStore(t))
 	const callers = 64
 	start := make(chan struct{})
 	services := make(chan *forge.Service, callers)

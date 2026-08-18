@@ -1,7 +1,6 @@
 package main
 
 import (
-	"io/fs"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -121,8 +120,8 @@ func TestConfigureLoggingReturnsAnErrorForAnUnopenablePath(t *testing.T) {
 
 // TestWiring exercises the startup path main performs: secret creation,
 // SQLite store at <data>/kb.db, legacy markdown import from the data dir,
-// and server.New over the embedded dist. Handler behavior itself is covered
-// in internal/server.
+// and the API-only server handler. Handler behavior itself is covered in
+// internal/server.
 func TestWiring(t *testing.T) {
 	dataDir := t.TempDir()
 	legacy := "# Alice\n\n## To Do\n\n- [ ] imported task #tag1\n"
@@ -148,11 +147,7 @@ func TestWiring(t *testing.T) {
 		t.Fatalf("imported = %d, want 1", imported)
 	}
 
-	static, err := fs.Sub(distFS, "dist")
-	if err != nil {
-		t.Fatalf("embedded dist: %v", err)
-	}
-	h := server.New(server.Config{}, static, st)
+	h := server.New(server.Config{}, st)
 
 	get := func(target, user string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -168,14 +163,8 @@ func TestWiring(t *testing.T) {
 		return w
 	}
 
-	// dist/ is a build artifact and is not tracked on the branch (only
-	// dist/.gitkeep is, so the go:embed directive still resolves). A
-	// source-only checkout therefore embeds no index.html and cannot serve
-	// the SPA; release commits and any tree where `vite build` has run can.
-	if _, err := fs.Stat(static, "index.html"); err != nil {
-		t.Log("no embedded index.html — source-only checkout, skipping the SPA check (run `npx vite build` to cover it)")
-	} else if w := get("/", ""); w.Code != http.StatusOK {
-		t.Errorf("GET / (embedded SPA): got %d, want 200", w.Code)
+	if w := get("/", ""); w.Code != http.StatusNotFound {
+		t.Errorf("GET /: got %d, want 404", w.Code)
 	}
 	w := get("/api/board", "alice")
 	if w.Code != http.StatusOK {
