@@ -39,6 +39,12 @@ type boardColumnClickedMsg struct{ status board.Status }
 type filterTextClickedMsg struct{}
 type filterLabelClickedMsg struct{ tag string }
 type filterClearClickedMsg struct{}
+type boardPointerDownMsg struct{ taskID string }
+type boardPointerMoveMsg struct {
+	status       board.Status
+	beforeTaskID string
+}
+type boardPointerUpMsg struct{}
 
 type boardHitKind uint8
 
@@ -265,15 +271,21 @@ func (m Model) renderBoard() (string, []boardHit) {
 	hits = append(filterHits, hits...)
 
 	state := "ready"
-	if m.loading || (m.watcher != nil && !m.haveVersion) {
-		state = "loading board..."
-	}
-	if m.loadErr != nil {
+	moveActive := m.move.lifted != nil || m.move.saving
+	movePriority := moveActive || m.move.notice
+	showMoveStatus := movePriority && m.move.status != ""
+	if showMoveStatus {
+		state = sanitizeTerminal(m.move.status)
+	} else if m.loadErr != nil {
 		state = "error: " + m.loadErr.Error()
 	} else if m.pollErr != nil {
 		state = "error: " + m.pollErr.Error()
 	} else if m.preferenceErr != nil {
 		state = "error: " + m.preferenceErr.Error()
+	} else if m.move.status != "" {
+		state = sanitizeTerminal(m.move.status)
+	} else if m.loading || (m.watcher != nil && !m.haveVersion) {
+		state = "loading board..."
 	}
 	cancelled := "off"
 	if m.boardView.showCancelled {
@@ -282,6 +294,10 @@ func (m Model) renderBoard() (string, []boardHit) {
 	help := "j/k cards | h/l/tab columns | 1-4 jump | c cancelled:" + cancelled + " | q quit"
 	if m.editor.Enabled() {
 		help = "n new | e edit | " + help
+	}
+	if showMoveStatus || (m.move.status != "" && m.loadErr == nil && m.pollErr == nil && m.preferenceErr == nil) {
+		footer := fitLine(state, width)
+		return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
 	}
 	if m.settingsNew != nil {
 		footer := settingsBoardFooter(state, cancelled, m.editor.Enabled(), width)
@@ -476,6 +492,9 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 		if m.boardView.column == statusIndex(status) && i == selected {
 			marker = "› "
 		}
+		if m.move.lifted != nil && task.ID == m.move.lifted.taskID {
+			marker = "↕ "
+		}
 		first := cardHeading(task, m.now())
 		for lineIndex, line := range wrapTokens(first, max(width-2, 1)) {
 			prefix := "  "
@@ -558,30 +577,56 @@ func joinColumns(columns []renderedColumn) (string, []boardHit) {
 	return strings.Join(lines, "\n"), hits
 }
 
-func boardMouseHandler(hits []boardHit) func(tea.MouseMsg) tea.Cmd {
+func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.Cmd {
+	pointerActive := len(active) > 0 && active[0]
 	return func(message tea.MouseMsg) tea.Cmd {
-		click, ok := message.(tea.MouseClickMsg)
-		if !ok || click.Button != tea.MouseLeft {
+		mouse := message.Mouse()
+		if _, release := message.(tea.MouseReleaseMsg); release {
+			if mouse.Button == tea.MouseLeft || (mouse.Button == tea.MouseNone && pointerActive) {
+				return func() tea.Msg { return boardPointerUpMsg{} }
+			}
 			return nil
 		}
-		mouse := click.Mouse()
+		if mouse.Button != tea.MouseLeft {
+			return nil
+		}
+		var matched *boardHit
+		var dragAnchor *boardHit
 		for i := len(hits) - 1; i >= 0; i-- {
 			hit := hits[i]
 			if mouse.X < hit.x0 || mouse.X >= hit.x1 || mouse.Y < hit.y0 || mouse.Y >= hit.y1 {
 				continue
 			}
-			switch hit.kind {
+			if matched == nil {
+				matched = &hit
+			}
+			if dragAnchor == nil && hit.kind == boardHitDefault {
+				dragAnchor = &hit
+			}
+		}
+		switch message.(type) {
+		case tea.MouseClickMsg:
+			if matched == nil {
+				return nil
+			}
+			switch matched.kind {
 			case boardHitFilterText:
 				return func() tea.Msg { return filterTextClickedMsg{} }
 			case boardHitFilterLabel:
-				return func() tea.Msg { return filterLabelClickedMsg{tag: hit.tag} }
+				return func() tea.Msg { return filterLabelClickedMsg{tag: matched.tag} }
 			case boardHitFilterClear:
 				return func() tea.Msg { return filterClearClickedMsg{} }
 			}
-			if hit.taskID != "" {
-				return func() tea.Msg { return boardCardClickedMsg{taskID: hit.taskID} }
+			if matched.taskID != "" {
+				return func() tea.Msg { return boardPointerDownMsg{taskID: matched.taskID} }
 			}
-			return func() tea.Msg { return boardColumnClickedMsg{status: hit.status} }
+			return func() tea.Msg { return boardColumnClickedMsg{status: matched.status} }
+		case tea.MouseMotionMsg:
+			if dragAnchor != nil {
+				return func() tea.Msg {
+					return boardPointerMoveMsg{status: dragAnchor.status, beforeTaskID: dragAnchor.taskID}
+				}
+			}
 		}
 		return nil
 	}
