@@ -289,7 +289,7 @@ func (m Model) renderBoard() (string, []boardHit) {
 		state = "error: " + m.preferenceErr.Error()
 	} else if m.move.status != "" {
 		state = sanitizeTerminal(m.move.status)
-	} else if m.loading || (m.watcher != nil && !m.haveVersion) {
+	} else if (m.loading && !m.haveBoardSnapshot) || (m.watcher != nil && !m.haveVersion) {
 		state = "loading board..."
 	}
 	cancelled := "off"

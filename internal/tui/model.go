@@ -72,6 +72,7 @@ type Model struct {
 	width             int
 	height            int
 	loading           bool
+	haveBoardSnapshot bool
 	reloadPending     bool
 	loadErr           error
 	pollErr           error
@@ -585,6 +586,7 @@ func (m *Model) finishBoardLoad(msg boardLoadedMsg) tea.Cmd {
 	m.loadErr = msg.err
 	var detailCmd tea.Cmd
 	if msg.err == nil {
+		m.haveBoardSnapshot = true
 		previous := m.filteredBoard()
 		m.board = msg.board
 		filtered := m.filteredBoard()
