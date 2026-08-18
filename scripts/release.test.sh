@@ -215,6 +215,14 @@ terminated_release() {
   )
 }
 
+linked_release() {
+  (
+    cd "$linked"
+    PATH="$fake_bin:$PATH" FAKE_GH_LOG="$test_root/gh.log" \
+      bash scripts/release.sh v1.2.3 docs/releases/v1.2.3.md --dry-run
+  )
+}
+
 run_fails 'version must match vX.Y.Z' release nope docs/releases/v1.2.3.md --dry-run
 run_fails 'release notes must be a readable, non-empty regular file' \
   release v1.2.3 docs/releases/missing.md --dry-run
@@ -245,8 +253,7 @@ git -C "$source_repo" tag -d v1.2.3 >/dev/null
 linked="$test_root/linked"
 git -C "$source_repo" worktree add -q -b release-test-linked "$linked"
 run_fails 'linked git worktrees are not release sources' \
-  env PATH="$fake_bin:$PATH" FAKE_GH_LOG="$test_root/gh.log" \
-  bash "$linked/scripts/release.sh" v1.2.3 "$linked/docs/releases/v1.2.3.md" --dry-run
+  linked_release
 git -C "$source_repo" worktree remove "$linked"
 
 git -C "$source_repo" tag -a v9.9.9 -m v9.9.9
