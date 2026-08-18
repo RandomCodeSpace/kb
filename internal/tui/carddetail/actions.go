@@ -80,7 +80,9 @@ func newLinkInput() textinput.Model {
 // OwnsInput is the root-routing seam for text entry, selection, confirmation,
 // and in-flight writes. Destructive or focus-changing root shortcuts must not
 // run while it returns true.
-func (m Model) OwnsInput() bool { return m.action != actionNone || m.saving }
+func (m Model) OwnsInput() bool {
+	return m.action != actionNone || m.saving || m.driftMode != driftNone
+}
 
 // ConsumeChanged reports one acknowledged mutation exactly once.
 func (m *Model) ConsumeChanged() bool {
@@ -501,6 +503,9 @@ func selectionWindow(count, selection, limit int) (int, int) {
 }
 
 func (m Model) actionFooter(width int) string {
+	if m.driftMode != driftNone {
+		return m.driftFooter()
+	}
 	if m.saving {
 		return "write in progress | esc stays here"
 	}
@@ -526,7 +531,7 @@ func (m Model) actionFooter(width int) string {
 	default:
 		switch {
 		case width >= 40:
-			return "e edit c add d/u rm b link esc close ↑/↓"
+			return "e edit v drift c add d/u rm b esc close ↑/↓"
 		case width >= 26:
 			return "e c add d/u rm b esc close"
 		default:

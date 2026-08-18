@@ -949,6 +949,43 @@ func loadExistingByID(tx *sql.Tx, user string) (map[string]*exTask, error) {
 // represent are rejected (see ValidateTaskFields). Labels are upserted from
 // t.Tags.
 func (s *Store) AddTask(user string, t board.Task) (board.Task, error) {
+	var err error
+	t, err = prepareNewTask(t)
+	if err != nil {
+		return board.Task{}, err
+	}
+	err = s.withTx(func(tx *sql.Tx) error { return s.addTaskTx(tx, user, &t) })
+	if err != nil {
+		return board.Task{}, err
+	}
+	return t, nil
+}
+
+// AddTaskWithImportLink inserts one task and its provenance in the same
+// transaction. A crash or failed provenance write therefore cannot leave an
+// imported card that the next preview mistakes for safe work to recreate.
+func (s *Store) AddTaskWithImportLink(user string, t board.Task, link ImportLink) (board.Task, error) {
+	if err := validateImportLink(link); err != nil {
+		return board.Task{}, err
+	}
+	var err error
+	t, err = prepareNewTask(t)
+	if err != nil {
+		return board.Task{}, err
+	}
+	err = s.withTx(func(tx *sql.Tx) error {
+		if err := s.addTaskTx(tx, user, &t); err != nil {
+			return err
+		}
+		return recordImportLinksTx(tx, user, []ImportLink{link}, time.Now().UTC().Format(time.RFC3339Nano))
+	})
+	if err != nil {
+		return board.Task{}, err
+	}
+	return t, nil
+}
+
+func prepareNewTask(t board.Task) (board.Task, error) {
 	if t.Status == "" {
 		t.Status = board.StatusTodo
 	}
@@ -964,26 +1001,24 @@ func (s *Store) AddTask(user string, t board.Task) (board.Task, error) {
 	now := time.Now().UTC()
 	t.ID = uuid.NewString()
 	t.CreatedAt, t.MovedAt = now, now
-	err := s.withTx(func(tx *sql.Tx) error {
-		pos, err := nextPosition(tx, user, t.Status)
-		if err != nil {
-			return err
-		}
-		t.Position = pos
-		seq, err := nextSeq(tx, user)
-		if err != nil {
-			return err
-		}
-		t.Seq = seq
-		if err := insertTask(tx, user, t); err != nil {
-			return err
-		}
-		return s.upsertLabels(tx, user, t.Tags)
-	})
-	if err != nil {
-		return board.Task{}, err
-	}
 	return t, nil
+}
+
+func (s *Store) addTaskTx(tx *sql.Tx, user string, t *board.Task) error {
+	pos, err := nextPosition(tx, user, t.Status)
+	if err != nil {
+		return err
+	}
+	t.Position = pos
+	seq, err := nextSeq(tx, user)
+	if err != nil {
+		return err
+	}
+	t.Seq = seq
+	if err := insertTask(tx, user, *t); err != nil {
+		return err
+	}
+	return s.upsertLabels(tx, user, t.Tags)
 }
 
 // UpdateTask applies patch to the task matching idPrefix and returns the

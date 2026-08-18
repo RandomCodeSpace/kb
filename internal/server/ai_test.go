@@ -166,25 +166,6 @@ func (r wireChatRequest) budget() int64 {
 	return 0
 }
 
-// Import packs cap each issue body, each comment, and the total prompt while
-// retaining a source index for every issue that fits into the bounded input.
-func TestPackImportIssuesBoundsForgeText(t *testing.T) {
-	issues := make([]forgeIssue, maxImportIssues)
-	for i := range issues {
-		issues[i] = forgeIssue{
-			Ref:      fmt.Sprintf("gitlab#%d", i+1),
-			Title:    "Import issue",
-			Body:     strings.Repeat("é", maxImportIssueBodyBytes),
-			Labels:   []string{"team::auth"},
-			Comments: []string{strings.Repeat("界", maxImportCommentBytes)},
-		}
-	}
-	packed, count := packImportIssues(issues)
-	if len(packed) > maxImportPackBytes || count == 0 || count > len(issues) {
-		t.Fatalf("pack len=%d count=%d, want <=%d and 1..%d", len(packed), count, maxImportPackBytes, len(issues))
-	}
-}
-
 // configureAI stores AI settings for the open-mode "default" user through
 // the API so the key round-trips through encryption.
 func configureAI(t *testing.T, h http.Handler, baseURL, model, key string) {
@@ -632,7 +613,7 @@ func TestAIStoriesFromForgeIssue(t *testing.T) {
 			case "/forge/api/v4/projects/group%2Fproject/issues/42":
 				_, _ = fmt.Fprintf(w, `{"iid":42,"title":"Issue title","description":%q,"web_url":"https://forge.example/group/project/-/issues/42"}`, body)
 			case "/forge/api/v4/projects/group%2Fproject/issues/42/notes":
-				_, _ = fmt.Fprintf(w, `[{"body":%q,"system":false}]`, strings.Repeat("界", maxForgeCommentLen))
+				_, _ = fmt.Fprintf(w, `[{"body":%q,"system":false}]`, strings.Repeat("界", 8<<10))
 			default:
 				http.NotFound(w, r)
 			}

@@ -12,7 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	kbai "github.com/RandomCodeSpace/kb/internal/ai"
-	"github.com/RandomCodeSpace/kb/internal/server"
+	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -31,7 +31,7 @@ type aiConnectionProber interface {
 }
 
 type forgeConnectionProber interface {
-	Probe(context.Context, string, server.ForgeProbeConfig) error
+	Probe(context.Context, string, forge.ForgeProbeConfig) error
 }
 
 type settingsLoadedMsg struct {
@@ -101,7 +101,7 @@ func newSettingsModel(st *store.Store, user string, ctx context.Context) *settin
 	return newSettingsModelWithBackends(
 		st,
 		kbai.NewRunner(st, "", nil, nil),
-		server.NewForgeProber(st),
+		forge.NewForgeProber(st),
 		user,
 		ctx,
 	)
@@ -524,7 +524,7 @@ func (m *settingsModel) startForgeTest(row *integrationSettingsRow) tea.Cmd {
 	m.status = "testing " + row.name.Value() + "..."
 	m.statusIsError = false
 	id := row.id
-	config := server.ForgeProbeConfig{
+	config := forge.ForgeProbeConfig{
 		Name: row.name.Value(), Kind: row.kind, BaseURL: row.baseURL.Value(),
 		Project: row.project.Value(), Token: row.token.Value(), Saved: row.persisted,
 	}

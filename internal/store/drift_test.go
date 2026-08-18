@@ -170,8 +170,8 @@ VALUES ('alice', 'forge.example', 'gitlab', 'gitlab:forge.example/acme/app#12',
 // recreating provenance that no longer exists.
 func TestSetImportBaselineLeavesMissingKeysAbsent(t *testing.T) {
 	s := newStore(t)
-	if err := s.SetImportBaseline("alice", "missing", ImportBaseline{Title: "missing"}); err != nil {
-		t.Fatalf("SetImportBaseline missing key: %v", err)
+	if err := s.SetImportBaseline("alice", "missing", ImportBaseline{Title: "missing"}); err == nil {
+		t.Fatal("SetImportBaseline missing key succeeded")
 	}
 	if _, found, err := s.ImportBaseline("alice", "missing"); err != nil || found {
 		t.Fatalf("ImportBaseline missing key = (found %t, err %v), want (false, nil)", found, err)

@@ -10,9 +10,12 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/forge"
+	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/adrsplit"
 	"github.com/RandomCodeSpace/kb/internal/tui/carddetail"
 	"github.com/RandomCodeSpace/kb/internal/tui/cardeditor"
+	"github.com/RandomCodeSpace/kb/internal/tui/issueimport"
 )
 
 const (
@@ -63,6 +66,7 @@ type Model struct {
 	detail            carddetail.Model
 	editor            cardeditor.Model
 	adr               adrsplit.Model
+	issueImport       issueimport.Model
 	selectAfterLoad   string
 	width             int
 	height            int
@@ -96,6 +100,11 @@ func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
 	m.editor.SetAIRunner(runner, ctx)
 	adrStore, _ := m.store.(adrsplit.Store)
 	m.adr = adrsplit.New(adrStore, runner, m.user, ctx)
+	if direct, ok := m.store.(*store.Store); ok {
+		backend := forge.New(direct, runner, nil)
+		m.issueImport = issueimport.New(direct, backend, m.user, ctx)
+		m.detail.SetDriftBackend(backend, ctx)
+	}
 }
 
 // NewModel creates the root model for one local board owner.
@@ -167,6 +176,30 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if carddetail.IsMutationMessage(message) {
 		return m, m.updateDetail(message)
 	}
+	if m.issueImport.IsOpen() && issueimport.IsMessage(message) {
+		command := m.issueImport.Update(message)
+		if m.issueImport.ConsumeChanged() {
+			return m, batchCommands(command, m.requireFreshBoard())
+		}
+		return m, command
+	}
+	if m.issueImport.IsOpen() {
+		switch msg := message.(type) {
+		case tea.KeyPressMsg:
+			if msg.String() == "ctrl+c" {
+				break
+			}
+			command := m.issueImport.Update(msg)
+			if m.issueImport.ConsumeChanged() {
+				return m, batchCommands(command, m.requireFreshBoard())
+			}
+			return m, command
+		case boardCardClickedMsg, boardColumnClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
+			return m, nil
+		}
+	}
 	if m.actionNotice && isBoardUserInput(message) {
 		m.actionNotice = false
 	}
@@ -226,7 +259,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.detail.IsOpen() {
 		switch msg := message.(type) {
 		case tea.KeyPressMsg:
-			if m.detail.OwnsInput() {
+			if m.detail.OwnsInput() && msg.String() != "ctrl+c" {
 				return m, m.updateDetail(message)
 			}
 			switch msg.String() {
@@ -266,6 +299,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.editor.CancelAsync()
 			m.adr.Close()
+			m.issueImport.Close()
 			m.stopped = true
 			m.reloadPending = false
 			return m, tea.Quit
@@ -296,7 +330,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.boardView.focusTask(m.filteredBoard(), m.move.lifted.taskID)
 				}
 				return m, nil
-			case "s", "c", "1", "2", "3", "4", "tab", "shift+tab", "n", "e", "a", "/", "f", "x":
+			case "s", "c", "1", "2", "3", "4", "tab", "shift+tab", "n", "e", "a", "i", "/", "f", "x":
 				m.cancelCardMove("focus changed")
 			default:
 				return m, nil
@@ -321,6 +355,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "a":
 			if m.adr.Enabled() && !m.move.saving {
 				return m, m.adr.Open()
+			}
+		case "i":
+			if m.issueImport.Enabled() && !m.writeBusy() {
+				return m, m.issueImport.Open()
 			}
 		case "enter":
 			if task, ok := m.selectedTask(); ok {
@@ -655,10 +693,14 @@ func (m Model) View() tea.View {
 		content = m.taskActionOverlay(content)
 		hits = nil
 	}
+	if m.issueImport.IsOpen() {
+		content = m.issueImport.Overlay(content, m.width, m.height)
+		hits = nil
+	}
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
-	if m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() {
+	if m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() && !m.issueImport.IsOpen() && !m.detail.OwnsInput() {
 		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
 		view.OnMouse = boardMouseHandler(hits, pointerActive)
 	}

@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -222,54 +222,6 @@ func newIntegrationsHandler(t *testing.T) (http.Handler, *store.Store) {
 	}
 	t.Cleanup(s.forgeClient.CloseIdleConnections)
 	return s.handler(), st
-}
-
-func TestForgeAPIBaseDerivation(t *testing.T) {
-	tests := []struct {
-		name, kind, baseURL, want string
-	}{
-		{
-			name:    "GitLab root",
-			kind:    "gitlab",
-			baseURL: "https://gitlab.example.com",
-			want:    "https://gitlab.example.com/api/v4",
-		},
-		{
-			name:    "GitLab subpath and trailing slash",
-			kind:    "gitlab",
-			baseURL: "https://gitlab.example.com/forge/",
-			want:    "https://gitlab.example.com/forge/api/v4",
-		},
-		{
-			name:    "public GitHub",
-			kind:    "github",
-			baseURL: "https://github.com/",
-			want:    "https://api.github.com",
-		},
-		{
-			name:    "public GitHub with explicit HTTPS port",
-			kind:    "github",
-			baseURL: "https://github.com:443/",
-			want:    "https://api.github.com",
-		},
-		{
-			name:    "GitHub Enterprise subpath",
-			kind:    "github",
-			baseURL: "https://github.example.com/forge/",
-			want:    "https://github.example.com/forge/api/v3",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := forgeAPIBase(test.kind, test.baseURL)
-			if err != nil {
-				t.Fatalf("forgeAPIBase(%q, %q): %v", test.kind, test.baseURL, err)
-			}
-			if got != test.want {
-				t.Fatalf("forgeAPIBase(%q, %q) = %q, want %q", test.kind, test.baseURL, got, test.want)
-			}
-		})
-	}
 }
 
 func TestIntegrationsCRUDAndPATRedaction(t *testing.T) {
@@ -707,493 +659,7 @@ func TestIntegrationsConnectionTestCollapsesUpstreamFailures(t *testing.T) {
 
 // Configured references select the most specific forge endpoint and preserve the
 // project identity required by the later fetch phase.
-func TestParseForgeRefResolvesConfiguredReferences(t *testing.T) {
-	sources := []store.ForgeSource{
-		{Name: "gitlab", Kind: "gitlab", BaseURL: "https://gitlab.example.com"},
-		{Name: "gitlab-enterprise", Kind: "gitlab", BaseURL: "https://gitlab.example.com/forge"},
-		{Name: "gitlab-nested", Kind: "gitlab", BaseURL: "https://gitlab.example.com/forge/team"},
-		{Name: "github", Kind: "github", BaseURL: "https://github.com"},
-		{Name: "github-enterprise", Kind: "github", BaseURL: "https://github.example.com/enterprise"},
-	}
 
-	tests := []struct {
-		name, sourceName, raw, wantSource, wantKind, wantProject string
-		wantIssue, wantMilestone                                 int
-	}{
-		{
-			name:       "GitLab issue",
-			raw:        "https://gitlab.example.com/group/subgroup/project/-/issues/42",
-			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/subgroup/project", wantIssue: 42,
-		},
-		{
-			name:       "GitLab legacy issue",
-			raw:        "https://gitlab.example.com/group/project/issues/43",
-			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/project", wantIssue: 43,
-		},
-		{
-			name:       "GitLab milestone",
-			raw:        "https://gitlab.example.com/group/project/-/milestones/7",
-			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/project", wantMilestone: 7,
-		},
-		{
-			name:       "GitLab project",
-			raw:        "https://gitlab.example.com/group/project",
-			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/project",
-		},
-		{
-			name:       "GitLab project may use a route-word namespace",
-			raw:        "https://gitlab.example.com/issues/project",
-			wantSource: "gitlab", wantKind: "gitlab", wantProject: "issues/project",
-		},
-		{
-			name:       "GitLab nested project may use a route-word namespace",
-			raw:        "https://gitlab.example.com/group/subgroup/issues/project",
-			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/subgroup/issues/project",
-		},
-		{
-			name:       "GitLab board resolves to its project",
-			raw:        "https://gitlab.example.com/group/project/-/boards/123",
-			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/project",
-		},
-		{
-			name:       "longest GitLab enterprise path prefix",
-			raw:        "https://gitlab.example.com/forge/group/project/-/issues/8",
-			wantSource: "gitlab-enterprise", wantKind: "gitlab", wantProject: "group/project", wantIssue: 8,
-		},
-		{
-			name:       "nested GitLab enterprise path prefix",
-			raw:        "https://gitlab.example.com/forge/team/group/project/-/issues/8",
-			wantSource: "gitlab-nested", wantKind: "gitlab", wantProject: "group/project", wantIssue: 8,
-		},
-		{
-			name:       "path prefix remains a whole segment",
-			raw:        "https://gitlab.example.com/forgeish/group/project/-/issues/8",
-			wantSource: "gitlab", wantKind: "gitlab", wantProject: "forgeish/group/project", wantIssue: 8,
-		},
-		{
-			name:       "GitHub issue",
-			raw:        "https://github.com/owner/repo/issues/9",
-			wantSource: "github", wantKind: "github", wantProject: "owner/repo", wantIssue: 9,
-		},
-		{
-			name:       "GitHub milestone",
-			raw:        "https://github.com/owner/repo/milestone/3",
-			wantSource: "github", wantKind: "github", wantProject: "owner/repo", wantMilestone: 3,
-		},
-		{
-			name:       "GitHub project",
-			raw:        "https://github.com/owner/repo",
-			wantSource: "github", wantKind: "github", wantProject: "owner/repo",
-		},
-		{
-			name:       "GitHub Enterprise path prefix",
-			raw:        "https://github.example.com/enterprise/owner/repo/issues/10",
-			wantSource: "github-enterprise", wantKind: "github", wantProject: "owner/repo", wantIssue: 10,
-		},
-		{
-			name:       "query fragment and trailing slash do not change identity",
-			raw:        "https://github.com/owner/repo/issues/9/?page=2#notes",
-			wantSource: "github", wantKind: "github", wantProject: "owner/repo", wantIssue: 9,
-		},
-		{
-			name:       "bare project uses named source",
-			sourceName: "github", raw: "owner/repo",
-			wantSource: "github", wantKind: "github", wantProject: "owner/repo",
-		},
-		{
-			name:       "absolute host ignores selected source name",
-			sourceName: "github", raw: "https://gitlab.example.com/group/project/-/issues/11",
-			wantSource: "gitlab", wantKind: "gitlab", wantProject: "group/project", wantIssue: 11,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := parseForgeRef(sources, test.sourceName, test.raw)
-			if err != nil {
-				t.Fatalf("parseForgeRef(%q, %q): %v", test.sourceName, test.raw, err)
-			}
-			if got.Source.Name != test.wantSource || got.Kind != test.wantKind || got.Project != test.wantProject ||
-				got.Issue != test.wantIssue || got.Milestone != test.wantMilestone {
-				t.Fatalf("parseForgeRef(%q) = %+v, want source=%q kind=%q project=%q issue=%d milestone=%d", test.raw, got, test.wantSource, test.wantKind, test.wantProject, test.wantIssue, test.wantMilestone)
-			}
-		})
-	}
-}
-
-func TestParseForgeRefBreaksEqualBaseTiesBySelectedSource(t *testing.T) {
-	t.Run("same base prefers selected source case-insensitively", func(t *testing.T) {
-		sources := []store.ForgeSource{
-			{Name: "alpha", Kind: "gitlab", BaseURL: "https://forge.example"},
-			{Name: "zulu", Kind: "gitlab", BaseURL: "https://forge.example"},
-		}
-		got, err := parseForgeRef(sources, "ZuLu", "https://forge.example/group/project/-/issues/8")
-		if err != nil || got.Source.Name != "zulu" || got.Project != "group/project" || got.Issue != 8 {
-			t.Fatalf("equal-base selected source = %+v, %v; want zulu issue 8", got, err)
-		}
-	})
-
-	t.Run("longer base still wins over selected source", func(t *testing.T) {
-		sources := []store.ForgeSource{
-			{Name: "alpha", Kind: "gitlab", BaseURL: "https://forge.example"},
-			{Name: "zulu", Kind: "gitlab", BaseURL: "https://forge.example/forge"},
-		}
-		got, err := parseForgeRef(sources, "alpha", "https://forge.example/forge/group/project/-/issues/8")
-		if err != nil || got.Source.Name != "zulu" || got.Project != "group/project" || got.Issue != 8 {
-			t.Fatalf("longer base source = %+v, %v; want zulu issue 8", got, err)
-		}
-	})
-}
-
-// Bare references and unconfigured hosts must never choose an arbitrary PAT.
-func TestParseForgeRefRejectsUnconfiguredReferences(t *testing.T) {
-	sources := []store.ForgeSource{
-		{Name: "github", Kind: "github", BaseURL: "https://github.com"},
-		{Name: "gitlab", Kind: "gitlab", BaseURL: "https://gitlab.example.com"},
-	}
-	tests := []struct {
-		name, sourceName, raw, want string
-	}{
-		{"unknown host", "", "https://unknown.example/owner/repo/issues/1", "no configured source for host unknown.example"},
-		{"bare without source", "", "owner/repo", "no configured source named"},
-		{"bare with unknown source", "missing", "owner/repo", "no configured source named missing"},
-		{"bare with GitLab source", "gitlab", "owner/repo", "bare reference requires GitHub source"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := parseForgeRef(sources, test.sourceName, test.raw)
-			if err == nil || err.Error() != test.want {
-				t.Fatalf("parseForgeRef(%q, %q) error = %v, want %q", test.sourceName, test.raw, err, test.want)
-			}
-		})
-	}
-}
-
-// Unambiguous modern and GitHub route errors must not degrade to project imports.
-func TestParseForgeRefRejectsMalformedRoutes(t *testing.T) {
-	sources := []store.ForgeSource{
-		{Name: "gitlab", Kind: "gitlab", BaseURL: "https://gitlab.example.com"},
-		{Name: "github", Kind: "github", BaseURL: "https://github.com"},
-	}
-	for _, raw := range []string{
-		"https://gitlab.example.com/group/project/-/issues/0",
-		"https://gitlab.example.com/group/project/-/issues/not-a-number",
-		"https://gitlab.example.com/group/project/-/issues/42/notes",
-		"https://github.com/owner/repo/issues/-1",
-		"https://github.com/owner/repo/milestone/999999999999999999999999999999999999",
-		"https://github.com/owner/repo/issues/9/comments",
-	} {
-		t.Run(raw, func(t *testing.T) {
-			if _, err := parseForgeRef(sources, "", raw); err == nil {
-				t.Fatalf("parseForgeRef(%q) succeeded, want malformed route error", raw)
-			}
-		})
-	}
-}
-
-// Legacy GitLab markers are routes only with a final positive decimal ID, so
-// every other marker-shaped path remains an otherwise valid nested project.
-func TestParseForgeRefTreatsAmbiguousLegacyTailsAsProjects(t *testing.T) {
-	sources := []store.ForgeSource{{Name: "gitlab", Kind: "gitlab", BaseURL: "https://gitlab.example.com"}}
-	for _, raw := range []string{
-		"https://gitlab.example.com/group/project/issues/42/notes",
-		"https://gitlab.example.com/group/project/issues/not-a-number/notes",
-		"https://gitlab.example.com/group/project/milestones/not-a-number/notes",
-		"https://gitlab.example.com/group/project/issues/0",
-		"https://gitlab.example.com/group/project/issues/not-a-number",
-		"https://gitlab.example.com/group/project/milestones/0",
-	} {
-		t.Run(raw, func(t *testing.T) {
-			got, err := parseForgeRef(sources, "", raw)
-			if err != nil {
-				t.Fatalf("parseForgeRef(%q): %v", raw, err)
-			}
-			project := strings.TrimPrefix(raw, "https://gitlab.example.com/")
-			if got.Project != project || got.Issue != 0 || got.Milestone != 0 {
-				t.Fatalf("parseForgeRef(%q) = %+v, want project-only %q", raw, got, project)
-			}
-		})
-	}
-}
-
-func testForgeRef(kind, name, baseURL, project string, issue, milestone int, pat string) forgeRef {
-	return forgeRef{
-		Source:    store.ForgeSource{Name: name, Kind: kind, BaseURL: baseURL},
-		Kind:      kind,
-		Project:   project,
-		Issue:     issue,
-		Milestone: milestone,
-		pat:       pat,
-	}
-}
-
-// Issue fetches encode forge-native paths, attach credentials only as headers,
-// and keep discussion text bounded before it reaches the AI import pipeline.
-func TestFetchIssueUsesEncodedEndpointsAndHeaderOnlyPAT(t *testing.T) {
-	tests := []struct {
-		name, kind, sourceName, project, pat, issuePath, commentsPath string
-		basePath                                                      string
-		ref                                                           forgeRef
-		wantRef                                                       string
-	}{
-		{
-			name: "GitLab enterprise", kind: "gitlab", sourceName: "gitlab", project: "group/sub/project", pat: "glpat-test",
-			basePath: "/forge", issuePath: "/forge/api/v4/projects/group%2Fsub%2Fproject/issues/42", commentsPath: "/forge/api/v4/projects/group%2Fsub%2Fproject/issues/42/notes",
-			wantRef: "gitlab#42",
-		},
-		{
-			name: "GitHub enterprise", kind: "github", sourceName: "github", project: "owner name/repo", pat: "ghp-test",
-			basePath: "/enterprise", issuePath: "/enterprise/api/v3/repos/owner%20name/repo/issues/9", commentsPath: "/enterprise/api/v3/repos/owner%20name/repo/issues/9/comments",
-			wantRef: "github#9",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			var requests int
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requests++
-				if strings.Contains(r.URL.RawQuery, test.pat) || strings.Contains(r.RequestURI, test.pat) {
-					t.Fatal("forge request put the PAT in its URL")
-				}
-				if r.Method != http.MethodGet {
-					t.Fatalf("method = %s, want GET", r.Method)
-				}
-				switch test.kind {
-				case "gitlab":
-					if r.Header.Get("PRIVATE-TOKEN") != test.pat || r.Header.Get("Authorization") != "" {
-						t.Fatal("GitLab request did not carry only PRIVATE-TOKEN")
-					}
-				case "github":
-					if r.Header.Get("Authorization") != "Bearer "+test.pat || r.Header.Get("PRIVATE-TOKEN") != "" {
-						t.Fatal("GitHub request did not carry only Bearer authorization")
-					}
-					if r.Header.Get("Accept") != "application/vnd.github+json" {
-						t.Fatalf("GitHub Accept = %q", r.Header.Get("Accept"))
-					}
-				}
-				switch r.URL.EscapedPath() {
-				case test.issuePath:
-					if r.URL.RawQuery != "" {
-						t.Fatalf("issue query = %q, want empty", r.URL.RawQuery)
-					}
-					if test.kind == "gitlab" {
-						_, _ = io.WriteString(w, `{"iid":42,"title":"Fix import","description":"body","web_url":"https://forge.example/issues/42","labels":["bug"]}`)
-					} else {
-						_, _ = io.WriteString(w, `{"number":9,"title":"Fix import","body":"body","html_url":"https://forge.example/issues/9","labels":[{"name":"bug"}]}`)
-					}
-				case test.commentsPath:
-					if r.URL.Query().Get("per_page") != "50" {
-						t.Fatalf("comments per_page = %q, want 50", r.URL.Query().Get("per_page"))
-					}
-					comments := make([]map[string]any, 0, 22)
-					for i := range 22 {
-						body := "comment"
-						if i == 1 {
-							body = strings.Repeat("é", 700)
-						}
-						if test.kind == "gitlab" {
-							comments = append(comments, map[string]any{"body": body, "system": i == 0})
-						} else {
-							comments = append(comments, map[string]any{"body": body})
-						}
-					}
-					if err := json.NewEncoder(w).Encode(comments); err != nil {
-						t.Fatalf("encode comments: %v", err)
-					}
-				default:
-					http.NotFound(w, r)
-				}
-			}))
-			defer upstream.Close()
-
-			baseURL := upstream.URL + test.basePath
-			issue := 42
-			if test.kind == "github" {
-				issue = 9
-			}
-			ref := testForgeRef(test.kind, test.sourceName, baseURL, test.project, issue, 0, test.pat)
-			s := &server{forgeClient: upstream.Client()}
-			got, err := s.fetchIssue(context.Background(), ref)
-			if err != nil {
-				t.Fatalf("fetchIssue: %v", err)
-			}
-			if requests != 2 || got.Ref != test.wantRef || got.Title != "Fix import" || got.Body != "body" || got.URL == "" || len(got.Labels) != 1 || got.Labels[0] != "bug" {
-				t.Fatalf("fetchIssue result = %+v, requests=%d", got, requests)
-			}
-			if len(got.Comments) != 20 {
-				t.Fatalf("comments = %d, want 20 after system-note filtering and cap", len(got.Comments))
-			}
-			for _, comment := range got.Comments {
-				if len(comment) > 1<<10 || !utf8.ValidString(comment) {
-					t.Fatalf("comment has invalid bounded UTF-8 length=%d", len(comment))
-				}
-			}
-		})
-	}
-}
-
-// GitHub pull requests share issue endpoints but must never become imported tasks.
-func TestFetchIssueRejectsGitHubPullRequests(t *testing.T) {
-	for _, body := range []string{
-		`{"number":9,"title":"PR","pull_request":{}}`,
-		`{"number":9,"title":"PR","pull_request":null}`,
-	} {
-		t.Run(body, func(t *testing.T) {
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasSuffix(r.URL.Path, "/comments") {
-					_, _ = io.WriteString(w, `[]`)
-					return
-				}
-				_, _ = io.WriteString(w, body)
-			}))
-			defer upstream.Close()
-
-			s := &server{forgeClient: upstream.Client()}
-			ref := testForgeRef("github", "github", upstream.URL+"/enterprise", "owner/repo", 9, 0, "")
-			_, err := s.fetchIssue(context.Background(), ref)
-			var ae *aiError
-			if !errors.As(err, &ae) || ae.code != http.StatusBadGateway || ae.msg != "forge request failed" {
-				t.Fatalf("pull-request error = %#v, want opaque forge aiError", err)
-			}
-		})
-	}
-}
-
-// List fetches cap imports, preserve upstream total hints, and stop immediately at rate limits.
-func TestFetchIssuesCapsAndReturnsRateLimitedPartials(t *testing.T) {
-	t.Run("GitLab pagination then 429", func(t *testing.T) {
-		var calls int
-		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.EscapedPath() != "/forge/api/v4/projects/group%2Fproject/issues" {
-				http.NotFound(w, r)
-				return
-			}
-			if r.URL.Query().Get("state") != "opened" || r.URL.Query().Get("per_page") != "50" {
-				t.Fatalf("list query = %q", r.URL.RawQuery)
-			}
-			calls++
-			if r.URL.Query().Get("page") == "2" {
-				w.Header().Set("X-Total", "30")
-				w.WriteHeader(http.StatusTooManyRequests)
-				return
-			}
-			w.Header().Set("X-Total", "30")
-			w.Header().Set("X-Next-Page", "2")
-			_, _ = io.WriteString(w, `[{"iid":1,"title":"One","description":"body","web_url":"https://forge.example/1"},{"iid":2,"title":"Two","description":"body","web_url":"https://forge.example/2"}]`)
-		}))
-		defer upstream.Close()
-
-		s := &server{forgeClient: upstream.Client()}
-		ref := testForgeRef("gitlab", "gitlab", upstream.URL+"/forge", "group/project", 0, 0, "")
-		issues, total, truncated, note, err := s.fetchIssues(context.Background(), ref, 99)
-		if err != nil || calls != 2 || len(issues) != 2 || total != 30 || !truncated || note != "rate limited — partial results (2 of 30)" {
-			t.Fatalf("fetchIssues = issues=%d total=%d truncated=%v note=%q err=%v calls=%d", len(issues), total, truncated, note, err, calls)
-		}
-	})
-
-	t.Run("GitLab maximum import cap", func(t *testing.T) {
-		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			items := make([]map[string]any, 25)
-			for i := range items {
-				items[i] = map[string]any{"iid": i + 1, "title": "Task", "description": "body", "web_url": "https://forge.example"}
-			}
-			if err := json.NewEncoder(w).Encode(items); err != nil {
-				t.Fatalf("encode issues: %v", err)
-			}
-		}))
-		defer upstream.Close()
-
-		s := &server{forgeClient: upstream.Client()}
-		ref := testForgeRef("gitlab", "gitlab", upstream.URL, "group/project", 0, 0, "")
-		issues, total, truncated, note, err := s.fetchIssues(context.Background(), ref, 100)
-		if err != nil || len(issues) != 20 || total != 25 || !truncated || note != "" {
-			t.Fatalf("cap result = issues=%d total=%d truncated=%v note=%q err=%v", len(issues), total, truncated, note, err)
-		}
-	})
-}
-
-// Milestone lists resolve their forge-specific marker before filtering issues, while GitHub rate exhaustion remains partial.
-func TestFetchIssuesResolvesMilestonesAndDropsGitHubPullRequests(t *testing.T) {
-	var calls int
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		switch r.URL.EscapedPath() {
-		case "/enterprise/api/v3/repos/owner/repo/milestones/3":
-			_, _ = io.WriteString(w, `{"number":3,"title":"Release"}`)
-		case "/enterprise/api/v3/repos/owner/repo/issues":
-			if r.URL.Query().Get("milestone") != "3" || r.URL.Query().Get("state") != "open" || r.URL.Query().Get("per_page") != "50" {
-				t.Fatalf("milestone list query = %q", r.URL.RawQuery)
-			}
-			_, _ = io.WriteString(w, `[{"number":1,"title":"PR","pull_request":null},{"number":2,"title":"Issue","body":"body","html_url":"https://forge.example/2"}]`)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer upstream.Close()
-
-	s := &server{forgeClient: upstream.Client()}
-	ref := testForgeRef("github", "github", upstream.URL+"/enterprise", "owner/repo", 0, 3, "")
-	issues, total, truncated, note, err := s.fetchIssues(context.Background(), ref, 20)
-	if err != nil || calls != 2 || len(issues) != 1 || issues[0].Ref != "github#2" || total != 1 || truncated || note != "" {
-		t.Fatalf("milestone result = %+v total=%d truncated=%v note=%q err=%v calls=%d", issues, total, truncated, note, err, calls)
-	}
-
-	t.Run("GitLab title filter", func(t *testing.T) {
-		var milestoneCalls int
-		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			milestoneCalls++
-			switch r.URL.EscapedPath() {
-			case "/forge/api/v4/projects/group%2Fproject/milestones/7":
-				_, _ = io.WriteString(w, `{"title":"Release 1"}`)
-			case "/forge/api/v4/projects/group%2Fproject/issues":
-				if r.URL.Query().Get("milestone") != "Release 1" || r.URL.Query().Get("state") != "opened" {
-					t.Fatalf("GitLab milestone query = %q", r.URL.RawQuery)
-				}
-				_, _ = io.WriteString(w, `[{"iid":7,"title":"Issue","description":"body","web_url":"https://forge.example/7"}]`)
-			default:
-				http.NotFound(w, r)
-			}
-		}))
-		defer upstream.Close()
-
-		s := &server{forgeClient: upstream.Client()}
-		ref := testForgeRef("gitlab", "gitlab", upstream.URL+"/forge", "group/project", 0, 7, "")
-		issues, total, truncated, note, err := s.fetchIssues(context.Background(), ref, 20)
-		if err != nil || milestoneCalls != 2 || len(issues) != 1 || issues[0].Ref != "gitlab#7" || total != 1 || truncated || note != "" {
-			t.Fatalf("GitLab milestone result = %+v total=%d truncated=%v note=%q err=%v calls=%d", issues, total, truncated, note, err, milestoneCalls)
-		}
-	})
-}
-
-// Exhausted GitHub rate limits return already fetched work without retries or sleeps.
-func TestFetchIssuesReturnsGitHubRateLimitPartial(t *testing.T) {
-	var calls int
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.EscapedPath() != "/enterprise/api/v3/repos/owner/repo/issues" {
-			http.NotFound(w, r)
-			return
-		}
-		calls++
-		if r.URL.Query().Get("page") == "2" {
-			w.Header().Set("X-RateLimit-Remaining", "0")
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		w.Header().Set("Link", `<https://forge.example/repos/owner/repo/issues?page=2>; rel="next"`)
-		w.Header().Set("X-Total", "999")
-		_, _ = io.WriteString(w, `[{"number":1,"title":"One","body":"body","html_url":"https://forge.example/1"},{"number":2,"title":"Two","body":"body","html_url":"https://forge.example/2"}]`)
-	}))
-	defer upstream.Close()
-
-	s := &server{forgeClient: upstream.Client()}
-	ref := testForgeRef("github", "github", upstream.URL+"/enterprise", "owner/repo", 0, 0, "")
-	issues, total, truncated, note, err := s.fetchIssues(context.Background(), ref, 20)
-	if err != nil || calls != 2 || len(issues) != 2 || total != 2 || !truncated || note != "rate limited — partial results (2 of 2)" {
-		t.Fatalf("GitHub partial = issues=%d total=%d truncated=%v note=%q err=%v calls=%d", len(issues), total, truncated, note, err, calls)
-	}
-}
-
-// Import preview computes duplicate flags before one AI transformation and
-// makes provenance server-owned even when the model invents link tags.
 func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.EscapedPath() != "/forge/api/v4/projects/group%2Fproject/issues" {
@@ -1227,7 +693,8 @@ func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
 	if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, &pat); err != nil {
 		t.Fatalf("seed forge source: %v", err)
 	}
-	linked, err := st.AddTask("default", board.Task{Title: "Existing linked", Tags: []string{"link::gitlab#42"}})
+	qualified42 := "gitlab:gitlab-main@" + baseURL + "/group/project#42"
+	linked, err := st.AddTask("default", board.Task{Title: "Existing linked", Tags: []string{"link::gitlab#42", "import::" + qualified42}})
 	if err != nil {
 		t.Fatalf("seed linked task: %v", err)
 	}
@@ -1274,9 +741,8 @@ func TestImportPreviewTransformsConfiguredForgeIssues(t *testing.T) {
 	if _, ok := raw["commentary"]; ok {
 		t.Fatalf("preview response leaked the skill commentary: %v", raw)
 	}
-	host := strings.TrimPrefix(upstream.URL, "http://")
 	first, second, unlinked := response.Drafts[0], response.Drafts[1], response.Drafts[2]
-	if first.Link != "gitlab#42" || first.ExternalKey != "gitlab:"+host+"/group/project#42" || first.URL == "" || first.DuplicateOf == nil || first.DuplicateOf.ID != linked.ID || first.DuplicateOf.Title != linked.Title || first.DuplicateOf.Via != "link" || strings.Join(first.Tags, ",") != "team::auth,link::gitlab#42" {
+	if first.Link != "gitlab#42" || first.ExternalKey != qualified42 || first.URL == "" || first.DuplicateOf == nil || first.DuplicateOf.ID != linked.ID || first.DuplicateOf.Title != linked.Title || first.DuplicateOf.Via != "link" || strings.Join(first.Tags, ",") != "team::auth,link::gitlab#42,import::"+qualified42 {
 		t.Fatalf("linked draft = %+v", first)
 	}
 	if second.Link != "gitlab#43" || second.DuplicateOf == nil || second.DuplicateOf.ID != similar.ID || second.DuplicateOf.Via != "similar" || !strings.Contains(strings.Join(second.Tags, ","), "link::gitlab#43") {
@@ -1341,20 +807,7 @@ func TestImportPreviewNotesATransformCutShort(t *testing.T) {
 
 // A rate-limited fetch and a transform cut short are independent, so the
 // second note joins the first rather than replacing it.
-func TestAppendImportNoteKeepsWhatTheFetchReported(t *testing.T) {
-	if got := appendImportNote("", importPartialTransformNote); got != importPartialTransformNote {
-		t.Errorf("appendImportNote(empty) = %q", got)
-	}
-	got := appendImportNote("rate limited", importPartialTransformNote)
-	if !strings.Contains(got, "rate limited") || !strings.Contains(got, importPartialTransformNote) {
-		t.Errorf("appendImportNote = %q, want both notes", got)
-	}
-}
 
-// One forge issue yields at most one linked draft. Nothing stops a model from
-// proposing two cards for the same source, and handing both the same link and
-// external key would let the user accept two board cards that claim to be one
-// issue.
 func TestImportPreviewLinksEachForgeIssueOnce(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.EscapedPath() != "/forge/api/v4/projects/group%2Fproject/issues" {
@@ -1385,7 +838,8 @@ func TestImportPreviewLinksEachForgeIssueOnce(t *testing.T) {
 	if _, err := st.SetForgeSource("default", "gitlab-main", "gitlab", &baseURL, &pat); err != nil {
 		t.Fatalf("seed forge source: %v", err)
 	}
-	if _, err := st.AddTask("default", board.Task{Title: "Existing linked", Tags: []string{"link::gitlab#43"}}); err != nil {
+	qualified43 := "gitlab:gitlab-main@" + baseURL + "/group/project#43"
+	if _, err := st.AddTask("default", board.Task{Title: "Existing linked", Tags: []string{"link::gitlab#43", "import::" + qualified43}}); err != nil {
 		t.Fatalf("seed linked task: %v", err)
 	}
 
@@ -2138,12 +1592,12 @@ func TestImportDriftRevisionAndAccept(t *testing.T) {
 	}
 	issueState.Store(importDriftIssueState{Title: "Initial title", Body: "Changed body"})
 	second, bodyDrift := postImportDrift(t, h, "primary", key, nil)
-	if second.Code != http.StatusOK || bodyDrift.State != "drifted" || !validImportDriftRevision(bodyDrift.Revision) {
+	if second.Code != http.StatusOK || bodyDrift.State != "drifted" || !forge.ValidRevision(bodyDrift.Revision) {
 		t.Fatalf("body drift response = %d %+v", second.Code, bodyDrift)
 	}
 	issueState.Store(importDriftIssueState{Title: "Changed title", Body: "Changed body"})
 	third, titleDrift := postImportDrift(t, h, "primary", key, nil)
-	if third.Code != http.StatusOK || titleDrift.State != "drifted" || !validImportDriftRevision(titleDrift.Revision) || titleDrift.Revision == bodyDrift.Revision {
+	if third.Code != http.StatusOK || titleDrift.State != "drifted" || !forge.ValidRevision(titleDrift.Revision) || titleDrift.Revision == bodyDrift.Revision {
 		t.Fatalf("title drift response = %d %+v, body revision=%q", third.Code, titleDrift, bodyDrift.Revision)
 	}
 
@@ -2162,7 +1616,7 @@ func TestImportDriftRevisionAndAccept(t *testing.T) {
 		t.Fatalf("matching accept = %d %+v body=%q", accepted.Code, advanced, accepted.Body.String())
 	}
 	afterAccept, found, err := st.ImportBaseline("default", key)
-	if err != nil || !found || afterAccept.At != advanced.BaselineAt || importDriftRevision(afterAccept) != titleDrift.Revision {
+	if err != nil || !found || afterAccept.At != advanced.BaselineAt || forge.BaselineRevision(afterAccept) != titleDrift.Revision {
 		t.Fatalf("accepted baseline = (%+v, %t, %v), want revision=%q at=%q", afterAccept, found, err, titleDrift.Revision, advanced.BaselineAt)
 	}
 	next, unchanged := postImportDrift(t, h, "primary", key, nil)
@@ -2218,7 +1672,7 @@ func TestImportDriftAcceptRejectsInvalidTargetsAndPreservesBaseline(t *testing.T
 		t.Fatalf("seed rejected accept provenance: %v", err)
 	}
 
-	validButStale := importDriftRevision(store.NewImportBaseline("Different", "body", ""))
+	validButStale := forge.BaselineRevision(store.NewImportBaseline("Different", "body", ""))
 	tests := []struct {
 		name, source, externalKey, revision string
 		headers                             map[string]string
@@ -2269,7 +1723,7 @@ func TestImportDriftAcceptFailuresStayOpaque(t *testing.T) {
 		if err := st.SetImportBaseline("default", key, store.NewImportBaseline("Old", "Old", "2026-07-29T10:00:00Z")); err != nil {
 			t.Fatalf("seed baseline: %v", err)
 		}
-		w, _ := postImportDriftAccept(t, h, "primary", key, importDriftRevision(store.NewImportBaseline("Current", "Current", "")), nil)
+		w, _ := postImportDriftAccept(t, h, "primary", key, forge.BaselineRevision(store.NewImportBaseline("Current", "Current", "")), nil)
 		if w.Code != http.StatusBadGateway || strings.TrimSpace(w.Body.String()) != "connection failed" {
 			t.Fatalf("forge accept failure = %d %q, want opaque 502", w.Code, w.Body.String())
 		}

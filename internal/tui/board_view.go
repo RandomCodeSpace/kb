@@ -306,6 +306,9 @@ func (m Model) renderBoard() (string, []boardHit) {
 	}
 	if m.settingsNew != nil {
 		footer := settingsBoardFooter(state, cancelled, m.editor.Enabled(), m.adr.Enabled(), width)
+		if m.issueImport.Enabled() && width >= 24 {
+			footer = fitLine("i import | "+footer, width)
+		}
 		return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
 	}
 	footer := fitLine(state+" | "+help, width)

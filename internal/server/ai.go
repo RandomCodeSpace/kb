@@ -16,9 +16,9 @@ import (
 	"syscall"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	kbai "github.com/RandomCodeSpace/kb/internal/ai"
+	"github.com/RandomCodeSpace/kb/internal/forge"
 )
 
 // AITimeout bounds one upstream chat-completion round trip. It is exported so
@@ -463,41 +463,12 @@ func (s *server) resolveAIStoriesInput(w http.ResponseWriter, r *http.Request, u
 		return aiStoriesInput{adr: req.ADR}, true
 	}
 
-	sources, err := s.store.ForgeSources(user)
+	issue, link, issueURL, err := s.sharedForge().ResolveIssueDocument(r.Context(), user, req.Source, req.URL)
 	if err != nil {
-		log.Printf("forge: list sources for stories for %s failed", user)
-		http.Error(w, storageErrorMessage, http.StatusInternalServerError)
+		writeAIError(w, user, "stories", serverForgeError(err))
 		return aiStoriesInput{}, false
 	}
-	ref, err := parseForgeRef(sources, req.Source, req.URL)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return aiStoriesInput{}, false
-	}
-	selected, found := forgeSourceByName(sources, req.Source)
-	if !found {
-		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
-		return aiStoriesInput{}, false
-	}
-	if ref.Source.Name != selected.Name {
-		http.Error(w, "reference does not match selected source", http.StatusBadRequest)
-		return aiStoriesInput{}, false
-	}
-	kind, baseURL, pat, err := s.store.ForgePAT(user, selected.Name)
-	if err != nil || kind != selected.Kind || baseURL != selected.BaseURL {
-		http.Error(w, configuredSourceUnavailableMessage, http.StatusBadRequest)
-		return aiStoriesInput{}, false
-	}
-	ref.pat = pat
-	ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
-	defer cancel()
-	issue, err := s.fetchIssue(ctx, ref)
-	if err != nil {
-		writeAIError(w, user, "stories", err)
-		return aiStoriesInput{}, false
-	}
-	link, _ := importIssueProvenance(ref, issue)
-	return aiStoriesInput{adr: forgeIssueADR(issue), link: link, issueURL: issue.URL}, true
+	return aiStoriesInput{adr: forge.IssueADR(issue), link: link, issueURL: issueURL}, true
 }
 
 // adrSplitSkillName is the skill /api/ai/stories runs. The endpoint predates
@@ -532,7 +503,7 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 	stories := run.Cards
 	if input.link != "" {
 		for i := range stories {
-			stories[i].Tags = append(stripModelLinkTags(stories[i].Tags), linkTagPrefix+input.link)
+			stories[i].Tags = append(forge.StripLinkTags(stories[i].Tags), linkTagPrefix+input.link)
 		}
 	}
 	writeJSON(w, struct {
@@ -540,67 +511,6 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 		Link    string       `json:"link,omitempty"`
 		URL     string       `json:"url,omitempty"`
 	}{Stories: stories, Link: input.link, URL: input.issueURL})
-}
-
-// forgeIssueADR turns one fetched issue and its bounded human discussion into
-// the ADR text sent to the existing splitter. Discussion yields first when the
-// input reaches maxADRBytes; if title and body alone exceed it, truncation is
-// still rune-safe and leaves the prompt within the same existing limit.
-func forgeIssueADR(issue forgeIssue) string {
-	adr := fmt.Sprintf("# %s\n\n%s", issue.Title, issue.Body)
-	discussion := "\n\n## Discussion"
-	if len(adr)+len(discussion) > maxADRBytes {
-		return truncateImportText(adr, maxADRBytes)
-	}
-	adr += discussion
-	for _, comment := range issue.Comments {
-		item := "\n- " + comment
-		remaining := maxADRBytes - len(adr)
-		if len(item) > remaining {
-			return adr + truncateImportText(item, remaining)
-		}
-		adr += item
-	}
-	return adr
-}
-
-// packImportIssues limits raw forge text before one model call while keeping
-// source numbers stable for server-owned provenance after coercion.
-func packImportIssues(issues []forgeIssue) (string, int) {
-	var packed strings.Builder
-	count := 0
-	for i, issue := range issues {
-		if packed.Len() >= maxImportPackBytes {
-			break
-		}
-		comments := make([]string, 0, min(len(issue.Comments), 10))
-		for _, comment := range issue.Comments {
-			if len(comments) == 10 {
-				break
-			}
-			comments = append(comments, truncateImportText(comment, maxImportCommentBytes))
-		}
-		section := fmt.Sprintf("Source %d\nTitle: %s\nRef: %s\nLabels: %s\nBody:\n%s\nComments:\n%s\n\n",
-			i+1, issue.Title, issue.Ref, strings.Join(issue.Labels, ", "),
-			truncateImportText(issue.Body, maxImportIssueBodyBytes), strings.Join(comments, "\n"))
-		if len(section) > maxImportPackBytes-packed.Len() {
-			break
-		}
-		packed.WriteString(section)
-		count++
-	}
-	return packed.String(), count
-}
-
-func truncateImportText(text string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	for len(text) > max {
-		_, size := utf8.DecodeLastRuneInString(text)
-		text = text[:len(text)-size]
-	}
-	return text
 }
 
 // logSafe makes an untrusted value safe to interpolate into a log line. The

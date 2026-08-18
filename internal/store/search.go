@@ -420,14 +420,90 @@ func (s *Store) SetImportBaseline(scope, externalKey string, baseline ImportBase
 	if err := validateImportBaseline(baseline); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`
+	result, err := s.db.Exec(`
 UPDATE import_links
 SET baseline_title = ?, baseline_hash = ?, baseline_excerpt = ?, baseline_at = ?
 WHERE scope = ? AND external_key = ?`,
-		baseline.Title, baseline.Hash, baseline.Excerpt, baseline.At, scope, externalKey); err != nil {
+		baseline.Title, baseline.Hash, baseline.Excerpt, baseline.At, scope, externalKey)
+	if err != nil {
 		return fmt.Errorf("store: set import baseline: %w", err)
 	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: set import baseline rows: %w", err)
+	}
+	if updated == 0 {
+		return errors.New("store: import link not found")
+	}
 	return nil
+}
+
+// CreateImportBaseline records the first observed baseline atomically. If a
+// competing frontend already recorded one, it returns that winner.
+func (s *Store) CreateImportBaseline(scope, externalKey string, baseline ImportBaseline) (ImportBaseline, bool, error) {
+	if err := validateImportBaseline(baseline); err != nil {
+		return ImportBaseline{}, false, err
+	}
+	result, err := s.db.Exec(`
+UPDATE import_links
+SET baseline_title = ?, baseline_hash = ?, baseline_excerpt = ?, baseline_at = ?
+WHERE scope = ? AND external_key = ?
+  AND baseline_title = '' AND baseline_hash = '' AND baseline_excerpt = '' AND baseline_at = ''`,
+		baseline.Title, baseline.Hash, baseline.Excerpt, baseline.At, scope, externalKey)
+	if err != nil {
+		return ImportBaseline{}, false, fmt.Errorf("store: create import baseline: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return ImportBaseline{}, false, fmt.Errorf("store: create import baseline rows: %w", err)
+	}
+	if updated == 1 {
+		return baseline, true, nil
+	}
+	current, present, err := s.ImportBaseline(scope, externalKey)
+	if err != nil {
+		return ImportBaseline{}, false, err
+	}
+	if !present {
+		return ImportBaseline{}, false, errors.New("store: import link not found")
+	}
+	return current, false, nil
+}
+
+// CompareAndSwapImportBaseline updates a baseline only if it still equals the
+// caller's observed value. This is the cross-service drift lock.
+func (s *Store) CompareAndSwapImportBaseline(scope, externalKey string, expected, next ImportBaseline) (bool, error) {
+	if err := validateImportBaseline(expected); err != nil {
+		return false, err
+	}
+	if err := validateImportBaseline(next); err != nil {
+		return false, err
+	}
+	result, err := s.db.Exec(`
+UPDATE import_links
+SET baseline_title = ?, baseline_hash = ?, baseline_excerpt = ?, baseline_at = ?
+WHERE scope = ? AND external_key = ?
+  AND baseline_title = ? AND baseline_hash = ? AND baseline_excerpt = ? AND baseline_at = ?`,
+		next.Title, next.Hash, next.Excerpt, next.At, scope, externalKey,
+		expected.Title, expected.Hash, expected.Excerpt, expected.At)
+	if err != nil {
+		return false, fmt.Errorf("store: compare and swap import baseline: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: compare and swap import baseline rows: %w", err)
+	}
+	if updated == 1 {
+		return true, nil
+	}
+	var exists int
+	if err := s.db.QueryRow(`SELECT 1 FROM import_links WHERE scope = ? AND external_key = ?`, scope, externalKey).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, errors.New("store: import link not found")
+		}
+		return false, fmt.Errorf("store: compare and swap import baseline existence: %w", err)
+	}
+	return false, nil
 }
 
 func validateImportBaseline(baseline ImportBaseline) error {
@@ -521,8 +597,13 @@ func (s *Store) RecordImportLinks(scope string, links []ImportLink) error {
 	}
 	importedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	return s.withTx(func(tx *sql.Tx) error {
-		for _, link := range links {
-			if _, err := tx.Exec(`
+		return recordImportLinksTx(tx, scope, links, importedAt)
+	})
+}
+
+func recordImportLinksTx(tx *sql.Tx, scope string, links []ImportLink, importedAt string) error {
+	for _, link := range links {
+		if _, err := tx.Exec(`
 INSERT INTO import_links (scope, source, kind, external_key, link, url, title, imported_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(scope, external_key) DO UPDATE SET
@@ -532,12 +613,11 @@ ON CONFLICT(scope, external_key) DO UPDATE SET
 	url = excluded.url,
 	title = excluded.title,
 	imported_at = excluded.imported_at`,
-				scope, link.Source, link.Kind, link.ExternalKey, link.Link, link.URL, link.Title, importedAt); err != nil {
-				return fmt.Errorf("store: record import link %q: %w", link.ExternalKey, err)
-			}
+			scope, link.Source, link.Kind, link.ExternalKey, link.Link, link.URL, link.Title, importedAt); err != nil {
+			return fmt.Errorf("store: record import link %q: %w", link.ExternalKey, err)
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 func validateImportLink(link ImportLink) error {
