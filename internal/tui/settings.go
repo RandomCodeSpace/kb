@@ -60,6 +60,8 @@ type forgeSettingsRemovedMsg struct {
 	id  string
 	err error
 }
+type settingsPointerMsg struct{ target string }
+type settingsWheelMsg struct{ delta int }
 
 type integrationSettingsRow struct {
 	id        string
@@ -203,10 +205,43 @@ func (m *settingsModel) Update(message tea.Msg) tea.Cmd {
 		}
 		m.finishForgeRemove(msg)
 		return nil
+	case settingsPointerMsg:
+		return m.updatePointer(msg.target)
+	case settingsWheelMsg:
+		if m.loaded && m.busy == "" && msg.delta != 0 {
+			m.moveFocus(msg.delta)
+		}
+		return nil
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
 	}
 	return nil
+}
+
+func (m *settingsModel) updatePointer(target string) tea.Cmd {
+	if target == "close" {
+		return m.updateKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	}
+	if !m.loaded || m.busy != "" {
+		return nil
+	}
+	if m.focus != target {
+		m.disarmRemove()
+	}
+	m.focus = target
+	m.applyFocus()
+	if settingsPointerActivates(target) {
+		return m.activateFocus()
+	}
+	return nil
+}
+
+func settingsPointerActivates(target string) bool {
+	if target == "ai:test" || target == "ai:save" || target == "forge:add" {
+		return true
+	}
+	return strings.HasSuffix(target, ":kind") || strings.HasSuffix(target, ":test") ||
+		strings.HasSuffix(target, ":save") || strings.HasSuffix(target, ":remove")
 }
 
 func (m *settingsModel) finishLoad(msg settingsLoadedMsg) {
