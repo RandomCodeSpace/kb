@@ -241,6 +241,38 @@ func TestAutoShipTransactionRefusesConcurrentCancellation(t *testing.T) {
 	}
 }
 
+func TestCancelledTaskCannotOpenKillPrompt(t *testing.T) {
+	m, _, tasks := actionTestModel(t, board.Task{Title: "Already gone", Status: board.StatusCancelled})
+	m.openKillPrompt(tasks[0])
+	if m.action.open() || m.actionStatus != "Card is already Cancelled" || !m.actionStatusError {
+		t.Fatalf("cancelled kill prompt = action:%#v status:%q error:%v", m.action, m.actionStatus, m.actionStatusError)
+	}
+}
+
+func TestAutoShipStopsWhenCandidateDisappears(t *testing.T) {
+	m := NewModel(stubBoardReader{}, nil, "u")
+	eligible := board.Task{Status: board.StatusTodo, Checks: []board.Check{{Text: "done", Done: true}}}
+	if command := m.finishAutoShipRead(autoShipReadyMsg{task: eligible, found: false}); command != nil || m.action.open() || m.action.busy {
+		t.Fatalf("missing auto-ship candidate = command:%v action:%#v", command, m.action)
+	}
+}
+
+func TestSameTaskChecklistRetainsDelayedAutoShip(t *testing.T) {
+	m, _, tasks := actionTestModel(t, board.Task{
+		Title: "Same detail", Status: board.StatusTodo, Checks: []board.Check{{Text: "done", Done: true}},
+	})
+	task := tasks[0]
+	if command := m.detail.Open(task); command == nil {
+		t.Fatal("detail did not schedule its load")
+	}
+	m.action.mode = taskActionChecklist
+	m.action.task = task
+	if !m.detail.IsOpen() || m.detail.OwnsInput() || m.autoShipInputOwned() {
+		t.Fatalf("same-task checklist ownership = detail:%v input:%v blocked:%v",
+			m.detail.IsOpen(), m.detail.OwnsInput(), m.autoShipInputOwned())
+	}
+}
+
 func TestKillRestoreAndArmedPurgeRouting(t *testing.T) {
 	m, backend, tasks := actionTestModel(t, board.Task{Title: "Lifecycle", Status: board.StatusDone})
 	task := tasks[0]
