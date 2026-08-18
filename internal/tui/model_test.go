@@ -513,6 +513,36 @@ func TestPointerBoardFooterOpensPrimarySurfaces(t *testing.T) {
 	}
 }
 
+func TestPointerBoardFooterRoutesRemainingActions(t *testing.T) {
+	for _, tc := range []struct {
+		label string
+		check func(Model) bool
+	}{
+		{label: "? help", check: func(m Model) bool { return m.helpOpen }},
+		{label: "c cancelled:off", check: func(m Model) bool { return m.boardView.showCancelled }},
+		{label: "e edit", check: func(m Model) bool { return m.editor.IsOpen() }},
+		{label: "q quit", check: func(m Model) bool { return m.stopped }},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			st := newSettingsTestStore(t)
+			if tc.label == "e edit" {
+				if _, err := st.AddTask("alice", board.Task{Title: "Pointer edit", Status: board.StatusTodo}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m := NewModel(st, nil, "alice")
+			m.width, m.height = 427, 73
+			m.settingsNew = func() *settingsModel { return newSettingsModel(st, "alice", context.Background()) }
+			m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
+			completeBoardLoad(t, &m, m.Init())
+			updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), tc.label)())
+			if !tc.check(m) {
+				t.Fatalf("pointer did not route %s", tc.label)
+			}
+		})
+	}
+}
+
 func TestBoardMouseWheelScrollsHoveredColumn(t *testing.T) {
 	m := mouseRoutingTestModel(t)
 

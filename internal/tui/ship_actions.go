@@ -817,10 +817,6 @@ func (m Model) shippedCount() int {
 	return len(seen)
 }
 
-func (m Model) taskActionOverlay(background string) string {
-	return m.taskActionSurface(background).Content
-}
-
 func (m Model) taskActionSurface(background string) pointer.Surface {
 	if !m.action.open() {
 		return pointer.Surface{Content: background}
