@@ -133,6 +133,28 @@ func TestDetailMouseHandlerRoutesOnlyPaneWheelAndOutsideLeftClick(t *testing.T) 
 	}
 }
 
+func TestDetailMouseWheelStopsAtUpperBound(t *testing.T) {
+	m := New(nil, "alice")
+	m.Open(fullTask())
+	m.Resize(80, 12)
+	m.bodyLines = make([]string, 30)
+	handler := m.MouseHandler(80, 12)
+	for range 100 {
+		if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command != nil {
+			m.Update(command())
+		}
+	}
+	if m.scroll != m.maxScroll() {
+		t.Fatalf("wheel down upper bound = %d, want %d", m.scroll, m.maxScroll())
+	}
+	if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command != nil {
+		m.Update(command())
+	}
+	if m.scroll != m.maxScroll() {
+		t.Fatalf("wheel down crossed upper bound = %d, want %d", m.scroll, m.maxScroll())
+	}
+}
+
 func TestModelHandlesErrorsStaleLoadsScrollAndClose(t *testing.T) {
 	loadErr := errors.New("comments broke")
 	m := New(stubReader{commentsErr: loadErr, linksErr: errors.New("links broke")}, "u")
@@ -362,6 +384,28 @@ func TestOverlayKeepsBoardAroundPane(t *testing.T) {
 	}
 }
 
+func TestOverlayClipsStaleBackgroundToCurrentTerminal(t *testing.T) {
+	m := New(nil, "u")
+	m.Open(board.Task{
+		ID: "id", Title: "detail", Status: board.StatusTodo,
+		Desc: strings.Repeat("line\n", 100),
+	})
+	backgroundLines := make([]string, 90)
+	for i := range backgroundLines {
+		backgroundLines[i] = strings.Repeat("b", 500)
+	}
+	view := ansi.Strip(m.Overlay(strings.Join(backgroundLines, "\n"), 427, 73))
+	lines := strings.Split(view, "\n")
+	if len(lines) > 73 {
+		t.Fatalf("overlay retained %d stale rows, want <= 73", len(lines))
+	}
+	for row, line := range lines {
+		if got := ansi.StringWidth(line); got > 427 {
+			t.Fatalf("overlay retained stale row %d width %d, want <= 427", row, got)
+		}
+	}
+}
+
 func TestViewFitsTinyTerminal(t *testing.T) {
 	m := New(nil, "u")
 	m.Open(board.Task{ID: "id", Title: "detail", Status: board.StatusTodo})
@@ -377,6 +421,45 @@ func TestViewFitsTinyTerminal(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestDetailBorderStaysInsideFullTerminalAcrossScrollAndResize(t *testing.T) {
+	m := New(nil, "u")
+	task := fullTask()
+	task.Title = strings.Repeat("wide detail ", 20)
+	task.Desc = strings.Repeat("## Section\nbody with wide text and an emoji 🧭\n\n", 40)
+	m.Resize(427, 73)
+	m.Open(task)
+
+	assertContained := func(width, height int) {
+		t.Helper()
+		view := ansi.Strip(m.View(width, height))
+		lines := strings.Split(view, "\n")
+		if len(lines) > height {
+			t.Fatalf("%dx%d detail has %d rows", width, height, len(lines))
+		}
+		for row, line := range lines {
+			if got := ansi.StringWidth(line); got > width {
+				t.Fatalf("%dx%d row %d width = %d", width, height, row, got)
+			}
+		}
+		plain := strings.Join(lines, "\n")
+		for _, edge := range []string{"╭", "╮", "╰", "╯"} {
+			if strings.Count(plain, edge) != 1 {
+				t.Fatalf("%dx%d detail edge %q count = %d\n%s", width, height, edge, strings.Count(plain, edge), plain)
+			}
+		}
+	}
+
+	assertContained(427, 73)
+	for range 20 {
+		m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	}
+	assertContained(427, 73)
+	m.Resize(80, 20)
+	assertContained(80, 20)
+	m.Resize(427, 73)
+	assertContained(427, 73)
 }
 
 func TestHostileFencedTabsStayInsideBorder(t *testing.T) {
