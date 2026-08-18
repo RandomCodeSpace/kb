@@ -110,7 +110,7 @@ func (m Model) IsOpen() bool  { return m.open }
 
 func IsMessage(message tea.Msg) bool {
 	switch message.(type) {
-	case sourcesLoadedMsg, previewCompletedMsg, cardCreatedMsg:
+	case sourcesLoadedMsg, previewCompletedMsg, cardCreatedMsg, pointerActionMsg:
 		return true
 	default:
 		return false
@@ -191,6 +191,8 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		m.setStatus("review proposals; exact duplicates start unticked", false)
 	case cardCreatedMsg:
 		return m.finishCard(msg)
+	case pointerActionMsg:
+		return m.updatePointer(msg)
 	case tea.KeyPressMsg:
 		if m.operation != "" {
 			if msg.String() == "esc" && m.operation == "preview" {
@@ -202,6 +204,43 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 			return m.updateInput(msg)
 		}
 		return m.updateReview(msg)
+	}
+	return nil
+}
+
+func (m *Model) updatePointer(msg pointerActionMsg) tea.Cmd {
+	if msg.session != m.session || msg.generation != m.generation || m.operation != "" {
+		return nil
+	}
+	switch msg.target {
+	case "source":
+		m.focus = 0
+		return m.applyFocus()
+	case "ref":
+		m.focus = 1
+		return m.applyFocus()
+	case "max":
+		m.focus = 2
+		return m.applyFocus()
+	case "import":
+		if m.stage == stageInput {
+			return m.startPreview()
+		}
+		return m.startCreate()
+	case "back":
+		if m.stage == stageReview {
+			m.stage, m.rows, m.status = stageInput, nil, ""
+			m.applyFocus()
+		}
+		return nil
+	}
+	if strings.HasPrefix(msg.target, "row:") {
+		index, err := strconv.Atoi(strings.TrimPrefix(msg.target, "row:"))
+		if err != nil || index < 0 || index >= len(m.rows) || m.rows[index].created {
+			return nil
+		}
+		m.selection = index
+		m.rows[index].include = !m.rows[index].include
 	}
 	return nil
 }

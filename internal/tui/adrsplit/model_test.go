@@ -3,6 +3,7 @@ package adrsplit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
@@ -80,7 +82,7 @@ func TestAvailabilitySessionsAndCloseLifecycle(t *testing.T) {
 	if disabled.Update(tea.KeyPressMsg{Code: 'x'}) != nil || IsMessage("plain") {
 		t.Fatal("closed model or unrelated message was handled")
 	}
-	if !IsMessage(fileLoadedMsg{}) || !IsMessage(splitCompletedMsg{}) || !IsMessage(cardAddedMsg{}) {
+	if !IsMessage(fileLoadedMsg{}) || !IsMessage(splitCompletedMsg{}) || !IsMessage(cardAddedMsg{}) || !IsMessage(pointerActionMsg{}) {
 		t.Fatal("async message classifier missed a message")
 	}
 
@@ -516,4 +518,95 @@ func TestKeyboardActionBranchesAndFocusTargets(t *testing.T) {
 	if safeError(context.Canceled) != "split cancelled" {
 		t.Fatalf("cancelled error = %q", safeError(context.Canceled))
 	}
+}
+
+func TestPointerControlsAreRenderDerivedAndSessionScoped(t *testing.T) {
+	m, _, _ := newTestModel()
+	beforeScroll := m.scroll
+	handler := m.MouseHandler(80, 24)
+	if m.scroll != beforeScroll {
+		t.Fatal("building pointer snapshot mutated render state")
+	}
+	before := m.focus
+	line, x := visibleTextPosition(t, m.View(80, 24), "ADR markdown")
+	command := pointerRelease(handler, x, line)
+	if command == nil || m.focus != before {
+		t.Fatalf("pointer release mutated model before update: command=%v focus=%q", command, m.focus)
+	}
+	message := command()
+	m.Update(message)
+	if m.focus != "adr" {
+		t.Fatalf("pointer input activation focus=%q message=%T", m.focus, message)
+	}
+
+	m.stage = stageReview
+	m.rows = rowsFromDrafts([]ai.Draft{testDraft("one"), testDraft("two")})
+	m.focus = "include:0"
+	handler = m.MouseHandler(80, 24)
+	line, x = visibleTextPosition(t, m.View(80, 24), "[x] include")
+	message = pointerRelease(handler, x, line)()
+	if _, ok := message.(pointerActionMsg); !ok {
+		t.Fatalf("review release message=%T", message)
+	}
+	m.Update(message)
+	if m.rows[0].include {
+		t.Fatal("pointer row activation did not toggle inclusion")
+	}
+
+	old := m.MouseHandler(80, 24)
+	m.Close()
+	m.Open()
+	if command := pointerRelease(old, x, line); command != nil {
+		if m.Update(command()) != nil || m.focus != "source" {
+			t.Fatal("stale pointer action changed reopened session")
+		}
+	}
+	if command := m.MouseHandler(80, 24)(tea.MouseMotionMsg{X: x, Y: line}); command != nil {
+		t.Fatal("pointer motion produced a model action")
+	}
+}
+
+func TestPointerControlsClipScrolledRowsAndGuardBusyWork(t *testing.T) {
+	m, _, _ := newTestModel()
+	m.stage = stageReview
+	drafts := make([]ai.Draft, 20)
+	for i := range drafts {
+		drafts[i] = testDraft(fmt.Sprintf("story-%d", i))
+	}
+	m.rows = rowsFromDrafts(drafts)
+	m.scroll = 0
+	view := m.View(50, 10)
+	if strings.Contains(ansi.Strip(view), "story-19") {
+		t.Fatal("small viewport rendered an offscreen row")
+	}
+	handler := m.MouseHandler(50, 10)
+	line, x := visibleTextPosition(t, view, "[x] include")
+	if command := pointerRelease(handler, x, line); command == nil {
+		t.Fatal("visible review control had no hit region")
+	}
+	if command := pointerRelease(handler, 3, 0); command != nil {
+		t.Fatal("offscreen overlay cell activated a control")
+	}
+	m.operation = "splitting ADR"
+	if command := pointerRelease(handler, 3, 8); command != nil {
+		if m.Update(command()) != nil || m.focus != "include:0" {
+			t.Fatal("busy overlay exposed pointer action")
+		}
+	}
+}
+
+func visibleTextPosition(t *testing.T, view, needle string) (int, int) {
+	t.Helper()
+	for y, line := range strings.Split(ansi.Strip(view), "\n") {
+		if x := strings.Index(line, needle); x >= 0 {
+			return y, x
+		}
+	}
+	t.Fatalf("visible control %q missing:\n%s", needle, ansi.Strip(view))
+	return 0, 0
+}
+
+func pointerRelease(handler func(tea.MouseMsg) tea.Cmd, x, y int) tea.Cmd {
+	handler(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	return handler(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
 }

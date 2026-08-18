@@ -186,7 +186,7 @@ func (m *Model) ConsumeChanged() bool {
 // IsMessage identifies overlay-owned asynchronous results.
 func IsMessage(message tea.Msg) bool {
 	switch message.(type) {
-	case fileLoadedMsg, splitCompletedMsg, cardAddedMsg:
+	case fileLoadedMsg, splitCompletedMsg, cardAddedMsg, pointerActionMsg:
 		return true
 	default:
 		return false
@@ -231,8 +231,48 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return m.applyFocus()
 	case cardAddedMsg:
 		return m.finishAdd(msg)
+	case pointerActionMsg:
+		return m.updatePointer(msg)
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
+	}
+	return nil
+}
+
+func (m *Model) updatePointer(msg pointerActionMsg) tea.Cmd {
+	if msg.session != m.session || msg.generation != m.generation || m.operation != "" || m.adding || m.guardClose {
+		return nil
+	}
+	m.focus = msg.target
+	switch msg.target {
+	case "source":
+		if m.source == sourcePaste {
+			m.source = sourceFile
+		} else {
+			m.source = sourcePaste
+		}
+		m.focus = m.inputTarget()
+		return m.applyFocus()
+	case "adr", "file", "max":
+		return m.applyFocus()
+	case "cancel", "split":
+		return m.updateInputKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
+	case "back", "add":
+		return m.updateReviewKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
+	}
+	if index, field, ok := parseRowFocus(msg.target); ok {
+		if field == "title" {
+			return m.applyFocus()
+		}
+		if field == "include" {
+			return m.updateReviewKey("space", tea.KeyPressMsg{Code: tea.KeySpace})
+		}
+		if index >= 0 && index < len(m.rows) {
+			return m.applyFocus()
+		}
+	}
+	if msg.target == "dest" {
+		return m.applyFocus()
 	}
 	return nil
 }

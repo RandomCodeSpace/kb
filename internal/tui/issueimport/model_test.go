@@ -3,10 +3,12 @@ package issueimport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
@@ -195,7 +197,7 @@ func TestUnavailableSourcesAndCardFailureStayReviewable(t *testing.T) {
 	if m.rows[0].created || m.rows[0].err == "" || !m.open || m.stage != stageReview {
 		t.Fatalf("failed card state = %+v", m.rows[0])
 	}
-	if !IsMessage(previewCompletedMsg{}) || IsMessage(tea.KeyPressMsg{}) {
+	if !IsMessage(previewCompletedMsg{}) || !IsMessage(pointerActionMsg{}) || IsMessage(tea.KeyPressMsg{}) {
 		t.Fatal("message classifier")
 	}
 }
@@ -359,4 +361,129 @@ func TestRemainingStateBranches(t *testing.T) {
 			t.Fatalf("remaining view omitted %q:\n%s", want, view)
 		}
 	}
+}
+
+func TestPointerControlsFocusRowsAndActionsWithoutBackgroundMutation(t *testing.T) {
+	backend := &fakeBackend{
+		sources: []store.ForgeSource{{Name: "primary"}},
+		preview: forge.Preview{Drafts: []forge.Draft{{Draft: ai.Draft{Title: "one"}}, {Draft: ai.Draft{Title: "two"}}}},
+	}
+	m := openModel(t, backend, &fakeStore{})
+	m.ref.SetValue("acme/kb")
+	handler := m.MouseHandler(80, 24)
+	line, x := importVisibleTextPosition(t, m.View(80, 24), 80, 24, "ref")
+	before := m.focus
+	command := pointerRelease(handler, x, line)
+	if command == nil || m.focus != before {
+		t.Fatalf("pointer release mutated model before update: command=%v focus=%d", command, m.focus)
+	}
+	m.Update(command())
+	if m.focus != 1 {
+		t.Fatalf("pointer input focus=%d, want ref", m.focus)
+	}
+	m.Update(m.startPreview()())
+	handler = m.MouseHandler(80, 24)
+	line, x = importVisibleTextPosition(t, m.View(80, 24), 80, 24, "one")
+	m.Update(pointerRelease(handler, x, line)())
+	if m.rows[0].include {
+		t.Fatal("pointer review row did not toggle")
+	}
+	m.rows[1].draft.Title = m.rows[0].draft.Title
+	m.rows[1].include = true
+	view := ansi.Strip(m.View(80, 24))
+	occurrence := 0
+	for y, text := range strings.Split(view, "\n") {
+		if strings.Contains(text, m.rows[1].draft.Title) {
+			occurrence++
+			if occurrence == 2 {
+				line, x = y+(24-len(strings.Split(view, "\n")))/2, strings.Index(text, m.rows[1].draft.Title)+(80-ansi.StringWidth(strings.Split(view, "\n")[0]))/2
+				break
+			}
+		}
+	}
+	if occurrence != 2 {
+		t.Fatal("duplicate review titles were not rendered")
+	}
+	handler = m.MouseHandler(80, 24)
+	m.Update(pointerRelease(handler, x, line)())
+	if m.rows[1].include {
+		t.Fatal("pointer row identity followed title text instead of rendered row")
+	}
+	m.rows[1].include = true
+	line, x = importVisibleTextPosition(t, m.View(80, 24), 80, 24, "Import")
+	command = pointerRelease(handler, x, line)
+	if command == nil {
+		t.Fatal("import action had no hit region")
+	}
+	if m.operation != "" {
+		t.Fatal("pointer action started work before update")
+	}
+	m.Update(command())
+	if m.operation != "create" {
+		t.Fatalf("pointer import operation=%q", m.operation)
+	}
+
+	m.stage = stageReview
+	m.operation = ""
+	m.selection = 0
+	handler = m.MouseHandler(80, 24)
+	line, x = importVisibleTextPosition(t, m.View(80, 24), 80, 24, "Back")
+	m.Update(pointerRelease(handler, x, line)())
+	if m.stage != stageInput {
+		t.Fatal("pointer back did not return to input")
+	}
+}
+
+func TestPointerControlsClipRowsAndRejectBusyOrStaleSnapshots(t *testing.T) {
+	drafts := make([]forge.Draft, 20)
+	for i := range drafts {
+		drafts[i] = forge.Draft{Draft: ai.Draft{Title: fmt.Sprintf("issue-%d", i)}}
+	}
+	backend := &fakeBackend{sources: []store.ForgeSource{{Name: "primary"}}, preview: forge.Preview{Drafts: drafts}}
+	m := openModel(t, backend, &fakeStore{})
+	m.ref.SetValue("acme/kb")
+	m.Update(m.startPreview()())
+	handler := m.MouseHandler(50, 10)
+	line, x := importVisibleTextPosition(t, m.View(50, 10), 50, 10, "issue-0")
+	if command := pointerRelease(handler, x, line); command == nil {
+		t.Fatal("visible issue control had no hit region")
+	}
+	if command := pointerRelease(handler, 3, 0); command != nil {
+		t.Fatal("offscreen issue control activated")
+	}
+	m.operation = "create"
+	if command := pointerRelease(handler, x, line); command != nil {
+		if m.Update(command()) != nil || m.operation != "create" {
+			t.Fatal("busy issue import exposed pointer action")
+		}
+	}
+	m.operation = ""
+	stale := m.MouseHandler(50, 10)
+	m.Close()
+	m.Open()
+	if command := pointerRelease(stale, x, line); command != nil {
+		m.Update(command())
+		if m.stage != stageInput || m.operation != "" {
+			t.Fatal("stale issue pointer mutated reopened session")
+		}
+	}
+}
+
+func importVisibleTextPosition(t *testing.T, view string, width, height int, needle string) (int, int) {
+	t.Helper()
+	frameWidth, frameHeight := ansi.StringWidth(strings.Split(ansi.Strip(view), "\n")[0]), len(strings.Split(ansi.Strip(view), "\n"))
+	xOffset := max((width-frameWidth)/2, 0)
+	yOffset := max((height-frameHeight)/2, 0)
+	for y, line := range strings.Split(ansi.Strip(view), "\n") {
+		if x := strings.Index(line, needle); x >= 0 {
+			return y + yOffset, x + xOffset
+		}
+	}
+	t.Fatalf("visible import control %q missing:\n%s", needle, ansi.Strip(view))
+	return 0, 0
+}
+
+func pointerRelease(handler func(tea.MouseMsg) tea.Cmd, x, y int) tea.Cmd {
+	handler(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	return handler(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
 }

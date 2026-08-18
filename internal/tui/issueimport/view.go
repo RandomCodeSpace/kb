@@ -32,7 +32,7 @@ func (m Model) View(width, height int) string {
 		if m.operation == "preview" {
 			lines = append(lines, "", "fetching configured forge data and drafting...")
 		}
-		lines = append(lines, "", "Tab fields  Left/Right change  Enter preview  Esc close")
+		lines = append(lines, "", "[ Import ]", "Tab fields  Left/Right change  Enter preview  Esc close")
 	} else {
 		if m.preview.Truncated {
 			lines = append(lines, fmt.Sprintf("fetched %d of about %d; results truncated", m.preview.Fetched, m.preview.TotalHint))
@@ -69,7 +69,7 @@ func (m Model) View(width, height int) string {
 		if progress := m.progress(); progress != "" {
 			lines = append(lines, "", progress)
 		}
-		lines = append(lines, "", "Up/Down select  Space toggle  Enter import/retry  Esc back")
+		lines = append(lines, "", "[ Import ]    [ Back ]", "Up/Down select  Space toggle  Enter import/retry  Esc back")
 	}
 	if m.status != "" {
 		prefix := "status  "
