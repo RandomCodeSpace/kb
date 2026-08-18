@@ -509,9 +509,6 @@ func (m Model) actionFooter(width int) string {
 	if m.saving {
 		return "write in progress | esc stays here"
 	}
-	if m.action == actionNone && width < 26 {
-		return "e c d u b esc"
-	}
 	controls := pointerFooterText(m.pointerFooterControls(width), width)
 	if m.confirm && (m.action == actionDeleteComment || m.action == actionDeleteLink) {
 		return controls + " | enter confirm delete | esc cancel"
@@ -526,10 +523,7 @@ func (m Model) actionFooter(width int) string {
 	case actionDeleteLink:
 		return controls + " | up/down choose | enter remove | esc back"
 	default:
-		if width < 40 {
-			return controls + " esc close"
-		}
-		return fitDetailLine(controls+" esc close", width)
+		return controls
 	}
 }
 
@@ -539,7 +533,7 @@ type detailPointerControl struct {
 }
 
 func (m Model) pointerFooterControls(width int) []detailPointerControl {
-	if m.driftMode != driftNone || m.saving || width < 26 {
+	if m.driftMode != driftNone || m.saving {
 		return nil
 	}
 	key := func(code rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: code, Text: string(code)} }
@@ -568,28 +562,41 @@ func (m Model) pointerFooterControls(width int) []detailPointerControl {
 			detailPointerControl{label: "Cancel", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
 		)
 	}
-	if width < 40 {
-		return controls(detailPointerControl{label: "Close", message: mouseDismissMsg{}})
+	taskControls := controls(
+		detailPointerControl{label: "Check", message: key('t')},
+		detailPointerControl{label: "Kill", message: key('x')},
+	)
+	if m.task.Status == board.StatusCancelled {
+		taskControls = controls(
+			detailPointerControl{label: "Restore", message: key('r')},
+			detailPointerControl{label: "Purge", message: key('D')},
+		)
 	}
-	full := controls(
-		detailPointerControl{label: "Edit", message: key('e')},
+	full := append([]detailPointerControl(nil), taskControls...)
+	if m.task.Status != board.StatusCancelled {
+		full = append(controls(detailPointerControl{label: "Edit", message: key('e')}), full...)
+	}
+	full = append(full, controls(
 		detailPointerControl{label: "Drift", message: key('v')},
 		detailPointerControl{label: "Comment", message: key('c')},
-		detailPointerControl{label: "Delete comment", message: key('d')},
+		detailPointerControl{label: "Del", message: key('d')},
 		detailPointerControl{label: "Link", message: key('b')},
-		detailPointerControl{label: "Remove link", message: key('u')},
+		detailPointerControl{label: "Unlink", message: key('u')},
 		detailPointerControl{label: "Close", message: mouseDismissMsg{}},
-	)
-	if pointerFooterWidth(full)+ansi.StringWidth(" | e edit v drift c add d/u rm b esc close") <= width {
+	)...)
+	if pointerFooterWidth(full) <= width {
 		return full
 	}
-	return controls(
+	primary := append([]detailPointerControl(nil), taskControls...)
+	primary = append(primary, controls(
 		detailPointerControl{label: "Comment", message: key('c')},
-		detailPointerControl{label: "Delete comment", message: key('d')},
 		detailPointerControl{label: "Link", message: key('b')},
-		detailPointerControl{label: "Remove link", message: key('u')},
 		detailPointerControl{label: "Close", message: mouseDismissMsg{}},
-	)
+	)...)
+	for len(primary) > 1 && pointerFooterWidth(primary) > width {
+		primary = append(primary[:len(primary)-2], primary[len(primary)-1])
+	}
+	return primary
 }
 
 func pointerFooterText(controls []detailPointerControl, width int) string {

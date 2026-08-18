@@ -723,7 +723,9 @@ func (m Model) View() tea.View {
 		hits = nil
 	}
 	if m.detail.IsOpen() {
-		content = m.detail.Overlay(content, m.width, m.height)
+		surface := m.detail.PointerSurface(content, m.width, m.height)
+		content = surface.Content
+		overlayMouse = surface.Pointer
 		hits = nil
 	}
 	if m.settings != nil {
@@ -761,12 +763,8 @@ func (m Model) View() tea.View {
 		return view
 	}
 	if !m.helpOpen && m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() && !m.issueImport.IsOpen() && !m.detail.OwnsInput() {
-		if m.detail.IsOpen() {
-			view.OnMouse = m.detail.MouseHandler(m.width, m.height)
-		} else {
-			pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
-			view.OnMouse = boardMouseHandler(hits, pointerActive)
-		}
+		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
+		view.OnMouse = boardMouseHandler(hits, pointerActive)
 	}
 	return view
 }

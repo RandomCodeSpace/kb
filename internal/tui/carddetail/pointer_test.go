@@ -84,7 +84,7 @@ func TestPointerSurfaceAddsCommentLinksAndDeletesThroughExistingMutations(t *tes
 	m.Update(reload())
 	m.Update(key('z'))
 
-	if command := clickControl(t, m, "Delete comment"); command != nil {
+	if command := clickControl(t, m, "Del"); command != nil {
 		t.Fatalf("opening comment delete returned command %v", command)
 	}
 	if command := clickControl(t, m, "Delete"); command != nil {
@@ -111,7 +111,7 @@ func TestPointerSurfaceCancelAndDestructiveBackdropHaveSafeSemantics(t *testing.
 		t.Fatalf("pointer cancel did not return to detail:\n%s", got)
 	}
 
-	clickControl(t, m, "Delete comment")
+	clickControl(t, m, "Del")
 	clickControl(t, m, "Delete")
 	surface := m.PointerSurface("board", pointerWidth, pointerHeight)
 	if surface.Pointer == nil {

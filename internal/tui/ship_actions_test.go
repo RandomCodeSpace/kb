@@ -324,6 +324,46 @@ func TestPointerPurgeRequiresTwoVisibleActivations(t *testing.T) {
 	}
 }
 
+func TestPointerDetailExposesTaskLifecycleActions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		task   board.Task
+		label  string
+		mode   taskActionMode
+		closed bool
+	}{
+		{name: "checklist", task: board.Task{Title: "Todo", Status: board.StatusTodo, Checks: []board.Check{{Text: "open"}}}, label: "Check", mode: taskActionChecklist},
+		{name: "cancel", task: board.Task{Title: "Todo", Status: board.StatusTodo}, label: "Kill", mode: taskActionKill},
+		{name: "restore", task: board.Task{Title: "Gone", Status: board.StatusCancelled}, label: "Restore", closed: true},
+		{name: "purge", task: board.Task{Title: "Gone", Status: board.StatusCancelled}, label: "Purge", mode: taskActionPurge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, backend, tasks := actionTestModel(t, tc.task)
+			task := tasks[0]
+			load := m.detail.Open(task)
+			if load != nil {
+				m.detail.Update(load())
+			}
+			command := pointerCommandForLabel(t, m.View(), tc.label)
+			next := updateTestModel(t, &m, command())
+			if tc.closed {
+				if m.action.open() || next == nil {
+					t.Fatalf("pointer %s did not start restore: action=%#v command=%v", tc.label, m.action, next)
+				}
+				finishActionCommand(t, &m, next)
+				stored, err := backend.Task("alice", task.ID)
+				if err != nil || stored.Status != board.StatusTodo {
+					t.Fatalf("pointer restore result = %+v, %v", stored, err)
+				}
+				return
+			}
+			if m.action.mode != tc.mode {
+				t.Fatalf("pointer %s mode = %v, want %v", tc.label, m.action.mode, tc.mode)
+			}
+		})
+	}
+}
+
 func TestAutoShipStopsWhenCandidateDisappears(t *testing.T) {
 	m := NewModel(stubBoardReader{}, nil, "u")
 	eligible := board.Task{Status: board.StatusTodo, Checks: []board.Check{{Text: "done", Done: true}}}

@@ -518,8 +518,8 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 		want  string
 	}{
 		{actionNone, 80, "[Comment]"},
-		{actionNone, 30, "esc close"},
-		{actionNone, 10, "e c d"},
+		{actionNone, 30, "[Close]"},
+		{actionNone, 10, "[Close]"},
 		{actionAddComment, 80, "add comment"},
 		{actionDeleteComment, 80, "enter delete"},
 		{actionAddLink, 80, "direction"},

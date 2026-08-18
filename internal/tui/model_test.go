@@ -248,7 +248,7 @@ func TestDriftReviewBlocksTaskActionsAndBoardMouse(t *testing.T) {
 	} {
 		updateTestModel(t, &m, message)
 	}
-	if m.action.open() || m.boardView != before || !m.detail.IsOpen() || !m.detail.OwnsInput() || m.View().OnMouse != nil {
+	if m.action.open() || m.boardView != before || !m.detail.IsOpen() || !m.detail.OwnsInput() || m.View().OnMouse == nil {
 		t.Fatalf("active drift review leaked input: action=%#v boardChanged=%t detailOpen=%t owns=%t mouse=%t",
 			m.action, m.boardView != before, m.detail.IsOpen(), m.detail.OwnsInput(), m.View().OnMouse != nil)
 	}
@@ -396,7 +396,7 @@ func TestCardDetailOpensFromKeyboardAndClick(t *testing.T) {
 	}
 	updateTestModel(t, &m, load())
 	view := ansi.Strip(m.View().Content)
-	if !strings.Contains(view, "detail-only description") || !strings.Contains(view, "esc close") {
+	if !strings.Contains(view, "detail-only description") || !strings.Contains(view, "[Close]") {
 		t.Fatalf("detail overlay missing content:\n%s", view)
 	}
 	columnBefore := m.boardView.column
@@ -567,7 +567,11 @@ func TestDetailOverlayMouseWheelAndOutsideClick(t *testing.T) {
 	if detailAfter == detailBefore {
 		t.Fatal("detail wheel did not change the viewport")
 	}
-	if command := m.View().OnMouse(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command == nil {
+	dismiss := requireMouseHandler(t, m.View().OnMouse, "detail backdrop")
+	if command := dismiss(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command != nil {
+		t.Fatalf("detail backdrop activated on press: %v", command)
+	}
+	if command := dismiss(tea.MouseReleaseMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command == nil {
 		t.Fatal("outside click was ignored")
 	} else {
 		updateTestModel(t, &m, command())
@@ -735,6 +739,72 @@ func TestRootDetailCommentAndLinkActionsOwnInputAndRefresh(t *testing.T) {
 	links, err = st.TaskLinks("alice", current.ID)
 	if err != nil || len(links.BlockedBy) != 0 || len(links.Blocks) != 0 {
 		t.Fatalf("links after confirmed unlink = %+v, %v", links, err)
+	}
+}
+
+func TestPointerDetailCommentSavePersistsWithoutCtrlS(t *testing.T) {
+	st := newSettingsTestStore(t)
+	task, err := st.AddTask("alice", board.Task{Title: "Pointer comment", Status: board.StatusTodo, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(st, nil, "alice")
+	m.width, m.height = 120, 30
+	completeBoardLoad(t, &m, m.Init())
+	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Comment")())
+	for _, value := range "saved by visible button" {
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: value, Text: string(value)})
+	}
+	save := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Save comment")())
+	if save == nil {
+		t.Fatal("visible Save comment did not start the existing write path")
+	}
+	drainModelCommands(t, &m, save)
+	comments, err := st.Comments("alice", task.ID)
+	if err != nil || len(comments) != 1 || comments[0].Body != "saved by visible button" {
+		t.Fatalf("pointer comment persistence = %+v, %v", comments, err)
+	}
+}
+
+func TestPointerDetailLinkLifecyclePersistsThroughVisibleControls(t *testing.T) {
+	st := newSettingsTestStore(t)
+	current, err := st.AddTask("alice", board.Task{Title: "Pointer link", Status: board.StatusTodo, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := st.AddTask("alice", board.Task{Title: "Pointer blocker", Status: board.StatusDoing, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(st, nil, "alice")
+	m.width, m.height = 120, 30
+	completeBoardLoad(t, &m, m.Init())
+	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Link")())
+	for _, value := range fmt.Sprintf("%d", other.Seq) {
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: value, Text: string(value)})
+	}
+	add := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Add link")())
+	if add == nil {
+		t.Fatal("visible Add link did not start the existing write path")
+	}
+	drainModelCommands(t, &m, add)
+	links, err := st.TaskLinks("alice", current.ID)
+	if err != nil || len(links.Blocks)+len(links.BlockedBy) != 1 {
+		t.Fatalf("pointer link persistence = %+v, %v", links, err)
+	}
+
+	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Unlink")())
+	updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Delete")())
+	remove := updateTestModel(t, &m, pointerCommandForLabel(t, m.View(), "Confirm delete")())
+	if remove == nil {
+		t.Fatal("visible Confirm delete did not start unlink")
+	}
+	drainModelCommands(t, &m, remove)
+	links, err = st.TaskLinks("alice", current.ID)
+	if err != nil || len(links.Blocks)+len(links.BlockedBy) != 0 {
+		t.Fatalf("pointer unlink persistence = %+v, %v", links, err)
 	}
 }
 
@@ -1970,7 +2040,7 @@ func TestWideDetailPTYRendersCompleteBorderInsideCellGrid(t *testing.T) {
 		}
 	}
 
-	waitFor(t, "esc close")
+	waitFor(t, "[Close]")
 	assertGrid(t, 427, 73)
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	waitFor(t, "9/")
@@ -1979,10 +2049,10 @@ func TestWideDetailPTYRendersCompleteBorderInsideCellGrid(t *testing.T) {
 	waitFor(t, "12/")
 	assertGrid(t, 427, 73)
 	tm.Send(tea.WindowSizeMsg{Width: 80, Height: 20})
-	waitFor(t, "esc close")
+	waitFor(t, "[Close]")
 	assertGrid(t, 80, 20)
 	tm.Send(tea.WindowSizeMsg{Width: 427, Height: 73})
-	waitFor(t, "esc close")
+	waitFor(t, "[Close]")
 	assertGrid(t, 427, 73)
 	tm.Send(tea.KeyPressMsg{Code: 'q'})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(5*time.Second))
