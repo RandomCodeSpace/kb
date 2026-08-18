@@ -25,5 +25,5 @@
 │                                                                          │
 │   [Cancel]                                                               │
 │ > [Save card]                                                            │
-│ tab navigate | ctrl+s save | esc close                                   │
+│ tab navigate | ctrl+s/ctrl+enter save | esc close                        │
 ╰──────────────────────────────────────────────────────────────────────────╯

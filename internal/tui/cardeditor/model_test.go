@@ -857,6 +857,138 @@ func TestKeyboardRoutesEveryFieldAndAction(t *testing.T) {
 	}
 }
 
+func TestCtrlEnterUsesTheKeyboardSavePath(t *testing.T) {
+	backend := newTestStore(t)
+	model := New(backend, "u")
+	model.OpenAdd(board.StatusTodo)
+	model.title.SetValue("ctrl enter save")
+
+	save := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
+	if save == nil || !model.saving {
+		t.Fatalf("ctrl+enter save command=%v saving=%v status=%q", save, model.saving, model.statusMessage)
+	}
+	model.Update(save())
+	if model.IsOpen() {
+		t.Fatal("ctrl+enter left the editor open")
+	}
+}
+
+func TestPointerFocusAndSaveUseTheRenderedHitRegions(t *testing.T) {
+	backend := newTestStore(t)
+	model := New(backend, "u")
+	model.OpenAdd(board.StatusTodo)
+	model.title.SetValue("pointer saved")
+
+	const width, height = 84, 32
+	save := clickRenderedText(t, &model, width, height, "[Save card]")
+	if save == nil {
+		t.Fatal("pointer save click returned no command")
+	}
+	start := model.Update(save())
+	if start == nil || !model.saving {
+		t.Fatalf("pointer save did not enter saving state: status=%q", model.statusMessage)
+	}
+	model.Update(start())
+	if model.IsOpen() {
+		t.Fatal("pointer save left the editor open")
+	}
+	boardSnapshot, err := backend.Board("u")
+	if err != nil || len(boardSnapshot.Tasks) != 1 || boardSnapshot.Tasks[0].Title != "pointer saved" {
+		t.Fatalf("pointer save board=%+v err=%v", boardSnapshot, err)
+	}
+
+	model.OpenAdd(board.StatusTodo)
+	focus := clickRenderedText(t, &model, width, height, "Description:")
+	if focus == nil {
+		t.Fatal("pointer description click returned no command")
+	}
+	model.Update(focus())
+	if model.focus != "desc" {
+		t.Fatalf("pointer description focus=%q", model.focus)
+	}
+}
+
+func TestPointerFocusCoversVisibleFieldsAndCancel(t *testing.T) {
+	const width, height = 120, 40
+	fields := []struct {
+		label, target string
+	}{
+		{"Title:", "title"},
+		{"Emoji:", "emoji"},
+		{"Description:", "desc"},
+		{"Priority:", "prio"},
+		{"Due:", "due"},
+		{"Effort:", "effort"},
+		{"Blocked:", "blocked"},
+		{"Labels:", "labels"},
+		{"Checklist (x prefix = done):", "checks"},
+	}
+	for _, field := range fields {
+		t.Run(field.target, func(t *testing.T) {
+			model := New(newTestStore(t), "u")
+			model.OpenAdd(board.StatusTodo)
+			click := clickRenderedText(t, &model, width, height, field.label)
+			model.Update(click())
+			if model.focus != field.target {
+				t.Fatalf("pointer %q focus=%q", field.label, model.focus)
+			}
+		})
+	}
+
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	cancel := clickRenderedText(t, &model, width, height, "[Cancel]")
+	if cancel == nil {
+		t.Fatal("pointer cancel click returned no command")
+	}
+	model.Update(cancel())
+	if model.IsOpen() {
+		t.Fatal("clean pointer cancel left the editor open")
+	}
+}
+
+func TestPointerHandlerIgnoresOutsideAndNonLeftClicks(t *testing.T) {
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	handler := model.MouseHandler(84, 32)
+	if handler == nil {
+		t.Fatal("open editor returned no mouse handler")
+	}
+	for _, message := range []tea.MouseMsg{
+		tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseRight},
+		tea.MouseClickMsg{X: 100, Y: 31, Button: tea.MouseLeft},
+		tea.MouseReleaseMsg{X: 20, Y: 4, Button: tea.MouseLeft},
+	} {
+		if command := handler(message); command != nil {
+			t.Fatalf("unexpected pointer command for %#v", message)
+		}
+	}
+}
+
+func clickRenderedText(t *testing.T, model *Model, width, height int, text string) tea.Cmd {
+	t.Helper()
+	lines := strings.Split(ansi.Strip(model.View(width, height)), "\n")
+	for y, line := range lines {
+		if x := strings.Index(line, text); x >= 0 {
+			handler := model.MouseHandler(width, height)
+			if handler == nil {
+				t.Fatalf("mouse handler is nil for %q", text)
+			}
+			if command := handler(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}); command != nil {
+				t.Fatalf("mouse press activated %q", text)
+			}
+			command := handler(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseNone})
+			if command == nil {
+				t.Logf("hits=%+v", model.pointerHits(width, height))
+				t.Fatalf("mouse handler missed rendered %q at x=%d y=%d line=%q", text, x, y, line)
+			}
+			return command
+		}
+	}
+	t.Fatalf("rendered text %q not found:\n%s", text, strings.Join(lines, "\n"))
+	return nil
+}
+
 func TestFocusTargetsHelpersAndCleanCloseBranches(t *testing.T) {
 	model := New(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)

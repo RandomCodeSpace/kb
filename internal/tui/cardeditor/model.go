@@ -82,6 +82,13 @@ type draftCompletedMsg struct {
 	err        error
 }
 
+// pointerClickMsg is emitted by MouseHandler after a rendered editor control
+// is clicked. Keeping the target symbolic lets pointer and keyboard activation
+// share the same focus and action paths.
+type pointerClickMsg struct {
+	target string
+}
+
 type snapshot struct {
 	title, emoji, desc, due, effort, checks string
 	prio                                    int
@@ -201,7 +208,7 @@ func (m *Model) ConsumeSaved() (string, bool) {
 // implementation messages into the root package.
 func IsMessage(message tea.Msg) bool {
 	switch message.(type) {
-	case labelsLoadedMsg, similarDebounceMsg, similarLoadedMsg, saveCompletedMsg, draftCompletedMsg:
+	case labelsLoadedMsg, similarDebounceMsg, similarLoadedMsg, saveCompletedMsg, draftCompletedMsg, pointerClickMsg:
 		return true
 	default:
 		return false
@@ -398,8 +405,28 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		m.applyDraft(msg.draft)
 		m.statusMessage, m.statusIsError = "AI draft applied; review before saving", false
 		return m.scheduleSimilar()
+	case pointerClickMsg:
+		return m.updatePointer(msg)
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
+	}
+	return nil
+}
+
+func (m *Model) updatePointer(message pointerClickMsg) tea.Cmd {
+	if m.saving || message.target == "" {
+		return nil
+	}
+	if strings.HasPrefix(message.target, "similar:") {
+		m.focus = message.target
+		m.applyFocus()
+		m.activateSimilar()
+		return nil
+	}
+	m.focus = message.target
+	m.applyFocus()
+	if message.target == "cancel" || message.target == "save" || message.target == "ai-draft" {
+		return m.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	}
 	return nil
 }
@@ -427,7 +454,7 @@ func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	}
-	if key == "ctrl+s" {
+	if key == "ctrl+s" || key == "ctrl+enter" {
 		return m.startSave()
 	}
 	if key == "esc" {
