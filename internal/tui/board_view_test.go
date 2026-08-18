@@ -302,18 +302,18 @@ func TestBoardFooterPrioritizesProductionSettingsActions(t *testing.T) {
 	}{
 		{
 			width: 120,
-			want:  []string{"s settings", "t/x/r/D actions", "j/k cards", "h/l/tab columns", "c cancelled:off", "q quit"},
+			want:  []string{"s settings", "t/x/r/D actions", "j/k cards", "h/l/tab columns", "? help", "q quit"},
 		},
 		{
 			width: 80,
-			want:  []string{"s settings", "j/k cards", "h/l/tab columns", "c cancelled:off", "q quit"},
+			want:  []string{"s settings", "j/k cards", "h/l/tab columns", "? help", "q quit"},
 			notWant: []string{
 				"1-4 jump",
 			},
 		},
 		{
 			width:   40,
-			want:    []string{"s settings", "j/k h/l", "q quit"},
+			want:    []string{"s settings", "? help", "j/k h/l", "q quit"},
 			notWant: []string{"1-4 jump", "c cancelled:off"},
 		},
 	} {
@@ -344,7 +344,7 @@ func TestBoardFooterWithoutSettingsKeepsBoardHints(t *testing.T) {
 	content, _ := model.renderBoard()
 	lines := strings.Split(plain(content), "\n")
 	footer := lines[len(lines)-1]
-	for _, want := range []string{"j/k cards", "h/l/tab columns", "1-4 jump", "c cancelled:off", "q quit"} {
+	for _, want := range []string{"j/k cards", "h/l/tab columns", "1-4 jump", "? help", "q quit"} {
 		if !strings.Contains(footer, want) {
 			t.Errorf("board-only footer missing %q: %q", want, footer)
 		}

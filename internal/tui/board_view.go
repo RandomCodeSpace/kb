@@ -296,7 +296,10 @@ func (m Model) renderBoard() (string, []boardHit) {
 	if m.boardView.showCancelled {
 		cancelled = "on"
 	}
-	help := "j/k cards | h/l/tab columns | 1-4 jump | c cancelled:" + cancelled + " | q quit"
+	help := "j/k cards | h/l/tab columns | 1-4 jump | ? help | q quit"
+	if width >= 100 {
+		help = "j/k cards | h/l/tab columns | 1-4 jump | c cancelled:" + cancelled + " | ? help | q quit"
+	}
 	if m.editor.Enabled() {
 		help = "n new | e edit | " + help
 	}
@@ -417,6 +420,19 @@ func settingsBoardFooter(state, cancelled string, editorEnabled, adrEnabled bool
 			candidates[i] = append([]string{"a split ADR"}, candidates[i]...)
 		}
 	}
+	for index := range candidates {
+		last := len(candidates[index]) - 1
+		withHelp := make([]string, 0, len(candidates[index])+1)
+		withHelp = append(withHelp, candidates[index][:last]...)
+		withHelp = append(withHelp, "? help", candidates[index][last])
+		candidates[index] = withHelp
+	}
+	if width <= 40 {
+		compact := "s settings | ? help | j/k h/l | q quit"
+		if ansi.StringWidth(compact) <= width {
+			return compact
+		}
+	}
 	minimumStateWidth := min(ansi.StringWidth(state), 5)
 	for _, candidate := range candidates {
 		help := strings.Join(candidate, " | ")
@@ -425,6 +441,12 @@ func settingsBoardFooter(state, cancelled string, editorEnabled, adrEnabled bool
 			continue
 		}
 		return fitLine(state, stateWidth) + " | " + help
+	}
+	for _, candidate := range candidates {
+		help := strings.Join(candidate, " | ")
+		if ansi.StringWidth(help) <= width {
+			return help
+		}
 	}
 	return fitLine("q quit", width)
 }

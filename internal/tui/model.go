@@ -22,6 +22,7 @@ const (
 	defaultWidth  = 80
 	defaultHeight = 24
 	pollInterval  = time.Second
+	ctrlCKey      = "ctrl+c"
 )
 
 var boardStatuses = [...]board.Status{
@@ -77,6 +78,7 @@ type Model struct {
 	dataVersion       int64
 	haveVersion       bool
 	stopped           bool
+	helpOpen          bool
 	readContext       context.Context
 	now               func() time.Time
 	savePreferences   func(tuiPreferences) error
@@ -160,6 +162,26 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.stopped {
 		return m, nil
 	}
+	if m.helpOpen {
+		switch msg := message.(type) {
+		case tea.KeyPressMsg:
+			switch msg.String() {
+			case "esc", "?":
+				m.helpOpen = false
+				return m, nil
+			case "q", ctrlCKey:
+				m.stopped = true
+				m.reloadPending = false
+				return m, tea.Quit
+			default:
+				return m, nil
+			}
+		case boardCardClickedMsg, boardColumnClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg:
+			return m, nil
+		}
+	}
 	if isTaskActionMessage(message) {
 		return m, m.updateTaskAction(message)
 	}
@@ -186,7 +208,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.issueImport.IsOpen() {
 		switch msg := message.(type) {
 		case tea.KeyPressMsg:
-			if msg.String() == "ctrl+c" {
+			if msg.String() == ctrlCKey {
 				break
 			}
 			command := m.issueImport.Update(msg)
@@ -224,7 +246,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.editor.IsOpen() {
 		switch msg := message.(type) {
 		case tea.KeyPressMsg:
-			if msg.String() == "ctrl+c" {
+			if msg.String() == ctrlCKey {
 				// The explicit terminal interrupt remains global.
 				break
 			}
@@ -245,7 +267,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.adr.IsOpen() {
 		switch msg := message.(type) {
 		case tea.KeyPressMsg:
-			if msg.String() == "ctrl+c" {
+			if msg.String() == ctrlCKey {
 				break
 			}
 			return m, m.adr.Update(msg)
@@ -259,7 +281,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.detail.IsOpen() {
 		switch msg := message.(type) {
 		case tea.KeyPressMsg:
-			if m.detail.OwnsInput() && msg.String() != "ctrl+c" {
+			if m.detail.OwnsInput() && msg.String() != ctrlCKey {
 				return m, m.updateDetail(message)
 			}
 			switch msg.String() {
@@ -278,7 +300,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					return m, command
 				}
 				return m, nil
-			case "q", "ctrl+c":
+			case "q", ctrlCKey:
 				// Preserve root quit while idle detail is open.
 			default:
 				return m, m.updateDetail(message)
@@ -293,7 +315,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	switch msg := message.(type) {
 	case tea.KeyPressMsg:
-		if msg.String() == "ctrl+c" {
+		if msg.String() == ctrlCKey {
 			if m.settings != nil {
 				m.settings.Close()
 			}
@@ -347,6 +369,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.stopped = true
 			m.reloadPending = false
 			return m, tea.Quit
+		case "?":
+			m.helpOpen = true
+			return m, nil
 		case "s":
 			if m.settingsNew != nil {
 				m.settings = m.settingsNew()
@@ -673,6 +698,10 @@ func batchCommands(commands ...tea.Cmd) tea.Cmd {
 // regions back into the update loop. Editing behavior arrives in later slices.
 func (m Model) View() tea.View {
 	content, hits := m.renderBoard()
+	if m.helpOpen {
+		content = m.keyboardHelpOverlay(content)
+		hits = nil
+	}
 	if m.detail.IsOpen() {
 		content = m.detail.Overlay(content, m.width, m.height)
 		hits = nil
@@ -700,7 +729,7 @@ func (m Model) View() tea.View {
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
-	if m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() && !m.issueImport.IsOpen() && !m.detail.OwnsInput() {
+	if !m.helpOpen && m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() && !m.issueImport.IsOpen() && !m.detail.OwnsInput() {
 		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
 		view.OnMouse = boardMouseHandler(hits, pointerActive)
 	}
