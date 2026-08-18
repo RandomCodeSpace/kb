@@ -836,6 +836,46 @@ func TestBoardMouseWheelScrollsHoveredColumn(t *testing.T) {
 	}
 }
 
+func TestBoardMouseWheelAtTopDoesNothing(t *testing.T) {
+	m := mouseRoutingTestModel(t)
+	m.boardView.manualScroll[0] = true
+	m.boardView.scrolls[0] = 0
+	handler := requireMouseHandler(t, m.View().OnMouse, "board top scroll")
+	if command := handler(tea.MouseWheelMsg{X: 1, Y: 4, Button: tea.MouseWheelUp}); command != nil {
+		t.Fatalf("top-bound wheel up returned %v", command)
+	}
+	if command := handler(tea.MouseWheelMsg{X: 1, Y: 0, Button: tea.MouseWheelUp}); command != nil {
+		t.Fatalf("header wheel returned %v", command)
+	}
+}
+
+func TestBoardPointerMotionCancelsControlPress(t *testing.T) {
+	m := mouseRoutingTestModel(t)
+	m.width, m.height = 120, 30
+	_, hits := m.renderBoard()
+	var target boardHit
+	for _, hit := range hits {
+		if hit.kind == boardHitFilterText {
+			target = hit
+			break
+		}
+	}
+	if target.kind != boardHitFilterText {
+		t.Fatal("filter text control was not rendered")
+	}
+	view := m.View()
+	press := requireMouseCommand(t, view.OnMouse(tea.MouseClickMsg{X: target.x0, Y: target.y0, Button: tea.MouseLeft}), "filter press")
+	updateTestModel(t, &m, press())
+	if !m.pointerState.Active() {
+		t.Fatal("filter press did not enter feedback state")
+	}
+	motion := requireMouseCommand(t, m.View().OnMouse(tea.MouseMotionMsg{X: target.x0 + 1, Y: target.y0, Button: tea.MouseLeft}), "filter motion")
+	updateTestModel(t, &m, motion())
+	if m.pointerState.Active() {
+		t.Fatal("pointer motion left filter feedback pressed")
+	}
+}
+
 func TestDetailOverlayMouseWheelAndOutsideClick(t *testing.T) {
 	m := mouseRoutingTestModel(t)
 
