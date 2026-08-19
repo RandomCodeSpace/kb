@@ -563,6 +563,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.mutateFilter(func(filter *boardFilterState) { filter.clear() })
 	case preferenceSavedMsg:
 		return m, m.finishPreferences(msg)
+	case tea.BackgroundColorMsg:
+		// Spec section 6.2: New is called on program start and here, nowhere
+		// else. Every style in the tree is rebuilt exactly once per answer, and
+		// the panes the root owns adopt the same instance.
+		m.styles = theme.New(msg.IsDark())
+		m.detail.SetStyles(m.styles)
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 {
 			m.width = msg.Width

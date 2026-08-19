@@ -31,12 +31,31 @@ type CardOpts struct {
 	Density   Density
 }
 
+// CardSpan locates one rendered label pill inside the rows a card returned.
+// Coordinates are relative to the card's own top-left cell, so a view that
+// places the card only has to add the card's origin to reach a hit region.
+type CardSpan struct {
+	Row    int
+	X0, X1 int
+	Index  int    // position in CardOpts.Labels
+	Tag    string // the label as the card rendered it
+}
+
 // Card renders one card as its content rows, without the inter-card gutter:
 // stacking and gutters belong to the panel. Spec section 3.1: four content rows
 // normally, five on a tall frame, two when compact.
 func Card(styles *theme.Styles, opts CardOpts) []string {
+	rows, _ := CardWithSpans(styles, opts)
+	return rows
+}
+
+// CardWithSpans is Card plus the position of every label pill it drew. The
+// board keys a pointer hit region to each label, and the card owns the wheel,
+// the compact degradation and the individual chip-survival rule of spec section
+// 3.4, so it is the only place those positions are known.
+func CardWithSpans(styles *theme.Styles, opts CardOpts) ([]string, []CardSpan) {
 	if opts.Width <= 0 {
-		return nil
+		return nil, nil
 	}
 	metrics := styles.Metrics
 	surface := styles.Surface(opts.Selected, opts.Alt)
@@ -52,10 +71,13 @@ func Card(styles *theme.Styles, opts CardOpts) []string {
 		rows = 3 + descLines
 	}
 	content := make([]string, 0, rows)
+	var spans []CardSpan
 	if inner >= metrics.CardMinInner {
 		content = append(content, cardTitle(styles, opts, surface, inner))
 		content = append(content, cardDesc(styles, opts, surface, inner, descLines)...)
-		content = append(content, cardChips(styles, opts, surface, inner)...)
+		chips, chipSpans := cardChips(styles, opts, surface, inner)
+		spans = offsetSpans(chipSpans, len(content), metrics.CardRail+metrics.CardPad(opts.Density), inner)
+		content = append(content, chips...)
 	}
 	for len(content) < rows {
 		content = append(content, "")
@@ -67,6 +89,20 @@ func Card(styles *theme.Styles, opts CardOpts) []string {
 	out := make([]string, 0, rows)
 	for _, line := range content[:rows] {
 		out = append(out, rail+left+fill(surfaceStyle, clip(line, inner), inner)+right)
+	}
+	return out, spans
+}
+
+// offsetSpans moves chip-row-relative spans onto the card's own grid: down by
+// the rows drawn above the chips, right by the rail and the left padding. The
+// right edge is clamped because the row itself is clipped to the content field.
+func offsetSpans(spans []CardSpan, row, column, inner int) []CardSpan {
+	out := make([]CardSpan, 0, len(spans))
+	for _, span := range spans {
+		span.Row += row
+		span.X0 += column
+		span.X1 = min(span.X1+column, column+inner)
+		out = append(out, span)
 	}
 	return out
 }
@@ -168,7 +204,7 @@ func wrap(styles *theme.Styles, text string, width, lines int) []string {
 
 // cardChips is the meta chip row and the label pill row of spec sections 3.4
 // and 3.5. Compact merges the labels onto the meta row and flattens the pills.
-func cardChips(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner int) []string {
+func cardChips(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner int) ([]string, []CardSpan) {
 	surfaceStyle := styles.On(theme.FgBase, surface)
 	flat := opts.Density.Compact()
 	labels := make([]string, 0, len(opts.Labels))
@@ -176,10 +212,30 @@ func cardChips(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner in
 		labels = append(labels, Label(styles, tag, surface, flat))
 	}
 	if flat {
-		return []string{join(surfaceStyle, append(append([]string{}, opts.Meta...), labels...), inner)}
+		entries := append(append([]string{}, opts.Meta...), labels...)
+		line, starts := joinAt(surfaceStyle, entries, inner)
+		return []string{line}, labelSpans(opts.Labels, labels, starts[len(opts.Meta):], 0)
 	}
+	line, starts := joinAt(surfaceStyle, labels, inner)
 	return []string{
 		join(surfaceStyle, opts.Meta, inner),
-		join(surfaceStyle, labels, inner),
+		line,
+	}, labelSpans(opts.Labels, labels, starts, 1)
+}
+
+// labelSpans pairs the emitted label pills with the tags they carry.
+func labelSpans(tags, rendered []string, starts []int, row int) []CardSpan {
+	spans := make([]CardSpan, 0, len(starts))
+	for index, start := range starts {
+		if start < 0 {
+			continue
+		}
+		spans = append(spans, CardSpan{
+			Row: row, X0: start,
+			X1:    start + ansi.StringWidth(rendered[index]),
+			Index: index,
+			Tag:   tags[index],
+		})
 	}
+	return spans
 }
