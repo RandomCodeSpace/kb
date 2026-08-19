@@ -1,0 +1,50 @@
+kb / kb roadmap / aksOps                                                                                                                                                                ×2 shipped today
+filter   type:feature   github#12   ✕ clear                                                                                                                                     4 CANCELLED 2 hidden · c
+                                                                                                                                                                                                        
+1 TO DO 4                                                           2 DOING 3                                                          3 DONE 3                                                         
+──────────────────────────────────────────────────────────────────  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ─────────────────────────────────────────────────────────────────
+▌ 🐛 Drag ghost on resize #142 2d old                               ╭───────────────────────────────────────────────────────────────╮  ▏ ✅ Filter persists in URL #133 shipped                         
+▌ P1  ⛔ blocked   overdue 1d  ◇M  type:bug   area:tui              │ 🚀 Board language variants #137 6h here                       │  ▏ P2 ◇S  type:feature   github#77                                
+                                                                    │ P1  today  ◇M  type:spike   github#137                        │                                                                   
+▏ ✨ Design tokens #139 new                                         ╰───────────────────────────────────────────────────────────────╯  ▌ ✅ Web UI hardening #131 shipped                               
+▏ P2 ◇L  type:feature   github#12                                                                                                      ▌ P1  type:fix                                                   
+                                                                    ▏ 🔧 Overlay separation #140 2d here                                                                                                
+▏ 📐 Adaptive compaction #144 5d old                                ▏ P2 ◇M  type:feature                                              ▏ ✅ Bump rig v0.2.0 #129 shipped                                
+▏ P3  in 3d  ◇S  type:design                                                                                                           ▏ P4  type:chore                                                 
+                                                                    ▏ 📝 Lipgloss research #138 1d here                                                                                                 
+▏ 🧪 Golden regen #147 9d old                                       ▏ P3  ⛔ blocked   type:research                                                                                                    
+▏ P4  type:chore   area:tests                                                                                                                                                                           
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+ready  ·  j/k cards  ·  h/l columns  ·  1-4 jump  ·  c cancelled:off  ·  enter open  ·  ? help  ·  q quit                                                                                               

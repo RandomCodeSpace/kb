@@ -1,0 +1,24 @@
+kb / kb roadmap / aksOps                                        ×2 shipped today
+filter   type:feature   github#12   ✕ clear             4 CANCELLED 2 hidden · c
+                                                                                
+1 TO DO 4                   2 DOING 3                  3 DONE 3                 
+──────────────────────────  ━━━━━━━━━━━━━━━━━━━━━━━━━  ─────────────────────────
+▌ 🐛 Drag ghost on resize   ╭───────────────────────╮  ▏ ✅ Filter persists in  
+▌ #142 2d old               │ 🚀 Board language     │  ▏ URL #133 shipped       
+▌ P1  ⛔ blocked            │ variants #137 6h here │  ▏ P2 ◇S  type:feature    
+▌  overdue 1d  ◇M           │ P1  today  ◇M         │  ▏  github#77             
+▌  type:bug   area:tui      │  type:spike           │                           
+                            │  github#137           │  ▌ ✅ Web UI hardening    
+▏ ✨ Design tokens #139     ╰───────────────────────╯  ▌ #131 shipped           
+▏ new                                                  ▌ P1  type:fix           
+▏ P2 ◇L  type:feature       ▏ 🔧 Overlay separation                             
+▏  github#12                ▏ #140 2d here             ▏ ✅ Bump rig v0.2.0 #129
+                            ▏ P2 ◇M  type:feature      ▏ shipped                
+▏ 📐 Adaptive compaction                               ▏ P4  type:chore         
+▏ #144 5d old               ▏ 📝 Lipgloss research                              
+▏ P3  in 3d  ◇S             ▏ #138 1d here                                      
+▏  type:design              ▏ P3  ⛔ blocked                                    
+                            ▏  type:research                                    
+▏ 🧪 Golden regen #147                                                          
+↓ 1 more                                                                        
+ready  ·  j/k cards  ·  h/l columns  ·  1-4 jump  ·  c cancelled:off            
