@@ -2311,7 +2311,7 @@ func TestRenderedCellGridNormalizesEraseAndCursor(t *testing.T) {
 	}
 }
 
-func TestWideDetailFrameRemainsInsideTerminalGrid(t *testing.T) {
+func TestWideDetailPanelRemainsInsideTerminalGrid(t *testing.T) {
 	task := board.Task{
 		ID: "wide", Seq: 10, Title: strings.Repeat("wide detail ", 20),
 		Desc:   strings.Repeat("## Section\nbody with wide text and an emoji 🧭\n\n", 40),
@@ -2336,10 +2336,15 @@ func TestWideDetailFrameRemainsInsideTerminalGrid(t *testing.T) {
 				t.Fatalf("%dx%d row %d width = %d", width, height, row, got)
 			}
 		}
+		// Spec section 4: the overlay elevates with a shade step and a shadow,
+		// so containment is asserted on the panel's own bands, not on a frame.
 		for _, edge := range []string{"╭", "╮", "╰", "╯"} {
-			if strings.Count(content, edge) != 1 {
-				t.Fatalf("%dx%d detail edge %q count = %d", width, height, edge, strings.Count(content, edge))
+			if strings.Contains(content, edge) {
+				t.Fatalf("%dx%d detail drew border rune %q", width, height, edge)
 			}
+		}
+		if !strings.Contains(content, "[Close]") {
+			t.Fatalf("%dx%d detail lost its footer band", width, height)
 		}
 	}
 
@@ -2354,7 +2359,7 @@ func TestWideDetailFrameRemainsInsideTerminalGrid(t *testing.T) {
 	assertGrid(427, 73)
 }
 
-func TestWideDetailPTYRendersCompleteBorderInsideCellGrid(t *testing.T) {
+func TestWideDetailPTYRendersCompletePanelInsideCellGrid(t *testing.T) {
 	task := board.Task{
 		ID: "wide", Seq: 10, Title: "Long detail",
 		Desc:   strings.Repeat("## Section\nbody with wide text and an emoji 🧭\n\n", 40),
@@ -2392,19 +2397,40 @@ func TestWideDetailPTYRendersCompleteBorderInsideCellGrid(t *testing.T) {
 		}
 		plain := ansi.Strip(string(grid))
 		for _, edge := range []string{"╭", "╮", "╰", "╯"} {
-			if strings.Count(plain, edge) != 1 {
-				t.Fatalf("cell grid detail edge %q count = %d", edge, strings.Count(plain, edge))
+			if strings.Contains(plain, edge) {
+				t.Fatalf("cell grid detail drew border rune %q", edge)
 			}
 		}
+		if !strings.Contains(plain, "[Close]") {
+			t.Fatal("cell grid lost the detail footer band")
+		}
+	}
+
+	// The scroll position is asserted on the parsed cell grid: a scrolled
+	// repetitive body changes one digit of the footer band's scroll hint, and
+	// the renderer emits that single cell rather than a matchable run.
+	waitForGrid := func(t *testing.T, width, height int, marker string) {
+		t.Helper()
+		teatest.WaitFor(t, io.TeeReader(output, &captured), func([]byte) bool {
+			frame, ok := finalFullScreenFrame(captured.Bytes())
+			if !ok {
+				return false
+			}
+			grid, err := renderedCellGrid(frame, width, height)
+			if err != nil {
+				return false
+			}
+			return strings.Contains(ansi.Strip(string(grid)), marker)
+		}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor(t, "[Close]")
 	assertGrid(t, 427, 73)
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyPgDown})
-	waitFor(t, "9/")
+	waitForGrid(t, 427, 73, "9/")
 	assertGrid(t, 427, 73)
 	tm.Send(tea.MouseWheelMsg{X: 213, Y: 36, Button: tea.MouseWheelDown})
-	waitFor(t, "12/")
+	waitForGrid(t, 427, 73, "12/")
 	assertGrid(t, 427, 73)
 	tm.Send(tea.WindowSizeMsg{Width: 80, Height: 20})
 	waitFor(t, "[Close]")

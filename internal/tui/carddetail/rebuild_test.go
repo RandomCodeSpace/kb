@@ -3,7 +3,7 @@ package carddetail
 import "testing"
 
 func TestRebuildBodyClearsStateWhenClosed(t *testing.T) {
-	m := New(stubReader{found: true}, "u")
+	m := New(stubReader{found: true}, "u", testStyles())
 	m.bodyLines = []string{"stale"}
 	m.bodyWidth = 40
 	m.scroll = 3

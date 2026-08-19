@@ -282,17 +282,20 @@ func (m *Model) focusActionSelection() {
 	}
 	focusLine := 0
 	for i, line := range m.bodyLines {
-		if strings.HasPrefix(line, "> ") {
+		// A body row is inset and styled, so the selection marker is found
+		// inside the row rather than at its first cell.
+		if strings.HasPrefix(strings.TrimLeft(ansi.Strip(line), " "), "> ") {
 			focusLine = i
 			break
 		}
 	}
-	_, innerHeight, _ := paneGeometry(m.width, m.height)
+	_, paneHeight, _ := m.paneSize(m.width, m.height)
+	bodyRows := max(paneHeight-2, 1)
 	if focusLine < m.scroll {
 		m.scroll = focusLine
 	}
-	if focusLine >= m.scroll+innerHeight {
-		m.scroll = focusLine - innerHeight + 1
+	if focusLine >= m.scroll+bodyRows {
+		m.scroll = focusLine - bodyRows + 1
 	}
 	m.clampScroll()
 }
@@ -513,7 +516,7 @@ func (m Model) actionBody(width int) string {
 		lines = append(lines, "", prefix+m.statusMessage)
 	}
 	for i := range lines {
-		lines[i] = fitDetailLine(safeText(lines[i], true), max(width-2, 1))
+		lines[i] = fitDetailLine(safeText(lines[i], true), max(width, 1))
 	}
 	return strings.Join(lines, "\n")
 }

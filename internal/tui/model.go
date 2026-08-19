@@ -64,6 +64,7 @@ type Model struct {
 	watcher           dataVersionReader
 	user              string
 	board             board.Board
+	styles            *theme.Styles
 	boardView         boardViewState
 	filter            boardFilterState
 	detail            carddetail.Model
@@ -99,7 +100,6 @@ type Model struct {
 	actionStatusError bool
 	actionNotice      bool
 	shipped           shippedRecord
-	styles            *theme.Styles
 }
 
 func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
@@ -132,15 +132,19 @@ func newModel(
 	moveStore, _ := store.(taskMoveStore)
 	actionStore, _ := store.(taskActionStore)
 	now := time.Now
+	// Spec section 6.3: the palette is resolved once for a dark terminal and
+	// rebuilt only when tea.BackgroundColorMsg says otherwise.
+	styles := theme.New(true)
 	return Model{
 		store:       store,
+		styles:      styles,
 		moveStore:   moveStore,
 		actionStore: actionStore,
 		watcher:     watcher,
 		user:        user,
 		board:       board.Board{Title: "Board"},
 		filter:      newBoardFilterState(),
-		detail:      carddetail.New(detailReader, user),
+		detail:      carddetail.New(detailReader, user, styles),
 		editor:      cardeditor.New(editorStore, user),
 		width:       defaultWidth,
 		height:      defaultHeight,
@@ -149,9 +153,6 @@ func newModel(
 		now:         now,
 		renderedAt:  now(),
 		action:      newTaskActionState(),
-		// Spec section 6.3: the palette defaults to dark and is rebuilt once,
-		// when the terminal answers with its background color.
-		styles: theme.New(true),
 	}
 }
 
@@ -564,8 +565,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.finishPreferences(msg)
 	case tea.BackgroundColorMsg:
 		// Spec section 6.2: New is called on program start and here, nowhere
-		// else. Every style in the tree is rebuilt exactly once per answer.
+		// else. Every style in the tree is rebuilt exactly once per answer, and
+		// the panes the root owns adopt the same instance.
 		m.styles = theme.New(msg.IsDark())
+		m.detail.SetStyles(m.styles)
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 {
 			m.width = msg.Width

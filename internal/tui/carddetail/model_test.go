@@ -13,6 +13,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 type stubReader struct {
@@ -57,7 +58,7 @@ func TestModelLoadsAndRendersFullDetail(t *testing.T) {
 		tombstone: store.Tombstone{TaskID: "task-1", Reason: "superseded", KilledAt: stamp.Format(time.RFC3339Nano)},
 		found:     true,
 	}
-	m := New(reader, "alice")
+	m := New(reader, "alice", testStyles())
 	if m.IsOpen() || m.TaskID() != "" || m.View(80, 24) != "" {
 		t.Fatal("new detail pane was not closed")
 	}
@@ -71,10 +72,11 @@ func TestModelLoadsAndRendersFullDetail(t *testing.T) {
 	m.Update(command())
 	body := ansi.Strip(m.renderBody(72))
 	for _, want := range []string{
-		"🧭 Map it  #7", "status cancelled", "priority 1", "due 2026-08-19", "effort M", "blocked",
-		"[type::feature]", "[github#86]", "killed 17 Aug 2026", "superseded", "Plan", "first",
-		"checklist", "☑ done", "☐ left", "blocks      [#9 todo]", "blocked by  [legacy done]",
-		"comments  1", "c3  alice  17 Aug 2026", "looks", "good",
+		"DETAIL", "status      cancelled  blocked", "priority    1", "due         2026-08-19",
+		"effort      M", "labels      [type::feature]", "links       [github#86]",
+		"killed 17 Aug 2026", "superseded", "Plan", "first",
+		"CHECKLIST", "1/2", "☑ done", "☐ left", "blocks      [#9 todo]", "blocked by  [legacy done]",
+		"COMMENTS", "c3  alice  17 Aug 2026", "looks", "good",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail body missing %q:\n%s", want, body)
@@ -82,6 +84,9 @@ func TestModelLoadsAndRendersFullDetail(t *testing.T) {
 	}
 	if strings.Count(body, "[github#86]") != 1 {
 		t.Errorf("link chips were not deduplicated:\n%s", body)
+	}
+	if header := ansi.Strip(m.View(80, 24)); !strings.Contains(header, "🧭 Map it") || !strings.Contains(header, "#7") {
+		t.Errorf("header band missing the card identity:\n%s", header)
 	}
 
 	view := m.View(80, 20)
@@ -93,7 +98,7 @@ func TestModelLoadsAndRendersFullDetail(t *testing.T) {
 }
 
 func TestDetailMouseHandlerRoutesOnlyPaneWheelAndOutsideLeftClick(t *testing.T) {
-	m := New(nil, "alice")
+	m := New(nil, "alice", testStyles())
 	if m.MouseHandler(80, 20) != nil {
 		t.Fatal("closed detail exposed a mouse handler")
 	}
@@ -134,7 +139,7 @@ func TestDetailMouseHandlerRoutesOnlyPaneWheelAndOutsideLeftClick(t *testing.T) 
 }
 
 func TestDetailMouseWheelStopsAtUpperBound(t *testing.T) {
-	m := New(nil, "alice")
+	m := New(nil, "alice", testStyles())
 	m.Open(fullTask())
 	m.Resize(80, 12)
 	m.bodyLines = make([]string, 30)
@@ -157,7 +162,7 @@ func TestDetailMouseWheelStopsAtUpperBound(t *testing.T) {
 
 func TestModelHandlesErrorsStaleLoadsScrollAndClose(t *testing.T) {
 	loadErr := errors.New("comments broke")
-	m := New(stubReader{commentsErr: loadErr, linksErr: errors.New("links broke")}, "u")
+	m := New(stubReader{commentsErr: loadErr, linksErr: errors.New("links broke")}, "u", testStyles())
 	command := m.Open(board.Task{ID: "current", Title: "Current", Status: board.StatusTodo})
 	m.Update(detailLoadedMsg{taskID: "stale", comments: []store.Comment{{ID: 1}}})
 	if !m.loading {
@@ -204,7 +209,8 @@ func TestModelRendersIndependentEnrichmentResults(t *testing.T) {
 		links:       store.TaskLinks{Blocks: []board.Task{{Seq: 9, Status: board.StatusDoing}}},
 		tombstone:   store.Tombstone{TaskID: "task", Reason: "replaced", KilledAt: stamp.Format(time.RFC3339Nano)},
 		found:       true,
-	}, "u")
+	}, "u", testStyles())
+
 	commentsFailed.Update(commentsFailed.Open(task)())
 	body := ansi.Strip(commentsFailed.renderBody(60))
 	for _, want := range []string{"blocks      [#9 doing]", "killed 17 Aug 2026", "comments error: comments unavailable"} {
@@ -212,7 +218,7 @@ func TestModelRendersIndependentEnrichmentResults(t *testing.T) {
 			t.Errorf("comments failure hid %q:\n%s", want, body)
 		}
 	}
-	if strings.Contains(body, "comments  none") || strings.Contains(body, "must not render") {
+	if strings.Contains(body, "none") || strings.Contains(body, "must not render") {
 		t.Fatalf("failed comments read rendered a successful comments state:\n%s", body)
 	}
 
@@ -220,7 +226,8 @@ func TestModelRendersIndependentEnrichmentResults(t *testing.T) {
 		comments:     []store.Comment{{ID: 1, Author: "alice", Body: "available", CreatedAt: stamp}},
 		linksErr:     errors.New("links unavailable"),
 		tombstoneErr: errors.New("killed unavailable"),
-	}, "u")
+	}, "u", testStyles())
+
 	contextFailed.Update(contextFailed.Open(task)())
 	body = ansi.Strip(contextFailed.renderBody(60))
 	for _, want := range []string{"available", "blocker links error: links unavailable", "killed context error: killed unavailable"} {
@@ -231,7 +238,7 @@ func TestModelRendersIndependentEnrichmentResults(t *testing.T) {
 }
 
 func TestModelRejectsStaleLoadForReopenedTask(t *testing.T) {
-	m := New(stubReader{}, "u")
+	m := New(stubReader{}, "u", testStyles())
 	task := board.Task{ID: "same", Title: "Same", Status: board.StatusTodo}
 	first := m.Open(task)
 	second := m.Open(task)
@@ -263,7 +270,7 @@ func (*countingDetailReader) Tombstone(string, string) (store.Tombstone, bool, e
 
 func TestRefreshCoalescesEnrichmentLoads(t *testing.T) {
 	reader := &countingDetailReader{}
-	m := New(reader, "u")
+	m := New(reader, "u", testStyles())
 	first := m.Open(board.Task{ID: "same", Title: "first", Status: board.StatusTodo})
 	if command := m.Refresh(board.Task{ID: "same", Title: "second", Status: board.StatusDoing}); command != nil {
 		t.Fatal("refresh overlapped the active enrichment load")
@@ -289,13 +296,13 @@ func TestRefreshCoalescesEnrichmentLoads(t *testing.T) {
 }
 
 func TestNilReaderAndRenderingHelpers(t *testing.T) {
-	m := New(nil, "u")
+	m := New(nil, "u", testStyles())
 	task := board.Task{ID: "id", Title: "Bare", Status: board.StatusTodo, Prio: 3}
 	if command := m.Open(task); command != nil || m.loading {
 		t.Fatalf("nil-reader open = command %v loading %v", command, m.loading)
 	}
 	body := ansi.Strip(m.renderBody(40))
-	if !strings.Contains(body, "comments  none") {
+	if !strings.Contains(body, "COMMENTS") || !strings.Contains(body, "none") {
 		t.Fatalf("nil-reader body:\n%s", body)
 	}
 	if got := m.View(1, 1); got == "" {
@@ -311,25 +318,41 @@ func TestNilReaderAndRenderingHelpers(t *testing.T) {
 	if got := killedContext(store.Tombstone{Reason: "why", KilledAt: "bad"}); got != "killed bad\nwhy" {
 		t.Fatalf("killedContext invalid date = %q", got)
 	}
-	if got := renderChecklist(nil); got != "checklist" {
-		t.Fatalf("empty checklist = %q", got)
-	}
-	if got := renderTaskLinks(store.TaskLinks{}); got != "" {
-		t.Fatalf("empty task links = %q", got)
-	}
 	if got := taskChips([]board.Task{{ID: "id", Status: board.StatusDoing}}); got != "[id doing]" {
 		t.Fatalf("fallback task chip = %q", got)
 	}
-	if got := renderComments([]store.Comment{{ID: 1, Author: "a", Body: "body"}}, 0); !strings.Contains(ansi.Strip(got), "1 Jan 0001") {
-		t.Fatalf("zero-time comment = %q", ansi.Strip(got))
+	m.comments = []store.Comment{{ID: 1, Author: "a", Body: "body"}}
+	if got := ansi.Strip(strings.Join(m.commentRows(36, 40), "\n")); !strings.Contains(got, "1 Jan 0001") {
+		t.Fatalf("zero-time comment = %q", got)
 	}
 	if got := safeText("ok\x1b[31m red\a\nnext", true); got != "ok red\nnext" {
 		t.Fatalf("safeText = %q", got)
 	}
 }
 
+// TestSetStylesAdoptsRebuiltTheme is spec section 6.3: the root resolves the
+// palette again when the terminal answers with its background color, and the
+// pane follows it instead of holding the palette it was constructed with.
+func TestSetStylesAdoptsRebuiltTheme(t *testing.T) {
+	m := New(nil, "u", testStyles())
+	before := m.styles
+	m.SetStyles(nil)
+	if m.styles != before {
+		t.Fatal("nil styles replaced the resolved palette")
+	}
+	_ = m.Open(board.Task{ID: "id", Title: "Bare", Status: board.StatusTodo, Prio: 3})
+	rebuilt := theme.New(false)
+	m.SetStyles(rebuilt)
+	if m.styles != rebuilt || m.renderMarkdown == nil {
+		t.Fatalf("rebuilt palette was not adopted: styles=%v renderer=%v", m.styles == rebuilt, m.renderMarkdown != nil)
+	}
+	if got := m.View(40, 12); got == "" {
+		t.Fatal("pane stopped rendering after the rebuild")
+	}
+}
+
 func TestViewClampsScrollToContent(t *testing.T) {
-	m := New(nil, "u")
+	m := New(nil, "u", testStyles())
 	task := fullTask()
 	task.Desc = strings.Repeat("line\n", 40)
 	m.Resize(40, 10)
@@ -360,7 +383,7 @@ func TestViewClampsScrollToContent(t *testing.T) {
 }
 
 func TestCardDetailGolden(t *testing.T) {
-	m := New(nil, "default")
+	m := New(nil, "default", testStyles())
 	task := fullTask()
 	task.Status = board.StatusDoing
 	m.Open(task)
@@ -371,8 +394,22 @@ func TestCardDetailGolden(t *testing.T) {
 	golden.RequireEqual(t, strings.Trim(strings.Join(lines, "\n"), "\n")+"\n")
 }
 
+// TestCardDetailColorGolden is the palette golden of spec section 6.4: an
+// ASCII-pinned golden of a design whose whole depth model is background color
+// asserts nothing about the design, so this one pins truecolor and keeps the
+// composed surface, shadow bands included.
+func TestCardDetailColorGolden(t *testing.T) {
+	m := New(nil, "default", testStyles())
+	task := fullTask()
+	task.Status = board.StatusDoing
+	m.Open(task)
+	board := strings.TrimRight(strings.Repeat(strings.Repeat("-", 60)+"\n", 20), "\n")
+	surface := m.PointerSurface(board, 60, 20)
+	golden.RequireEqual(t, theme.Downsample(surface.Content, theme.ColorProfile)+"\n")
+}
+
 func TestOverlayKeepsBoardAroundPane(t *testing.T) {
-	m := New(nil, "u")
+	m := New(nil, "u", testStyles())
 	background := strings.Repeat("b", 30) + "\n" + strings.Repeat("b", 30)
 	if got := m.Overlay(background, 30, 2); got != background {
 		t.Fatalf("closed overlay changed background: %q", got)
@@ -385,7 +422,7 @@ func TestOverlayKeepsBoardAroundPane(t *testing.T) {
 }
 
 func TestOverlayClipsStaleBackgroundToCurrentTerminal(t *testing.T) {
-	m := New(nil, "u")
+	m := New(nil, "u", testStyles())
 	m.Open(board.Task{
 		ID: "id", Title: "detail", Status: board.StatusTodo,
 		Desc: strings.Repeat("line\n", 100),
@@ -407,7 +444,7 @@ func TestOverlayClipsStaleBackgroundToCurrentTerminal(t *testing.T) {
 }
 
 func TestViewFitsTinyTerminal(t *testing.T) {
-	m := New(nil, "u")
+	m := New(nil, "u", testStyles())
 	m.Open(board.Task{ID: "id", Title: "detail", Status: board.StatusTodo})
 	for _, size := range [][2]int{{1, 1}, {2, 3}, {4, 3}} {
 		view := m.View(size[0], size[1])
@@ -423,8 +460,8 @@ func TestViewFitsTinyTerminal(t *testing.T) {
 	}
 }
 
-func TestDetailBorderStaysInsideFullTerminalAcrossScrollAndResize(t *testing.T) {
-	m := New(nil, "u")
+func TestDetailPanelStaysInsideFullTerminalAcrossScrollAndResize(t *testing.T) {
+	m := New(nil, "u", testStyles())
 	task := fullTask()
 	task.Title = strings.Repeat("wide detail ", 20)
 	task.Desc = strings.Repeat("## Section\nbody with wide text and an emoji 🧭\n\n", 40)
@@ -443,10 +480,12 @@ func TestDetailBorderStaysInsideFullTerminalAcrossScrollAndResize(t *testing.T) 
 				t.Fatalf("%dx%d row %d width = %d", width, height, row, got)
 			}
 		}
+		// Spec section 4: elevation is a shade step plus a shadow, never a
+		// frame, so no box-drawing rune belongs to the overlay any more.
 		plain := strings.Join(lines, "\n")
-		for _, edge := range []string{"╭", "╮", "╰", "╯"} {
-			if strings.Count(plain, edge) != 1 {
-				t.Fatalf("%dx%d detail edge %q count = %d\n%s", width, height, edge, strings.Count(plain, edge), plain)
+		for _, edge := range []string{"╭", "╮", "╰", "╯", "│", "─"} {
+			if strings.Contains(plain, edge) {
+				t.Fatalf("%dx%d detail drew border rune %q\n%s", width, height, edge, plain)
 			}
 		}
 	}
@@ -462,8 +501,8 @@ func TestDetailBorderStaysInsideFullTerminalAcrossScrollAndResize(t *testing.T) 
 	assertContained(427, 73)
 }
 
-func TestHostileFencedTabsStayInsideBorder(t *testing.T) {
-	m := New(nil, "u")
+func TestHostileFencedTabsStayInsidePanel(t *testing.T) {
+	m := New(nil, "u", testStyles())
 	m.Open(board.Task{
 		ID: "id", Title: "tabs", Status: board.StatusTodo,
 		Desc: "```\n\t~~~~~~\t界界界界界\n```",
@@ -483,15 +522,12 @@ func TestHostileFencedTabsStayInsideBorder(t *testing.T) {
 		if width := ansi.StringWidth(line); width > 20 {
 			t.Fatalf("line width = %d:\n%s", width, view)
 		}
-		if strings.HasPrefix(line, "│") && !strings.HasSuffix(line, "│") {
-			t.Fatalf("content crossed the right border: %q", line)
-		}
 	}
 }
 
 func TestScrollAndViewReuseRenderedMarkdown(t *testing.T) {
 	renders := 0
-	m := New(nil, "u")
+	m := New(nil, "u", testStyles())
 	m.renderMarkdown = func(source string, _ int) string {
 		renders++
 		return source

@@ -52,7 +52,7 @@ func TestDriftSelectCheckAndAcceptConflict(t *testing.T) {
 		result:    forge.Drift{State: "drifted", UpstreamTitle: "Changed", BaselineTitle: "Old", Summary: "material change", Revision: strings.Repeat("a", 64)},
 		acceptErr: forge.ErrUpstreamChanged,
 	}
-	m := New(nil, "alice")
+	m := New(nil, "alice", testStyles())
 	m.SetDriftBackend(backend, context.Background())
 	m.Open(driftTask("task-a"))
 	command := m.Update(tea.KeyPressMsg{Code: 'v'})
@@ -98,7 +98,7 @@ func TestPointerDriftSelectCheckAcceptAndBack(t *testing.T) {
 		result:   forge.Drift{State: "drifted", Revision: strings.Repeat("a", 64)},
 		acceptAt: "2026-08-18T00:00:00Z",
 	}
-	m := New(nil, "alice")
+	m := New(nil, "alice", testStyles())
 	m.SetDriftBackend(backend, context.Background())
 	m.Open(driftTask("task-pointer"))
 	m.Update(m.beginDrift()())
@@ -150,7 +150,7 @@ func TestDriftAcceptSuccessAndStaleSessionGuards(t *testing.T) {
 		provenance: map[string][]store.ImportLink{"github#93": {{Source: "github", ExternalKey: "key", Title: "Issue"}}},
 		result:     forge.Drift{State: "drifted", Revision: strings.Repeat("b", 64)}, acceptAt: "2026-08-18T00:00:00Z",
 	}
-	m := New(nil, "alice")
+	m := New(nil, "alice", testStyles())
 	m.SetDriftBackend(backend, nil)
 	task := driftTask("task-a")
 	task.Tags = []string{"link::github#93"}
@@ -175,7 +175,7 @@ func TestDriftAcceptSuccessAndStaleSessionGuards(t *testing.T) {
 }
 
 func TestDriftErrorsMissingLinksAndBusyInput(t *testing.T) {
-	m := New(nil, "alice")
+	m := New(nil, "alice", testStyles())
 	m.SetDriftBackend(&fakeDriftBackend{}, context.Background())
 	m.Open(board.Task{ID: "plain", Title: "Plain", Status: board.StatusTodo})
 	if command := m.beginDrift(); command != nil || m.statusMessage != "no imported forge link on this card" {
@@ -215,7 +215,7 @@ func TestRawImportLinksAndDriftRenderingHelpers(t *testing.T) {
 	if strings.Join(got, ",") != "github#1,gitlab#2" {
 		t.Fatalf("links = %v", got)
 	}
-	m := New(nil, "u")
+	m := New(nil, "u", testStyles())
 	m.open = true
 	m.driftMode, m.driftBusy = driftSelect, "check"
 	if !strings.Contains(m.driftBody(20), "check in progress") || m.driftFooter() != "check in progress | input locked" {
