@@ -5,6 +5,7 @@ package carddetail
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -13,7 +14,6 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
-	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -21,12 +21,16 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget"
 )
 
 const (
-	maxPaneWidth  = 92
 	defaultWidth  = 80
 	defaultHeight = 24
+	// minPaneWidth is the floor the pane keeps on a frame too narrow for the
+	// spec section 4 geometry, carried over from v1.0.1.
+	minPaneWidth = 12
 )
 
 // Reader is the store projection needed to enrich a board task for display.
@@ -79,6 +83,7 @@ type Model struct {
 	generation     uint64
 	width          int
 	height         int
+	styles         *theme.Styles
 	renderMarkdown markdownRenderer
 	bodyLines      []string
 	bodyWidth      int
@@ -111,11 +116,15 @@ type Model struct {
 
 // New creates a closed detail pane. A nil reader still shows board-resident
 // task fields; enrichment is simply unavailable to lightweight model tests.
-func New(reader Reader, user string) Model {
+//
+// The styles are the design system of spec section 6: the pane never builds a
+// lipgloss style, it composes the cached ones, and it hands the palette-derived
+// markdown config to glamour through the injectable renderer.
+func New(reader Reader, user string, styles *theme.Styles) Model {
 	writer, _ := reader.(Writer)
 	return Model{
 		reader: reader, writer: writer, user: user, width: defaultWidth, height: defaultHeight,
-		renderMarkdown: renderMarkdown,
+		styles: styles, renderMarkdown: markdownWith(styles),
 	}
 }
 
@@ -209,8 +218,8 @@ func (m *Model) Close() {
 func (m *Model) Resize(width, height int) {
 	m.width = max(width, 1)
 	m.height = max(height, 1)
-	innerWidth, _, _ := paneGeometry(m.width, m.height)
-	if m.open && (m.bodyLines == nil || m.bodyWidth != innerWidth) {
+	paneWidth, _, _ := m.paneSize(m.width, m.height)
+	if m.open && (m.bodyLines == nil || m.bodyWidth != paneWidth) {
 		m.rebuildBody()
 		return
 	}
@@ -317,7 +326,7 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 	if !m.open {
 		return nil
 	}
-	paneWidth, paneHeight := paneSize(width, height)
+	paneWidth, paneHeight, _ := m.paneSize(width, height)
 	x0 := max((max(width, 1)-paneWidth)/2, 0)
 	y0 := max((max(height, 1)-paneHeight)/2, 0)
 	return func(message tea.MouseMsg) tea.Cmd {
@@ -414,15 +423,18 @@ func (m *Model) startLoad() tea.Cmd {
 	return m.load(m.task.ID, m.generation)
 }
 
-// View renders a centered bordered pane sized for the current terminal.
+// View renders the centered overlay panel sized for the current terminal. The
+// panel carries no shadow here: a shadow needs something to fall on, and this
+// path has no board behind it.
 func (m *Model) View(width, height int) string {
 	if !m.open {
 		return ""
 	}
 	width = max(width, 1)
 	height = max(height, 1)
-	frame, _, _ := m.frame(width, height)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, frame)
+	layout := m.layout(width, height)
+	panel := fitTerminal(widget.Overlay(m.styles, layout.opts), width, height)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, panel)
 }
 
 // Overlay composes the pane over the board without making carddetail own the
@@ -441,14 +453,17 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 	width = max(width, 1)
 	height = max(height, 1)
 	background = fitTerminal(background, width, height)
-	frame, paneWidth, _ := m.frame(width, height)
-	_, paneHeight := paneSize(width, height)
+	layout := m.layout(width, height)
+	paneWidth, paneHeight := layout.opts.Width, layout.opts.Height
 	x := max((width-paneWidth)/2, 0)
 	y := max((height-paneHeight)/2, 0)
-	content := fitTerminal(lipgloss.NewCompositor(
-		lipgloss.NewLayer(background),
-		lipgloss.NewLayer(frame).X(x).Y(y).Z(1),
-	).Render(), width, height)
+	layers := []*lipgloss.Layer{lipgloss.NewLayer(background)}
+	if layout.elevated {
+		layers = append(layers, widget.OverlayLayers(m.styles, layout.opts, x, y)...)
+	} else {
+		layers = append(layers, lipgloss.NewLayer(widget.Overlay(m.styles, layout.opts)).X(x).Y(y).Z(1))
+	}
+	content := fitTerminal(lipgloss.NewCompositor(layers...).Render(), width, height)
 
 	bounds := pointer.Rect{X0: 0, Y0: 0, X1: width, Y1: height}
 	pane := pointer.Rect{X0: x, Y0: y, X1: x + paneWidth, Y1: y + paneHeight}
@@ -465,14 +480,14 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 		hitMap.AddBackdrop(bounds, pane, func(pointer.Point) tea.Msg { return wrap(mouseDismissMsg{}) })
 	}
 
-	innerWidth, _, _ := paneGeometry(width, height)
-	displayWidth := max(innerWidth-2, 1)
-	footerY := y + paneHeight - 3
-	xCursor := x + 2
-	for _, control := range m.pointerFooterControls(displayWidth) {
+	inset := m.styles.Metrics.OverlayInsetX
+	displayWidth := layout.contentWidth
+	footerY := y + paneHeight - 1
+	xCursor := x + inset
+	for _, control := range m.pointerFooterControls(layout.footerWidth) {
 		label := "[" + control.label + "]"
 		labelWidth := ansi.StringWidth(label)
-		if xCursor+labelWidth > x+paneWidth-2 || footerY < y || footerY >= y+paneHeight {
+		if xCursor+labelWidth > x+paneWidth || footerY < y || footerY >= y+paneHeight {
 			break
 		}
 		rect := pointer.Rect{X0: xCursor, Y0: footerY, X1: xCursor + labelWidth, Y1: footerY + 1}
@@ -482,7 +497,7 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 	}
 	if m.driftMode == driftSelect && m.driftBusy == "" {
 		viewport := pointer.Viewport{
-			Rect:   pointer.Rect{X0: x + 2, Y0: y + 1, X1: x + paneWidth - 2, Y1: footerY},
+			Rect:   pointer.Rect{X0: x + inset, Y0: y + 1, X1: x + paneWidth - inset, Y1: footerY},
 			Scroll: m.scroll,
 		}
 		for index := range m.driftChoices {
@@ -503,7 +518,7 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 			logicalRow++
 		}
 		viewport := pointer.Viewport{
-			Rect:   pointer.Rect{X0: x + 2, Y0: y + 1, X1: x + paneWidth - 2, Y1: footerY},
+			Rect:   pointer.Rect{X0: x + inset, Y0: y + 1, X1: x + paneWidth - inset, Y1: footerY},
 			Scroll: m.scroll,
 		}
 		for index := start; index < end; index++ {
@@ -516,36 +531,66 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 	return pointer.Surface{Content: content, Pointer: hitMap.Handler()}
 }
 
-func (m *Model) frame(width, height int) (string, int, int) {
+// paneLayout is one resolved render pass: the panel the widget draws, whether
+// it is elevated, and the two widths the footer and its controls share so a
+// clickable label always lands where it was rendered.
+type paneLayout struct {
+	opts         widget.OverlayOpts
+	elevated     bool
+	contentWidth int
+	footerWidth  int
+}
+
+func (m *Model) layout(width, height int) paneLayout {
 	width = max(width, 1)
 	height = max(height, 1)
 	m.ensureBody(width, height)
-	innerWidth, innerHeight, paneHeight := paneGeometry(width, height)
-	displayWidth := max(innerWidth-2, 1)
+	paneWidth, paneHeight, elevated := m.paneSize(width, height)
+	contentWidth := m.contentWidth(paneWidth)
 
-	lines := m.bodyLines
-	maxScroll := max(0, len(lines)-innerHeight)
+	bodyRows := max(paneHeight-2, 0)
+	maxScroll := max(0, len(m.bodyLines)-bodyRows)
 	start := min(m.scroll, maxScroll)
-	end := min(start+innerHeight, len(lines))
-	visibleLines := append([]string(nil), lines[start:end]...)
-	for i := range visibleLines {
-		visibleLines[i] = ansi.Truncate(visibleLines[i], innerWidth, "")
-	}
-	visible := strings.Join(visibleLines, "\n")
-	visible = lipgloss.NewStyle().Width(innerWidth).Height(innerHeight).Render(visible)
-	footer := m.actionFooter(displayWidth)
+	end := min(start+bodyRows, len(m.bodyLines))
+	hint := ""
+	// A band insets its content from the left and right-aligns its tail at its
+	// own edge, so the footer hints have one inset less than a body row.
+	footerWidth := max(paneWidth-m.styles.Metrics.OverlayInsetX, 1)
 	if maxScroll > 0 {
-		footer = fmt.Sprintf("%s  %d/%d", footer, start+1, maxScroll+1)
+		hint = widget.ScrollHint(m.styles, start+1, maxScroll+1, theme.OverlayBand)
+		footerWidth = max(footerWidth-ansi.StringWidth(hint)-1, 1)
 	}
-	content := visible + "\n" + fitDetailLine(footer, displayWidth)
-	frame := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		Padding(0, 1).
-		Width(innerWidth).
-		Height(paneHeight - 2).
-		Render(content)
-	frame = fitTerminal(frame, width, height)
-	return frame, lipgloss.Width(frame), lipgloss.Height(frame)
+	return paneLayout{
+		opts: widget.OverlayOpts{
+			Title:  m.headerTitle(),
+			Seq:    m.headerSeq(),
+			Body:   m.bodyLines[start:end],
+			Footer: m.actionFooter(footerWidth),
+			Hint:   hint,
+			Width:  paneWidth,
+			Height: paneHeight,
+		},
+		elevated:     elevated,
+		contentWidth: contentWidth,
+		footerWidth:  footerWidth,
+	}
+}
+
+// headerTitle is the header band's bold title: the emoji and the card title.
+func (m Model) headerTitle() string {
+	title := strings.TrimSpace(safeText(m.task.Title, false))
+	if m.task.Emoji != "" {
+		title = safeText(m.task.Emoji, false) + " " + title
+	}
+	return title
+}
+
+// headerSeq is the right-aligned reference of the header band.
+func (m Model) headerSeq() string {
+	if m.task.Seq <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("#%d", m.task.Seq)
 }
 
 func fitDetailLine(line string, width int) string {
@@ -559,15 +604,26 @@ func fitDetailLine(line string, width int) string {
 	return ansi.Cut(line, 0, width-1) + "…"
 }
 
-func paneGeometry(width, height int) (innerWidth, innerHeight, paneHeight int) {
-	paneWidth, paneHeight := paneSize(width, height)
-	return max(paneWidth-4, 1), max(paneHeight-4, 1), paneHeight
-}
-
-func paneSize(width, height int) (paneWidth, paneHeight int) {
+// paneSize is the overlay geometry of spec section 4: pw = min(72, frameW-8),
+// ph = min(13, frameH-6), centered. A frame too short for the section 4
+// minimums does not get an elevated panel: the overlay keeps the v1.0.1
+// full-frame pane height, whose backdrop margin the frozen dismissal behavior
+// depends on, and casts no shadow.
+func (m Model) paneSize(width, height int) (paneWidth, paneHeight int, elevated bool) {
 	width = max(width, 1)
 	height = max(height, 1)
-	return min(max(width-4, 12), maxPaneWidth, width), min(max(min(height-2, height), 5), height)
+	metrics := m.styles.Metrics.Overlay
+	paneWidth = max(min(metrics.PaneW, width-metrics.FrameSlackW), min(width, minPaneWidth))
+	paneHeight = min(metrics.PaneH, height-metrics.FrameSlackH)
+	if paneWidth >= metrics.MinW && paneHeight >= metrics.MinH {
+		return paneWidth, paneHeight, true
+	}
+	return paneWidth, min(max(min(height-2, height), 5), height), false
+}
+
+// contentWidth is the width a body row has between the overlay insets.
+func (m Model) contentWidth(paneWidth int) int {
+	return max(paneWidth-2*m.styles.Metrics.OverlayInsetX, 1)
 }
 
 func (m *Model) clampScroll() {
@@ -579,15 +635,15 @@ func (m *Model) clampScroll() {
 }
 
 func (m Model) maxScroll() int {
-	_, innerHeight, _ := paneGeometry(m.width, m.height)
-	return max(0, len(m.bodyLines)-innerHeight)
+	_, paneHeight, _ := m.paneSize(m.width, m.height)
+	return max(0, len(m.bodyLines)-max(paneHeight-2, 0))
 }
 
 func (m *Model) ensureBody(width, height int) {
 	m.width = max(width, 1)
 	m.height = max(height, 1)
-	innerWidth, _, _ := paneGeometry(m.width, m.height)
-	if m.bodyLines == nil || m.bodyWidth != innerWidth {
+	paneWidth, _, _ := m.paneSize(m.width, m.height)
+	if m.bodyLines == nil || m.bodyWidth != paneWidth {
 		m.rebuildBody()
 		return
 	}
@@ -601,10 +657,10 @@ func (m *Model) rebuildBody() {
 		m.scroll = 0
 		return
 	}
-	innerWidth, _, _ := paneGeometry(m.width, m.height)
-	body := m.renderBody(innerWidth)
+	paneWidth, _, _ := m.paneSize(m.width, m.height)
+	body := m.renderBody(paneWidth)
 	m.bodyLines = strings.Split(strings.TrimRight(body, "\n"), "\n")
-	m.bodyWidth = innerWidth
+	m.bodyWidth = paneWidth
 	m.clampScroll()
 }
 
@@ -619,91 +675,177 @@ func fitTerminal(rendered string, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
+// renderBody renders the scrollable body as panel-width rows. Spec section 4:
+// the section breaks are OverlayBand rows, the key/value lines are field rows,
+// and every other row carries the panel surface to both edges.
 func (m Model) renderBody(width int) string {
 	if m.driftMode != driftNone {
-		return m.driftBody(width)
+		return strings.Join(m.paneRows(m.driftBody(m.contentWidth(width)), width), "\n")
 	}
 	if m.action != actionNone {
-		return m.actionBody(width)
+		return strings.Join(m.paneRows(m.actionBody(m.contentWidth(width)), width), "\n")
 	}
-	title := strings.TrimSpace(safeText(m.task.Title, false))
-	if m.task.Emoji != "" {
-		title = safeText(m.task.Emoji, false) + " " + title
+	return strings.Join(m.detailRows(width), "\n")
+}
+
+// paneRows turns an action or drift pane into panel rows: its first line is its
+// heading and becomes the section break, the rest are body rows.
+func (m Model) paneRows(body string, width int) []string {
+	heading, rest, _ := strings.Cut(body, "\n")
+	rows := []string{widget.Section(m.styles, heading, "", width)}
+	for _, line := range strings.Split(rest, "\n") {
+		rows = append(rows, m.row(line, width))
 	}
-	if m.task.Seq > 0 {
-		title += fmt.Sprintf("  #%d", m.task.Seq)
-	}
-	sections := []string{lipgloss.NewStyle().Bold(true).Render(title)}
-	sections = append(sections, m.metadata())
-	if tags := regularTags(m.task.Tags); len(tags) > 0 {
-		sections = append(sections, "labels  "+strings.Join(tags, "  "))
-	}
-	if links := importLinks(m.task.Tags); len(links) > 0 {
-		sections = append(sections, "links   "+strings.Join(links, "  "))
-	}
-	if m.tombstone != nil {
-		sections = append(sections, killedContext(*m.tombstone))
-	}
-	if m.tombstoneErr != nil {
-		sections = append(sections, "killed context error: "+safeText(m.tombstoneErr.Error(), false))
-	}
+	return rows
+}
+
+// row renders one body row of plain text on the panel surface.
+func (m Model) row(text string, width int) string {
+	return widget.OverlayRow(m.styles, m.styles.Overlay.Surf.Render(text), width)
+}
+
+// blank is one empty body row: a section separator that is not a break.
+func (m Model) blank(width int) string { return m.row("", width) }
+
+func (m Model) detailRows(width int) []string {
+	content := m.contentWidth(width)
+	rows := []string{widget.Section(m.styles, "DETAIL", "", width)}
+	rows = append(rows, m.fieldRows(width)...)
 	if strings.TrimSpace(m.task.Desc) != "" {
-		sections = append(sections, m.markdown(m.task.Desc, width))
+		rows = append(rows, m.blank(width))
+		rows = append(rows, m.markdownRows(m.task.Desc, content, width)...)
 	}
 	if len(m.task.Checks) > 0 {
-		sections = append(sections, renderChecklist(m.task.Checks))
+		rows = append(rows, m.checklistRows(width)...)
 	}
-	if refs := renderTaskLinks(m.links); refs != "" {
-		sections = append(sections, refs)
-	}
-	sections = append(sections, renderCompletionGate(m.task, m.links, m.loading, m.linksErr))
-	if m.linksErr != nil {
-		sections = append(sections, "blocker links error: "+safeText(m.linksErr.Error(), false))
-	}
-	if m.loading {
-		sections = append(sections, "loading comments and context...")
-	} else if m.commentsErr != nil {
-		sections = append(sections, "comments error: "+safeText(m.commentsErr.Error(), false))
-	} else {
-		if len(m.comments) > 0 {
-			sections = append(sections, renderCommentsWith(m.comments, width, m.markdown))
-		} else {
-			sections = append(sections, "comments  none")
-		}
-	}
+	rows = append(rows, m.contextRows(width)...)
+	rows = append(rows, m.commentRows(content, width)...)
 	if m.statusMessage != "" {
 		prefix := "status: "
 		if m.statusIsError {
 			prefix = "error: "
 		}
-		sections = append(sections, prefix+m.statusMessage)
+		rows = append(rows, m.blank(width), m.row(prefix+m.statusMessage, width))
 	}
-	return strings.Join(sections, "\n\n")
+	return rows
+}
+
+// fieldRows are the card's own attributes as the key/value rows of spec
+// section 4: label in FgMuted, fixed gutter, value in FgBase.
+func (m Model) fieldRows(width int) []string {
+	status := string(m.task.Status)
+	if m.task.Blocked {
+		status += "  blocked"
+	}
+	rows := []string{
+		widget.Field(m.styles, "status", status, width),
+		widget.Field(m.styles, "priority", strconv.Itoa(m.task.Prio), width),
+	}
+	if m.task.Due != "" {
+		rows = append(rows, widget.Field(m.styles, "due", safeText(m.task.Due, false), width))
+	}
+	if m.task.Effort != "" {
+		rows = append(rows, widget.Field(m.styles, "effort", safeText(m.task.Effort, false), width))
+	}
+	if tags := regularTags(m.task.Tags); len(tags) > 0 {
+		rows = append(rows, widget.Field(m.styles, "labels", strings.Join(tags, "  "), width))
+	}
+	if links := importLinks(m.task.Tags); len(links) > 0 {
+		rows = append(rows, widget.Field(m.styles, "links", strings.Join(links, "  "), width))
+	}
+	if m.tombstone != nil {
+		for _, line := range strings.Split(killedContext(*m.tombstone), "\n") {
+			rows = append(rows, m.row(line, width))
+		}
+	}
+	if m.tombstoneErr != nil {
+		rows = append(rows, m.row("killed context error: "+safeText(m.tombstoneErr.Error(), false), width))
+	}
+	return rows
+}
+
+// markdownRows wraps glamour's output into body rows. The renderer is fed the
+// palette-derived config of spec section 5.2 through the injectable field.
+func (m Model) markdownRows(source string, content, width int) []string {
+	rendered := strings.Split(m.markdown(source, content), "\n")
+	rows := make([]string, 0, len(rendered))
+	for _, line := range rendered {
+		rows = append(rows, widget.OverlayRow(m.styles, line, width))
+	}
+	return rows
+}
+
+func (m Model) checklistRows(width int) []string {
+	done := 0
+	for _, check := range m.task.Checks {
+		if check.Done {
+			done++
+		}
+	}
+	rows := []string{widget.Section(m.styles, "CHECKLIST",
+		fmt.Sprintf("%d/%d", done, len(m.task.Checks)), width)}
+	for _, check := range m.task.Checks {
+		state := widget.CheckOpen
+		if check.Done {
+			state = widget.CheckDone
+		}
+		mark := widget.Check(m.styles, safeText(check.Text, false), state, theme.OverlaySurf, false)
+		rows = append(rows, widget.OverlayRow(m.styles, m.styles.Overlay.Surf.Render("  ")+mark, width))
+	}
+	return rows
+}
+
+// contextRows are the blocker links and the completion gate, the two rows that
+// answer whether this card can move.
+func (m Model) contextRows(width int) []string {
+	var rows []string
+	if len(m.links.Blocks) > 0 {
+		rows = append(rows, widget.Field(m.styles, "blocks", taskChips(m.links.Blocks), width))
+	}
+	if len(m.links.BlockedBy) > 0 {
+		rows = append(rows, widget.Field(m.styles, "blocked by", taskChips(m.links.BlockedBy), width))
+	}
+	gate, state := renderCompletionGate(m.task, m.links, m.loading, m.linksErr)
+	rows = append(rows, widget.OverlayRow(m.styles, m.styles.On(state, theme.OverlaySurf).Render(gate), width))
+	if m.linksErr != nil {
+		rows = append(rows, m.row("blocker links error: "+safeText(m.linksErr.Error(), false), width))
+	}
+	return rows
+}
+
+func (m Model) commentRows(content, width int) []string {
+	if m.loading {
+		return []string{
+			widget.Section(m.styles, "COMMENTS", "", width),
+			m.row("loading comments and context...", width),
+		}
+	}
+	if m.commentsErr != nil {
+		return []string{
+			widget.Section(m.styles, "COMMENTS", "", width),
+			m.row("comments error: "+safeText(m.commentsErr.Error(), false), width),
+		}
+	}
+	count := "none"
+	if len(m.comments) > 0 {
+		count = strconv.Itoa(len(m.comments))
+	}
+	rows := []string{widget.Section(m.styles, "COMMENTS", count, width)}
+	for _, comment := range m.comments {
+		date := comment.CreatedAt.UTC().Format("2 Jan 2006")
+		rows = append(rows, m.row(fmt.Sprintf("c%d  %s  %s",
+			comment.ID, safeText(comment.Author, false), date), width))
+		rows = append(rows, m.markdownRows(comment.Body, content, width)...)
+		rows = append(rows, m.blank(width))
+	}
+	return rows
 }
 
 func (m Model) markdown(source string, width int) string {
 	if m.renderMarkdown == nil {
-		return renderMarkdown(source, width)
+		return markdownWith(m.styles)(source, width)
 	}
 	return m.renderMarkdown(source, width)
-}
-
-func (m Model) metadata() string {
-	primary := []string{fmt.Sprintf("status %s", m.task.Status), fmt.Sprintf("priority %d", m.task.Prio)}
-	if m.task.Blocked {
-		primary = append(primary, "blocked")
-	}
-	secondary := make([]string, 0, 2)
-	if m.task.Due != "" {
-		secondary = append(secondary, "due "+m.task.Due)
-	}
-	if m.task.Effort != "" {
-		secondary = append(secondary, "effort "+m.task.Effort)
-	}
-	if len(secondary) == 0 {
-		return strings.Join(primary, "  ")
-	}
-	return strings.Join(primary, "  ") + "\n" + strings.Join(secondary, "  ")
 }
 
 func regularTags(tags []string) []string {
@@ -740,48 +882,28 @@ func killedContext(tombstone store.Tombstone) string {
 	return fmt.Sprintf("killed %s\n%s", safeText(date, false), safeText(tombstone.Reason, false))
 }
 
-func renderMarkdown(source string, width int) string {
-	style := styles.DarkStyleConfig
-	zero := uint(0)
-	style.Document.Margin = &zero
-	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStyles(style),
-		glamour.WithWordWrap(max(width, 1)),
-	)
-	if err != nil {
-		return safeText(source, true)
-	}
-	rendered, err := renderer.Render(parityMarkdown(safeText(source, true)))
-	if err != nil {
-		return safeText(source, true)
-	}
-	return strings.Trim(rendered, "\r\n")
-}
-
-func renderChecklist(checks []board.Check) string {
-	lines := []string{"checklist"}
-	for _, check := range checks {
-		mark := "☐"
-		if check.Done {
-			mark = "☑"
+// markdownWith binds glamour to the palette-derived config of spec section
+// 5.2, replacing the hardcoded DarkStyleConfig clone this file used to carry.
+func markdownWith(styles *theme.Styles) markdownRenderer {
+	return func(source string, width int) string {
+		renderer, err := glamour.NewTermRenderer(
+			glamour.WithStyles(styles.Markdown),
+			glamour.WithWordWrap(max(width, 1)),
+		)
+		if err != nil {
+			return safeText(source, true)
 		}
-		lines = append(lines, fmt.Sprintf("  %s %s", mark, safeText(check.Text, false)))
+		rendered, err := renderer.Render(parityMarkdown(safeText(source, true)))
+		if err != nil {
+			return safeText(source, true)
+		}
+		return strings.Trim(rendered, "\r\n")
 	}
-	return strings.Join(lines, "\n")
 }
 
-func renderTaskLinks(links store.TaskLinks) string {
-	var lines []string
-	if len(links.Blocks) > 0 {
-		lines = append(lines, "blocks      "+taskChips(links.Blocks))
-	}
-	if len(links.BlockedBy) > 0 {
-		lines = append(lines, "blocked by  "+taskChips(links.BlockedBy))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderCompletionGate(task board.Task, links store.TaskLinks, loading bool, linksErr error) string {
+// renderCompletionGate reports whether the card can finish, and the status
+// slot that says so at a glance.
+func renderCompletionGate(task board.Task, links store.TaskLinks, loading bool, linksErr error) (string, theme.Slot) {
 	var reasons []string
 	if warning := store.CompletionWarning(task); warning != "" {
 		reasons = append(reasons, warning)
@@ -809,12 +931,12 @@ func renderCompletionGate(task board.Task, links store.TaskLinks, loading bool, 
 		if unknown != "" {
 			reasons = append(reasons, unknown)
 		}
-		return "completion gate  blocked: " + strings.Join(reasons, "; ")
+		return "completion gate  blocked: " + strings.Join(reasons, "; "), theme.StatusDanger
 	}
 	if unknown != "" {
-		return "completion gate  unknown: " + unknown
+		return "completion gate  unknown: " + unknown, theme.FgSubtle
 	}
-	return "completion gate  clear"
+	return "completion gate  clear", theme.StatusOK
 }
 
 func taskChips(tasks []board.Task) string {
@@ -827,20 +949,6 @@ func taskChips(tasks []board.Task) string {
 		chips = append(chips, fmt.Sprintf("[%s %s]", ref, task.Status))
 	}
 	return strings.Join(chips, "  ")
-}
-
-func renderComments(comments []store.Comment, width int) string {
-	return renderCommentsWith(comments, width, renderMarkdown)
-}
-
-func renderCommentsWith(comments []store.Comment, width int, renderer markdownRenderer) string {
-	sections := []string{fmt.Sprintf("comments  %d", len(comments))}
-	for _, comment := range comments {
-		date := comment.CreatedAt.UTC().Format("2 Jan 2006")
-		header := fmt.Sprintf("c%d  %s  %s", comment.ID, safeText(comment.Author, false), date)
-		sections = append(sections, header+"\n"+renderer(comment.Body, width))
-	}
-	return strings.Join(sections, "\n\n")
 }
 
 func safeText(text string, keepNewlines bool) string {

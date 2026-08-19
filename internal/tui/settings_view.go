@@ -124,15 +124,20 @@ func (m *settingsModel) Surface(width, height int) pointer.Surface {
 	}
 	rendered := make([]string, 0, bodyHeight)
 	for _, row := range visible {
-		rendered = append(rendered, m.renderSettingsRow(row, inner))
+		if row.kind == settingsRowSection {
+			rendered = append(rendered, widget.Section(styles, settingsFit(row.line, inner), "", width))
+			continue
+		}
+		rendered = append(rendered, widget.OverlayRow(styles, m.renderSettingsRow(row, inner), width))
 	}
-	content := strings.Join(widget.OverlayRows(styles, widget.OverlayOpts{
+	content := widget.Overlay(styles, widget.OverlayOpts{
 		Title:  sanitizeTerminal("kb / settings / " + m.user),
 		Body:   rendered,
 		Footer: footer,
-		W:      width,
-		H:      height,
-	}), "\n")
+		Hint:   settingsScrollHint(styles, m.scroll+bodyHeight, len(body)),
+		Width:  width,
+		Height: height,
+	})
 
 	footerY := height - 1
 	hitMap.AddWheel(viewport.Rect, func(delta int) tea.Msg { return settingsWheelMsg{delta: delta} })
@@ -164,8 +169,6 @@ func (m *settingsModel) renderSettingsRow(row settingsRenderRow, width int) stri
 		line = m.pointerState.Render(settingsControlID(row.target), line)
 	}
 	switch row.kind {
-	case settingsRowSection:
-		return widget.Section(styles, line, width)
 	case settingsRowHint:
 		return styles.Overlay.FieldLabel.Render(line)
 	case settingsRowField:
@@ -309,6 +312,15 @@ func (m *settingsModel) actionRow(target, label string, width int) settingsRende
 		target: target,
 		kind:   settingsRowButton,
 	}
+}
+
+// settingsScrollHint is the section 5.1 scroll indicator, shown only while the
+// pane has more rows than the window.
+func settingsScrollHint(styles *theme.Styles, shown, total int) string {
+	if total <= 0 || shown >= total {
+		return ""
+	}
+	return widget.ScrollHint(styles, shown, total, theme.OverlayBand)
 }
 
 func settingsFit(line string, width int) string {

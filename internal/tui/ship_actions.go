@@ -7,6 +7,7 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
@@ -864,14 +865,20 @@ func (m Model) taskActionSurface(background string) pointer.Surface {
 	opts := widget.OverlayOpts{
 		Title:  m.taskActionTitle(),
 		Seq:    m.taskActionSeq(),
-		Body:   actionRowContent(rows),
+		Body:   m.actionRowContent(styles, rows, paneWidth),
 		Footer: m.taskActionFooter(),
-		X:      x, Y: y, W: paneWidth, H: paneHeight,
+		Width:  paneWidth,
+		Height: paneHeight,
 	}
-	content := widget.Overlay(styles, background, opts)
+	background = fitActionFrame(background, width, height)
+	layers := append(
+		[]*lipgloss.Layer{lipgloss.NewLayer(background)},
+		widget.OverlayLayers(styles, opts, x, y)...,
+	)
+	content := fitActionFrame(lipgloss.NewCompositor(layers...).Render(), width, height)
 
 	var hits pointer.Map
-	panel := widget.OverlayRows(styles, opts)
+	panel := strings.Split(widget.Overlay(styles, opts), "\n")
 	for index, line := range panel {
 		var labels []actionLabel
 		switch {
@@ -906,12 +913,26 @@ func (m Model) taskActionSurface(background string) pointer.Surface {
 	return pointer.Surface{Content: content, Pointer: hits.Handler()}
 }
 
-func actionRowContent(rows []actionRow) []string {
+// actionRowContent insets every dialog row to the panel width. A section-free
+// dialog has no band rows, so every row is a body row.
+func (m Model) actionRowContent(styles *theme.Styles, rows []actionRow, width int) []string {
 	out := make([]string, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, row.content)
+		out = append(out, widget.OverlayRow(styles, row.content, width))
 	}
 	return out
+}
+
+// fitActionFrame keeps a composed dialog inside the terminal cell grid.
+func fitActionFrame(rendered string, width, height int) string {
+	lines := strings.Split(rendered, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for index := range lines {
+		lines[index] = ansi.Truncate(lines[index], width, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // taskActionTitle is the header band label of the open dialog.
@@ -1006,7 +1027,7 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 			rows = append(rows, actionRow{
 				content: m.pointerState.Render(
 					taskActionControlID(taskActionPointerCheck, index),
-					widget.Check(styles, label, state, index == a.checkIndex),
+					widget.Check(styles, label, state, theme.OverlaySurf, index == a.checkIndex),
 				),
 				labels: []actionLabel{{text: label, kind: taskActionPointerCheck, index: index}},
 			})

@@ -7,6 +7,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
@@ -126,38 +127,67 @@ func (m Model) pointerHits(width, height int) []pointerHit {
 	return hits
 }
 
-// View renders the editor pane on an empty canvas, for callers that have no
-// board behind it.
+// View renders the editor pane centered on the terminal. The panel carries no
+// shadow here: a shadow needs something to fall on, and this path has no board
+// behind it.
 func (m *Model) View(width, height int) string {
 	if !m.open {
 		return ""
 	}
 	width, height = max(width, 1), max(height, 1)
-	styles := m.themeStyles()
-	return m.compose(widget.Fill(styles, theme.Canvas, width, height), width, height)
+	frame := m.layout(width, height)
+	panel := fitTerminal(widget.Overlay(m.themeStyles(), m.panelOpts(frame)), width, height)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, panel)
 }
 
-// Overlay composes the editor over the board/detail surface.
+// Overlay composes the editor over the board/detail surface. Spec section 4:
+// the panel is an elevation over what is behind it, never a frame, so it takes
+// the shade step and the shadow with it.
 func (m *Model) Overlay(background string, width, height int) string {
 	if !m.open {
 		return background
 	}
-	return m.compose(background, max(width, 1), max(height, 1))
+	width, height = max(width, 1), max(height, 1)
+	background = fitTerminal(background, width, height)
+	frame := m.layout(width, height)
+	layers := append(
+		[]*lipgloss.Layer{lipgloss.NewLayer(background)},
+		widget.OverlayLayers(m.themeStyles(), m.panelOpts(frame), frame.x, frame.y)...,
+	)
+	return fitTerminal(lipgloss.NewCompositor(layers...).Render(), width, height)
 }
 
-// compose is spec section 4: the panel is an elevation over the surface behind
-// it, never a frame. The shade step and the shadow are the separation.
-func (m *Model) compose(background string, width, height int) string {
-	styles := m.themeStyles()
-	frame := m.layout(width, height)
-	return widget.Overlay(styles, background, widget.OverlayOpts{
+func (m *Model) panelOpts(frame editorFrame) widget.OverlayOpts {
+	return widget.OverlayOpts{
 		Title:  m.headerTitle(),
 		Seq:    m.sequenceTag(),
 		Body:   m.visibleRows(frame),
 		Footer: m.footerLine(frame.inner),
-		X:      frame.x, Y: frame.y,
-		W: frame.width, H: frame.height,
-	})
+		Hint:   m.scrollHint(frame),
+		Width:  frame.width,
+		Height: frame.height,
+	}
+}
+
+// scrollHint is the section 5.1 scroll indicator, shown only while the body
+// does not fit the panel.
+func (m *Model) scrollHint(frame editorFrame) string {
+	if len(frame.rows) <= frame.bodyHeight {
+		return ""
+	}
+	return widget.ScrollHint(m.themeStyles(), frame.scroll+frame.bodyHeight, len(frame.rows), theme.OverlayBand)
+}
+
+// fitTerminal keeps a composed frame inside the cell grid it was composed for.
+func fitTerminal(rendered string, width, height int) string {
+	lines := strings.Split(rendered, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for index := range lines {
+		lines[index] = ansi.Truncate(lines[index], width, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // layout resolves the panel geometry and scrolls the focused row into view.
@@ -199,12 +229,18 @@ func (m *Model) layout(width, height int) editorFrame {
 	}
 }
 
-// visibleRows renders the window of body rows the panel shows.
+// visibleRows renders the window of body rows the panel shows, as panel-width
+// rows.
 func (m *Model) visibleRows(frame editorFrame) []string {
+	styles := m.themeStyles()
 	end := min(frame.scroll+frame.bodyHeight, len(frame.rows))
 	visible := make([]string, 0, frame.bodyHeight)
 	for _, row := range frame.rows[frame.scroll:end] {
-		visible = append(visible, m.renderRow(row, frame.inner))
+		if row.kind == rowSection {
+			visible = append(visible, widget.Section(styles, fit(row.text, frame.inner), "", frame.width))
+			continue
+		}
+		visible = append(visible, widget.OverlayRow(styles, m.renderRow(row, frame.inner), frame.width))
 	}
 	return visible
 }
@@ -215,8 +251,6 @@ func (m *Model) renderRow(row editorRow, width int) string {
 	styles := m.themeStyles()
 	line := fit(row.text, width)
 	switch row.kind {
-	case rowSection:
-		return widget.Section(styles, line, width)
 	case rowButton:
 		if label := fit(row.button, width); strings.HasSuffix(line, label) {
 			marker := strings.TrimSuffix(line, label)

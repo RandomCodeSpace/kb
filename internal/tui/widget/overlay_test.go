@@ -9,152 +9,160 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
-func TestOverlayRowsAreEmptyWithoutAPanel(t *testing.T) {
+func TestOverlayIsEmptyWithoutAPanel(t *testing.T) {
 	styles := theme.New(true)
-	if got := OverlayRows(styles, OverlayOpts{W: 0, H: 5}); got != nil {
-		t.Errorf("zero-width overlay rendered %v", got)
+	if got := Overlay(styles, OverlayOpts{Width: 0, Height: 8}); got != "" {
+		t.Errorf("zero-width overlay rendered %q", got)
 	}
-	if got := OverlayRows(styles, OverlayOpts{W: 20, H: 0}); got != nil {
-		t.Errorf("zero-height overlay rendered %v", got)
+	if got := Overlay(styles, OverlayOpts{Width: 40, Height: 0}); got != "" {
+		t.Errorf("zero-height overlay rendered %q", got)
+	}
+	if got := OverlayLayers(styles, OverlayOpts{Width: 0, Height: 0}, 1, 1); got != nil {
+		t.Errorf("empty overlay produced %d layers", len(got))
+	}
+	if got := OverlayRow(styles, "x", 0); got != "" {
+		t.Errorf("zero-width row rendered %q", got)
+	}
+	if got := Section(styles, "DETAIL", "", 0); got != "" {
+		t.Errorf("zero-width section rendered %q", got)
 	}
 }
 
-func TestOverlayRowsBandTheBodyAndTheFooter(t *testing.T) {
+func TestOverlayStacksHeaderBodyAndFooterBands(t *testing.T) {
 	styles := theme.New(true)
-	rows := OverlayRows(styles, OverlayOpts{
-		Title:  "EDIT CARD",
-		Seq:    "#90",
-		Body:   []string{"first", "second"},
-		Footer: "esc close",
-		W:      24,
-		H:      5,
+	panel := Overlay(styles, OverlayOpts{
+		Title:  "Map it",
+		Seq:    "#7",
+		Body:   []string{OverlayRow(styles, "body", 30)},
+		Footer: "[Close]",
+		Hint:   "1/4",
+		Width:  30,
+		Height: 5,
 	})
+	rows := strings.Split(panel, "\n")
 	if len(rows) != 5 {
-		t.Fatalf("overlay rendered %d rows, want 5", len(rows))
+		t.Fatalf("panel rendered %d rows, want 5", len(rows))
 	}
-	header := ansi.Strip(rows[0])
-	if !strings.HasPrefix(header, "  EDIT CARD") || !strings.HasSuffix(header, "#90  ") {
-		t.Errorf("header band = %q", header)
+	if plain := ansi.Strip(rows[0]); !strings.HasPrefix(plain, "  Map it") || !strings.HasSuffix(plain, "#7") {
+		t.Errorf("header band = %q, want the title inset and the reference right-aligned", plain)
 	}
-	if plain := ansi.Strip(rows[1]); plain != "  first"+strings.Repeat(" ", 24-7) {
-		t.Errorf("body row = %q", plain)
+	if plain := ansi.Strip(rows[1]); !strings.HasPrefix(plain, "  body") {
+		t.Errorf("body row = %q, want the content inset", plain)
 	}
-	if plain := ansi.Strip(rows[3]); strings.TrimSpace(plain) != "" {
-		t.Errorf("unused body row = %q, want blank", plain)
-	}
-	if plain := ansi.Strip(rows[4]); !strings.HasPrefix(plain, "  esc close") {
-		t.Errorf("footer band = %q", plain)
+	if plain := ansi.Strip(rows[4]); !strings.HasPrefix(plain, "  [Close]") || !strings.HasSuffix(plain, "1/4") {
+		t.Errorf("footer band = %q, want the hints inset and the scroll hint right-aligned", plain)
 	}
 	for index, row := range rows {
-		if width := ansi.StringWidth(row); width != 24 {
-			t.Errorf("row %d width = %d, want 24", index, width)
+		if got := ansi.StringWidth(row); got != 30 {
+			t.Errorf("row %d is %d cells, want 30", index, got)
 		}
 	}
 }
 
-func TestOverlayRowsDropTheBandsTheyCannotFit(t *testing.T) {
+func TestOverlayFillsUnusedBodyRowsWithTheSurface(t *testing.T) {
 	styles := theme.New(true)
-	one := OverlayRows(styles, OverlayOpts{Title: "T", Body: []string{"body"}, Footer: "f", W: 10, H: 1})
-	if len(one) != 1 || !strings.Contains(ansi.Strip(one[0]), "T") {
-		t.Fatalf("one-row overlay = %q, want its header", one)
-	}
-	two := OverlayRows(styles, OverlayOpts{Title: "T", Body: []string{"body"}, Footer: "f", W: 10, H: 2})
-	if len(two) != 2 || !strings.Contains(ansi.Strip(two[1]), "body") {
-		t.Fatalf("two-row overlay = %q, want header and body", two)
-	}
-	narrow := OverlayRows(styles, OverlayOpts{Title: "T", Footer: "f", W: 3, H: 3})
-	for index, row := range narrow {
-		if width := ansi.StringWidth(row); width != 3 {
-			t.Errorf("narrow row %d width = %d, want 3", index, width)
+	rows := strings.Split(Overlay(styles, OverlayOpts{
+		Title:  "T",
+		Body:   []string{OverlayRow(styles, "one", 20)},
+		Width:  20,
+		Height: 6,
+	}), "\n")
+	for index := 2; index < 5; index++ {
+		if plain := ansi.Strip(rows[index]); strings.TrimSpace(plain) != "" || ansi.StringWidth(rows[index]) != 20 {
+			t.Errorf("row %d = %q, want a blank surface row", index, plain)
 		}
 	}
-	if got := ansi.StringWidth(overlayFooter(styles, "f", 2, 0, 4)); got != 4 {
-		t.Errorf("footer with no field = %d cells, want 4", got)
-	}
 }
 
-func TestOverlayCastsAShadowInsideTheFrame(t *testing.T) {
+func TestOverlayClipsBodyRowsAndPadsShortOnes(t *testing.T) {
 	styles := theme.New(true)
-	background := Fill(styles, theme.Canvas, 20, 8)
-	composed := Overlay(styles, background, OverlayOpts{
-		Title: "TITLE", Body: []string{"body"}, Footer: "hint",
-		X: 2, Y: 1, W: 12, H: 4,
-	})
-	lines := strings.Split(composed, "\n")
-	if len(lines) != 8 {
-		t.Fatalf("composed %d rows, want the background's 8", len(lines))
-	}
-	for index, line := range lines {
-		if width := ansi.StringWidth(line); width != 20 {
-			t.Errorf("composed row %d width = %d, want 20", index, width)
+	rows := strings.Split(Overlay(styles, OverlayOpts{
+		Body:   []string{strings.Repeat("x", 40), "short"},
+		Width:  16,
+		Height: 4,
+	}), "\n")
+	for index := 1; index <= 2; index++ {
+		if got := ansi.StringWidth(rows[index]); got != 16 {
+			t.Errorf("body row %d is %d cells, want 16", index, got)
 		}
 	}
-	if !strings.Contains(ansi.Strip(lines[1]), "TITLE") {
-		t.Errorf("panel row = %q, want the header band at y=1", ansi.Strip(lines[1]))
+}
+
+func TestOverlayKeepsTheSingleRowHeader(t *testing.T) {
+	styles := theme.New(true)
+	rows := strings.Split(Overlay(styles, OverlayOpts{Title: "T", Width: 10, Height: 1}), "\n")
+	if len(rows) != 1 {
+		t.Fatalf("one-row panel rendered %d rows", len(rows))
 	}
-	if lines[5] == lines[7] {
-		t.Errorf("row below the panel carries no shadow band: %q", lines[5])
-	}
-	if strings.TrimSpace(ansi.Strip(lines[5])) != "" {
-		t.Errorf("shadow row is not blank: %q", ansi.Strip(lines[5]))
+	if !strings.Contains(ansi.Strip(rows[0]), "T") {
+		t.Errorf("one-row panel = %q, want the header band", ansi.Strip(rows[0]))
 	}
 }
 
-func TestOverlayKeepsTheFrameWhenThePanelTouchesTheEdge(t *testing.T) {
+func TestOverlayLayersCastTheShadowDownAndRight(t *testing.T) {
 	styles := theme.New(true)
-	background := Fill(styles, theme.Canvas, 6, 3)
-	composed := Overlay(styles, background, OverlayOpts{Title: "T", W: 6, H: 3})
-	lines := strings.Split(composed, "\n")
-	if len(lines) != 3 {
-		t.Fatalf("edge-touching overlay grew to %d rows", len(lines))
+	layers := OverlayLayers(styles, OverlayOpts{Title: "T", Width: 20, Height: 6}, 3, 2)
+	if len(layers) != 3 {
+		t.Fatalf("overlay produced %d layers, want 3", len(layers))
 	}
-	for index, line := range lines {
-		if width := ansi.StringWidth(line); width != 6 {
-			t.Errorf("row %d width = %d, want 6", index, width)
+	bottom, right, panel := layers[0], layers[1], layers[2]
+	if bottom.GetX() != 4 || bottom.GetY() != 8 || bottom.Width() != 20 || bottom.Height() != 1 {
+		t.Errorf("bottom shadow = %d,%d %dx%d", bottom.GetX(), bottom.GetY(), bottom.Width(), bottom.Height())
+	}
+	if right.GetX() != 23 || right.GetY() != 3 || right.Width() != 1 || right.Height() != 6 {
+		t.Errorf("right shadow = %d,%d %dx%d", right.GetX(), right.GetY(), right.Width(), right.Height())
+	}
+	if panel.GetX() != 3 || panel.GetY() != 2 || panel.GetZ() <= bottom.GetZ() {
+		t.Errorf("panel layer = %d,%d z%d, want it above the shadow", panel.GetX(), panel.GetY(), panel.GetZ())
+	}
+}
+
+func TestBandTailWinsWhenTheLabelCannotFit(t *testing.T) {
+	styles := theme.New(true)
+	plain := ansi.Strip(Section(styles, strings.Repeat("SECTION", 5), "12", 16))
+	if !strings.HasSuffix(plain, "12") {
+		t.Errorf("section band = %q, want the count kept", plain)
+	}
+	if got := ansi.StringWidth(plain); got != 16 {
+		t.Errorf("section band is %d cells, want 16", got)
+	}
+	narrow := ansi.Strip(Section(styles, "DETAIL", "12", 3))
+	if strings.Contains(narrow, "12") {
+		t.Errorf("section band = %q, want the count dropped when it cannot fit", narrow)
+	}
+}
+
+func TestFieldRowUsesTheLabelGutter(t *testing.T) {
+	styles := theme.New(true)
+	plain := ansi.Strip(Field(styles, "status", "doing", 40))
+	if !strings.HasPrefix(plain, "  status      doing") {
+		t.Errorf("field row = %q, want a twelve-column label gutter", plain)
+	}
+	if got := ansi.StringWidth(plain); got != 40 {
+		t.Errorf("field row is %d cells, want 40", got)
+	}
+	long := ansi.Strip(Field(styles, "blocked by more", strings.Repeat("value ", 20), 30))
+	if got := ansi.StringWidth(long); got != 30 {
+		t.Errorf("truncated field row is %d cells, want 30", got)
+	}
+	if got := ansi.StringWidth(ansi.Strip(Field(styles, "status", "doing", 8))); got != 8 {
+		t.Errorf("narrow field row is %d cells, want 8", got)
+	}
+}
+
+func TestCheckMarksEveryChecklistState(t *testing.T) {
+	styles := theme.New(true)
+	for state, want := range map[CheckState]string{
+		CheckOpen:    styles.Glyph.Check,
+		CheckDone:    styles.Glyph.CheckOn,
+		CheckDropped: styles.Glyph.CheckOff,
+	} {
+		got := ansi.Strip(Check(styles, "ship it", state, theme.OverlaySurf, false))
+		if !strings.HasPrefix(got, want) || !strings.HasSuffix(got, " ship it") {
+			t.Errorf("state %d rendered %q, want the %q mark", state, got, want)
 		}
 	}
-	if got := Overlay(styles, background, OverlayOpts{W: 0, H: 0}); got != background {
-		t.Error("an overlay with no panel replaced the background")
-	}
-	if got := clipBlock("abc", 0, 0); got != "abc" {
-		t.Errorf("clip to no frame = %q", got)
-	}
-}
-
-func TestSectionAndFieldRenderTheOverlayRows(t *testing.T) {
-	styles := theme.New(true)
-	if got := Section(styles, "", 0); got != "" {
-		t.Errorf("zero-width section = %q", got)
-	}
-	section := Section(styles, "COMMENTS", 20)
-	if plain := ansi.Strip(section); plain != "COMMENTS"+strings.Repeat(" ", 12) {
-		t.Errorf("section = %q", plain)
-	}
-	if got := Field(styles, "label", "value", 0); got != "" {
-		t.Errorf("zero-width field = %q", got)
-	}
-	field := ansi.Strip(Field(styles, "Priority", "P1", 20))
-	if !strings.HasPrefix(field, "Priority") || !strings.HasSuffix(field, "P1") {
-		t.Errorf("field row = %q", field)
-	}
-	if ansi.StringWidth(field) != 14 {
-		t.Errorf("field row width = %d, want the gutter plus the value", ansi.StringWidth(field))
-	}
-	if got := Field(styles, "verylonglabelthatoverflows", "v", 8); ansi.StringWidth(got) != 8 {
-		t.Errorf("truncated field = %q", ansi.Strip(got))
-	}
-}
-
-func TestFillPaintsASlot(t *testing.T) {
-	styles := theme.New(true)
-	if got := Fill(styles, theme.Canvas, 0, 4); got != "" {
-		t.Errorf("zero-width fill = %q", got)
-	}
-	if got := Fill(styles, theme.Canvas, 4, 0); got != "" {
-		t.Errorf("zero-height fill = %q", got)
-	}
-	rows := strings.Split(Fill(styles, theme.Canvas, 4, 2), "\n")
-	if len(rows) != 2 || ansi.StringWidth(rows[0]) != 4 {
-		t.Errorf("fill = %q", rows)
+	if focused := Check(styles, "ship it", CheckOpen, theme.OverlaySurf, true); focused == Check(styles, "ship it", CheckOpen, theme.OverlaySurf, false) {
+		t.Error("a focused checklist row renders the same as a resting one")
 	}
 }

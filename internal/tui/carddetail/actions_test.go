@@ -12,6 +12,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 type actionStore struct {
@@ -97,7 +98,7 @@ func (s *actionStore) Unlink(_ string, aRef, bRef string) error {
 
 func openActionModel(t *testing.T, st *actionStore) *Model {
 	t.Helper()
-	m := New(st, "alice")
+	m := New(st, "alice", testStyles())
 	load := m.Open(board.Task{ID: "task-7", Seq: 7, Title: "Seven", Status: board.StatusTodo, Prio: 3})
 	if load == nil {
 		t.Fatal("detail open did not load enrichment")
@@ -326,7 +327,7 @@ func TestStaleMutationCannotCrossDetailSession(t *testing.T) {
 
 func TestMutationDuringEnrichmentQueuesFreshSuccessor(t *testing.T) {
 	st := &actionStore{}
-	m := New(st, "alice")
+	m := New(st, "alice", testStyles())
 	initial := m.Open(board.Task{ID: "task-7", Seq: 7, Title: "Seven", Status: board.StatusTodo})
 	if initial == nil || !m.loading {
 		t.Fatal("initial detail load did not start")
@@ -365,7 +366,7 @@ func TestCardDetailActionGolden(t *testing.T) {
 }
 
 func TestCompletionGateAndActionViewsAreTerminalSafe(t *testing.T) {
-	gate := renderCompletionGate(
+	gate, gateSlot := renderCompletionGate(
 		board.Task{Blocked: true, Checks: []board.Check{{Text: "open"}}},
 		store.TaskLinks{BlockedBy: []board.Task{
 			{ID: "one", Seq: 1, Status: board.StatusTodo},
@@ -377,13 +378,17 @@ func TestCompletionGateAndActionViewsAreTerminalSafe(t *testing.T) {
 			t.Errorf("completion gate missing %q: %s", want, gate)
 		}
 	}
-	if clear := renderCompletionGate(board.Task{}, store.TaskLinks{}, false, nil); clear != "completion gate  clear" {
-		t.Fatalf("clear gate = %q", clear)
+	if gateSlot != theme.StatusDanger {
+		t.Fatalf("blocked gate slot = %v", gateSlot)
 	}
-	if unknown := renderCompletionGate(board.Task{}, store.TaskLinks{}, true, nil); unknown != "completion gate  unknown: linked blockers loading" {
-		t.Fatalf("loading gate = %q", unknown)
+	clear, clearSlot := renderCompletionGate(board.Task{}, store.TaskLinks{}, false, nil)
+	if clear != "completion gate  clear" || clearSlot != theme.StatusOK {
+		t.Fatalf("clear gate = %q slot %v", clear, clearSlot)
 	}
-	if unknown := renderCompletionGate(board.Task{}, store.TaskLinks{}, false, errors.New("broken")); unknown != "completion gate  unknown: linked blockers unavailable" {
+	if unknown, slot := renderCompletionGate(board.Task{}, store.TaskLinks{}, true, nil); unknown != "completion gate  unknown: linked blockers loading" || slot != theme.FgSubtle {
+		t.Fatalf("loading gate = %q slot %v", unknown, slot)
+	}
+	if unknown, _ := renderCompletionGate(board.Task{}, store.TaskLinks{}, false, errors.New("broken")); unknown != "completion gate  unknown: linked blockers unavailable" {
 		t.Fatalf("failed gate = %q", unknown)
 	}
 
@@ -412,7 +417,7 @@ func TestCompletionGateAndActionViewsAreTerminalSafe(t *testing.T) {
 }
 
 func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
-	readOnly := New(stubReader{}, "u")
+	readOnly := New(stubReader{}, "u", testStyles())
 	readOnly.Open(board.Task{ID: "read-only", Status: board.StatusTodo})
 	if command := readOnly.beginAction(actionAddComment); command != nil || readOnly.action != actionNone {
 		t.Fatalf("read-only action = command:%v action:%v", command, readOnly.action)
@@ -422,7 +427,7 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 	}
 
 	st := &actionStore{}
-	m := New(st, "u")
+	m := New(st, "u", testStyles())
 	load := m.Open(board.Task{ID: "task", Seq: 1, Status: board.StatusTodo})
 	m.beginAction(actionDeleteComment)
 	if m.action != actionNone || m.statusMessage != "comments are still loading" {
@@ -511,7 +516,7 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 		t.Fatalf("clamped selection window = %d:%d", start, end)
 	}
 
-	footerModel := Model{}
+	footerModel := Model{styles: testStyles()}
 	for _, test := range []struct {
 		mode  actionMode
 		width int

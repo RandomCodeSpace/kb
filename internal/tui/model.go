@@ -64,6 +64,7 @@ type Model struct {
 	watcher           dataVersionReader
 	user              string
 	board             board.Board
+	styles            *theme.Styles
 	boardView         boardViewState
 	filter            boardFilterState
 	detail            carddetail.Model
@@ -99,7 +100,6 @@ type Model struct {
 	actionStatusError bool
 	actionNotice      bool
 	shipped           shippedRecord
-	styles            *theme.Styles
 }
 
 // themeStyles is the resolved design system. Spec section 6.2: it is built once
@@ -152,21 +152,24 @@ func newModel(
 	moveStore, _ := store.(taskMoveStore)
 	actionStore, _ := store.(taskActionStore)
 	now := time.Now
+	// Spec section 6.3: the palette is resolved once for a dark terminal and
+	// rebuilt only when tea.BackgroundColorMsg says otherwise.
+	styles := theme.New(true)
 	return Model{
 		store:       store,
+		styles:      styles,
 		moveStore:   moveStore,
 		actionStore: actionStore,
 		watcher:     watcher,
 		user:        user,
 		board:       board.Board{Title: "Board"},
 		filter:      newBoardFilterState(),
-		detail:      carddetail.New(detailReader, user),
+		detail:      carddetail.New(detailReader, user, styles),
 		editor:      cardeditor.New(editorStore, user),
 		width:       defaultWidth,
 		height:      defaultHeight,
 		loading:     watcher == nil,
 		readContext: ctx,
-		styles:      theme.New(true),
 		now:         now,
 		renderedAt:  now(),
 		action:      newTaskActionState(),

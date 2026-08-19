@@ -195,7 +195,7 @@ func TestPointerSurfaceCancelAndDestructiveBackdropHaveSafeSemantics(t *testing.
 	if command := clickControl(t, m, "Cancel"); command != nil {
 		t.Fatalf("comment cancel returned command %v", command)
 	}
-	if got := ansi.Strip(m.View(pointerWidth, pointerHeight)); !strings.Contains(got, "comments") || strings.Contains(got, "ADD COMMENT") {
+	if got := ansi.Strip(m.View(pointerWidth, pointerHeight)); !strings.Contains(got, "COMMENTS") || strings.Contains(got, "ADD COMMENT") {
 		t.Fatalf("pointer cancel did not return to detail:\n%s", got)
 	}
 
@@ -217,7 +217,7 @@ func TestPointerSurfaceCancelAndDestructiveBackdropHaveSafeSemantics(t *testing.
 }
 
 func TestPointerSurfaceWheelAndIdleBackdropRespectPaneOwnership(t *testing.T) {
-	m := New(nil, "alice")
+	m := New(nil, "alice", testStyles())
 	task := fullTask()
 	task.Desc = strings.Repeat("long detail\n", 80)
 	m.Open(task)

@@ -1,17 +1,13 @@
-╭─────────────────────────────────────────────────────╮
-│ 🧭 Map it  #7                                       │
-│                                                     │
-│ status doing  priority 1  blocked                   │
-│ due 2026-08-19  effort M                            │
-│                                                     │
-│ labels  [type::feature]                             │
-│                                                     │
-│ links   [github#86]                                 │
-│                                                     │
-│ Plan                                                │
-│                                                     │
-│ • first                                             │
-│ https://example.com                                 │
-│                                                     │
-│ [Check] [Kill] [Comment] [Link] [Close]  1/8        │
-╰─────────────────────────────────────────────────────╯
+🧭 Map it                                       #7
+DETAIL
+status      doing  blocked
+priority    1
+due         2026-08-19
+effort      M
+labels      [type::feature]
+links       [github#86]
+
+Plan
+
+• first
+[Check] [Kill] [Comment] [Link] [Close]        1/7
