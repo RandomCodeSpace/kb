@@ -4,21 +4,21 @@ filter   type:feature   github#12   ✕ clear                                   
 1 TO DO 4                                       2 DOING 3                                      3 DONE 3                                     
 ──────────────────────────────────────────────  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ─────────────────────────────────────────────
 ▌ 🐛 Drag ghost on resize #142 2d old           ╭───────────────────────────────────────────╮  ▏ ✅ Filter persists in URL #133 shipped     
-▌ P1  ⛔ blocked   overdue 1d  ◇M  type:bug     │ 🚀 Board language variants #137 6h here   │  ▏ P2 ◇S  type:feature   github#77            
+▌ The drag ghost keeps the pre-resize column …  │ 🚀 Board language variants #137 6h here   │  ▏ Board filters now round-trip through the q…
+▌ P1  ⛔ blocked   overdue 1d  ◇M  type:bug     │ Three throwaway renders of the same boar… │  ▏ P2 ◇S  type:feature   github#77            
 ▌  area:tui                                     │ P1  today  ◇M  type:spike   github#137    │                                               
                                                 ╰───────────────────────────────────────────╯  ▌ ✅ Web UI hardening #131 shipped           
-▏ ✨ Design tokens #139 new                                                                    ▌ P1  type:fix                               
-▏ P2 ◇L  type:feature   github#12               ▏ 🔧 Overlay separation #140 2d here                                                        
+▏ ✨ Design tokens #139 new                                                                    ▌ Closed the last pre-freeze gaps in the web…
+▏ Name every color by role and resolve the pa…  ▏ 🔧 Overlay separation #140 2d here           ▌ P1  type:fix                               
+▏ P2 ◇L  type:feature   github#12               ▏ Composite the detail pane over a scrimmed …                                               
                                                 ▏ P2 ◇M  type:feature                          ▏ ✅ Bump rig v0.2.0 #129 shipped            
-▏ 📐 Adaptive compaction #144 5d old                                                           ▏ P4  type:chore                             
-▏ P3  in 3d  ◇S  type:design                    ▏ 📝 Lipgloss research #138 1d here                                                         
+▏ 📐 Adaptive compaction #144 5d old                                                           ▏ Routine dependency bump; no behaviour chan…
+▏ Drop description, then age, then effort as …  ▏ 📝 Lipgloss research #138 1d here            ▏ P4  type:chore                             
+▏ P3  in 3d  ◇S  type:design                    ▏ Write up what v2 changes for us: canvas co…                                               
                                                 ▏ P3  ⛔ blocked   type:research                                                            
 ▏ 🧪 Golden regen #147 9d old                                                                                                               
+▏ Regenerate the golden frames after the card…                                                                                              
 ▏ P4  type:chore   area:tests                                                                                                               
-                                                                                                                                            
-                                                                                                                                            
-                                                                                                                                            
-                                                                                                                                            
                                                                                                                                             
                                                                                                                                             
                                                                                                                                             

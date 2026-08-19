@@ -143,6 +143,8 @@ type styles struct {
 
 	title     lipgloss.Style
 	titleDone lipgloss.Style
+	desc      lipgloss.Style
+	descDone  lipgloss.Style
 	seq       lipgloss.Style
 	age       lipgloss.Style
 	ageShip   lipgloss.Style
@@ -203,6 +205,8 @@ func newStyles(p palette) styles {
 
 		title:     base.Foreground(p.fgBase).Bold(true),
 		titleDone: base.Foreground(p.fgMuted),
+		desc:      base.Foreground(p.fgMuted),
+		descDone:  base.Foreground(p.fgFaint),
 		seq:       base.Foreground(p.fgFaint),
 		age:       base.Foreground(p.fgMuted),
 		ageShip:   base.Foreground(p.success),
@@ -253,6 +257,7 @@ func newStyles(p palette) styles {
 type card struct {
 	emoji   string
 	title   string
+	desc    string
 	seq     int
 	age     string
 	prio    int
@@ -273,29 +278,49 @@ func fakeBoard() []column {
 	return []column{
 		{index: 1, name: "TO DO", cards: []card{
 			{emoji: "🐛", title: "Drag ghost on resize", seq: 142, age: "2d old", prio: 1,
+				desc: "The drag ghost keeps the pre-resize column width, so the " +
+					"card lands one column left of the drop target.",
 				blocked: true, due: "overdue 1d", overdue: true, effort: "M",
 				tags: []string{"type::bug", "area::tui"}},
 			{emoji: "✨", title: "Design tokens", seq: 139, age: "new", prio: 2,
+				desc: "Name every color by role and resolve the palette once at " +
+					"startup. No literal hex outside the token table.",
 				effort: "L", tags: []string{"type::feature", "github#12"}},
 			{emoji: "📐", title: "Adaptive compaction", seq: 144, age: "5d old", prio: 3,
+				desc: "Drop description, then age, then effort as the viewport " +
+					"narrows, so cards degrade in one predictable order.",
 				due: "in 3d", effort: "S", tags: []string{"type::design"}},
 			{emoji: "🧪", title: "Golden regen", seq: 147, age: "9d old", prio: 4,
+				desc: "Regenerate the golden frames after the card layout change " +
+					"and review the diff by hand once.",
 				tags: []string{"type::chore", "area::tests"}},
 		}},
 		{index: 2, name: "DOING", cards: []card{
 			{emoji: "🚀", title: "Board language variants", seq: 137, age: "6h here", prio: 1,
+				desc: "Three throwaway renders of the same board data, one per " +
+					"visual language. The winner binds the token ticket.",
 				due: "today", effort: "M", tags: []string{"type::spike", "github#137"}},
 			{emoji: "🔧", title: "Overlay separation", seq: 140, age: "2d here", prio: 2,
+				desc: "Composite the detail pane over a scrimmed board plane so " +
+					"the layers never share a style table.",
 				effort: "M", tags: []string{"type::feature"}},
 			{emoji: "📝", title: "Lipgloss research", seq: 138, age: "1d here", prio: 3,
+				desc: "Write up what v2 changes for us: canvas compositing, " +
+					"LightDark resolution, and style caching.",
 				blocked: true, tags: []string{"type::research"}},
 		}},
 		{index: 3, name: "DONE", cards: []card{
 			{emoji: "✅", title: "Filter persists in URL", seq: 133, age: "shipped", prio: 2,
+				desc: "Board filters now round-trip through the query string, so " +
+					"a shared link opens the same view.",
 				effort: "S", tags: []string{"type::feature", "github#77"}},
 			{emoji: "✅", title: "Web UI hardening", seq: 131, age: "shipped", prio: 1,
+				desc: "Closed the last pre-freeze gaps in the web board before it " +
+					"was retired in favour of the TUI.",
 				tags: []string{"type::fix"}},
 			{emoji: "✅", title: "Bump rig v0.2.0", seq: 129, age: "shipped", prio: 4,
+				desc: "Routine dependency bump; no behaviour change beyond the " +
+					"new retry defaults.",
 				tags: []string{"type::chore"}},
 		}},
 	}
@@ -311,6 +336,13 @@ const (
 	chromeRows      = 6 // brand, filter, air, column head, rule, footer
 	minColumnWidth  = 18
 	overlayMaxWidth = 66
+
+	// Density thresholds. Below either one the board switches to compact and
+	// the description - the first thing to go - is dropped entirely.
+	compactColumnWidth = 34
+	compactHeight      = 28
+	// A second description line is only affordable in a wide column.
+	twoLineDescWidth = 48
 )
 
 // selection per column; the focused column's selection is the focused card.
@@ -422,6 +454,22 @@ func wrapChips(chips []string, width int) []string {
 	return lines
 }
 
+// descLines lays the description out inside `inner` cells. It never wraps past
+// the card width and never runs longer than `limit` rows: the overflow is
+// folded into the last kept row and truncated with an ellipsis.
+func descLines(text string, inner, limit int) []string {
+	if text == "" || inner <= 0 || limit <= 0 {
+		return nil
+	}
+	wrapped := strings.Split(ansi.Wrap(text, inner, ""), "\n")
+	if len(wrapped) <= limit {
+		return wrapped
+	}
+	kept := wrapped[:limit]
+	kept[limit-1] = ansi.Truncate(strings.Join(wrapped[limit-1:], " "), inner, "…")
+	return kept
+}
+
 func splitWidths(total, count int) []int {
 	usable := max(total-gutter*(count-1), count*minColumnWidth)
 	base, extra := usable/count, usable%count
@@ -444,13 +492,13 @@ func splitWidths(total, count int) []int {
 // Idle and selected cards carry zero frame: a 1-cell left-edge bar plus one
 // cell of air. The focused card is the single exception - a rounded border,
 // which GetFrameSize prices at 2 rows and 4 columns (border + padding).
-func (s styles) renderCard(c card, width int, sel, focus, done bool) []string {
+func (s styles) renderCard(c card, width int, sel, focus, done, compact bool) []string {
 	if focus {
 		// GetFrameSize prices the border + padding; the body is sized to what
 		// is left so the card still lands on the column grid.
 		fw, _ := s.focusCard.GetFrameSize()
 		inner := max(width-fw, 4)
-		body := s.cardBody(c, inner, done)
+		body := s.cardBody(c, inner, done, compact)
 		return strings.Split(s.focusCard.Render(strings.Join(body, "\n")), "\n")
 	}
 	bar, glyph := s.barIdle, "▏"
@@ -458,15 +506,28 @@ func (s styles) renderCard(c card, width int, sel, focus, done bool) []string {
 		bar, glyph = s.barSel, "▌"
 	}
 	inner := max(width-2, 4)
-	out := make([]string, 0, 4)
-	for _, line := range s.cardBody(c, inner, done) {
+	out := make([]string, 0, 6)
+	for _, line := range s.cardBody(c, inner, done, compact) {
 		out = append(out, bar.Render(glyph)+" "+pad(line, inner))
 	}
 	return out
 }
 
-func (s styles) cardBody(c card, inner int, done bool) []string {
+func (s styles) cardBody(c card, inner int, done, compact bool) []string {
 	lines := wrapChips(s.headingChips(c, done), inner)
+	if !compact {
+		limit := 1
+		if inner >= twoLineDescWidth {
+			limit = 2
+		}
+		descStyle := s.desc
+		if done {
+			descStyle = s.descDone
+		}
+		for _, line := range descLines(c.desc, inner, limit) {
+			lines = append(lines, descStyle.Render(line))
+		}
+	}
 	lines = append(lines, wrapChips(s.metaChips(c), inner)...)
 	for i, line := range lines {
 		lines[i] = pad(line, inner)
@@ -493,7 +554,7 @@ func (s styles) renderColumnHead(col column, width int, focus bool) (string, str
 	return pad(head, width), rule
 }
 
-func (s styles) renderColumnBody(col column, width, height int, focus bool, sel int) []string {
+func (s styles) renderColumnBody(col column, width, height int, focus bool, sel int, compact bool) []string {
 	if height <= 0 {
 		return nil
 	}
@@ -504,7 +565,7 @@ func (s styles) renderColumnBody(col column, width, height int, focus bool, sel 
 		if i > 0 {
 			lines = append(lines, strings.Repeat(" ", width))
 		}
-		lines = append(lines, s.renderCard(c, width, i == sel, focus && i == sel, done)...)
+		lines = append(lines, s.renderCard(c, width, i == sel, focus && i == sel, done, compact)...)
 		ends = append(ends, len(lines))
 	}
 	if len(col.cards) == 0 {
@@ -584,6 +645,7 @@ func (s styles) board(width, height int) string {
 	columns := fakeBoard()
 	widths := splitWidths(width, len(columns))
 	bodyHeight := max(height-chromeRows, 1)
+	compact := height < compactHeight || widths[0] < compactColumnWidth
 
 	heads := make([]string, len(columns))
 	rules := make([]string, len(columns))
@@ -591,7 +653,7 @@ func (s styles) board(width, height int) string {
 	for i, col := range columns {
 		focus := i == focusedColumn
 		heads[i], rules[i] = s.renderColumnHead(col, widths[i], focus)
-		bodies[i] = s.renderColumnBody(col, widths[i], bodyHeight, focus, selection[i])
+		bodies[i] = s.renderColumnBody(col, widths[i], bodyHeight, focus, selection[i], compact)
 	}
 
 	gap := strings.Repeat(" ", gutter)
@@ -638,10 +700,7 @@ func (s styles) overlay(width, height int) string {
 		s.overlayField.Render("moved     ")+s.overlayBody.Render("2026-08-19 06:12 · from TO DO"),
 		"",
 	)
-	body := "Three throwaway renders of the board, same data, different " +
-		"visual languages on lipgloss v2. The chosen language binds the " +
-		"design-token ticket."
-	for _, line := range strings.Split(ansi.Wrap(body, inner, ""), "\n") {
+	for _, line := range strings.Split(ansi.Wrap(c.desc, inner, ""), "\n") {
 		rows = append(rows, s.overlayBody.Render(line))
 	}
 	rows = append(rows,

@@ -4,24 +4,24 @@ filter   type:feature   github#12   ✕ clear                                   
 1 TO DO 4                                                           2 DOING 3                                                          3 DONE 3                                                         
 ──────────────────────────────────────────────────────────────────  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ─────────────────────────────────────────────────────────────────
 ▌ 🐛 Drag ghost on resize #142 2d old                               ╭───────────────────────────────────────────────────────────────╮  ▏ ✅ Filter persists in URL #133 shipped                         
-▌ P1  ⛔ blocked   overdue 1d  ◇M  type:bug   area:tui              │ 🚀 Board language variants #137 6h here                       │  ▏ P2 ◇S  type:feature   github#77                                
+▌ The drag ghost keeps the pre-resize column width, so the card     │ 🚀 Board language variants #137 6h here                       │  ▏ Board filters now round-trip through the query string, so a    
+▌ lands one column left of the drop target.                         │ Three throwaway renders of the same board data, one per       │  ▏ shared link opens the same view.                               
+▌ P1  ⛔ blocked   overdue 1d  ◇M  type:bug   area:tui              │ visual language. The winner binds the token ticket.           │  ▏ P2 ◇S  type:feature   github#77                                
                                                                     │ P1  today  ◇M  type:spike   github#137                        │                                                                   
 ▏ ✨ Design tokens #139 new                                         ╰───────────────────────────────────────────────────────────────╯  ▌ ✅ Web UI hardening #131 shipped                               
-▏ P2 ◇L  type:feature   github#12                                                                                                      ▌ P1  type:fix                                                   
-                                                                    ▏ 🔧 Overlay separation #140 2d here                                                                                                
+▏ Name every color by role and resolve the palette once at                                                                             ▌ Closed the last pre-freeze gaps in the web board before it was 
+▏ startup. No literal hex outside the token table.                  ▏ 🔧 Overlay separation #140 2d here                               ▌ retired in favour of the TUI.                                  
+▏ P2 ◇L  type:feature   github#12                                   ▏ Composite the detail pane over a scrimmed board plane so the     ▌ P1  type:fix                                                   
+                                                                    ▏ layers never share a style table.                                                                                                 
 ▏ 📐 Adaptive compaction #144 5d old                                ▏ P2 ◇M  type:feature                                              ▏ ✅ Bump rig v0.2.0 #129 shipped                                
-▏ P3  in 3d  ◇S  type:design                                                                                                           ▏ P4  type:chore                                                 
-                                                                    ▏ 📝 Lipgloss research #138 1d here                                                                                                 
+▏ Drop description, then age, then effort as the viewport narrows,                                                                     ▏ Routine dependency bump; no behaviour change beyond the new    
+▏ so cards degrade in one predictable order.                        ▏ 📝 Lipgloss research #138 1d here                                ▏ retry defaults.                                                
+▏ P3  in 3d  ◇S  type:design                                        ▏ Write up what v2 changes for us: canvas compositing, LightDark   ▏ P4  type:chore                                                 
+                                                                    ▏ resolution, and style caching.                                                                                                    
 ▏ 🧪 Golden regen #147 9d old                                       ▏ P3  ⛔ blocked   type:research                                                                                                    
+▏ Regenerate the golden frames after the card layout change and                                                                                                                                         
+▏ review the diff by hand once.                                                                                                                                                                         
 ▏ P4  type:chore   area:tests                                                                                                                                                                           
-                                                                                                                                                                                                        
-                                                                                                                                                                                                        
-                                                                                                                                                                                                        
-                                                                                                                                                                                                        
-                                                                                                                                                                                                        
-                                                                                                                                                                                                        
-                                                                                                                                                                                                        
-                                                                                                                                                                                                        
                                                                                                                                                                                                         
                                                                                                                                                                                                         
                                                                                                                                                                                                         

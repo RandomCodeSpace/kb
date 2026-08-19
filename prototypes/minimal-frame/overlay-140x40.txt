@@ -4,30 +4,30 @@ filter   type:feature   github#12   ✕ clear                                   
 1 TO DO 4                                       2 DOING 3                                      3 DONE 3
 ──────────────────────────────────────────────  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ─────────────────────────────────────────────
 ▌ 🐛 Drag ghost on resize #142 2d old           ╭───────────────────────────────────────────╮  ▏ ✅ Filter persists in URL #133 shipped
-▌ P1  ⛔ blocked   overdue 1d  ◇M  type:bug     │ 🚀 Board language variants #137 6h here   │  ▏ P2 ◇S  type:feature   github#77 
+▌ The drag ghost keeps the pre-resize column …  │ 🚀 Board language variants #137 6h here   │  ▏ Board filters now round-trip through the q…
+▌ P1  ⛔ blocked   overdue 1d  ◇M  type:bug     │ Three throwaway renders of the same boar… │  ▏ P2 ◇S  type:feature   github#77 
 ▌  area:tui                                     │ P1  today  ◇M  type:spike   github#137    │
                                                 ╰───────────────────────────────────────────╯  ▌ ✅ Web UI hardening #131 shipped
-▏ ✨ Design tokens #139 new                                                                    ▌ P1  type:fix 
-▏ P2 ◇L  type:feature   github#12    ╭────────────────────────────────────────────────────────────────╮
+▏ ✨ Design tokens #139 new          ╭────────────────────────────────────────────────────────────────╮ the last pre-freeze gaps in the web…
+▏ Name every color by role and resolv│                                                                │pe:fix 
+▏ P2 ◇L  type:feature   github#12    │  DOING  ·  card #137                                           │
                                      │                                                                │p rig v0.2.0 #129 shipped
-▏ 📐 Adaptive compaction #144 5d old │  DOING  ·  card #137                                           │pe:chore 
-▏ P3  in 3d  ◇S  type:design         │                                                                │
-                                     │  🚀 Board language variants                                    │
-▏ 🧪 Golden regen #147 9d old        │                                                                │
-▏ P4  type:chore   area:tests        │  P1  today  ◇M  type:spike   github#137                        │
+▏ 📐 Adaptive compaction #144 5d old │  🚀 Board language variants                                    │e dependency bump; no behaviour chan…
+▏ Drop description, then age, then ef│                                                                │pe:chore 
+▏ P3  in 3d  ◇S  type:design         │  P1  today  ◇M  type:spike   github#137                        │
                                      │                                                                │
-                                     │  ────────────────────────────────────────────────────────────  │
-                                     │                                                                │
-                                     │  assignee  aksOps                                              │
+▏ 🧪 Golden regen #147 9d old        │  ────────────────────────────────────────────────────────────  │
+▏ Regenerate the golden frames after │                                                                │
+▏ P4  type:chore   area:tests        │  assignee  aksOps                                              │
                                      │  moved     2026-08-19 06:12 · from TO DO                       │
                                      │                                                                │
-                                     │  Three throwaway renders of the board, same data, different    │
-                                     │  visual languages on lipgloss v2. The chosen language binds    │
-                                     │  the design-token ticket.                                      │
+                                     │  Three throwaway renders of the same board data, one per       │
+                                     │  visual language. The winner binds the token ticket.           │
                                      │                                                                │
                                      │  esc close  ·  e edit  ·  m move  ·  o open in browser         │
                                      │                                                                │
                                      ╰────────────────────────────────────────────────────────────────╯
+
 
 
 
