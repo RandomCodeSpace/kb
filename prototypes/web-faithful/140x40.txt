@@ -7,34 +7,34 @@
 │ │ 🐛 Pointer hit-test drifts on        │ │ │ │ 🚀 Panel-framed board columns        │ │ │ │ 📦 lipgloss v2 design-system         │ │ │   │
 │ │ wrapped meta                         │ │ │ │ #140                         5h here │ │ │ │ research                             │ │ │   │
 │ │ #142                          3d old │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ #138                         shipped │ │ │   │
-│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │  P1   ◷ today   ◇ L                  │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │   │
+│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ Give each status column a real box   │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │   │
+│ │ Label spans are computed before the  │ │ │ │ with its own header band, count, an… │ │ │ │ Surveyed the v2 style, layer, and    │ │ │   │
+│ │ meta line wraps, so the second row…  │ │ │ │  P1   ◷ today   ◇ L                  │ │ │ │ canvas APIs and wrote up the postur… │ │ │   │
 │ │  P1   ⛔ blocked   ◷ overdue 2d      │ │ │ │  type:feature   area:tui             │ │ │ │  P2   ◇ M                            │ │ │   │
 │ │  ◇ M                                 │ │ │ ╰──────────────────────────────────────╯ │ │ │  type:spike                          │ │ │   │
 │ │  type:bug   area:tui   #github#12    │ │ │                                          │ │ ╰──────────────────────────────────────╯ │ │   │
 │ ╰──────────────────────────────────────╯ │ │ ╭──────────────────────────────────────╮ │ │                                          │ │   │
 │                                          │ │ │ 🧪 Golden regen for restyle slices   │ │ │ ╭──────────────────────────────────────╮ │ │   │
-│ ╭──────────────────────────────────────╮ │ │ │ #141                         2d here │ │ │ │ ✨ LightDark background probe        │ │ │   │
-│ │ ✨ Design tokens package             │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ #135                         shipped │ │ │   │
-│ │ #139                          1d old │ │ │ │  P3   ◇ M                            │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ C │
-│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │  type:test                           │ │ │ │  P3                                  │ │ │ A │
-│ │  P2   ◷ in 3d   ◇ L                  │ │ │ ╰──────────────────────────────────────╯ │ │ │  type:feature                        │ │ │ N │
-│ │  type:feature   area:tui             │ │ │                                          │ │ ╰──────────────────────────────────────╯ │ │ C │
-│ ╰──────────────────────────────────────╯ │ │ ╭──────────────────────────────────────╮ │ │                                          │ │ E │
-│                                          │ │ │ 🔧 GetFrameSize layout math          │ │ │ ╭──────────────────────────────────────╮ │ │ L │
-│ ╭──────────────────────────────────────╮ │ │ │ #143                         1d here │ │ │ │ 🐛 Fix column scroll clamp           │ │ │ L │
-│ │ 🔒 Redact remote tokens in debug log │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ #131                         shipped │ │ │ E │
-│ │ #144                             new │ │ │ │  P2   ⛔ blocked                     │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ D │
-│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │  type:chore   #github#12             │ │ │ │  P1                                  │ │ │   │
+│ ╭──────────────────────────────────────╮ │ │ │ #141                         2d here │ │ │ │ ✨ LightDark background probe        │ │ │ C │
+│ │ ✨ Design tokens package             │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ #135                         shipped │ │ │ A │
+│ │ #139                          1d old │ │ │ │ Every restyle slice invalidates the  │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ N │
+│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ golden frames. Add a regen target…   │ │ │ │ Query the terminal for its           │ │ │ C │
+│ │ Extract the semantic palette into    │ │ │ │  P3   ◇ M                            │ │ │ │ background at startup and resolve…   │ │ │ E │
+│ │ internal/theme so every view reads…  │ │ │ │  type:test                           │ │ │ │  P3                                  │ │ │ L │
+│ │  P2   ◷ in 3d   ◇ L                  │ │ │ ╰──────────────────────────────────────╯ │ │ │  type:feature                        │ │ │ L │
+│ │  type:feature   area:tui             │ │ │                                          │ │ ╰──────────────────────────────────────╯ │ │ E │
+│ ╰──────────────────────────────────────╯ │ │ ╭──────────────────────────────────────╮ │ │                                          │ │ D │
+│                                          │ │ │ 🔧 GetFrameSize layout math          │ │ │ ╭──────────────────────────────────────╮ │ │   │
+│ ╭──────────────────────────────────────╮ │ │ │ #143                         1d here │ │ │ │ 🐛 Fix column scroll clamp           │ │ │   │
+│ │ 🔒 Redact remote tokens in debug log │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ #131                         shipped │ │ │   │
+│ │ #144                             new │ │ │ │ Replace the hardcoded border and     │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │   │
+│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ padding constants with GetFrameSize… │ │ │ │ Scrolling past the last card left    │ │ │   │
+│ │ The forge client logs its            │ │ │ │  P2   ⛔ blocked                     │ │ │ │ the viewport pinned one row below…   │ │ │   │
+│ │ Authorization header verbatim when…  │ │ │ │  type:chore   #github#12             │ │ │ │  P1                                  │ │ │   │
 │ │  P2   ◇ S                            │ │ │ ╰──────────────────────────────────────╯ │ │ │  type:bug   #github#9                │ │ │   │
 │ │  type:chore   risk:high              │ │ │                                          │ │ ╰──────────────────────────────────────╯ │ │   │
 │ ╰──────────────────────────────────────╯ │ │                                          │ │                                          │ │   │
+│ +1 more                                  │ │                                          │ │                                          │ │   │
 │                                          │ │                                          │ │                                          │ │   │
-│ ╭──────────────────────────────────────╮ │ │                                          │ │                                          │ │   │
-│ │ 📝 Document overlay z-order          │ │ │                                          │ │                                          │ │   │
-│ │ #147                          6d old │ │ │                                          │ │                                          │ │   │
-│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │                                          │ │                                          │ │   │
-│ │  P4                                  │ │ │                                          │ │                                          │ │   │
-│ │  type:docs                           │ │ │                                          │ │                                          │ │   │
-│ ╰──────────────────────────────────────╯ │ │                                          │ │                                          │ │   │
 ╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯ ╰───╯
  j/k cards │ h/l columns │ enter open │ n new │ c cancelled:off │ / filter │ ? help │ q quit                            web-faithful · #137 

@@ -7,6 +7,8 @@
 │ │ 🐛 Pointer hit-test drifts on wrapped meta               │ │ │ │ 🚀 Panel-framed board columns                            │ │ │ │ 📦 lipgloss v2 design-system research                    │ │ │   │
 │ │ #142                                              3d old │ │ │ │ #140                                             5h here │ │ │ │ #138                                             shipped │ │ │   │
 │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │   │
+│ │ Label spans are computed before the meta line wraps, so  │ │ │ │ Give each status column a real box with its own header   │ │ │ │ Surveyed the v2 style, layer, and canvas APIs and wrote  │ │ │   │
+│ │ the second row of chips reports the x-range of the…      │ │ │ │ band, count, and rule. The card stack sits inset by one… │ │ │ │ up the posture this board follows: semantic tokens,…     │ │ │   │
 │ │  P1   ⛔ blocked   ◷ overdue 2d   ◇ M                    │ │ │ │  P1   ◷ today   ◇ L                                      │ │ │ │  P2   ◇ M                                                │ │ │   │
 │ │  type:bug   area:tui   #github#12                        │ │ │ │  type:feature   area:tui                                 │ │ │ │  type:spike                                              │ │ │   │
 │ ╰──────────────────────────────────────────────────────────╯ │ │ ╰──────────────────────────────────────────────────────────╯ │ │ ╰──────────────────────────────────────────────────────────╯ │ │   │
@@ -15,33 +17,31 @@
 │ │ ✨ Design tokens package                                 │ │ │ │ 🧪 Golden regen for restyle slices                       │ │ │ │ ✨ LightDark background probe                            │ │ │   │
 │ │ #139                                              1d old │ │ │ │ #141                                             2d here │ │ │ │ #135                                             shipped │ │ │   │
 │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │   │
+│ │ Extract the semantic palette into internal/theme so      │ │ │ │ Every restyle slice invalidates the golden frames. Add a │ │ │ │ Query the terminal for its background at startup and     │ │ │   │
+│ │ every view reads roles instead of raw hex. Ships with a… │ │ │ │ regen target that rewrites them in one pass and fails…   │ │ │ │ resolve the palette once, with a flag to force either…   │ │ │   │
 │ │  P2   ◷ in 3d   ◇ L                                      │ │ │ │  P3   ◇ M                                                │ │ │ │  P3                                                      │ │ │   │
-│ │  type:feature   area:tui                                 │ │ │ │  type:test                                               │ │ │ │  type:feature                                            │ │ │   │
+│ │  type:feature   area:tui                                 │ │ │ │  type:test                                               │ │ │ │  type:feature                                            │ │ │ C │
+│ ╰──────────────────────────────────────────────────────────╯ │ │ ╰──────────────────────────────────────────────────────────╯ │ │ ╰──────────────────────────────────────────────────────────╯ │ │ A │
+│                                                              │ │                                                              │ │                                                              │ │ N │
+│ ╭──────────────────────────────────────────────────────────╮ │ │ ╭──────────────────────────────────────────────────────────╮ │ │ ╭──────────────────────────────────────────────────────────╮ │ │ C │
+│ │ 🔒 Redact remote tokens in debug log                     │ │ │ │ 🔧 GetFrameSize layout math                              │ │ │ │ 🐛 Fix column scroll clamp                               │ │ │ E │
+│ │ #144                                                 new │ │ │ │ #143                                             1d here │ │ │ │ #131                                             shipped │ │ │ L │
+│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ L │
+│ │ The forge client logs its Authorization header verbatim  │ │ │ │ Replace the hardcoded border and padding constants with  │ │ │ │ Scrolling past the last card left the viewport pinned    │ │ │ E │
+│ │ when KB_DEBUG is set. Mask everything after the scheme…  │ │ │ │ GetFrameSize calls so width math survives a border-styl… │ │ │ │ one row below the stack, so the bottom border vanished…  │ │ │ D │
+│ │  P2   ◇ S                                                │ │ │ │  P2   ⛔ blocked                                         │ │ │ │  P1                                                      │ │ │   │
+│ │  type:chore   risk:high                                  │ │ │ │  type:chore   #github#12                                 │ │ │ │  type:bug   #github#9                                    │ │ │   │
 │ ╰──────────────────────────────────────────────────────────╯ │ │ ╰──────────────────────────────────────────────────────────╯ │ │ ╰──────────────────────────────────────────────────────────╯ │ │   │
 │                                                              │ │                                                              │ │                                                              │ │   │
-│ ╭──────────────────────────────────────────────────────────╮ │ │ ╭──────────────────────────────────────────────────────────╮ │ │ ╭──────────────────────────────────────────────────────────╮ │ │   │
-│ │ 🔒 Redact remote tokens in debug log                     │ │ │ │ 🔧 GetFrameSize layout math                              │ │ │ │ 🐛 Fix column scroll clamp                               │ │ │ C │
-│ │ #144                                                 new │ │ │ │ #143                                             1d here │ │ │ │ #131                                             shipped │ │ │ A │
-│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ N │
-│ │  P2   ◇ S                                                │ │ │ │  P2   ⛔ blocked                                         │ │ │ │  P1                                                      │ │ │ C │
-│ │  type:chore   risk:high                                  │ │ │ │  type:chore   #github#12                                 │ │ │ │  type:bug   #github#9                                    │ │ │ E │
-│ ╰──────────────────────────────────────────────────────────╯ │ │ ╰──────────────────────────────────────────────────────────╯ │ │ ╰──────────────────────────────────────────────────────────╯ │ │ L │
-│                                                              │ │                                                              │ │                                                              │ │ L │
-│ ╭──────────────────────────────────────────────────────────╮ │ │                                                              │ │                                                              │ │ E │
-│ │ 📝 Document overlay z-order                              │ │ │                                                              │ │                                                              │ │ D │
+│ ╭──────────────────────────────────────────────────────────╮ │ │                                                              │ │                                                              │ │   │
+│ │ 📝 Document overlay z-order                              │ │ │                                                              │ │                                                              │ │   │
 │ │ #147                                              6d old │ │ │                                                              │ │                                                              │ │   │
 │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │                                                              │ │                                                              │ │   │
+│ │ Write down which layers the compositor stacks and in     │ │ │                                                              │ │                                                              │ │   │
+│ │ what order, so the next overlay does not have to be…     │ │ │                                                              │ │                                                              │ │   │
 │ │  P4                                                      │ │ │                                                              │ │                                                              │ │   │
 │ │  type:docs                                               │ │ │                                                              │ │                                                              │ │   │
 │ ╰──────────────────────────────────────────────────────────╯ │ │                                                              │ │                                                              │ │   │
-│                                                              │ │                                                              │ │                                                              │ │   │
-│                                                              │ │                                                              │ │                                                              │ │   │
-│                                                              │ │                                                              │ │                                                              │ │   │
-│                                                              │ │                                                              │ │                                                              │ │   │
-│                                                              │ │                                                              │ │                                                              │ │   │
-│                                                              │ │                                                              │ │                                                              │ │   │
-│                                                              │ │                                                              │ │                                                              │ │   │
-│                                                              │ │                                                              │ │                                                              │ │   │
 │                                                              │ │                                                              │ │                                                              │ │   │
 │                                                              │ │                                                              │ │                                                              │ │   │
 │                                                              │ │                                                              │ │                                                              │ │   │

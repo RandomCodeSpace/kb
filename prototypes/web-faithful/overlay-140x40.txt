@@ -7,34 +7,34 @@
 │ │ 🐛 Pointer hit-test drifts on        │ │ │ │ 🚀 Panel-framed board columns        │ │ │ │ 📦 lipgloss v2 design-system         │ │ │   │
 │ │ wrapped meta                         │ │ │ │ #140                         5h here │ │ │ │ research                             │ │ │   │
 │ │ #142                          3d old │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ #138                         shipped │ │ │   │
-│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │  P1   ◷ today   ◇ L                  │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │   │
-│ │  P1   ⛔ blocked   ◷ overdue ╭────────────────────────────────────────────────────────────────────────╮                        │ │ │   │
-│ │  ◇ M                         │  CARD DETAIL                                                esc close  │                        │ │ │   │
-│ │  type:bug   area:tui   #githu│  ────────────────────────────────────────────────────────────────────  │  ──────────────────────╯ │ │   │
-│ ╰──────────────────────────────│  🐛 Pointer hit-test drifts on wrapped meta                      #142  │                          │ │   │
-│                                │   P1   ⛔ blocked   ◷ overdue 2d   ◇ M   type:bug   area:tui           │  ──────────────────────╮ │ │   │
-│ ╭──────────────────────────────│   #github#12                                                           │  ckground probe        │ │ │   │
-│ │ ✨ Design tokens package     │                                                                        │                shipped │ │ │   │
-│ │ #139                         │  Label spans are computed before the meta line wraps, so the second    │  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ C │
-│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌│  row of chips reports the x-range of the first. Clicking a pill on     │                        │ │ │ A │
-│ │  P2   ◷ in 3d   ◇ L          │  row two filters by the wrong tag.                                     │                        │ │ │ N │
-│ │  type:feature   area:tui     │                                                                        │  ──────────────────────╯ │ │ C │
-│ ╰──────────────────────────────│  created 3d ago  ·  moved 2d ago  ·  assignee @aksOps  ·  status todo  │                          │ │ E │
-│                                │                                                                        │  ──────────────────────╮ │ │ L │
-│ ╭──────────────────────────────│                                                                        │  croll clamp           │ │ │ L │
-│ │ 🔒 Redact remote tokens in de│                                                                        │                shipped │ │ │ E │
-│ │ #144                         │                                                                        │  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ D │
-│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌│                                                                        │                        │ │ │   │
-│ │  P2   ◇ S                    │                                                                        │  thub#9                │ │ │   │
-│ │  type:chore   risk:high      │   e edit   x toggle blocked   m move   D delete                        │  ──────────────────────╯ │ │   │
-│ ╰──────────────────────────────╰────────────────────────────────────────────────────────────────────────╯                          │ │   │
-│                                                                                                                                    │ │   │
-│ ╭──────────────────────────────────────╮ │ │                                          │ │                                          │ │   │
-│ │ 📝 Document overlay z-order          │ │ │                                          │ │                                          │ │   │
-│ │ #147                          6d old │ │ │                                          │ │                                          │ │   │
-│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │                                          │ │                                          │ │   │
-│ │  P4                                  │ │ │                                          │ │                                          │ │   │
-│ │  type:docs                           │ │ │                                          │ │                                          │ │   │
+│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ │ Give each status column a real box   │ │ │ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │   │
+│ │ Label spans are computed befo╭────────────────────────────────────────────────────────────────────────╮v2 style, layer, and    │ │ │   │
+│ │ meta line wraps, so the secon│  CARD DETAIL                                                esc close  │   wrote up the postur… │ │ │   │
+│ │  P1   ⛔ blocked   ◷ overdue │  ────────────────────────────────────────────────────────────────────  │                        │ │ │   │
+│ │  ◇ M                         │  🐛 Pointer hit-test drifts on wrapped meta                      #142  │                        │ │ │   │
+│ │  type:bug   area:tui   #githu│   P1   ⛔ blocked   ◷ overdue 2d   ◇ M   type:bug   area:tui           │  ──────────────────────╯ │ │   │
+│ ╰──────────────────────────────│   #github#12                                                           │                          │ │   │
+│                                │                                                                        │  ──────────────────────╮ │ │   │
+│ ╭──────────────────────────────│  Label spans are computed before the meta line wraps, so the second    │  ckground probe        │ │ │ C │
+│ │ ✨ Design tokens package     │  row of chips reports the x-range of the first. Clicking a pill on     │                shipped │ │ │ A │
+│ │ #139                         │  row two filters by the wrong tag.                                     │  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │ N │
+│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌│                                                                        │  nal for its           │ │ │ C │
+│ │ Extract the semantic palette │  created 3d ago  ·  moved 2d ago  ·  assignee @aksOps  ·  status todo  │  tartup and resolve…   │ │ │ E │
+│ │ internal/theme so every view │                                                                        │                        │ │ │ L │
+│ │  P2   ◷ in 3d   ◇ L          │                                                                        │                        │ │ │ L │
+│ │  type:feature   area:tui     │                                                                        │  ──────────────────────╯ │ │ E │
+│ ╰──────────────────────────────│                                                                        │                          │ │ D │
+│                                │                                                                        │  ──────────────────────╮ │ │   │
+│ ╭──────────────────────────────│                                                                        │  croll clamp           │ │ │   │
+│ │ 🔒 Redact remote tokens in de│   e edit   x toggle blocked   m move   D delete                        │                shipped │ │ │   │
+│ │ #144                         ╰────────────────────────────────────────────────────────────────────────╯  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ │ │ │   │
+│ │ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌                                                                          the last card left    │ │ │   │
+│ │ The forge client logs its            │ │ │ │  P2   ⛔ blocked                     │ │ │ │ the viewport pinned one row below…   │ │ │   │
+│ │ Authorization header verbatim when…  │ │ │ │  type:chore   #github#12             │ │ │ │  P1                                  │ │ │   │
+│ │  P2   ◇ S                            │ │ │ ╰──────────────────────────────────────╯ │ │ │  type:bug   #github#9                │ │ │   │
+│ │  type:chore   risk:high              │ │ │                                          │ │ ╰──────────────────────────────────────╯ │ │   │
 │ ╰──────────────────────────────────────╯ │ │                                          │ │                                          │ │   │
+│ +1 more                                  │ │                                          │ │                                          │ │   │
+│                                          │ │                                          │ │                                          │ │   │
 ╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯ ╰───╯
  j/k cards │ h/l columns │ enter open │ n new │ c cancelled:off │ / filter │ ? help │ q quit                            web-faithful · #137 

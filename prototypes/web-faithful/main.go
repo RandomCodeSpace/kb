@@ -184,6 +184,8 @@ type styles struct {
 	sepHi     lipgloss.Style
 	body      lipgloss.Style
 	bodyHi    lipgloss.Style
+	desc      lipgloss.Style
+	descHi    lipgloss.Style
 	more      lipgloss.Style
 	empty     lipgloss.Style
 
@@ -271,7 +273,9 @@ func newStyles(isDark bool) styles {
 	s.sepHi = base.Background(t.bgCardFocus).Foreground(t.rule)
 	s.body = base.Background(t.bgCard).Foreground(t.fgSubtle)
 	s.bodyHi = base.Background(t.bgCardFocus).Foreground(t.fgSubtle)
-	s.more = base.Background(t.bgPanel).Foreground(t.fgMuted).Italic(true)
+	s.desc = base.Background(t.bgCard).Foreground(t.fgMuted)
+	s.descHi = base.Background(t.bgCardFocus).Foreground(t.fgMuted)
+	s.more =base.Background(t.bgPanel).Foreground(t.fgMuted).Italic(true)
 	s.empty = base.Background(t.bgPanel).Foreground(t.fgMuted).Italic(true)
 
 	for i := 1; i <= 4; i++ {
@@ -328,7 +332,9 @@ type card struct {
 	overdue bool
 	effort  string
 	tags    []string
-	notes   string
+	// desc is the card body. The board shows a truncated snippet of it under
+	// the title; the detail overlay wraps it in full.
+	desc string
 }
 
 type column struct {
@@ -343,23 +349,26 @@ func board() []column {
 			{
 				emoji: "🐛", title: "Pointer hit-test drifts on wrapped meta", seq: 142,
 				age: "3d old", prio: 1, blocked: true, due: "overdue 2d", overdue: true, effort: "M",
-				tags:  []string{"type::bug", "area::tui", "github#12"},
-				notes: "Label spans are computed before the meta line wraps, so the second row of chips reports the x-range of the first. Clicking a pill on row two filters by the wrong tag.",
+				tags: []string{"type::bug", "area::tui", "github#12"},
+				desc: "Label spans are computed before the meta line wraps, so the second row of chips reports the x-range of the first. Clicking a pill on row two filters by the wrong tag.",
 			},
 			{
 				emoji: "✨", title: "Design tokens package", seq: 139,
 				age: "1d old", prio: 2, due: "in 3d", effort: "L",
 				tags: []string{"type::feature", "area::tui"},
+				desc: "Extract the semantic palette into internal/theme so every view reads roles instead of raw hex. Ships with a LightDark seam and one cached style factory.",
 			},
 			{
 				emoji: "🔒", title: "Redact remote tokens in debug log", seq: 144,
 				age: "new", prio: 2, effort: "S",
 				tags: []string{"type::chore", "risk::high"},
+				desc: "The forge client logs its Authorization header verbatim when KB_DEBUG is set. Mask everything after the scheme before the line reaches the writer.",
 			},
 			{
 				emoji: "📝", title: "Document overlay z-order", seq: 147,
 				age: "6d old", prio: 4,
 				tags: []string{"type::docs"},
+				desc: "Write down which layers the compositor stacks and in what order, so the next overlay does not have to be reverse-engineered from the render call.",
 			},
 		}},
 		{name: "DOING", key: "doing", cards: []card{
@@ -367,16 +376,19 @@ func board() []column {
 				emoji: "🚀", title: "Panel-framed board columns", seq: 140,
 				age: "5h here", prio: 1, due: "today", effort: "L",
 				tags: []string{"type::feature", "area::tui"},
+				desc: "Give each status column a real box with its own header band, count, and rule. The card stack sits inset by one gutter column on each side.",
 			},
 			{
 				emoji: "🧪", title: "Golden regen for restyle slices", seq: 141,
 				age: "2d here", prio: 3, effort: "M",
 				tags: []string{"type::test"},
+				desc: "Every restyle slice invalidates the golden frames. Add a regen target that rewrites them in one pass and fails loudly on an unreviewed diff.",
 			},
 			{
 				emoji: "🔧", title: "GetFrameSize layout math", seq: 143,
 				age: "1d here", prio: 2, blocked: true,
 				tags: []string{"type::chore", "github#12"},
+				desc: "Replace the hardcoded border and padding constants with GetFrameSize calls so width math survives a border-style change.",
 			},
 		}},
 		{name: "DONE", key: "done", cards: []card{
@@ -384,16 +396,19 @@ func board() []column {
 				emoji: "📦", title: "lipgloss v2 design-system research", seq: 138,
 				age: "shipped", prio: 2, effort: "M",
 				tags: []string{"type::spike"},
+				desc: "Surveyed the v2 style, layer, and canvas APIs and wrote up the posture this board follows: semantic tokens, cached styles, no per-frame construction.",
 			},
 			{
 				emoji: "✨", title: "LightDark background probe", seq: 135,
 				age: "shipped", prio: 3,
 				tags: []string{"type::feature"},
+				desc: "Query the terminal for its background at startup and resolve the palette once, with a flag to force either side when the probe times out.",
 			},
 			{
 				emoji: "🐛", title: "Fix column scroll clamp", seq: 131,
 				age: "shipped", prio: 1,
 				tags: []string{"type::bug", "github#9"},
+				desc: "Scrolling past the last card left the viewport pinned one row below the stack, so the bottom border vanished until the column was re-entered.",
 			},
 		}},
 	}
@@ -417,6 +432,7 @@ const (
 	chromeRows     = 3  // header + filter bar + footer
 	compactBelow   = 28 // terminal height under which cards drop to two rows
 	panelChromeRow = 4  // top border + band + band rule + bottom border
+	descLines      = 2  // description snippet rows on a normal-density card
 )
 
 // ---------------------------------------------------------------------------
@@ -512,6 +528,23 @@ func pack(chips []string, width, maxLines int, fill lipgloss.Style) []string {
 		lines = append(lines, cur)
 	}
 	return lines
+}
+
+// snippet wraps text to width and keeps at most maxLines of it. When the text
+// does not fit, the last kept line ends in an ellipsis so the truncation is
+// visible. No returned line is ever wider than width.
+func snippet(text string, width, maxLines int) []string {
+	if text == "" || width < 2 || maxLines < 1 {
+		return nil
+	}
+	wrapped := strings.Split(ansi.Wrap(text, width, " -"), "\n")
+	if len(wrapped) <= maxLines {
+		return wrapped
+	}
+	out := wrapped[:maxLines]
+	last := strings.TrimRight(ansi.Truncate(out[maxLines-1], width-1, ""), " ")
+	out[maxLines-1] = last + "…"
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -628,9 +661,10 @@ func (s styles) cardStyles(outer int) cardStyles {
 
 func (s styles) renderCard(c card, cs cardStyles, focused, compact bool) []string {
 	fill := s.body
-	titleStyle, seqStyle, sepStyle := s.title, s.seq, s.sep
+	titleStyle, seqStyle, sepStyle, descStyle := s.title, s.seq, s.sep, s.desc
 	if focused {
-		fill, titleStyle, seqStyle, sepStyle = s.bodyHi, s.titleHi, s.seqHi, s.sepHi
+		fill, titleStyle, seqStyle, sepStyle, descStyle =
+			s.bodyHi, s.titleHi, s.seqHi, s.sepHi, s.descHi
 	}
 	width := cs.content
 	seq := seqStyle.Render(fmt.Sprintf("#%d", c.seq))
@@ -656,6 +690,9 @@ func (s styles) renderCard(c card, cs cardStyles, focused, compact bool) []strin
 		}
 		lines = append(lines, row(seq, fill.Render(c.age), width, fill))
 		lines = append(lines, sepStyle.Render(repeat("╌", width)))
+		for _, line := range snippet(c.desc, width, descLines) {
+			lines = append(lines, padTo(descStyle.Render(line), width, fill))
+		}
 		for _, line := range pack(s.chips(c, false), width, 2, fill) {
 			lines = append(lines, padTo(line, width, fill))
 		}
@@ -925,7 +962,7 @@ func (s styles) renderOverlay(width, height int) []string {
 		lines = append(lines, padTo(line, inner, fill))
 	}
 	lines = append(lines, fill.Render(repeat(" ", inner)))
-	for _, line := range strings.Split(ansi.Wrap(c.notes, inner, " -"), "\n") {
+	for _, line := range strings.Split(ansi.Wrap(c.desc, inner, " -"), "\n") {
 		lines = append(lines, padTo(s.overlayKey.Render(line), inner, fill))
 	}
 	lines = append(lines, fill.Render(repeat(" ", inner)))
