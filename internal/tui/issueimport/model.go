@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
+	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
@@ -15,6 +18,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 const (
@@ -95,6 +99,48 @@ type Model struct {
 	scroll       int
 	manualScroll bool
 	pointerState pointer.State
+	styles       *theme.Styles
+	spin         spinner.Model
+}
+
+// fallbackStyles is the palette a Model rendered without SetStyles draws with.
+// It is built once and never mutated; the root resolves its own on construction
+// and again on tea.BackgroundColorMsg (spec section 6.3).
+var fallbackStyles = sync.OnceValue(func() *theme.Styles { return theme.New(true) })
+
+// SetStyles hands the overlay the resolved design system. Spec section 6.2:
+// styles are built once by the root and threaded down, never constructed here.
+func (m *Model) SetStyles(styles *theme.Styles) {
+	if styles == nil {
+		return
+	}
+	m.styles = styles
+	m.spin.Spinner = styles.Spinner
+}
+
+// themeStyles is the resolved design system, defaulting to the dark reference
+// palette until the root hands over its own.
+func (m Model) themeStyles() *theme.Styles {
+	if m.styles != nil {
+		return m.styles
+	}
+	return fallbackStyles()
+}
+
+// progressBar is the bubbles progress bar of spec section 5.2, hued from the
+// palette. Both fill characters are full blocks: a bar drawn in half blocks or
+// shade characters carries a foreground only, and its cells would punch a hole
+// through the panel's shade tier.
+func progressBar(styles *theme.Styles, width int) progress.Model {
+	block := []rune(styles.Glyph.RailFull)[0]
+	bar := progress.New(
+		progress.WithoutPercentage(),
+		progress.WithWidth(width),
+		progress.WithFillCharacters(block, block),
+		progress.WithColors(styles.Pal[theme.StatusOK]),
+	)
+	bar.EmptyColor = styles.Pal[theme.OverlayBand]
+	return bar
 }
 
 func New(st Store, backend Backend, user string, ctx context.Context) Model {
@@ -105,7 +151,10 @@ func New(st Store, backend Backend, user string, ctx context.Context) Model {
 	input.Prompt = ""
 	input.Placeholder = "owner/repo or configured forge URL"
 	input.SetWidth(56)
-	return Model{store: st, backend: backend, user: user, ctx: ctx, ref: input, max: defaultMax}
+	return Model{
+		store: st, backend: backend, user: user, ctx: ctx, ref: input, max: defaultMax,
+		spin: spinner.New(spinner.WithSpinner(fallbackStyles().Spinner)),
+	}
 }
 
 func (m Model) Enabled() bool { return m.store != nil && m.backend != nil }
@@ -116,11 +165,23 @@ func IsMessage(message tea.Msg) bool {
 		return true
 	}
 	switch message.(type) {
-	case sourcesLoadedMsg, previewCompletedMsg, cardCreatedMsg, pointerActionMsg:
+	case sourcesLoadedMsg, previewCompletedMsg, cardCreatedMsg, pointerActionMsg, spinner.TickMsg:
 		return true
 	default:
 		return false
 	}
+}
+
+// spinTick advances the busy indicator. Spec section 5.2 adopts the bubbles
+// spinner for the fetch state that used to be static text; the tick loop stops
+// as soon as the fetch ends, so an idle overlay costs no timers.
+func (m *Model) spinTick(msg spinner.TickMsg) tea.Cmd {
+	if m.operation != "preview" {
+		return nil
+	}
+	var command tea.Cmd
+	m.spin, command = m.spin.Update(msg)
+	return command
 }
 
 func (m *Model) Open() tea.Cmd {
@@ -172,6 +233,8 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return command
 	}
 	switch msg := message.(type) {
+	case spinner.TickMsg:
+		return m.spinTick(msg)
 	case sourcesLoadedMsg:
 		if msg.session != m.session {
 			return nil
@@ -342,10 +405,10 @@ func (m *Model) startPreview() tea.Cmd {
 	m.cancel, m.operation = cancel, "preview"
 	m.setStatus("fetching and drafting...", false)
 	request := forge.PreviewRequest{Source: m.sources[m.source].Name, Ref: raw, Max: m.max}
-	return func() tea.Msg {
+	return tea.Batch(m.spin.Tick, func() tea.Msg {
 		preview, err := m.backend.Preview(ctx, m.user, request)
 		return previewCompletedMsg{session: session, generation: generation, preview: preview, err: err}
-	}
+	})
 }
 
 func (m *Model) updateReview(msg tea.KeyPressMsg) tea.Cmd {

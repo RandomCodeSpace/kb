@@ -56,7 +56,7 @@ func (m Model) keyboardHelpSurface(background string) pointer.Surface {
 	closeID := pointer.ControlID("help:close")
 	for index, line := range lines {
 		if strings.Contains(line, "close help") {
-			lines[index] = strings.Replace(line, "close help", m.pointerState.Render(closeID, "close help"), 1)
+			lines[index] = strings.Replace(line, "close help", m.pointerState.Render(m.themeStyles(), closeID, "close help"), 1)
 		}
 	}
 	for index := range lines {

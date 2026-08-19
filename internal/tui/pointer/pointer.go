@@ -2,9 +2,9 @@
 package pointer
 
 import (
-	"strings"
-
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 // Point is a zero-based terminal cell.
@@ -53,19 +53,17 @@ func (s State) IsPressed(id ControlID) bool {
 // Active reports whether any rendered control owns the current press.
 func (s State) Active() bool { return s.pressed != "" }
 
-// Render applies same-width reverse-video feedback to the active control.
-// The caller supplies already-sanitized terminal content.
+// Render applies same-width pressed feedback to the active control. The caller
+// supplies already-sanitized terminal content.
 //
-// A themed control renders its own styles inside this run, and every one of
-// them ends in a reset that would cancel the feedback for the rest of the row,
-// so the attribute is re-armed after each reset.
-func (s State) Render(id ControlID, content string) string {
-	if !s.IsPressed(id) {
+// Spec section 9.1: the feedback is theme.Styles.Pressed, not a raw escape
+// written here. The theme owns the attribute and the re-arming a composed run
+// needs; this package only decides which control wears it.
+func (s State) Render(styles *theme.Styles, id ControlID, content string) string {
+	if !s.IsPressed(id) || styles == nil {
 		return content
 	}
-	rearmed := strings.ReplaceAll(content, "\x1b[m", "\x1b[m\x1b[7m")
-	rearmed = strings.ReplaceAll(rearmed, "\x1b[0m", "\x1b[0m\x1b[7m")
-	return "\x1b[7m" + rearmed + "\x1b[27m"
+	return styles.PressedRun(content)
 }
 
 // Update consumes pointer feedback messages. The returned command emits the

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -66,12 +67,34 @@ func newTestModel() (*Model, *fakeStore, *fakeRunner) {
 	return &m, st, runner
 }
 
+// commandMsg runs a command and returns the overlay message it produced. An
+// operation that also starts the busy spinner returns a batch, so the batch is
+// walked and the spinner tick - which is a timer, not a result - is skipped.
 func commandMsg(t *testing.T, command tea.Cmd) tea.Msg {
 	t.Helper()
 	if command == nil {
 		t.Fatal("command is nil")
 	}
-	return command()
+	message := command()
+	batch, batched := message.(tea.BatchMsg)
+	if !batched {
+		return message
+	}
+	for _, sub := range batch {
+		if sub == nil {
+			continue
+		}
+		if result := sub(); !isSpinnerTick(result) {
+			return result
+		}
+	}
+	t.Fatal("batch produced no overlay message")
+	return nil
+}
+
+func isSpinnerTick(message tea.Msg) bool {
+	_, tick := message.(spinner.TickMsg)
+	return tick
 }
 
 func TestAvailabilitySessionsAndCloseLifecycle(t *testing.T) {
@@ -543,7 +566,7 @@ func TestPointerControlsAreRenderDerivedAndSessionScoped(t *testing.T) {
 	m.rows = rowsFromDrafts([]ai.Draft{testDraft("one"), testDraft("two")})
 	m.focus = "include:0"
 	handler = m.MouseHandler(80, 24)
-	line, x = visibleTextPosition(t, m.View(80, 24), "[x] include")
+	line, x = visibleTextPosition(t, m.View(80, 24), "1 include")
 	message = pointerRelease(m, handler, x, line)()
 	if _, ok := message.(pointerActionMsg); !ok {
 		t.Fatalf("review release message=%T", message)
@@ -580,7 +603,7 @@ func TestPointerControlsClipScrolledRowsAndGuardBusyWork(t *testing.T) {
 		t.Fatal("small viewport rendered an offscreen row")
 	}
 	handler := m.MouseHandler(50, 10)
-	line, x := visibleTextPosition(t, view, "[x] include")
+	line, x := visibleTextPosition(t, view, "1 include")
 	if command := pointerRelease(m, handler, x, line); command == nil {
 		t.Fatal("visible review control had no hit region")
 	}
@@ -686,7 +709,7 @@ func TestPointerControlsActivateEveryVisibleInputAndReviewControl(t *testing.T) 
 	review, _, _ := newTestModel()
 	review.stage = stageReview
 	review.rows = rowsFromDrafts([]ai.Draft{testDraft("one"), testDraft("two")})
-	pointerActivate(t, review, "[x] include")
+	pointerActivate(t, review, "1 include")
 	if review.rows[0].include {
 		t.Fatal("pointer include did not toggle the selected row")
 	}
@@ -790,8 +813,11 @@ func TestDirtyCloseButtonActivatesAfterPressedRerender(t *testing.T) {
 	if press == nil || m.Update(press()) != nil {
 		t.Fatal("dirty-close discard did not enter pressed state")
 	}
-	if view := ansi.Strip(m.View(80, 24)); !strings.Contains(view, "[>Discard<]") {
-		t.Fatalf("dirty-close discard omitted pressed feedback:\n%s", view)
+	// The feedback is theme.Styles.Pressed now, not a text substitution, so it
+	// is the reverse-video attribute in the composed frame that says "pressed".
+	view := m.View(80, 24)
+	if !strings.Contains(view, "\x1b[7m") || !strings.Contains(ansi.Strip(view), "[ Discard ]") {
+		t.Fatalf("dirty-close discard omitted pressed feedback:\n%s", ansi.Strip(view))
 	}
 	release := m.MouseHandler(80, 24)(tea.MouseReleaseMsg{X: x, Y: line, Button: tea.MouseNone})
 	if release == nil {
@@ -826,20 +852,25 @@ func TestCreatedReviewRowsKeepPointerTargetsAligned(t *testing.T) {
 	m.stage = stageReview
 	m.rows = rowsFromDrafts([]ai.Draft{testDraft("created"), testDraft("pending")})
 	m.rows[0].created = true
-	lines := m.bodyLines(80)
-	targets := m.controlRows()
-	for line, rendered := range lines {
+	for _, row := range m.bodyRows(80) {
 		want := ""
 		switch {
-		case strings.Contains(rendered, "Destination:"):
+		case strings.Contains(row.plain(), "Destination:"):
 			want = "dest"
-		case strings.Contains(rendered, "[ Back to source ]"):
+		case strings.Contains(row.plain(), "[ Back to source ]"):
 			want = "back"
-		case strings.Contains(rendered, "[ Add selected"):
+		case strings.Contains(row.plain(), "[ Add selected"):
 			want = "add"
 		}
-		if want != "" && targets[line] != want {
-			t.Fatalf("line %d %q target=%q want %q", line, rendered, targets[line], want)
+		if want != "" && row.target != want {
+			t.Fatalf("row %q target=%q want %q", row.plain(), row.target, want)
+		}
+	}
+	// A created story keeps its rows in the list but never a focus target, so
+	// the batch cannot be told to write it twice.
+	for _, row := range m.bodyRows(80) {
+		if strings.Contains(row.plain(), "created") && row.target != "" {
+			t.Fatalf("created row %q carries target %q", row.plain(), row.target)
 		}
 	}
 }

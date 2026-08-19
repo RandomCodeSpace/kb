@@ -18,9 +18,7 @@ import (
 // constructing a style has found a missing token, and the fix is a new token,
 // not an exemption.
 var seamAllowlist = map[string]bool{
-	"adrsplit/view.go":    true,
-	"help.go":             true,
-	"issueimport/view.go": true,
+	"help.go": true,
 }
 
 // seamMarker is the construction call the seam bans.
@@ -50,7 +48,7 @@ func TestNoStyleConstructionOutsideTheme(t *testing.T) {
 // TestSeamAllowlistOnlyShrinks pins the allowlist size so a migration slice
 // cannot quietly trade one exemption for another.
 func TestSeamAllowlistOnlyShrinks(t *testing.T) {
-	const atMost = 3
+	const atMost = 1
 	if len(seamAllowlist) > atMost {
 		t.Fatalf("seam allowlist has %d entries, at most %d are allowed", len(seamAllowlist), atMost)
 	}

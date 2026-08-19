@@ -1,6 +1,8 @@
 package theme
 
 import (
+	"strings"
+
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
@@ -9,6 +11,7 @@ import (
 	"charm.land/glamour/v2/styles"
 	huh "charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Styles is the whole design system, resolved once. Spec section 6.2: every
@@ -42,8 +45,10 @@ type Styles struct {
 	Metrics Metrics
 	Glyph   Glyphs
 
-	blank     lipgloss.Style
-	blankBold lipgloss.Style
+	blank      lipgloss.Style
+	blankBold  lipgloss.Style
+	pressedOn  string
+	pressedOff string
 }
 
 // BoardStyles are the page-level surfaces of spec section 2.1.
@@ -136,6 +141,29 @@ func New(isDark bool) *Styles {
 	return built
 }
 
+// The two forms of an SGR reset a composed run can carry. lipgloss emits the
+// short form; glamour and huh emit the explicit one. Both cancel the pressed
+// attribute, so both are re-armed after.
+const (
+	shortReset    = ansi.ResetStyle
+	explicitReset = "\x1b[0m"
+)
+
+// PressedRun wraps an already-composed run in the Pressed token. Spec section
+// 9.1: the reverse-video feedback is a theme token, not a raw escape written by
+// the pointer package.
+//
+// A themed control renders its own styles inside this run, and every one of
+// them ends in a reset that would cancel the feedback for the rest of the row,
+// so the attribute is re-armed after each reset. The run closes by clearing the
+// attribute alone rather than resetting the whole style, because the caller may
+// be substituting it into the middle of a styled line.
+func (s *Styles) PressedRun(content string) string {
+	rearmed := strings.ReplaceAll(content, shortReset, shortReset+s.pressedOn)
+	rearmed = strings.ReplaceAll(rearmed, explicitReset, explicitReset+s.pressedOn)
+	return s.pressedOn + rearmed + s.pressedOff
+}
+
 // On returns the cached blank style carrying a foreground and background slot.
 // The widget API of spec section 5.1 is slot-parameterized (chip fills, column
 // hues), so the surface a run lands on is only known at render time; resolving
@@ -173,11 +201,13 @@ func build(table paletteRGB, isDark bool) *Styles {
 	pal := table.colors()
 	blank := lipgloss.NewStyle()
 	built := &Styles{
-		Pal:       pal,
-		Metrics:   defaultMetrics,
-		Glyph:     defaultGlyphs,
-		blank:     blank,
-		blankBold: blank.Bold(true),
+		Pal:        pal,
+		Metrics:    defaultMetrics,
+		Glyph:      defaultGlyphs,
+		blank:      blank,
+		blankBold:  blank.Bold(true),
+		pressedOn:  ansi.Style{}.Reverse(true).String(),
+		pressedOff: ansi.Style{}.Reverse(false).String(),
 	}
 	on := func(foreground, background Slot) lipgloss.Style {
 		return blank.Foreground(pal[foreground]).Background(pal[background])

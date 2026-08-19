@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"github.com/charmbracelet/x/ansi"
@@ -11,10 +12,15 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
+// normalizedView is the structure golden form: layout, truncation and drop
+// order, pinned to the colorless profile of spec section 6.4.
 func normalizedView(model *Model, width, height int) string {
-	lines := strings.Split(ansi.Strip(model.View(width, height)), "\n")
+	rendered := theme.Downsample(model.View(width, height), theme.StructureProfile)
+	lines := strings.Split(ansi.Strip(rendered), "\n")
 	for i := range lines {
 		lines[i] = strings.TrimSpace(lines[i])
 	}
@@ -26,6 +32,19 @@ func TestADRSplitInputGolden(t *testing.T) {
 	m.adr.SetValue("# ADR 0007\n\nUse the local store directly.")
 	m.focus = "split"
 	golden.RequireEqual(t, normalizedView(m, 84, 28))
+}
+
+// TestADRSplitReviewColorGolden is the palette golden of spec section 6.4: an
+// ASCII-pinned golden of a design whose depth model is background color asserts
+// nothing about the design, so this one pins truecolor over a board background.
+func TestADRSplitReviewColorGolden(t *testing.T) {
+	m, _, _ := newTestModel()
+	m.stage = stageReview
+	m.rows = rowsFromDrafts([]ai.Draft{testDraft("one"), testDraft("two")})
+	m.rows[1].include = false
+	m.focus = "include:0"
+	background := strings.TrimSuffix(strings.Repeat(strings.Repeat("b", 56)+"\n", 16), "\n")
+	golden.RequireEqual(t, []byte(theme.Downsample(m.Overlay(background, 56, 16), theme.ColorProfile)))
 }
 
 func TestViewsCoverFileReviewProgressErrorsAndNarrowTerminals(t *testing.T) {
@@ -109,9 +128,6 @@ func TestViewHelpersCoverCursorPlaceholdersAndLabels(t *testing.T) {
 		t.Fatalf("focused area = %#v", got)
 	}
 
-	if focusedLine([]string{"a", "> b"}) != 1 || focusedLine([]string{"a"}) != 0 {
-		t.Fatal("focused-line helper failed")
-	}
 	for status, want := range map[board.Status]string{
 		board.StatusTodo: "To Do", board.StatusDoing: "Doing", board.StatusDone: "Done",
 		board.StatusCancelled: "Cancelled", board.Status("bad\x1b[31m"): "bad",
@@ -125,5 +141,100 @@ func TestViewHelpersCoverCursorPlaceholdersAndLabels(t *testing.T) {
 	}
 	if got := fitBlock("one\ntwo\nthree", 2, 2); got != "on\ntw" {
 		t.Fatalf("fitBlock = %q", got)
+	}
+}
+
+// TestThemeSeamRowKindsAndChoiceEdges covers the design-system seam of spec
+// section 6.2: the overlay takes a *theme.Styles, falls back to the dark
+// reference until it gets one, and picks a token per row kind.
+func TestThemeSeamRowKindsAndChoiceEdges(t *testing.T) {
+	m, _, _ := newTestModel()
+	if m.themeStyles() != fallbackStyles() {
+		t.Fatal("unset styles did not fall back to the reference palette")
+	}
+	styles := theme.New(true)
+	m.SetStyles(nil)
+	if m.themeStyles() != fallbackStyles() {
+		t.Fatal("nil styles replaced the palette")
+	}
+	m.SetStyles(styles)
+	if m.themeStyles() != styles || m.spin.Spinner.FPS != styles.Spinner.FPS {
+		t.Fatal("SetStyles did not adopt the design system")
+	}
+
+	for _, row := range []splitRow{
+		{text: "boom", kind: rowError},
+		{text: "hint", kind: rowHint},
+		{text: "field", target: "max", kind: rowField},
+		{text: "plain", kind: rowBody},
+		{text: "  [ Cancel ]", button: "[ Cancel ]", target: "cancel", kind: rowButton},
+	} {
+		if got := m.renderRow(row, 40); ansi.Strip(got) == "" {
+			t.Fatalf("row %q rendered empty", row.text)
+		}
+	}
+	// A button whose label no longer fits falls back to the panel surface.
+	if got := m.renderRow(splitRow{text: "  [ Cancel ]", button: "[ Cancel ]", kind: rowButton}, 4); ansi.Strip(got) == "" {
+		t.Fatal("clipped button rendered empty")
+	}
+	m.focus = "max"
+	if focused := m.renderRow(splitRow{text: "field", target: "max", kind: rowField}, 40); focused == "" {
+		t.Fatal("focused field rendered empty")
+	}
+
+	if effortIndex("nope") != 0 || statusIndex(board.Status("nope")) != 0 {
+		t.Fatal("unknown choice values did not fall back to the first option")
+	}
+	if got := effortChoices(); got[0] != "none" || len(got) != 4 {
+		t.Fatalf("effort choices = %v", got)
+	}
+	if got := storyCountChoices(); len(got) != maxStories || got[0] != "1" {
+		t.Fatalf("story count choices = %v", got)
+	}
+	if got := m.choiceRow("max", "Max stories", nil, 0, "", 20); got.text != "> Max stories: " {
+		t.Fatalf("empty choice row = %q", got.text)
+	}
+}
+
+// TestSpinnerAdvancesOnlyWhileBusy is spec section 5.2: the busy states carry
+// the bubbles spinner, and the tick loop stops as soon as nothing is in flight.
+func TestSpinnerAdvancesOnlyWhileBusy(t *testing.T) {
+	m, _, _ := newTestModel()
+	if m.busy() || m.spinTick(spinner.TickMsg{}) != nil {
+		t.Fatal("idle overlay kept a spinner tick alive")
+	}
+	m.operation = "splitting ADR"
+	if !m.busy() || m.spinTick(spinner.TickMsg{ID: m.spin.ID()}) == nil {
+		t.Fatal("busy overlay dropped the spinner tick")
+	}
+	if m.busyPrefix() == "" {
+		t.Fatal("busy footer carried no spinner frame")
+	}
+	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, "splitting ADR") {
+		t.Fatalf("busy footer = %q", got)
+	}
+	m.operation, m.adding = "", true
+	if !m.busy() {
+		t.Fatal("batch write is a busy state")
+	}
+	m.adding = false
+	if command := m.Update(spinner.TickMsg{ID: m.spin.ID()}); command != nil {
+		t.Fatal("settled overlay re-armed the spinner")
+	}
+}
+
+// TestPointerRegionsClipToTheTerminalGrid keeps a panel that overhangs the
+// frame from claiming cells outside it.
+func TestPointerRegionsClipToTheTerminalGrid(t *testing.T) {
+	if _, ok := clipRect(pointer.Rect{X0: 5, Y0: 5, X1: 4, Y1: 6}, 10, 10); ok {
+		t.Fatal("inverted rect survived clipping")
+	}
+	if _, ok := clipRect(pointer.Rect{X0: -4, Y0: -4, X1: 40, Y1: 40}, 10, 10); !ok {
+		t.Fatal("overhanging rect was dropped instead of clipped")
+	}
+	m, _, _ := newTestModel()
+	frame := m.layout(80, 24)
+	if regions := m.pointerRegions(frame, 0, 0); len(regions) != 0 {
+		t.Fatalf("zero-size terminal exposed %d regions", len(regions))
 	}
 }

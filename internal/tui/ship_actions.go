@@ -12,6 +12,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 	"github.com/RandomCodeSpace/kb/internal/tui/widget"
@@ -968,7 +969,7 @@ func (m Model) taskActionFooter() string {
 	case taskActionPurge:
 		hints = "Enter arm  Enter again confirm  Esc cancel"
 	}
-	return m.pointerState.Render(taskActionControlID(taskActionPointerCancel, 0), hints)
+	return m.pointerState.Render(m.themeStyles(), taskActionControlID(taskActionPointerCancel, 0), hints)
 }
 
 func (m Model) taskActionFooterLabels() []actionLabel {
@@ -996,18 +997,18 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 		rows := []actionRow{{content: surface.Render(actionFit("Move "+sanitizeTerminal(a.task.Title)+" to Done?"+busy, width))}}
 		if notes := shipWarningNotes(a.warning); len(notes) > 0 {
 			// The note already ends in a blank row of its own.
-			rows = append(rows, m.huhRows(huhNote(styles, notes, width), nil)...)
+			rows = append(rows, m.huhRows(formview.HuhNote(styles, notes, width), nil)...)
 		} else {
 			rows = append(rows, actionRow{})
 		}
 		rows = append(rows, m.huhRows(m.shipChoiceField(styles, width), shipChoiceLabels(a.warning))...)
 		return appendActionError(styles, rows, a.errorText, width)
 	case taskActionKill:
-		reason := m.pointerState.Render(taskActionControlID(taskActionPointerKillReason, 0), "Reason:") +
+		reason := m.pointerState.Render(styles, taskActionControlID(taskActionPointerKillReason, 0), "Reason:") +
 			" " + settingsInputDisplay(a.reason, false, true, max(width-8, 1))
 		rows := []actionRow{
 			{content: surface.Render(actionFit("Why reject "+sanitizeTerminal(a.task.Title)+"?"+busy, width))},
-			m.huhRow(huhNote(styles, []string{"The card moves to Cancelled. The reason is optional."}, width)),
+			m.huhRow(formview.HuhNote(styles, []string{"The card moves to Cancelled. The reason is optional."}, width)),
 			{
 				content: surface.Render(actionFit(reason, width)),
 				labels:  []actionLabel{{text: "Reason:", kind: taskActionPointerKillReason}},
@@ -1026,7 +1027,7 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 			label := actionFit(sanitizeTerminal(check.Text), max(width-2, 1))
 			rows = append(rows, actionRow{
 				content: m.pointerState.Render(
-					taskActionControlID(taskActionPointerCheck, index),
+					styles, taskActionControlID(taskActionPointerCheck, index),
 					widget.Check(styles, label, state, theme.OverlaySurf, index == a.checkIndex),
 				),
 				labels: []actionLabel{{text: label, kind: taskActionPointerCheck, index: index}},
@@ -1043,7 +1044,7 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 			{content: styles.Overlay.FieldLabel.Render(actionFit("The card, comments, links, and kill reason are removed for good.", width))},
 			{},
 			{
-				content: m.pointerState.Render(taskActionControlID(taskActionPointerPurge, 0), widget.Button(styles, widget.ButtonOpts{
+				content: m.pointerState.Render(styles, taskActionControlID(taskActionPointerPurge, 0), widget.Button(styles, widget.ButtonOpts{
 					Text:           actionFit(label, width),
 					Armed:          a.armed,
 					Selected:       !a.armed,
@@ -1063,13 +1064,13 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 func (m Model) shipChoiceField(styles *theme.Styles, width int) string {
 	choices := shipChoices(m.action.warning)
 	if len(choices) == 2 {
-		return huhConfirm(styles, choices[0], choices[1], m.action.choice == 0, width)
+		return formview.HuhConfirm(styles, choices[0], choices[1], m.action.choice == 0, width)
 	}
-	return huhSelect(styles, choices, m.action.choice, width)
+	return formview.HuhSelect(styles, choices, m.action.choice, width)
 }
 
 func (m Model) killChoiceField(styles *theme.Styles, width int) string {
-	return huhSelect(styles, killChoices(), m.action.choice, width)
+	return formview.HuhSelect(styles, killChoices(), m.action.choice, width)
 }
 
 func shipChoices(warning shipWarning) []string {
@@ -1128,7 +1129,7 @@ func (m Model) huhRows(rendered string, labels []actionLabel) []actionRow {
 				continue
 			}
 			row.labels = append(row.labels, label)
-			row.content = m.pointerState.Render(taskActionControlID(label.kind, label.index), row.content)
+			row.content = m.pointerState.Render(m.themeStyles(), taskActionControlID(label.kind, label.index), row.content)
 		}
 		rows = append(rows, row)
 	}

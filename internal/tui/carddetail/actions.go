@@ -667,7 +667,7 @@ func (m Model) pointerFooterText(controls []detailPointerControl, width int) str
 	parts := make([]string, 0, len(controls))
 	for _, control := range controls {
 		label := "[" + control.label + "]"
-		parts = append(parts, m.pointerState.Render(detailFooterControlID(control), label))
+		parts = append(parts, m.pointerState.Render(m.styles, detailFooterControlID(control), label))
 	}
 	return fitDetailLine(strings.Join(parts, " "), width)
 }

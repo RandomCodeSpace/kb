@@ -1,11 +1,13 @@
 package pointer_test
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 type activatedMsg struct {
@@ -494,11 +496,23 @@ func TestStateRenderMarksOnlyThePressedControl(t *testing.T) {
 	hitMap.AddControl("save", pointer.Rect{X0: 0, Y0: 0, X1: 8, Y1: 1}, func(pointer.Point) tea.Msg { return nil })
 	press := hitMap.Handler()(tea.MouseClickMsg{X: 1, Y: 0, Button: tea.MouseLeft})
 	state, _, _ = state.Update(press())
-	if got := state.Render("other", "[Save]"); got != "[Save]" {
+	styles := theme.New(true)
+	if got := state.Render(styles, "other", "[Save]"); got != "[Save]" {
 		t.Fatalf("inactive render = %q", got)
 	}
-	if got := state.Render("save", "[Save]"); got != "\x1b[7m[Save]\x1b[27m" {
+	if got := state.Render(styles, "save", "[Save]"); got != "\x1b[7m[Save]\x1b[27m" {
 		t.Fatalf("pressed render = %q", got)
+	}
+	// The token is the theme's; a caller without one renders the plain content
+	// rather than a half-applied attribute.
+	if got := state.Render(nil, "save", "[Save]"); got != "[Save]" {
+		t.Fatalf("themeless render = %q", got)
+	}
+	// A themed control's own reset would cancel the attribute for the rest of
+	// the run, so it is re-armed after every inner reset.
+	inner := styles.Overlay.Surf.Render("x") + "\x1b[0m"
+	if got := state.Render(styles, "save", inner); strings.Count(got, "\x1b[7m") != 3 {
+		t.Fatalf("re-armed render = %q", got)
 	}
 }
 

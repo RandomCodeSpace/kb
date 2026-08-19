@@ -249,7 +249,7 @@ func (m Model) driftBody(width int) string {
 				cursor = "> "
 			}
 			line := fmt.Sprintf("%s%s  %s  %s", cursor, safeText(item.Source, false), safeText(item.Title, false), safeText(item.URL, false))
-			lines = append(lines, m.pointerState.Render(detailDriftControlID(index), line))
+			lines = append(lines, m.pointerState.Render(m.styles, detailDriftControlID(index), line))
 		}
 		return strings.Join(lines, "\n")
 	}

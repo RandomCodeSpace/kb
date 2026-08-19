@@ -181,7 +181,7 @@ func TestIssueImportOwnsRootInputAndCancelsLiftOnOpen(t *testing.T) {
 		t.Fatal("active import leaked board input")
 	}
 	view := m.View()
-	if view.OnMouse == nil || !strings.Contains(ansi.Strip(view.Content), "Forge issue import") {
+	if view.OnMouse == nil || !strings.Contains(ansi.Strip(view.Content), "FORGE ISSUE IMPORT") {
 		t.Fatal("active import did not own rendering/mouse")
 	}
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
