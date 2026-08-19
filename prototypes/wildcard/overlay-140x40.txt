@@ -4,24 +4,24 @@
  ▌ 1 TO DO                                   4  ▸ 2 DOING                                  3  ▌ 3 DONE                                   3  
    4 cards · 1 blocked                            3 cards · 1 blocked                           3 cards                                     
   ▌ 🐛 Drag ghost sticks after drop      #142    ▌ 🎨 Semantic palette + style factory #138    ▌ 🔍 Research lipgloss v2 patterns    #139   
+  ▌ The drag preview keeps rendering after t…    ▌ Replace the ad-hoc color literals with …    ▌ Read the v2 canvas and layer APIs and w…   
   ▌ P1 3d old ▐blocked▌ ▐overdue 2d▌ ◇M          ▌ P1 6h here ▐today▌ ◇L                       ▌ P2 shipped ◇M                              
   ▌ ▐type:bug▌ ▐#github#12▌                      ▌ ▐type:feature▌ ▐area:theme▌                 ▌ ▐type:research▌                            
                                                                                                                                             
   ▌ ✨ Card detail overlay polish        #145    █ 🧪 Golden regen for the restyle     #149    ▌ 🧭 Board filter persisted in URL    #133   
+  ▌ Give the detail panel a real header band…    █ Regenerate every golden after the new c…    ▌ Keep the active query and label filter …   
   ▌ P2 new ▐in 2d▌ ◇S                            █ P2 2d here ▐blocked▌ ▐in 4d▌ ◇M             ▌ P3 shipped ◇S                              
-  ▌ ▐type:feature▌ ▐area:tui▌                    █ ▐type:test▌ ▐#github#41▌                    ▌ ▐type:feature▌                             
+  ▌ ▐type:feature▌ ▐area:tui▌       🧪 Golden regen for the restyle                                  #149 ture▌                             
                                                                                                                                             
-  ▌ 🔧 Pin color profile in golden  🧪 Golden regen for the restyle                                  #149 he compat package          #131   
-  ▌ P3 1d old ◇S                                                                                            ◇S                              
-  ▌ ▐type:chore▌                    P2 2d here ▐blocked▌ ▐in 4d▌ ◇M ▐type:test▌ ▐#github#41▌               e▌                               
-                                    DETAIL                                                                                                  
-  ▌ 📦 Draft v1.2 release notes     status      DOING · moved 2d ago                                                                        
-  ▌ P4 5d old ◇L                    assignee    ak                                                                                          
-  ▌ ▐type:docs▌                     created     2026-08-13                                                                                  
-                                    blocked by  #142 drag ghost regression                                                                  
-                                                                                                                                            
-                                    Regenerate every golden after the restyle lands. Pin the                                                
-                                    color profile in teatest so CI and local truecolor agree.                                               
+  ▌ 🔧 Pin color profile in golden  P2 2d here ▐blocked▌ ▐in 4d▌ ◇M ▐type:test▌ ▐#github#41▌               e compat package          #131   
+  ▌ CI renders in 256 colors while  DETAIL                                                                 ports the shim any more. Dele…   
+  ▌ P3 1d old ◇S                    status      DOING · moved 2d ago                                        ◇S                              
+  ▌ ▐type:chore▌                    assignee    ak                                                         e▌                               
+                                    created     2026-08-13                                                                                  
+  ▌ 📦 Draft v1.2 release notes     blocked by  #142 drag ghost regression                                                                  
+  ▌ Summarize the restyle, the poi                                                                                                          
+  ▌ P4 5d old ◇L                    Regenerate every golden after the new card language lands, then diff                                    
+  ▌ ▐type:docs▌                     the frames by hand once to make sure nothing silently reflowed.                                         
                                                                                                                                             
                                     e edit · x cancel · t move · esc close                                                                  
                                                                                                                                             

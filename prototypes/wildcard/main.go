@@ -11,23 +11,31 @@
 //	rounded-border card, Padding(0,1)   2 content rows + 2 border rows
 //	                                    + 1 gutter        = 5 rows / card
 //	                                    4 cols of chrome per card
-//	Strata card, normal density         3 content rows + 0 border
-//	                                    + 1 gutter        = 4 rows / card
+//	Strata card, normal density         4 content rows (title, description,
+//	                                    meta chips, label pills) + 0 border
+//	                                    + 1 gutter        = 5 rows / card
 //	                                    2 cols of chrome (rail + right pad)
-//	Strata card, compact density        2 content rows, zebra instead of a
-//	                                    gutter             = 2 rows / card
+//	Strata card, tall frames (h >= 45)  the description gets a second line
+//	                                                       = 6 rows / card
+//	Strata card, compact density        2 content rows, no description, zebra
+//	                                    instead of a gutter = 2 rows / card
 //	                                    1 col of chrome (the rail)
 //
-// A bordered board fits 4 cards in a 20-row column; Strata fits 5 at normal
-// density and 10 at compact. The rows the borders were spending are spent on
-// a third card line (the label pills) instead, and the card still reads as a
-// distinct surface because it is literally a different shade.
+// A bordered board fits 4 cards in a 20-row column; Strata fits 4 at normal
+// density (the description line costs the row the borders gave back) and 10 at
+// compact. The card still reads as a distinct surface because it is literally
+// a different shade, not because anything is drawn around it.
+//
+// The description is a muted single line (two on tall frames) under the title,
+// word-wrapped to the card's inner width and ellipsized - it never wraps past
+// the card. It is the first thing compaction drops.
 //
 // Compaction (map #136's density decision) fires below 30 rows and drops, in
-// order: the page-padding row, the column meta line, the inter-card gutter
-// (replaced by zebra striping), the card's third line, the card's inner left
-// padding and the column's side padding, and finally the pill end caps - chips
-// degrade to flat colored text, scoped labels to their value half.
+// order: the description, the page-padding row, the column meta line, the
+// inter-card gutter (replaced by zebra striping), the card's label line, the
+// card's inner left padding and the column's side padding, and finally the pill
+// end caps - chips degrade to flat colored text, scoped labels to their value
+// half.
 //
 // Known risk, flagged rather than hidden: the whole accent vocabulary is
 // U+2588/258C/2590 half-blocks. On fonts without block glyphs this degrades
@@ -392,6 +400,7 @@ func text(s string, fg, bg slot, bold bool) []run {
 type task struct {
 	emoji   string
 	title   string
+	desc    string
 	seq     int
 	age     string
 	prio    int
@@ -411,20 +420,40 @@ type column struct {
 
 var board = []column{
 	{index: 1, label: "TO DO", hue: hueTodo, tasks: []task{
-		{"🐛", "Drag ghost sticks after drop", 142, "3d old", 1, true, "overdue 2d", true, "M", []string{"type::bug", "github#12"}},
-		{"✨", "Card detail overlay polish", 145, "new", 2, false, "in 2d", false, "S", []string{"type::feature", "area::tui"}},
-		{"🔧", "Pin color profile in goldens", 147, "1d old", 3, false, "", false, "S", []string{"type::chore"}},
-		{"📦", "Draft v1.2 release notes", 151, "5d old", 4, false, "", false, "L", []string{"type::docs"}},
+		{"🐛", "Drag ghost sticks after drop",
+			"The drag preview keeps rendering after the mouse button is released, so the board shows two copies of the card until the next repaint.",
+			142, "3d old", 1, true, "overdue 2d", true, "M", []string{"type::bug", "github#12"}},
+		{"✨", "Card detail overlay polish",
+			"Give the detail panel a real header band, a section break, and keyboard hints in the footer so it reads as a modal rather than a box.",
+			145, "new", 2, false, "in 2d", false, "S", []string{"type::feature", "area::tui"}},
+		{"🔧", "Pin color profile in goldens",
+			"CI renders in 256 colors while local runs are truecolor, so golden files churn. Pin the profile in the test harness.",
+			147, "1d old", 3, false, "", false, "S", []string{"type::chore"}},
+		{"📦", "Draft v1.2 release notes",
+			"Summarize the restyle, the pointer work, and the URL filter for the v1.2 tag, with upgrade notes for the dropped compat package.",
+			151, "5d old", 4, false, "", false, "L", []string{"type::docs"}},
 	}},
 	{index: 2, label: "DOING", hue: hueDoing, tasks: []task{
-		{"🎨", "Semantic palette + style factory", 138, "6h here", 1, false, "today", false, "L", []string{"type::feature", "area::theme"}},
-		{"🧪", "Golden regen for the restyle", 149, "2d here", 2, true, "in 4d", false, "M", []string{"type::test", "github#41"}},
-		{"🚀", "Adaptive compaction threshold", 150, "1d here", 2, false, "today", false, "M", []string{"type::feature"}},
+		{"🎨", "Semantic palette + style factory",
+			"Replace the ad-hoc color literals with named semantic slots and a cached style factory keyed by foreground, background, and weight.",
+			138, "6h here", 1, false, "today", false, "L", []string{"type::feature", "area::theme"}},
+		{"🧪", "Golden regen for the restyle",
+			"Regenerate every golden after the new card language lands, then diff the frames by hand once to make sure nothing silently reflowed.",
+			149, "2d here", 2, true, "in 4d", false, "M", []string{"type::test", "github#41"}},
+		{"🚀", "Adaptive compaction threshold",
+			"Pick the density tier from the frame height instead of a fixed flag, and drop card lines in a documented order as the terminal shrinks.",
+			150, "1d here", 2, false, "today", false, "M", []string{"type::feature"}},
 	}},
 	{index: 3, label: "DONE", hue: hueDone, tasks: []task{
-		{"🔍", "Research lipgloss v2 patterns", 139, "shipped", 2, false, "", false, "M", []string{"type::research"}},
-		{"🧭", "Board filter persisted in URL", 133, "shipped", 3, false, "", false, "S", []string{"type::feature"}},
-		{"🧹", "Drop the compat package", 131, "shipped", 4, false, "", false, "S", []string{"type::chore"}},
+		{"🔍", "Research lipgloss v2 patterns",
+			"Read the v2 canvas and layer APIs and write down which parts of the redesign they cover and which need hand-rolled cell composition.",
+			139, "shipped", 2, false, "", false, "M", []string{"type::research"}},
+		{"🧭", "Board filter persisted in URL",
+			"Keep the active query and label filter in the address bar so a filtered board survives a reload and can be shared as a link.",
+			133, "shipped", 3, false, "", false, "S", []string{"type::feature"}},
+		{"🧹", "Drop the compat package",
+			"Nothing imports the shim any more. Delete it and fold the two remaining helpers into the packages that actually call them.",
+			131, "shipped", 4, false, "", false, "S", []string{"type::chore"}},
 	}},
 }
 
@@ -470,19 +499,30 @@ func labelSlot(tag string) slot {
 // pill caps at normal sizes, adaptive compaction under it.
 const compactBelow = 30
 
+// descTwoLines is the height above which a card can afford a second
+// description line. Below it the snippet is a single ellipsized line.
+const descTwoLines = 45
+
 type layout struct {
-	compact bool
-	margin  int
-	gutter  int
-	cardH   int
-	cardGap int
+	compact   bool
+	margin    int
+	gutter    int
+	cardH     int
+	cardGap   int
+	descLines int
 }
 
 func newLayout(w, h int) layout {
 	compact := h < compactBelow
-	l := layout{compact: compact, gutter: 1, cardH: 3, cardGap: 1}
+	// Normal card rows: title + description + meta chips + label pills.
+	l := layout{compact: compact, gutter: 1, cardGap: 1, descLines: 1}
+	if h >= descTwoLines {
+		l.descLines = 2
+	}
+	l.cardH = 3 + l.descLines
 	if compact {
-		l.cardH, l.cardGap = 2, 0
+		// Compaction drops the description first, then the label line.
+		l.descLines, l.cardH, l.cardGap = 0, 2, 0
 	}
 	if w >= 100 {
 		l.margin = 1
@@ -510,6 +550,39 @@ func fit(s string, w int) string {
 		return s
 	}
 	return ansi.Truncate(s, w-1, "") + "…"
+}
+
+// wrapFit greedily wraps s into at most n lines of w columns. The last line
+// carries the ellipsis when text is left over, so a description can never wrap
+// past the card it belongs to.
+func wrapFit(s string, w, n int) []string {
+	if w <= 0 || n <= 0 {
+		return nil
+	}
+	words := strings.Fields(s)
+	out := make([]string, 0, n)
+	for len(words) > 0 && len(out) < n {
+		if len(out) == n-1 {
+			out = append(out, fit(strings.Join(words, " "), w))
+			break
+		}
+		line := ""
+		for len(words) > 0 {
+			cand := words[0]
+			if line != "" {
+				cand = line + " " + words[0]
+			}
+			if ansi.StringWidth(cand) > w {
+				break
+			}
+			line, words = cand, words[1:]
+		}
+		if line == "" { // a single word wider than the card
+			line, words = fit(words[0], w), words[1:]
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 func renderFrame(w, h int, overlay bool) *grid {
@@ -723,15 +796,26 @@ func drawCard(g *grid, l layout, x, y, w int, t task, selected, alt bool) {
 	g.paint(cx, y, fit(head, titleW), styleKey{fg: fgBase, bg: bg, bold: selected}, titleW)
 	g.paint(cx+inner-seqW, y, seq, styleKey{fg: fgMuted, bg: bg}, seqW)
 
-	// Row 1 (+2): meta chips, dropped right-to-left when they do not fit.
 	chips := metaChips(t, bg, l.compact)
 	if l.compact {
+		// Compact drops the description entirely; chips take row 1.
 		chips = append(chips, labelChips(t, bg, true)...)
 		paintChips(g, cx, y+1, chips, inner)
 		return
 	}
-	paintChips(g, cx, y+1, chips, inner)
-	paintChips(g, cx, y+2, labelChips(t, bg, false), inner)
+
+	// Rows 1..descLines: the muted description snippet, wrapped and clipped to
+	// the card's inner width.
+	row := y + 1
+	for _, line := range wrapFit(t.desc, inner, l.descLines) {
+		g.paint(cx, row, line, styleKey{fg: fgMuted, bg: bg}, inner)
+		row++
+	}
+	row = y + 1 + l.descLines // keep the chip rows aligned on short descriptions
+
+	// Meta chips, then label pills; both drop right-to-left when they do not fit.
+	paintChips(g, cx, row, chips, inner)
+	paintChips(g, cx, row+1, labelChips(t, bg, false), inner)
 }
 
 // metaChips returns the ordered, droppable meta tokens for one card. Order is
@@ -849,10 +933,8 @@ func drawOverlay(g *grid, w, h int) {
 		g.paint(px+14, row, fit(f[1], pw-16), styleKey{fg: fgBase, bg: overlaySurf}, pw-16)
 		row++
 	}
-	body := []string{
-		"Regenerate every golden after the restyle lands. Pin the",
-		"color profile in teatest so CI and local truecolor agree.",
-	}
+	// The overlay shows the same description the card snippet was cut from.
+	body := wrapFit(t.desc, pw-4, 2)
 	row++
 	for _, line := range body {
 		if row >= py+ph-2 {

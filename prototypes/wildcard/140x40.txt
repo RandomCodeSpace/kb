@@ -4,24 +4,24 @@
  ▌ 1 TO DO                                   4  ▸ 2 DOING                                  3  ▌ 3 DONE                                   3  
    4 cards · 1 blocked                            3 cards · 1 blocked                           3 cards                                     
   ▌ 🐛 Drag ghost sticks after drop      #142    ▌ 🎨 Semantic palette + style factory #138    ▌ 🔍 Research lipgloss v2 patterns    #139   
+  ▌ The drag preview keeps rendering after t…    ▌ Replace the ad-hoc color literals with …    ▌ Read the v2 canvas and layer APIs and w…   
   ▌ P1 3d old ▐blocked▌ ▐overdue 2d▌ ◇M          ▌ P1 6h here ▐today▌ ◇L                       ▌ P2 shipped ◇M                              
   ▌ ▐type:bug▌ ▐#github#12▌                      ▌ ▐type:feature▌ ▐area:theme▌                 ▌ ▐type:research▌                            
                                                                                                                                             
   ▌ ✨ Card detail overlay polish        #145    █ 🧪 Golden regen for the restyle     #149    ▌ 🧭 Board filter persisted in URL    #133   
+  ▌ Give the detail panel a real header band…    █ Regenerate every golden after the new c…    ▌ Keep the active query and label filter …   
   ▌ P2 new ▐in 2d▌ ◇S                            █ P2 2d here ▐blocked▌ ▐in 4d▌ ◇M             ▌ P3 shipped ◇S                              
   ▌ ▐type:feature▌ ▐area:tui▌                    █ ▐type:test▌ ▐#github#41▌                    ▌ ▐type:feature▌                             
                                                                                                                                             
   ▌ 🔧 Pin color profile in goldens      #147    ▌ 🚀 Adaptive compaction threshold    #150    ▌ 🧹 Drop the compat package          #131   
+  ▌ CI renders in 256 colors while local run…    ▌ Pick the density tier from the frame he…    ▌ Nothing imports the shim any more. Dele…   
   ▌ P3 1d old ◇S                                 ▌ P2 1d here ▐today▌ ◇M                       ▌ P4 shipped ◇S                              
   ▌ ▐type:chore▌                                 ▌ ▐type:feature▌                              ▌ ▐type:chore▌                               
                                                                                                                                             
   ▌ 📦 Draft v1.2 release notes          #151                                                                                               
+  ▌ Summarize the restyle, the pointer work,…                                                                                               
   ▌ P4 5d old ◇L                                                                                                                            
   ▌ ▐type:docs▌                                                                                                                             
-                                                                                                                                            
-                                                                                                                                            
-                                                                                                                                            
-                                                                                                                                            
                                                                                                                                             
                                                                                                                                             
                                                                                                                                             
