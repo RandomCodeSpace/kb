@@ -332,6 +332,10 @@ func markdownStyles(table paletteRGB) glamour.StyleConfig {
 	zero := uint(0)
 	built.Document.Margin = &zero
 	built.Document.Color = hexOf(FgBase)
+	// Markdown is only ever rendered inside an overlay, and glamour pads its
+	// wrapped lines: without the surface on the document block those pad cells
+	// punch a hole through the panel's shade tier (spec section 4).
+	built.Document.BackgroundColor = hexOf(OverlaySurf)
 	built.Paragraph.Color = hexOf(FgBase)
 	built.Text.Color = hexOf(FgBase)
 	built.BlockQuote.Color = hexOf(FgMuted)
