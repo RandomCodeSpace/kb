@@ -269,6 +269,15 @@ func (s *Styles) ChipRuns(fill, surface Slot) ChipStyles {
 	}
 }
 
+// HuhTheme hands the already-built huh styles to a huh field. Spec section 6.3
+// registers the factory itself as huh.ThemeFunc; a field rendered from a
+// *Styles that New has already resolved must not rebuild the palette per frame,
+// so the func closes over the built styles and ignores the background argument
+// it was resolved for.
+func (s *Styles) HuhTheme() huh.Theme {
+	return huh.ThemeFunc(func(bool) *huh.Styles { return s.Huh })
+}
+
 func inputStyles(pal Palette, on styleFunc, isDark bool) textinput.Styles {
 	built := textinput.DefaultStyles(isDark)
 	built.Focused = textinput.StyleState{

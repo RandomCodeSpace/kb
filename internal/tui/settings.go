@@ -15,6 +15,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 const settingsTestTimeout = 20 * time.Second
@@ -102,6 +103,24 @@ type settingsModel struct {
 	scroll        int
 	testCancel    context.CancelFunc
 	closed        bool
+	styles        *theme.Styles
+}
+
+// SetStyles hands the settings pane the resolved design system. Spec section
+// 6.2: the root builds it once and threads it down.
+func (m *settingsModel) SetStyles(styles *theme.Styles) {
+	if styles != nil {
+		m.styles = styles
+	}
+}
+
+// themeStyles is the resolved design system, defaulting to the dark reference
+// palette until the root hands one over.
+func (m *settingsModel) themeStyles() *theme.Styles {
+	if m.styles == nil {
+		m.styles = theme.New(true)
+	}
+	return m.styles
 }
 
 func newSettingsModel(st *store.Store, user string, ctx context.Context) *settingsModel {

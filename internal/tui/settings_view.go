@@ -9,11 +9,29 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget"
+)
+
+// settingsRowKind is the semantic role of one settings row, which decides the
+// token it renders with. Spec section 6.2: the view takes a *theme.Styles and
+// never builds one.
+type settingsRowKind uint8
+
+const (
+	settingsRowBody settingsRowKind = iota
+	settingsRowField
+	settingsRowSection
+	settingsRowButton
+	settingsRowHint
 )
 
 type settingsRenderRow struct {
 	line   string
+	button string
 	target string
+	armed  bool
+	kind   settingsRowKind
 }
 
 func settingsControlID(target string) pointer.ControlID {
@@ -27,7 +45,10 @@ func (m *settingsModel) View(width, height int) string {
 func (m *settingsModel) Surface(width, height int) pointer.Surface {
 	width = max(width, 1)
 	height = max(height, 3)
-	inputWidth := max(width-18, 8)
+	styles := m.themeStyles()
+	inset := min(styles.Metrics.OverlayInsetX, width/2)
+	inner := max(width-2*inset, 1)
+	inputWidth := max(inner-18, 8)
 	m.aiBase.SetWidth(inputWidth)
 	m.aiModel.SetWidth(inputWidth)
 	m.aiKey.SetWidth(inputWidth)
@@ -38,26 +59,26 @@ func (m *settingsModel) Surface(width, height int) pointer.Surface {
 		m.rows[i].token.SetWidth(inputWidth)
 	}
 
-	header := settingsFit("kb / settings / "+m.user, width)
-	body := []settingsRenderRow{{line: ""}, {line: "AI SETTINGS"}}
+	body := []settingsRenderRow{{line: ""}, {line: "AI SETTINGS", kind: settingsRowSection}}
 	if !m.loaded {
-		body = append(body, settingsRenderRow{line: "loading settings..."})
+		body = append(body, settingsRenderRow{line: "loading settings...", kind: settingsRowHint})
 	} else {
 		body = append(body,
-			settingsRenderRow{line: m.inputModelLine("ai:base", "Base URL", m.aiBase, false, width), target: "ai:base"},
-			settingsRenderRow{line: m.inputModelLine("ai:model", "Model", m.aiModel, false, width), target: "ai:model"},
-			settingsRenderRow{line: m.inputModelLine("ai:key", keyLabel("API key", m.hasKey), m.aiKey, true, width), target: "ai:key"},
-			settingsRenderRow{line: m.actionLine("ai:test", "Test connection", width), target: "ai:test"},
-			settingsRenderRow{line: m.actionLine("ai:save", "Save AI settings", width), target: "ai:save"},
-			settingsRenderRow{line: ""}, settingsRenderRow{line: "FORGE INTEGRATIONS"},
+			m.inputModelRow("ai:base", "Base URL", m.aiBase, false, inner),
+			m.inputModelRow("ai:model", "Model", m.aiModel, false, inner),
+			m.inputModelRow("ai:key", keyLabel("API key", m.hasKey), m.aiKey, true, inner),
+			m.actionRow("ai:test", "Test connection", inner),
+			m.actionRow("ai:save", "Save AI settings", inner),
+			settingsRenderRow{line: ""},
+			settingsRenderRow{line: "FORGE INTEGRATIONS", kind: settingsRowSection},
 		)
 		if len(m.rows) == 0 {
-			body = append(body, settingsRenderRow{line: "(none configured)"})
+			body = append(body, settingsRenderRow{line: "(none configured)", kind: settingsRowHint})
 		}
 		for i := range m.rows {
-			body = append(body, m.renderForgeRow(&m.rows[i], width)...)
+			body = append(body, m.renderForgeRow(&m.rows[i], inner)...)
 		}
-		body = append(body, settingsRenderRow{line: m.actionLine("forge:add", "+ Add integration", width), target: "forge:add"})
+		body = append(body, m.actionRow("forge:add", "+ Add integration", inner))
 	}
 	status := m.status
 	if status == "" {
@@ -66,7 +87,7 @@ func (m *settingsModel) Surface(width, height int) pointer.Surface {
 	if m.statusIsError {
 		status = "error: " + status
 	}
-	footer := settingsFit("[Close] | "+status+" | tab navigate | enter act", width)
+	footer := settingsFit("[Close] | "+status+" | tab navigate | enter act", inner)
 	footer = strings.Replace(footer, "[Close]", m.pointerState.Render(settingsControlID("close"), "[Close]"), 1)
 
 	bodyHeight := height - 2
@@ -87,8 +108,6 @@ func (m *settingsModel) Surface(width, height int) pointer.Surface {
 	m.scroll = min(max(m.scroll, 0), maxScroll)
 	end := min(m.scroll+bodyHeight, len(body))
 	visible := body[m.scroll:end]
-	lines := make([]string, 0, height)
-	lines = append(lines, header)
 	var hitMap pointer.Map
 	viewport := pointer.Viewport{
 		Rect:   pointer.Rect{X0: 0, Y0: 1, X1: width, Y1: height - 1},
@@ -103,22 +122,60 @@ func (m *settingsModel) Surface(width, height int) pointer.Surface {
 			hitMap.AddControl(settingsControlID(target), rect, func(pointer.Point) tea.Msg { return settingsPointerMsg{owner: m, target: target} })
 		}
 	}
+	rendered := make([]string, 0, bodyHeight)
 	for _, row := range visible {
-		line := settingsFit(row.line, width)
-		if row.target != "" {
-			line = m.pointerState.Render(settingsControlID(row.target), line)
-		}
-		lines = append(lines, line)
+		rendered = append(rendered, m.renderSettingsRow(row, inner))
 	}
-	footerY := len(lines)
-	lines = append(lines, footer)
+	content := strings.Join(widget.OverlayRows(styles, widget.OverlayOpts{
+		Title:  sanitizeTerminal("kb / settings / " + m.user),
+		Body:   rendered,
+		Footer: footer,
+		W:      width,
+		H:      height,
+	}), "\n")
+
+	footerY := height - 1
 	hitMap.AddWheel(viewport.Rect, func(delta int) tea.Msg { return settingsWheelMsg{delta: delta} })
 	hitMap.AddControl(
 		settingsControlID("close"),
-		pointer.Rect{X0: 0, Y0: footerY, X1: min(width, 7), Y1: footerY + 1},
+		pointer.Rect{X0: inset, Y0: footerY, X1: min(width, inset+7), Y1: footerY + 1},
 		func(pointer.Point) tea.Msg { return settingsPointerMsg{owner: m, target: "close"} },
 	)
-	return pointer.Surface{Content: strings.Join(lines, "\n"), Pointer: hitMap.Handler()}
+	return pointer.Surface{Content: content, Pointer: hitMap.Handler()}
+}
+
+// renderSettingsRow applies the token the row's role names.
+func (m *settingsModel) renderSettingsRow(row settingsRenderRow, width int) string {
+	styles := m.themeStyles()
+	line := settingsFit(row.line, width)
+	if row.kind == settingsRowButton {
+		if label := settingsFit(row.button, width); strings.HasSuffix(line, label) {
+			marker := strings.TrimSuffix(line, label)
+			return styles.Overlay.Surf.Render(marker) + widget.Button(styles, widget.ButtonOpts{
+				Text:           label,
+				Selected:       m.focus == row.target,
+				Armed:          row.armed,
+				Pressed:        m.pointerState.IsPressed(settingsControlID(row.target)),
+				UnderlineIndex: -1,
+			})
+		}
+	}
+	if row.target != "" {
+		line = m.pointerState.Render(settingsControlID(row.target), line)
+	}
+	switch row.kind {
+	case settingsRowSection:
+		return widget.Section(styles, line, width)
+	case settingsRowHint:
+		return styles.Overlay.FieldLabel.Render(line)
+	case settingsRowField:
+		if m.focus == row.target {
+			return styles.OnBold(theme.FgBase, theme.OverlaySurf).Render(line)
+		}
+		return styles.Overlay.FieldValue.Render(line)
+	default:
+		return styles.Overlay.Surf.Render(line)
+	}
 }
 
 func (m *settingsModel) renderForgeRow(row *integrationSettingsRow, width int) []settingsRenderRow {
@@ -133,33 +190,32 @@ func (m *settingsModel) renderForgeRow(row *integrationSettingsRow, width int) [
 	}
 	lines := []settingsRenderRow{
 		{line: ""},
-		{line: settingsFit("-- "+row.name.Value()+" ("+marker+") --", width), target: rowTarget},
+		{line: settingsFit(row.name.Value()+" ("+marker+")", width), target: rowTarget, kind: settingsRowSection},
 	}
 	if row.persisted {
 		lines = append(lines,
-			settingsRenderRow{line: settingsFit("  Name: "+row.name.Value()+" (locked)", width)},
-			settingsRenderRow{line: settingsFit("  Kind: "+row.kind+" (locked)", width)},
+			settingsRenderRow{line: settingsFit("  Name: "+row.name.Value()+" (locked)", width), kind: settingsRowHint},
+			settingsRenderRow{line: settingsFit("  Kind: "+row.kind+" (locked)", width), kind: settingsRowHint},
 		)
 	} else {
 		lines = append(lines,
-			settingsRenderRow{line: m.inputLine(prefix+"kind", "Kind", row.kind, width), target: prefix + "kind"},
-			settingsRenderRow{line: m.inputModelLine(prefix+"name", "Name", row.name, false, width), target: prefix + "name"},
+			m.inputRow(prefix+"kind", "Kind", row.kind, width),
+			m.inputModelRow(prefix+"name", "Name", row.name, false, width),
 		)
 	}
 	lines = append(lines,
-		settingsRenderRow{line: m.inputModelLine(prefix+"base", "Base URL", row.baseURL, false, width), target: prefix + "base"},
-		settingsRenderRow{line: m.inputModelLine(prefix+"project", "Project", row.project, false, width), target: prefix + "project"},
-		settingsRenderRow{line: m.inputModelLine(prefix+"token", keyLabel("Token", row.hasToken), row.token, true, width), target: prefix + "token"},
-		settingsRenderRow{line: m.actionLine(prefix+"test", "Test", width), target: prefix + "test"},
+		m.inputModelRow(prefix+"base", "Base URL", row.baseURL, false, width),
+		m.inputModelRow(prefix+"project", "Project", row.project, false, width),
+		m.inputModelRow(prefix+"token", keyLabel("Token", row.hasToken), row.token, true, width),
+		m.actionRow(prefix+"test", "Test", width),
 	)
 	remove := "Remove"
 	if m.armedRemove == row.id {
 		remove = "Confirm remove"
 	}
-	return append(lines,
-		settingsRenderRow{line: m.actionLine(prefix+"save", "Save", width), target: prefix + "save"},
-		settingsRenderRow{line: m.actionLine(prefix+"remove", remove, width), target: prefix + "remove"},
-	)
+	removeRow := m.actionRow(prefix+"remove", remove, width)
+	removeRow.armed = m.armedRemove == row.id
+	return append(lines, m.actionRow(prefix+"save", "Save", width), removeRow)
 }
 
 func settingsInputDisplay(input textinput.Model, secret, focused bool, width int) string {
@@ -209,20 +265,24 @@ func keyLabel(label string, saved bool) string {
 	return label
 }
 
-func (m *settingsModel) inputLine(target, label, value string, width int) string {
+func (m *settingsModel) inputRow(target, label, value string, width int) settingsRenderRow {
 	marker := "  "
 	if m.focus == target {
 		marker = "> "
 	}
-	return settingsFit(marker+label+": "+value, width)
+	return settingsRenderRow{
+		line:   settingsFit(marker+label+": "+value, width),
+		target: target,
+		kind:   settingsRowField,
+	}
 }
 
-func (m *settingsModel) inputModelLine(
+func (m *settingsModel) inputModelRow(
 	target, label string,
 	input textinput.Model,
 	secret bool,
 	width int,
-) string {
+) settingsRenderRow {
 	marker := "  "
 	if m.focus == target {
 		marker = "> "
@@ -230,15 +290,25 @@ func (m *settingsModel) inputModelLine(
 	prefix := marker + label + ": "
 	available := max(width-ansi.StringWidth(prefix), 1)
 	value := settingsInputDisplay(input, secret, m.focus == target, available)
-	return settingsFit(prefix+value, width)
+	return settingsRenderRow{
+		line:   settingsFit(prefix+value, width),
+		target: target,
+		kind:   settingsRowField,
+	}
 }
 
-func (m *settingsModel) actionLine(target, label string, width int) string {
+func (m *settingsModel) actionRow(target, label string, width int) settingsRenderRow {
 	marker := "  "
 	if m.focus == target {
 		marker = "> "
 	}
-	return settingsFit(marker+"["+label+"]", width)
+	button := "[" + label + "]"
+	return settingsRenderRow{
+		line:   settingsFit(marker+button, width),
+		button: button,
+		target: target,
+		kind:   settingsRowButton,
+	}
 }
 
 func settingsFit(line string, width int) string {

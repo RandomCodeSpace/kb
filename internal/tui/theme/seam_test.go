@@ -21,7 +21,6 @@ var seamAllowlist = map[string]bool{
 	"adrsplit/view.go":    true,
 	"board_view.go":       true,
 	"carddetail/model.go": true,
-	"cardeditor/view.go":  true,
 	"help.go":             true,
 	"issueimport/view.go": true,
 }
@@ -53,7 +52,7 @@ func TestNoStyleConstructionOutsideTheme(t *testing.T) {
 // TestSeamAllowlistOnlyShrinks pins the allowlist size so a migration slice
 // cannot quietly trade one exemption for another.
 func TestSeamAllowlistOnlyShrinks(t *testing.T) {
-	const atMost = 6
+	const atMost = 5
 	if len(seamAllowlist) > atMost {
 		t.Fatalf("seam allowlist has %d entries, at most %d are allowed", len(seamAllowlist), atMost)
 	}

@@ -7,16 +7,55 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget"
 )
 
-const maxEditorWidth = 96
+// rowKind is the semantic role of one editor body row. It decides which token
+// the row is rendered with; no view code composes a style of its own.
+type rowKind uint8
+
+const (
+	rowBody    rowKind = iota // plain content on the overlay panel tier
+	rowField                  // a labelled control row
+	rowSection                // a section break band
+	rowButton                 // an action, rendered by the button widget
+	rowHint                   // secondary text
+	rowError                  // an error line
+)
+
+// editorRow is one logical body row. The target is the symbolic pointer
+// control the row activates, carried structurally instead of recovered by
+// matching the rendered text: card titles, descriptions and checklist text are
+// untrusted, and text matching let them impersonate a control.
+type editorRow struct {
+	text   string
+	button string
+	target string
+	kind   rowKind
+}
+
+// plain is the row as unstyled text, the form the pointer geometry and the
+// control-safety tests read.
+func (r editorRow) plain() string { return r.text }
+
+// editorFrame is the resolved geometry of one render: where the panel sits,
+// how much body fits, and which logical rows the window shows.
+type editorFrame struct {
+	x, y       int
+	width      int
+	height     int
+	inner      int
+	bodyHeight int
+	rows       []editorRow
+	scroll     int
+}
 
 type pointerHit struct {
 	x0, x1 int
@@ -39,67 +78,34 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 			return pointerClickMsg{session: session, target: target}
 		})
 	}
-	width, height = max(width, 1), max(height, 1)
-	_, paneWidth, paneHeight := m.frame(width, height)
-	x0 := max((width-paneWidth)/2, 0)
-	y0 := max((height-paneHeight)/2, 0)
-	innerWidth := max(paneWidth-4, 1)
-	bodyHeight := max(paneHeight-4, 1)
-	maxScroll := max(len(m.bodyLines(innerWidth))-bodyHeight, 0)
-	hitMap.AddWheel(pointer.Rect{X0: x0, Y0: y0, X1: x0 + paneWidth, Y1: y0 + paneHeight}, func(delta int) tea.Msg {
+	frame := m.layout(width, height)
+	maxScroll := max(len(frame.rows)-frame.bodyHeight, 0)
+	hitMap.AddWheel(pointer.Rect{X0: frame.x, Y0: frame.y, X1: frame.x + frame.width, Y1: frame.y + frame.height}, func(delta int) tea.Msg {
 		return pointerWheelMsg{session: session, delta: delta, maxScroll: maxScroll}
 	})
 	return hitMap.Handler()
 }
 
 func (m Model) pointerHits(width, height int) []pointerHit {
-	_, paneWidth, paneHeight := m.frame(width, height)
-	width, height = max(width, 1), max(height, 1)
-	x0 := max((width-paneWidth)/2, 0)
-	y0 := max((height-paneHeight)/2, 0)
-	innerWidth := max(paneWidth-4, 1)
-	bodyHeight := max(paneHeight-3, 1)
-	body := m.bodyLines(innerWidth)
-	maxScroll := max(len(body)-bodyHeight, 0)
-	scroll := min(max(m.scroll, 0), maxScroll)
-	hits := make([]pointerHit, 0, len(body))
-	areaTarget, areaRows := "", 0
-	similarRows, similarIndex := m.visibleSimilar(), 0
-	for index, line := range body {
-		target := ""
-		if areaRows > 0 {
-			target = areaTarget
-			areaRows--
-		} else {
-			lineText := pointerLineText(line)
-			if similarIndex < len(similarRows) && lineText == strings.TrimSpace(similarText(similarRows[similarIndex])+"  [Enter dismiss]") {
-				target = "similar:" + similarKey(similarRows[similarIndex])
-				similarIndex++
-			} else {
-				target = pointerTarget(m, line)
-			}
-			if target == "ai-prompt" {
-				areaTarget, areaRows = target, 2
-			} else if target == "desc" || target == "checks" {
-				areaTarget, areaRows = target, 3
-			}
-		}
-		if target == "" {
+	frame := m.layout(width, height)
+	hits := make([]pointerHit, 0, len(frame.rows))
+	for index, row := range frame.rows {
+		if row.target == "" {
 			continue
 		}
-		y := y0 + 1 + index - scroll
-		if y < y0+1 || y >= y0+1+bodyHeight {
+		y := frame.y + 1 + index - frame.scroll
+		if y < frame.y+1 || y >= frame.y+1+frame.bodyHeight {
 			continue
 		}
 		hits = append(hits, pointerHit{
-			x0: x0 + 1, x1: x0 + paneWidth - 1,
+			x0: frame.x + 1, x1: frame.x + frame.width - 1,
 			y0: y, y1: y + 1,
-			target: target,
+			target: row.target,
 		})
 	}
 	if m.guardClose {
-		footerY := y0 + paneHeight - 2
-		footerX := x0 + 2
+		footerY := frame.y + frame.height - 1
+		footerX := frame.x + m.themeStyles().Metrics.OverlayInsetX
 		for _, target := range []struct {
 			label  string
 			target string
@@ -107,7 +113,7 @@ func (m Model) pointerHits(width, height int) []pointerHit {
 			{label: "[Discard]", target: "discard"},
 			{label: "[Keep editing]", target: "keep"},
 		} {
-			start := strings.Index(ansi.Strip(m.footerLine(innerWidth)), target.label)
+			start := strings.Index(ansi.Strip(m.footerLine(frame.inner)), target.label)
 			if start < 0 {
 				continue
 			}
@@ -120,65 +126,15 @@ func (m Model) pointerHits(width, height int) []pointerHit {
 	return hits
 }
 
-func pointerTarget(model Model, line string) string {
-	trimmed := pointerLineText(line)
-	if model.labelsOpen {
-		for _, suggestion := range model.filteredLabels() {
-			if trimmed == "› "+sanitize(suggestion) || trimmed == sanitize(suggestion) {
-				return "label:" + suggestion
-			}
-		}
-	}
-	switch {
-	case strings.HasPrefix(trimmed, "Request:"):
-		return "ai-prompt"
-	case trimmed == "[Draft]" || strings.HasPrefix(trimmed, "[Cancel draft"):
-		return "ai-draft"
-	case strings.HasPrefix(trimmed, "Title:"):
-		return "title"
-	case strings.HasPrefix(trimmed, "Emoji:"):
-		return "emoji"
-	case trimmed == "Description:":
-		return "desc"
-	case strings.HasPrefix(trimmed, "Priority:"):
-		return "prio"
-	case strings.HasPrefix(trimmed, "Due:"):
-		return "due"
-	case strings.HasPrefix(trimmed, "Effort:"):
-		return "effort"
-	case strings.HasPrefix(trimmed, "Blocked:"):
-		return "blocked"
-	case strings.HasPrefix(trimmed, "Labels:"):
-		return "labels"
-	case trimmed == "Checklist (x prefix = done):":
-		return "checks"
-	case trimmed == "[Cancel]":
-		return "cancel"
-	case trimmed == "[Save card]":
-		return "save"
-	case trimmed == "[Discard]":
-		return "discard"
-	case trimmed == "[Keep editing]":
-		return "keep"
-	case trimmed == "[Dismiss all similar items]":
-		return "similar:all"
-	}
-	return ""
-}
-
-func pointerLineText(line string) string {
-	trimmed := strings.TrimSpace(line)
-	trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
-	return strings.TrimSpace(strings.TrimPrefix(trimmed, "!"))
-}
-
-// View renders the editor pane without its board background.
+// View renders the editor pane on an empty canvas, for callers that have no
+// board behind it.
 func (m *Model) View(width, height int) string {
 	if !m.open {
 		return ""
 	}
-	frame, _, _ := m.frame(width, height)
-	return lipgloss.Place(max(width, 1), max(height, 1), lipgloss.Center, lipgloss.Center, frame)
+	width, height = max(width, 1), max(height, 1)
+	styles := m.themeStyles()
+	return m.compose(widget.Fill(styles, theme.Canvas, width, height), width, height)
 }
 
 // Overlay composes the editor over the board/detail surface.
@@ -186,30 +142,42 @@ func (m *Model) Overlay(background string, width, height int) string {
 	if !m.open {
 		return background
 	}
-	width, height = max(width, 1), max(height, 1)
-	frame, paneWidth, paneHeight := m.frame(width, height)
-	return lipgloss.NewCompositor(
-		lipgloss.NewLayer(background),
-		lipgloss.NewLayer(frame).X(max((width-paneWidth)/2, 0)).Y(max((height-paneHeight)/2, 0)).Z(2),
-	).Render()
+	return m.compose(background, max(width, 1), max(height, 1))
 }
 
-func (m *Model) frame(width, height int) (string, int, int) {
-	width, height = max(width, 1), max(height, 1)
-	paneWidth := min(max(width-4, 18), maxEditorWidth, width)
-	paneHeight := min(max(height-2, 7), height)
-	innerWidth := max(paneWidth-4, 1)
-	bodyHeight := max(paneHeight-4, 1)
+// compose is spec section 4: the panel is an elevation over the surface behind
+// it, never a frame. The shade step and the shadow are the separation.
+func (m *Model) compose(background string, width, height int) string {
+	styles := m.themeStyles()
+	frame := m.layout(width, height)
+	return widget.Overlay(styles, background, widget.OverlayOpts{
+		Title:  m.headerTitle(),
+		Seq:    m.sequenceTag(),
+		Body:   m.visibleRows(frame),
+		Footer: m.footerLine(frame.inner),
+		X:      frame.x, Y: frame.y,
+		W: frame.width, H: frame.height,
+	})
+}
 
-	body := m.bodyLines(innerWidth)
+// layout resolves the panel geometry and scrolls the focused row into view.
+func (m *Model) layout(width, height int) editorFrame {
+	width, height = max(width, 1), max(height, 1)
+	metrics := m.themeStyles().Metrics
+	paneWidth := min(max(width-4, 18), metrics.Overlay.Editor, width)
+	paneHeight := min(max(height-2, 7), height)
+	inner := max(paneWidth-2*metrics.OverlayInsetX, 1)
+	bodyHeight := max(paneHeight-2, 1)
+
+	rows := m.bodyRows(inner)
 	focusLine := 0
-	for i, line := range body {
-		if strings.HasPrefix(line, ">") {
-			focusLine = i
+	for index, row := range rows {
+		if row.target != "" && row.target == m.focus {
+			focusLine = index
 			break
 		}
 	}
-	maxScroll := max(len(body)-bodyHeight, 0)
+	maxScroll := max(len(rows)-bodyHeight, 0)
 	if !m.manualScroll {
 		if focusLine < m.scroll {
 			m.scroll = focusLine
@@ -219,24 +187,74 @@ func (m *Model) frame(width, height int) (string, int, int) {
 		}
 	}
 	m.scroll = min(max(m.scroll, 0), maxScroll)
-	end := min(m.scroll+bodyHeight, len(body))
-	visible := make([]string, 0, bodyHeight)
-	for _, line := range body[m.scroll:end] {
-		visible = append(visible, fit(line, innerWidth))
+	return editorFrame{
+		x:          max((width-paneWidth)/2, 0),
+		y:          max((height-paneHeight)/2, 0),
+		width:      paneWidth,
+		height:     paneHeight,
+		inner:      inner,
+		bodyHeight: bodyHeight,
+		rows:       rows,
+		scroll:     m.scroll,
 	}
-	for len(visible) < bodyHeight {
-		visible = append(visible, "")
-	}
+}
 
-	content := strings.Join(visible, "\n") + "\n" + m.footerLine(innerWidth)
-	frame := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		Padding(0, 1).
-		Width(innerWidth).
-		Height(paneHeight - 2).
-		Render(content)
-	frame = fitBlock(frame, width, height)
-	return frame, lipgloss.Width(frame), lipgloss.Height(frame)
+// visibleRows renders the window of body rows the panel shows.
+func (m *Model) visibleRows(frame editorFrame) []string {
+	end := min(frame.scroll+frame.bodyHeight, len(frame.rows))
+	visible := make([]string, 0, frame.bodyHeight)
+	for _, row := range frame.rows[frame.scroll:end] {
+		visible = append(visible, m.renderRow(row, frame.inner))
+	}
+	return visible
+}
+
+// renderRow applies the token the row's role names. Spec section 6.2: the view
+// takes a *theme.Styles and never constructs one.
+func (m *Model) renderRow(row editorRow, width int) string {
+	styles := m.themeStyles()
+	line := fit(row.text, width)
+	switch row.kind {
+	case rowSection:
+		return widget.Section(styles, line, width)
+	case rowButton:
+		if label := fit(row.button, width); strings.HasSuffix(line, label) {
+			marker := strings.TrimSuffix(line, label)
+			return styles.Overlay.Surf.Render(marker) + widget.Button(styles, widget.ButtonOpts{
+				Text:           label,
+				Selected:       m.focus == row.target,
+				Pressed:        m.pointerState.IsPressed(pointer.ControlID(row.target)),
+				UnderlineIndex: -1,
+			})
+		}
+		return styles.Overlay.Surf.Render(line)
+	case rowError:
+		return styles.On(theme.StatusDanger, theme.OverlaySurf).Render(line)
+	case rowHint:
+		return styles.Overlay.FieldLabel.Render(line)
+	case rowField:
+		if m.focus == row.target {
+			return styles.OnBold(theme.FgBase, theme.OverlaySurf).Render(line)
+		}
+		return styles.Overlay.FieldValue.Render(line)
+	default:
+		return styles.Overlay.Surf.Render(line)
+	}
+}
+
+// title2 is the header band title of spec section 4 step 4.
+func (m *Model) headerTitle() string {
+	if m.mode == modeEdit {
+		return "EDIT CARD"
+	}
+	return "CREATE CARD / " + string(m.status)
+}
+
+func (m *Model) sequenceTag() string {
+	if m.mode == modeEdit && m.base.Seq > 0 {
+		return fmt.Sprintf("#%d", m.base.Seq)
+	}
+	return ""
 }
 
 func (m *Model) footerLine(width int) string {
@@ -266,83 +284,110 @@ func (m Model) pressedLabel(target, label string) string {
 	if !m.pointerState.IsPressed(pointer.ControlID(target)) {
 		return label
 	}
-	return lipgloss.NewStyle().Reverse(true).Render(label)
+	return m.themeStyles().Pressed.Render(label)
 }
 
+// bodyLines is the body as unstyled text. Pointer geometry reads the rows, not
+// these lines; the control-safety tests read them.
 func (m *Model) bodyLines(width int) []string {
-	title := "CREATE CARD / " + string(m.status)
-	if m.mode == modeEdit {
-		title = "EDIT CARD"
-		if m.base.Seq > 0 {
-			title += fmt.Sprintf(" #%d", m.base.Seq)
-		}
+	rows := m.bodyRows(width)
+	lines := make([]string, 0, len(rows))
+	for _, row := range rows {
+		lines = append(lines, row.plain())
 	}
-	lines := []string{title, ""}
+	return lines
+}
+
+func (m *Model) bodyRows(width int) []editorRow {
+	rows := []editorRow{}
 	if m.runner != nil {
-		lines = append(lines, "Draft with AI (fills the form; review before Save)")
-		lines = append(lines, m.areaBlock("ai-prompt", "Request", m.draftPrompt, width, 2)...)
+		rows = append(rows, editorRow{text: "Draft with AI (fills the form; review before Save)", kind: rowSection})
+		rows = append(rows, m.areaBlock("ai-prompt", "Request", m.draftPrompt, width, 2)...)
 		action := "Draft"
 		if m.drafting {
 			action = "Cancel draft (Esc)"
 		}
-		lines = append(lines, m.actionLine("ai-draft", action), "")
+		rows = append(rows, m.actionRow("ai-draft", action), editorRow{})
 	}
-	lines = append(lines,
-		m.inputLine("title", "Title", m.title, width),
-		m.inputLine("emoji", "Emoji", m.emoji, width),
+	rows = append(rows,
+		m.inputRow("title", "Title", m.title, width),
+		m.inputRow("emoji", "Emoji", m.emoji, width),
 	)
 	if emoji := strings.TrimSpace(m.emoji.Value()); emoji != "" && !board.IsSingleEmoji(emoji) {
-		lines = append(lines, "  error: one Extended_Pictographic character plus optional variation selector")
+		rows = append(rows, editorRow{
+			text: "  error: one Extended_Pictographic character plus optional variation selector",
+			kind: rowError,
+		})
 	}
-	lines = append(lines, m.areaBlock("desc", "Description", m.desc, width, 3)...)
-	lines = append(lines,
-		m.choiceLine("prio", "Priority", fmt.Sprintf("%d (%s)  left/right", m.prio, priorityName(m.prio))),
-		m.inputLine("due", "Due", m.due, width)+"  [/] day; ctrl+x clear",
-		m.choiceLine("effort", "Effort", effortName(m.effort)+"  left/right; ctrl+x clear"),
-		m.choiceLine("blocked", "Blocked", boolName(m.blocked)+"  space toggle"),
-		m.inputLine("labels", "Labels", m.label, width),
-		"  selected: "+safeList(m.tags),
+	rows = append(rows, m.areaBlock("desc", "Description", m.desc, width, 3)...)
+	rows = append(rows,
+		m.choiceRow("prio", "Priority", fmt.Sprintf("%d (%s)  left/right", m.prio, priorityName(m.prio))),
+		m.inputRow("due", "Due", m.due, width, "  [/] day; ctrl+x clear"),
+		m.choiceRow("effort", "Effort", effortName(m.effort)+"  left/right; ctrl+x clear"),
+		m.choiceRow("blocked", "Blocked", boolName(m.blocked)+"  space toggle"),
+		m.inputRow("labels", "Labels", m.label, width),
+		editorRow{text: "  selected: " + safeList(m.tags), kind: rowHint},
 	)
 	if m.focus == "labels" && m.labelsOpen {
-		lines = append(lines, m.labelSuggestionLines()...)
+		rows = append(rows, m.labelSuggestionRows()...)
 	}
 	if m.labelsErr != nil {
-		lines = append(lines, "  labels error: "+safeError(m.labelsErr))
+		rows = append(rows, editorRow{text: "  labels error: " + safeError(m.labelsErr), kind: rowError})
 	}
-	lines = append(lines, m.areaBlock("checks", "Checklist (x prefix = done)", m.checks, width, 3)...)
-	lines = append(lines, m.similarLines()...)
+	rows = append(rows, m.areaBlock("checks", "Checklist (x prefix = done)", m.checks, width, 3)...)
+	rows = append(rows, m.similarRows()...)
 	if m.stale {
-		lines = append(lines, "  external refresh withheld while form is dirty")
+		rows = append(rows, editorRow{text: "  external refresh withheld while form is dirty", kind: rowHint})
 	}
 	if m.statusMessage != "" {
-		prefix := "  status: "
+		prefix, kind := "  status: ", rowHint
 		if m.statusIsError {
-			prefix = "  error: "
+			prefix, kind = "  error: ", rowError
 		}
-		lines = append(lines, prefix+sanitize(m.statusMessage))
+		rows = append(rows, editorRow{text: prefix + sanitize(m.statusMessage), kind: kind})
 	}
-	lines = append(lines, "", m.actionLine("cancel", "Cancel"), m.actionLine("save", "Save card"))
-	return lines
+	return append(rows, editorRow{}, m.actionRow("cancel", "Cancel"), m.actionRow("save", "Save card"))
 }
 
-func (m *Model) inputLine(target, label string, input textinput.Model, width int) string {
+func (m *Model) inputRow(target, label string, input textinput.Model, width int, suffix ...string) editorRow {
 	marker := m.controlMarker(target)
 	prefix := marker + label + ": "
 	available := max(width-ansi.StringWidth(prefix), 1)
-	return prefix + inputDisplay(input, m.focus == target, available)
+	return editorRow{
+		text:   prefix + inputDisplay(input, m.focus == target, available) + strings.Join(suffix, ""),
+		target: target,
+		kind:   rowField,
+	}
 }
 
-func (m *Model) choiceLine(target, label, value string) string {
-	return m.controlMarker(target) + label + ": " + sanitize(value)
+func (m *Model) choiceRow(target, label, value string) editorRow {
+	return editorRow{
+		text:   m.controlMarker(target) + label + ": " + sanitize(value),
+		target: target,
+		kind:   rowField,
+	}
 }
 
-func (m *Model) actionLine(target, label string) string {
-	return m.controlMarker(target) + "[" + label + "]"
+func (m *Model) actionRow(target, label string) editorRow {
+	button := "[" + label + "]"
+	return editorRow{
+		text:   m.controlMarker(target) + button,
+		button: button,
+		target: target,
+		kind:   rowButton,
+	}
 }
 
-func (m *Model) areaBlock(target, label string, area textarea.Model, width, rows int) []string {
-	lines := []string{m.controlMarker(target) + label + ":"}
-	return append(lines, areaDisplay(area, m.focus == target, width, rows)...)
+func (m *Model) areaBlock(target, label string, area textarea.Model, width, rows int) []editorRow {
+	out := []editorRow{{
+		text:   m.controlMarker(target) + label + ":",
+		target: target,
+		kind:   rowField,
+	}}
+	for _, line := range areaDisplay(area, m.focus == target, width, rows) {
+		out = append(out, editorRow{text: line, target: target, kind: rowBody})
+	}
+	return out
 }
 
 func (m Model) controlMarker(target string) string {
@@ -355,12 +400,12 @@ func (m Model) controlMarker(target string) string {
 	return "  "
 }
 
-func (m Model) labelSuggestionLines() []string {
+func (m Model) labelSuggestionRows() []editorRow {
 	suggestions := m.filteredLabels()
 	if len(suggestions) == 0 {
-		return []string{"    (no label suggestions; Enter adds typed labels)"}
+		return []editorRow{{text: "    (no label suggestions; Enter adds typed labels)", kind: rowHint}}
 	}
-	lines := []string{"    suggestions (up/down, Enter add):"}
+	rows := []editorRow{{text: "    suggestions (up/down, Enter add):", kind: rowHint}}
 	for i, suggestion := range suggestions {
 		marker := "  "
 		if m.pointerState.IsPressed(pointer.ControlID("label:" + suggestion)) {
@@ -368,41 +413,52 @@ func (m Model) labelSuggestionLines() []string {
 		} else if i == min(m.labelHighlight, len(suggestions)-1) {
 			marker = "› "
 		}
-		lines = append(lines, "    "+marker+sanitize(suggestion))
+		rows = append(rows, editorRow{
+			text:   "    " + marker + sanitize(suggestion),
+			target: "label:" + suggestion,
+			kind:   rowBody,
+		})
 	}
-	return lines
+	return rows
 }
 
-func (m Model) similarLines() []string {
-	lines := []string{}
+func (m Model) similarRows() []editorRow {
 	switch {
 	case m.similarLoading:
-		return []string{"", "  similar items: searching..."}
+		return []editorRow{{}, {text: "  similar items: searching...", kind: rowHint}}
 	case m.similarErr != nil:
-		return []string{"", "  similar items error: " + safeError(m.similarErr)}
+		return []editorRow{{}, {text: "  similar items error: " + safeError(m.similarErr), kind: rowError}}
 	}
 	hits := m.visibleSimilar()
 	if len(hits) == 0 {
-		return lines
+		return nil
 	}
-	lines = append(lines, "", fmt.Sprintf("  similar items (%d):", len(hits)))
+	rows := []editorRow{{}, {text: fmt.Sprintf("  similar items (%d):", len(hits)), kind: rowSection}}
 	for _, hit := range hits {
 		target := "similar:" + similarKey(hit)
-		marker := "    "
-		if m.pointerState.IsPressed(pointer.ControlID(target)) {
-			marker = "!   "
-		} else if m.focus == target {
-			marker = ">   "
-		}
-		lines = append(lines, marker+similarText(hit)+"  [Enter dismiss]")
+		rows = append(rows, editorRow{
+			text:   m.similarMarker(target) + similarText(hit) + "  [Enter dismiss]",
+			target: target,
+			kind:   rowBody,
+		})
 	}
-	marker := "    "
-	if m.pointerState.IsPressed(pointer.ControlID("similar:all")) {
-		marker = "!   "
-	} else if m.focus == "similar:all" {
-		marker = ">   "
+	return append(rows, editorRow{
+		text:   m.similarMarker("similar:all") + "[Dismiss all similar items]",
+		button: "[Dismiss all similar items]",
+		target: "similar:all",
+		kind:   rowButton,
+	})
+}
+
+func (m Model) similarMarker(target string) string {
+	switch {
+	case m.pointerState.IsPressed(pointer.ControlID(target)):
+		return "!   "
+	case m.focus == target:
+		return ">   "
+	default:
+		return "    "
 	}
-	return append(lines, marker+"[Dismiss all similar items]")
 }
 
 func similarText(hit store.SimilarHit) string {
@@ -480,15 +536,4 @@ func safeList(values []string) string {
 
 func fit(line string, width int) string {
 	return ansi.Truncate(sanitize(line), max(width, 0), "")
-}
-
-func fitBlock(block string, width, height int) string {
-	lines := strings.Split(block, "\n")
-	if len(lines) > height {
-		lines = lines[:height]
-	}
-	for i := range lines {
-		lines[i] = ansi.Truncate(lines[i], max(width, 0), "")
-	}
-	return strings.Join(lines, "\n")
 }
