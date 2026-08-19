@@ -108,6 +108,8 @@ func (m *Model) applyStyles(styles *theme.Styles) {
 	m.styles = styles
 	m.detail.SetStyles(styles)
 	m.editor.SetStyles(styles)
+	m.adr.SetStyles(styles)
+	m.issueImport.SetStyles(styles)
 	if m.settings != nil {
 		m.settings.SetStyles(styles)
 	}
@@ -120,9 +122,11 @@ func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
 	m.editor.SetAIRunner(runner, ctx)
 	adrStore, _ := m.store.(adrsplit.Store)
 	m.adr = adrsplit.New(adrStore, runner, m.user, ctx)
+	m.adr.SetStyles(m.styles)
 	if direct, ok := m.store.(*store.Store); ok {
 		backend := forge.New(direct, runner, nil)
 		m.issueImport = issueimport.New(direct, backend, m.user, ctx)
+		m.issueImport.SetStyles(m.styles)
 		m.detail.SetDriftBackend(backend, ctx)
 	}
 }
@@ -781,10 +785,30 @@ func batchCommands(commands ...tea.Cmd) tea.Cmd {
 	return tea.Batch(filtered...)
 }
 
+// overlayOpen reports whether anything is elevated over the board this frame.
+func (m Model) overlayOpen() bool {
+	return m.helpOpen || m.detail.IsOpen() || m.settings != nil ||
+		m.adr.IsOpen() || m.editor.IsOpen() || m.action.open() || m.issueImport.IsOpen()
+}
+
+// backdrop is the model the board renders through this frame. Spec section 4
+// step 1: an overlay dims the board by re-rendering it with the dimmed *Styles,
+// which is a second palette built once by theme.New, never a post-pass over a
+// rendered string.
+func (m Model) backdrop() Model {
+	if !m.overlayOpen() {
+		return m
+	}
+	if dimmed := m.themeStyles().Dimmed; dimmed != nil {
+		m.styles = dimmed
+	}
+	return m
+}
+
 // View renders the responsive read-only board and wires view-derived mouse hit
 // regions back into the update loop. Editing behavior arrives in later slices.
 func (m Model) View() tea.View {
-	content, hits := m.renderBoard()
+	content, hits := m.backdrop().renderBoard()
 	var overlayMouse func(tea.MouseMsg) tea.Cmd
 	if m.helpOpen {
 		surface := m.keyboardHelpSurface(content)

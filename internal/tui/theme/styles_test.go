@@ -223,6 +223,22 @@ func TestPressedIsReverseVideo(t *testing.T) {
 	}
 }
 
+// TestPressedRunSurvivesInnerResets is spec section 9.1: the pointer package no
+// longer writes the escape by hand, and a run composed of themed styles keeps
+// the attribute past every reset those styles emit. The run closes by clearing
+// the attribute alone, so it can be substituted into a styled line.
+func TestPressedRunSurvivesInnerResets(t *testing.T) {
+	styles := New(true)
+	plain := styles.PressedRun("[Close]")
+	if plain != "\x1b[7m[Close]\x1b[27m" {
+		t.Fatalf("PressedRun = %q", plain)
+	}
+	composed := styles.PressedRun(styles.Overlay.Surf.Render("a") + "\x1b[0m" + "b")
+	if strings.Count(composed, "\x1b[7m") != 3 || !strings.HasSuffix(composed, "\x1b[27m") {
+		t.Fatalf("composed PressedRun = %q", composed)
+	}
+}
+
 func distanceTo(from, to rgb) int {
 	return from.distance(to)
 }

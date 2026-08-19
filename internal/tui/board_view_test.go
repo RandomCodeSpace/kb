@@ -830,3 +830,46 @@ func TestCancelledPreferenceWritesSerializeLatestToggle(t *testing.T) {
 		t.Fatalf("saved toggles = %v", saved)
 	}
 }
+
+// TestOverlayDimsTheBoardBackdrop is spec section 4 step 1: an overlay dims the
+// board by re-rendering it through the dimmed *Styles, not by post-processing a
+// rendered string.
+func TestOverlayDimsTheBoardBackdrop(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	m := NewModel(stubBoardReader{board: boardViewFixture(now)}, nil, "alice")
+	m.loading = false
+	m.board = boardViewFixture(now)
+	m.now = func() time.Time { return now }
+	m.width, m.height = 120, 40
+
+	if m.overlayOpen() || m.backdrop().themeStyles() != m.styles {
+		t.Fatal("a bare board was rendered through the dimmed palette")
+	}
+	plainFrame := m.render()
+
+	m.helpOpen = true
+	if !m.overlayOpen() {
+		t.Fatal("an open overlay did not claim the backdrop")
+	}
+	dimmed := m.backdrop()
+	if dimmed.themeStyles() != m.styles.Dimmed {
+		t.Fatal("an open overlay did not dim the backdrop")
+	}
+	dimFrame := dimmed.render()
+	if dimFrame == plainFrame {
+		t.Fatal("the dimmed backdrop rendered identically to the board")
+	}
+	// The dim is a second built palette (section 1.8), so the dimmed frame
+	// carries the dimmed card surface and not the base one.
+	base, dim := colorSequence(m.styles.Pal[theme.Card]), colorSequence(m.styles.Dimmed.Pal[theme.Card])
+	if !strings.Contains(plainFrame, base) || strings.Contains(dimFrame, base) || !strings.Contains(dimFrame, dim) {
+		t.Fatalf("dimmed frame kept the base card surface\nbase %q dim %q", base, dim)
+	}
+}
+
+// colorSequence is the truecolor background escape a palette slot emits, the
+// form a rendered frame carries it in.
+func colorSequence(value color.Color) string {
+	r, g, b, _ := value.RGBA()
+	return fmt.Sprintf("48;2;%d;%d;%d", r>>8, g>>8, b>>8)
+}

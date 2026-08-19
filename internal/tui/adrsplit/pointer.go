@@ -1,12 +1,12 @@
 package adrsplit
 
 import (
-	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 type pointerActionMsg struct {
@@ -24,40 +24,48 @@ func (m *Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 	snapshot := *m
-	frame, frameWidth, frameHeight := snapshot.frame(width, height)
-	regions := snapshot.pointerRegions(width, height, frameWidth, frameHeight)
+	frame := snapshot.layout(max(width, 1), max(height, 1))
 	var hitMap pointer.Map
 	session, generation := m.session, m.generation
-	for _, region := range regions {
-		region := region
-		hitMap.AddControl(controlID(region.target), region.Rect, func(pointer.Point) tea.Msg {
-			return pointerActionMsg{target: region.target, session: session, generation: generation}
-		})
+	action := func(target string) pointer.Action {
+		return func(pointer.Point) tea.Msg {
+			return pointerActionMsg{target: target, session: session, generation: generation}
+		}
 	}
-	pane := pointer.Rect{X0: max((max(width, 1)-frameWidth)/2, 0), Y0: max((max(height, 1)-frameHeight)/2, 0), X1: max((max(width, 1)-frameWidth)/2, 0) + frameWidth, Y1: max((max(height, 1)-frameHeight)/2, 0) + frameHeight}
+	for _, region := range snapshot.pointerRegions(frame, width, height) {
+		hitMap.AddControl(controlID(region.target), region.Rect, action(region.target))
+	}
+	pane := pointer.Rect{X0: frame.x, Y0: frame.y, X1: frame.x + frame.width, Y1: frame.y + frame.height}
 	if snapshot.guardClose {
-		footerRow := len(strings.Split(frame, "\n")) - 2
-		for _, control := range []struct {
-			target string
-			label  string
-		}{{"discard", "[ Discard ]"}, {"stay", "[ Stay ]"}} {
-			pressed := strings.Replace(strings.Replace(control.label, "[ ", "[>", 1), " ]", "<]", 1)
-			if rect, ok := controlRectAtRow(frame, pane, footerRow, control.label, pressed); ok {
-				target := control.target
-				hitMap.AddControl(controlID(target), rect, func(pointer.Point) tea.Msg {
-					return pointerActionMsg{target: target, session: session, generation: generation}
-				})
+		// The guard's controls live in the footer band, and their positions come
+		// from the band the view itself built: an ADR is untrusted text and must
+		// never be able to impersonate a control.
+		footer := ansi.Strip(snapshot.confirmFooter())
+		inset := snapshot.themeStyles().Metrics.OverlayInsetX
+		for _, control := range []struct{ target, label string }{
+			{target: "discard", label: guardDiscard},
+			{target: "stay", label: guardStay},
+		} {
+			start := strings.Index(footer, control.label)
+			if start < 0 {
+				continue
+			}
+			rect := pointer.Rect{
+				X0: frame.x + inset + start,
+				Y0: frame.y + frame.height - 1,
+				X1: frame.x + inset + start + ansi.StringWidth(control.label),
+				Y1: frame.y + frame.height,
+			}
+			if clipped, ok := clipRect(rect, width, height); ok {
+				hitMap.AddControl(controlID(control.target), clipped, action(control.target))
 			}
 		}
 	}
 	if snapshot.operation == "" && !snapshot.adding {
-		hitMap.AddBackdrop(pointer.Rect{X1: max(width, 1), Y1: max(height, 1)}, pane, func(pointer.Point) tea.Msg {
-			return pointerActionMsg{target: "backdrop", session: session, generation: generation}
-		})
+		hitMap.AddBackdrop(pointer.Rect{X1: max(width, 1), Y1: max(height, 1)}, pane, action("backdrop"))
 	}
 	if snapshot.stage == stageReview && snapshot.operation == "" && !snapshot.adding && !snapshot.guardClose {
-		bodyHeight := max(frameHeight-4, 1)
-		maxScroll := max(len(snapshot.bodyLines(max(frameWidth-4, 1)))-bodyHeight, 0)
+		maxScroll := max(len(frame.rows)-frame.bodyHeight, 0)
 		body := pointer.Rect{X0: pane.X0, Y0: pane.Y0 + 1, X1: pane.X1, Y1: max(pane.Y1-1, pane.Y0+1)}
 		hitMap.AddWheel(body, func(delta int) tea.Msg {
 			return pointerActionMsg{target: "scroll", session: session, generation: generation, scrollDelta: delta * 3, maxScroll: maxScroll}
@@ -68,97 +76,44 @@ func (m *Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 
 func controlID(target string) pointer.ControlID { return pointer.ControlID("adrsplit." + target) }
 
-func controlRectAtRow(frame string, pane pointer.Rect, row int, needles ...string) (pointer.Rect, bool) {
-	lines := strings.Split(ansi.Strip(frame), "\n")
-	if row < 0 || row >= len(lines) {
-		return pointer.Rect{}, false
-	}
-	for _, needle := range needles {
-		if start := strings.Index(lines[row], needle); start >= 0 {
-			return pointer.Rect{X0: pane.X0 + start, Y0: pane.Y0 + row, X1: pane.X0 + start + ansi.StringWidth(needle), Y1: pane.Y0 + row + 1}, true
-		}
-	}
-	return pointer.Rect{}, false
-}
-
 type adrsplitRegion struct {
 	pointer.Rect
 	target string
 }
 
-func (m *Model) pointerRegions(width, height, frameWidth, frameHeight int) []adrsplitRegion {
-	width, height = max(width, 1), max(height, 1)
-	x0 := max((width-frameWidth)/2, 0)
-	y0 := max((height-frameHeight)/2, 0)
-	body := m.bodyLines(max(frameWidth-4, 1))
-	targets := m.controlRows()
-	regions := make([]adrsplitRegion, 0, len(targets))
-	for line, target := range targets {
-		if line < m.scroll || line >= m.scroll+len(body) || line-m.scroll >= frameHeight-2 {
+// pointerRegions projects the rows the panel shows onto terminal cells. The
+// target comes from the row itself, so a control is what the view says it is.
+func (m *Model) pointerRegions(frame splitFrame, width, height int) []adrsplitRegion {
+	regions := make([]adrsplitRegion, 0, len(frame.rows))
+	for index, row := range frame.rows {
+		if row.target == "" {
 			continue
 		}
-		rect := pointer.Rect{X0: x0, Y0: y0 + 1 + line - m.scroll, X1: x0 + frameWidth, Y1: y0 + 2 + line - m.scroll}
-		if rect.X0 < 0 {
-			rect.X0 = 0
-		}
-		if rect.Y0 < 0 {
-			rect.Y0 = 0
-		}
-		if rect.X1 > width {
-			rect.X1 = width
-		}
-		if rect.Y1 > height {
-			rect.Y1 = height
-		}
-		if rect.X0 >= rect.X1 || rect.Y0 >= rect.Y1 {
+		y := frame.y + 1 + index - frame.scroll
+		if y < frame.y+1 || y >= frame.y+1+frame.bodyHeight {
 			continue
 		}
-		regions = append(regions, adrsplitRegion{Rect: rect, target: target})
+		rect, ok := clipRect(pointer.Rect{
+			X0: frame.x, Y0: y,
+			X1: frame.x + frame.width, Y1: y + 1,
+		}, width, height)
+		if !ok {
+			continue
+		}
+		regions = append(regions, adrsplitRegion{Rect: rect, target: row.target})
 	}
 	return regions
 }
 
-func (m Model) controlRows() map[int]string {
-	targets := make(map[int]string)
-	line := 0
-	if m.stage == stageInput {
-		line += 2
-		targets[line] = "source"
-		line++
-		if m.source == sourcePaste {
-			for row := 0; row < 9; row++ {
-				targets[line+row] = "adr"
-			}
-			line += 9
-			line++
-		} else {
-			targets[line] = "file"
-			line += 2
-		}
-		targets[line] = "max"
-		line += 2
-		targets[line], targets[line+1] = "cancel", "split"
-		return targets
+// clipRect keeps a region inside the terminal grid it was measured against.
+func clipRect(rect pointer.Rect, width, height int) (pointer.Rect, bool) {
+	width, height = max(width, 1), max(height, 1)
+	rect.X0 = max(rect.X0, 0)
+	rect.Y0 = max(rect.Y0, 0)
+	rect.X1 = min(rect.X1, width)
+	rect.Y1 = min(rect.Y1, height)
+	if rect.X0 >= rect.X1 || rect.Y0 >= rect.Y1 {
+		return pointer.Rect{}, false
 	}
-	line = 3
-	for i, row := range m.rows {
-		if row.created {
-			line += 6
-			continue
-		}
-		targets[line] = fmt.Sprintf("include:%d", i)
-		targets[line+1] = fmt.Sprintf("title:%d", i)
-		targets[line+2] = fmt.Sprintf("prio:%d", i)
-		targets[line+3] = fmt.Sprintf("effort:%d", i)
-		line += 4
-		if row.err != "" {
-			line++
-		}
-		line++
-	}
-	targets[line] = "dest"
-	targets[line+2] = "back"
-	targets[line+3] = "cancel"
-	targets[line+4] = "add"
-	return targets
+	return rect, true
 }

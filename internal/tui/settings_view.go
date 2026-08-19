@@ -88,7 +88,7 @@ func (m *settingsModel) Surface(width, height int) pointer.Surface {
 		status = "error: " + status
 	}
 	footer := settingsFit("[Close] | "+status+" | tab navigate | enter act", inner)
-	footer = strings.Replace(footer, "[Close]", m.pointerState.Render(settingsControlID("close"), "[Close]"), 1)
+	footer = strings.Replace(footer, "[Close]", m.pointerState.Render(styles, settingsControlID("close"), "[Close]"), 1)
 
 	bodyHeight := height - 2
 	focusLine := -1
@@ -166,7 +166,7 @@ func (m *settingsModel) renderSettingsRow(row settingsRenderRow, width int) stri
 		}
 	}
 	if row.target != "" {
-		line = m.pointerState.Render(settingsControlID(row.target), line)
+		line = m.pointerState.Render(styles, settingsControlID(row.target), line)
 	}
 	switch row.kind {
 	case settingsRowHint:

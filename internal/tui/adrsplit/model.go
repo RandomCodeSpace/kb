@@ -8,9 +8,11 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -20,6 +22,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 const (
@@ -126,6 +129,32 @@ type Model struct {
 	scroll        int
 	manualScroll  bool
 	pointerState  pointer.State
+	styles        *theme.Styles
+	spin          spinner.Model
+}
+
+// SetStyles hands the overlay the resolved design system. Spec section 6.2:
+// styles are built once by the root and threaded down, never constructed here.
+func (m *Model) SetStyles(styles *theme.Styles) {
+	if styles == nil {
+		return
+	}
+	m.styles = styles
+	m.spin.Spinner = styles.Spinner
+}
+
+// fallbackStyles is the palette a Model rendered without SetStyles draws with.
+// It is built once and never mutated; the root resolves its own on construction
+// and again on tea.BackgroundColorMsg (spec section 6.3).
+var fallbackStyles = sync.OnceValue(func() *theme.Styles { return theme.New(true) })
+
+// themeStyles is the resolved design system, defaulting to the dark reference
+// palette until the root hands over its own.
+func (m Model) themeStyles() *theme.Styles {
+	if m.styles != nil {
+		return m.styles
+	}
+	return fallbackStyles()
 }
 
 // New creates a closed overlay. Nil dependencies keep the feature unavailable
@@ -135,6 +164,7 @@ func New(st Store, runner Runner, user string, ctx context.Context) Model {
 		ctx = context.Background()
 	}
 	m := Model{store: st, runner: runner, user: user, ctx: ctx}
+	m.spin = spinner.New(spinner.WithSpinner(fallbackStyles().Spinner))
 	m.resetInputs()
 	return m
 }
@@ -193,12 +223,30 @@ func IsMessage(message tea.Msg) bool {
 		return true
 	}
 	switch message.(type) {
-	case fileLoadedMsg, splitCompletedMsg, cardAddedMsg, pointerActionMsg:
+	case fileLoadedMsg, splitCompletedMsg, cardAddedMsg, pointerActionMsg, spinner.TickMsg:
 		return true
 	default:
 		return false
 	}
 }
+
+// busy reports whether a spinner-worthy operation is in flight.
+func (m Model) busy() bool { return m.operation != "" || m.adding }
+
+// spinTick advances the busy indicator. Spec section 5.2 adopts the bubbles
+// spinner for every busy state that used to be static text; the tick loop stops
+// as soon as nothing is in flight, so an idle overlay costs no timers.
+func (m *Model) spinTick(msg spinner.TickMsg) tea.Cmd {
+	if !m.busy() {
+		return nil
+	}
+	var command tea.Cmd
+	m.spin, command = m.spin.Update(msg)
+	return command
+}
+
+// startSpinner is the command that begins the tick loop for a new operation.
+func (m Model) startSpinner() tea.Cmd { return m.spin.Tick }
 
 // Update applies user input and scoped asynchronous results.
 func (m *Model) Update(message tea.Msg) tea.Cmd {
@@ -211,6 +259,8 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return command
 	}
 	switch msg := message.(type) {
+	case spinner.TickMsg:
+		return m.spinTick(msg)
 	case fileLoadedMsg:
 		if msg.session != m.session || msg.generation != m.generation || m.operation != "reading file" {
 			return nil
@@ -468,10 +518,10 @@ func (m *Model) startSplit() tea.Cmd {
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel, m.operation = cancel, "reading file"
 	m.status, m.statusIsError = "reading ADR file...", false
-	return func() tea.Msg {
+	return tea.Batch(m.startSpinner(), func() tea.Msg {
 		text, err := readADRFile(ctx, path)
 		return fileLoadedMsg{session: session, generation: generation, text: text, err: err}
-	}
+	})
 }
 
 func (m *Model) startRun(text string) tea.Cmd {
@@ -480,10 +530,10 @@ func (m *Model) startRun(text string) tea.Cmd {
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel, m.operation = cancel, "splitting ADR"
 	m.status, m.statusIsError = "splitting ADR...", false
-	return func() tea.Msg {
+	return tea.Batch(m.startSpinner(), func() tea.Msg {
 		run, err := m.runner.RunSkill(ctx, m.user, ai.ScopeReadOnly, "adr-split", text, maximum, splitMaxTokens)
 		return splitCompletedMsg{session: session, generation: generation, run: run, err: err}
-	}
+	})
 }
 
 func (m *Model) cancelOperation() {
@@ -532,7 +582,7 @@ func (m *Model) startAdd() tea.Cmd {
 	m.adding, m.addPosition = true, 0
 	m.addGeneration++
 	m.status, m.statusIsError = fmt.Sprintf("creating card 1 of %d...", len(m.addQueue)), false
-	return m.addNext()
+	return tea.Batch(m.startSpinner(), m.addNext())
 }
 
 func (m *Model) addNext() tea.Cmd {
@@ -800,8 +850,11 @@ func cycleInt(value, low, high int, key string) int {
 	return value
 }
 
+// effortValues is the effort cycle, in order. The view names the same order.
+func effortValues() []string { return []string{"", "S", "M", "L"} }
+
 func cycleEffort(value, key string) string {
-	values := []string{"", "S", "M", "L"}
+	values := effortValues()
 	index := 0
 	for i, candidate := range values {
 		if candidate == value {

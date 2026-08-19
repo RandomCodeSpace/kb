@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -58,6 +59,31 @@ func (b *fakeBackend) CreateTask(user, _ string, task board.Task, _ forge.LinkIn
 
 func key(value string) tea.KeyPressMsg { return tea.KeyPressMsg{Code: rune(value[0]), Text: value} }
 
+// runCmd runs a command and returns the overlay message it produced. A fetch
+// also starts the busy spinner, so the batch is walked and the spinner tick -
+// which is a timer, not a result - is skipped.
+func runCmd(command tea.Cmd) tea.Msg {
+	if command == nil {
+		return nil
+	}
+	message := command()
+	batch, batched := message.(tea.BatchMsg)
+	if !batched {
+		return message
+	}
+	for _, sub := range batch {
+		if sub == nil {
+			continue
+		}
+		result := sub()
+		if _, tick := result.(spinner.TickMsg); tick {
+			continue
+		}
+		return result
+	}
+	return nil
+}
+
 func openModel(t *testing.T, backend *fakeBackend, st *fakeStore) Model {
 	t.Helper()
 	backend.store = st
@@ -84,7 +110,7 @@ func TestPreviewDefaultsExactDuplicatesOffAndFuzzyOn(t *testing.T) {
 	if command == nil || m.operation != "preview" {
 		t.Fatal("preview did not start")
 	}
-	m.Update(command())
+	m.Update(runCmd(command))
 	if m.stage != stageReview || len(m.rows) != 2 || m.rows[0].include || !m.rows[1].include {
 		t.Fatalf("review defaults = %+v", m.rows)
 	}
@@ -111,7 +137,7 @@ func TestAtomicCardProvenanceRetryDoesNotDuplicateCard(t *testing.T) {
 	st := &fakeStore{}
 	m := openModel(t, backend, st)
 	m.ref.SetValue("acme/kb")
-	m.Update(m.startPreview()())
+	m.Update(runCmd(m.startPreview()))
 	command := m.startCreate()
 	m.Update(command())
 	if len(st.added) != 0 || m.rows[0].created || m.ConsumeChanged() {
@@ -130,7 +156,7 @@ func TestPreviewCancellationAndReopenRejectStaleResults(t *testing.T) {
 	m := openModel(t, backend, &fakeStore{})
 	m.ref.SetValue("acme/kb")
 	command := m.startPreview()
-	stale := command()
+	stale := runCmd(command)
 	m.Update(key("e"))
 	if m.operation != "preview" {
 		t.Fatal("ordinary input cancelled active preview")
@@ -192,7 +218,7 @@ func TestUnavailableSourcesAndCardFailureStayReviewable(t *testing.T) {
 	st := &fakeStore{err: errors.New("refused")}
 	m = openModel(t, backend, st)
 	m.ref.SetValue("acme/kb")
-	m.Update(m.startPreview()())
+	m.Update(runCmd(m.startPreview()))
 	m.Update(m.startCreate()())
 	if m.rows[0].created || m.rows[0].err == "" || !m.open || m.stage != stageReview {
 		t.Fatalf("failed card state = %+v", m.rows[0])
@@ -235,7 +261,7 @@ func TestKeyboardAndReviewBranches(t *testing.T) {
 	if command == nil {
 		t.Fatal("enter did not preview")
 	}
-	m.Update(command())
+	m.Update(runCmd(command))
 	m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if m.selection != 1 {
 		t.Fatalf("down selection = %d", m.selection)
@@ -264,7 +290,7 @@ func TestEdgeMessagesAndRows(t *testing.T) {
 	st := &fakeStore{}
 	m := openModel(t, backend, st)
 	m.ref.SetValue("acme/kb")
-	m.Update(m.startPreview()())
+	m.Update(runCmd(m.startPreview()))
 	m.rows[0].draft.ExternalKey = ""
 	command := m.startCreate()
 	m.Update(command())
@@ -301,7 +327,7 @@ func TestReviewWindowAndRenderingBranches(t *testing.T) {
 		t.Fatal("open input did not render")
 	}
 	m.ref.SetValue("acme/kb")
-	m.Update(m.startPreview()())
+	m.Update(runCmd(m.startPreview()))
 	m.selection = 15
 	m.operation, m.queue, m.queuePos = "create", []int{0, 1}, 0
 	view := m.View(44, 14)
@@ -329,13 +355,13 @@ func TestRemainingStateBranches(t *testing.T) {
 		t.Fatalf("numeric/right max = %d", m.max)
 	}
 	m.ref.SetValue("acme/kb")
-	m.Update(m.startPreview()())
+	m.Update(runCmd(m.startPreview()))
 	if m.status != "preview refused" || !m.statusError {
 		t.Fatalf("preview error = %q", m.status)
 	}
 	backend.previewErr = nil
 	backend.preview = forge.Preview{Fetched: 1, Drafts: []forge.Draft{{Draft: ai.Draft{Title: "one"}}}}
-	m.Update(m.startPreview()())
+	m.Update(runCmd(m.startPreview()))
 	command := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if command == nil {
 		t.Fatal("review enter did not start create")
@@ -397,7 +423,7 @@ func TestPointerControlsFocusRowsAndActionsWithoutBackgroundMutation(t *testing.
 	if m.focus != 1 {
 		t.Fatalf("pointer input focus=%d, want ref", m.focus)
 	}
-	m.Update(m.startPreview()())
+	m.Update(runCmd(m.startPreview()))
 	handler = m.MouseHandler(80, 24)
 	line, x = importVisibleTextPosition(t, m.View(80, 24), 80, 24, "one")
 	m.Update(pointerRelease(&m, handler, x, line)())
@@ -458,7 +484,7 @@ func TestPointerControlsClipRowsAndRejectBusyOrStaleSnapshots(t *testing.T) {
 	backend := &fakeBackend{sources: []store.ForgeSource{{Name: "primary"}}, preview: forge.Preview{Drafts: drafts}}
 	m := openModel(t, backend, &fakeStore{})
 	m.ref.SetValue("acme/kb")
-	m.Update(m.startPreview()())
+	m.Update(runCmd(m.startPreview()))
 	handler := m.MouseHandler(50, 10)
 	line, x := importVisibleTextPosition(t, m.View(50, 10), 50, 10, "issue-0")
 	if command := pointerRelease(&m, handler, x, line); command == nil {
@@ -552,8 +578,11 @@ func TestInputButtonActivatesAfterPressedRerender(t *testing.T) {
 	if press == nil || m.Update(press()) != nil {
 		t.Fatal("import cancel did not enter pressed state")
 	}
-	if view := ansi.Strip(m.View(80, 24)); !strings.Contains(view, "[>Cancel<]") {
-		t.Fatalf("import cancel omitted pressed feedback:\n%s", view)
+	// The feedback is theme.Styles.Pressed now, not a text substitution, so it
+	// is the reverse-video attribute in the composed frame that says "pressed".
+	view := m.View(80, 24)
+	if !strings.Contains(view, "7m") || !strings.Contains(ansi.Strip(view), "[ Cancel ]") {
+		t.Fatalf("import cancel omitted pressed feedback:\n%s", ansi.Strip(view))
 	}
 	release := m.MouseHandler(80, 24)(tea.MouseReleaseMsg{X: x, Y: line, Button: tea.MouseNone})
 	if release == nil {
@@ -577,7 +606,7 @@ func TestPointerWheelReachesShortReviewRowsAndVisibleDismissControls(t *testing.
 	backend := &fakeBackend{sources: []store.ForgeSource{{Name: "primary"}}, preview: forge.Preview{Drafts: drafts}}
 	m := openModel(t, backend, &fakeStore{})
 	m.ref.SetValue("acme/kb")
-	m.Update(m.startPreview()())
+	m.Update(runCmd(m.startPreview()))
 
 	for range 40 {
 		pointerWheel(t, &m, m.MouseHandler(50, 10), 25, 5, tea.MouseWheelDown)
@@ -608,7 +637,7 @@ func TestPointerWheelReachesShortReviewRowsAndVisibleDismissControls(t *testing.
 
 	closeReview := openModel(t, backend, &fakeStore{})
 	closeReview.ref.SetValue("acme/kb")
-	closeReview.Update(closeReview.startPreview()())
+	closeReview.Update(runCmd(closeReview.startPreview()))
 	if got := ansi.Strip(closeReview.View(80, 24)); !strings.Contains(got, "[ Close ]") {
 		t.Fatalf("review close missing:\n%s", got)
 	}
@@ -635,7 +664,7 @@ func TestPointerWheelReachesShortReviewRowsAndVisibleDismissControls(t *testing.
 
 	review := openModel(t, backend, &fakeStore{})
 	review.ref.SetValue("acme/kb")
-	review.Update(review.startPreview()())
+	review.Update(runCmd(review.startPreview()))
 	if command := pointerRelease(&review, review.MouseHandler(80, 24), 0, 0); command != nil {
 		review.Update(command())
 	}
@@ -678,7 +707,7 @@ func TestPointerAndAsyncGuardsCoverInputEdges(t *testing.T) {
 	if preview == nil || m.operation != "preview" {
 		t.Fatal("pointer import did not start preview")
 	}
-	m.Update(preview())
+	m.Update(runCmd(preview))
 	if m.stage != stageReview {
 		t.Fatalf("preview stage = %d", m.stage)
 	}
@@ -727,7 +756,7 @@ func TestPointerRowsCannotImpersonateFieldsOrReviewButtons(t *testing.T) {
 		t.Fatalf("ref text impersonated source: focus=%d source=%d", m.focus, m.source)
 	}
 
-	m.Update(m.startPreview()())
+	m.Update(runCmd(m.startPreview()))
 	line, x = importVisibleTextPosition(t, m.View(80, 24), 80, 24, "[ Import ]")
 	command = pointerRelease(&m, m.MouseHandler(80, 24), x, line)
 	if command == nil {

@@ -450,7 +450,7 @@ func (m Model) renderFooter(styles *theme.Styles, text string, state theme.Slot,
 		}
 		content := style.Render(part)
 		if key != "" {
-			content = m.pointerState.Render(boardFooterControlID(key), content)
+			content = m.pointerState.Render(styles, boardFooterControlID(key), content)
 		}
 		rendered = append(rendered, content)
 	}
@@ -543,7 +543,7 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 		start := x
 		partWidth := ansi.StringWidth(part)
 		hit := boardHit{x0: start, x1: min(start+partWidth, width), y0: row + 1, y1: row + 2, kind: kind, tag: tag}
-		lines[row] = append(lines[row], m.pointerState.Render(boardHitControlID(hit), style.Render(part)))
+		lines[row] = append(lines[row], m.pointerState.Render(styles, boardHitControlID(hit), style.Render(part)))
 		if kind != boardHitDefault && start < width {
 			hits = append(hits, hit)
 		}
@@ -769,7 +769,7 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 	})
 	// The band is the column's click target, so the pressed state wraps the row
 	// the panel drew rather than the panel wrapping the pointer.
-	lines[0] = m.pointerState.Render(pointer.ControlID("board-column:"+string(status)), lines[0])
+	lines[0] = m.pointerState.Render(styles, pointer.ControlID("board-column:"+string(status)), lines[0])
 	return renderedColumn{lines: lines, hits: hits}
 }
 
@@ -850,7 +850,7 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 			for spanIndex := len(rowSpans[rowIndex]) - 1; spanIndex >= 0; spanIndex-- {
 				span := rowSpans[rowIndex][spanIndex]
 				line = ansi.Cut(line, 0, span.x0) +
-					m.pointerState.Render(boardCardLabelControlID(task.ID, span.tag), ansi.Cut(line, span.x0, span.x1)) +
+					m.pointerState.Render(styles, boardCardLabelControlID(task.ID, span.tag), ansi.Cut(line, span.x0, span.x1)) +
 					ansi.Cut(line, span.x1, ansi.StringWidth(line))
 			}
 			lines = append(lines, line)
