@@ -1,0 +1,210 @@
+package theme
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestNewBuildsBaseAndDimmedOnce(t *testing.T) {
+	styles := New(true)
+	if styles.Dimmed == nil {
+		t.Fatal("New must build the dimmed variant beside the base palette")
+	}
+	if styles.Dimmed.Dimmed != nil {
+		t.Error("the dimmed instance must not carry a dimmed variant of its own")
+	}
+	if styles.Pal[Card] == styles.Dimmed.Pal[Card] {
+		t.Error("the dimmed palette must differ from the base palette")
+	}
+}
+
+func TestNewResolvesBothBackgrounds(t *testing.T) {
+	dark := New(true)
+	light := New(false)
+	// Light-background adaptation is fog per map #136: the seam exists and
+	// resolves, the light column deliberately mirrors the dark one.
+	if dark.Pal[Canvas] != light.Pal[Canvas] {
+		t.Error("the light column is not designed yet and must mirror the dark one")
+	}
+}
+
+func TestDimBlendsTowardCanvas(t *testing.T) {
+	dimmed := darkPalette.dim()
+	if dimmed[Canvas] != darkPalette[Canvas] {
+		t.Errorf("Canvas dimmed to %s, it is the blend target and must not move", dimmed[Canvas].hex())
+	}
+	// 37*0.34 + 11*0.66 rounds to 20 by the spec's round-half-up, and so on
+	// per channel.
+	if got, want := dimmed[Card].hex(), "#141922"; got != want {
+		t.Errorf("Card dimmed to %s, want %s", got, want)
+	}
+	ground := darkPalette[Canvas]
+	for slot := Slot(0); slot < numSlots; slot++ {
+		if distanceTo(dimmed[slot], ground) > distanceTo(darkPalette[slot], ground) {
+			t.Errorf("slot %d moved away from Canvas when dimmed", slot)
+		}
+	}
+}
+
+func TestMixChannelClamps(t *testing.T) {
+	if got := mixChannel(255, 255, 2); got != 255 {
+		t.Errorf("over-range blend = %d, want 255", got)
+	}
+	if got := mixChannel(0, 10, -2); got != 0 {
+		t.Errorf("under-range blend = %d, want 0", got)
+	}
+}
+
+func TestHexRendersLowercaseSixDigits(t *testing.T) {
+	if got := (rgb{0x0a, 0xb0, 0xff}).hex(); got != "#0ab0ff" {
+		t.Errorf("hex = %s, want #0ab0ff", got)
+	}
+}
+
+func TestRGBAScalesToSixteenBit(t *testing.T) {
+	red, green, blue, alpha := (rgb{0xff, 0x00, 0x80}).RGBA()
+	if red != 0xffff || green != 0 || blue != 0x8080 || alpha != 0xffff {
+		t.Errorf("RGBA = %d %d %d %d", red, green, blue, alpha)
+	}
+}
+
+func TestColorsCoverEverySlot(t *testing.T) {
+	pal := darkPalette.colors()
+	for slot := Slot(0); slot < numSlots; slot++ {
+		if pal[slot] == nil {
+			t.Errorf("slot %d resolved to no color", slot)
+		}
+	}
+}
+
+func TestPrioritySlotFallsBackToPrio3(t *testing.T) {
+	cases := map[int]Slot{1: Prio1, 2: Prio2, 3: Prio3, 4: Prio4, 0: Prio3, 9: Prio3, -1: Prio3}
+	for priority, want := range cases {
+		if got := PrioritySlot(priority); got != want {
+			t.Errorf("PrioritySlot(%d) = %d, want %d", priority, got, want)
+		}
+	}
+}
+
+func TestLabelSlotWrapsTheWheel(t *testing.T) {
+	cases := map[int]Slot{0: Label1, 4: Label5, 5: Label1, -1: Label5}
+	for index, want := range cases {
+		if got := LabelSlot(index); got != want {
+			t.Errorf("LabelSlot(%d) = %d, want %d", index, got, want)
+		}
+	}
+}
+
+func TestOnAppliesBothSlots(t *testing.T) {
+	styles := New(true)
+	rendered := styles.On(FgBase, Card).Render("x")
+	if !strings.Contains(rendered, "x") {
+		t.Fatalf("rendered content lost: %q", rendered)
+	}
+	if !strings.Contains(rendered, "\x1b[") {
+		t.Errorf("On produced no color sequences: %q", rendered)
+	}
+	if styles.OnBold(FgBase, Card).Render("x") == rendered {
+		t.Error("OnBold must differ from On")
+	}
+	if styles.Fg(FgBase).Render("x") == rendered {
+		t.Error("Fg must not set a background")
+	}
+}
+
+func TestSurfacePicksTheCardTier(t *testing.T) {
+	styles := New(true)
+	cases := []struct {
+		selected  bool
+		alternate bool
+		want      Slot
+	}{
+		{true, false, Raised},
+		{true, true, Raised},
+		{false, true, Zebra},
+		{false, false, Card},
+	}
+	for _, testCase := range cases {
+		if got := styles.Surface(testCase.selected, testCase.alternate); got != testCase.want {
+			t.Errorf("Surface(%v, %v) = %d, want %d", testCase.selected, testCase.alternate, got, testCase.want)
+		}
+	}
+}
+
+func TestChipRunsMatchTheCachedDefaults(t *testing.T) {
+	styles := New(true)
+	if !sameRuns(styles.ChipRuns(Brand, Card), styles.Chip) {
+		t.Error("Styles.Chip must be ChipRuns against the resting card surface")
+	}
+	for index := range styles.Label {
+		if !sameRuns(styles.ChipRuns(LabelSlot(index), Card), styles.Label[index]) {
+			t.Errorf("Styles.Label[%d] is not the wheel slot composed onto the card surface", index)
+		}
+	}
+	if sameRuns(styles.ChipRuns(Brand, Card), styles.ChipRuns(Brand, Raised)) {
+		t.Error("the same fill on a different surface must render differently")
+	}
+}
+
+// sameRuns compares chip runs by what they render, since lipgloss styles are
+// not comparable.
+func sameRuns(left, right ChipStyles) bool {
+	const probe = "chip"
+	return left.CapLeft.Render(probe) == right.CapLeft.Render(probe) &&
+		left.CapRight.Render(probe) == right.CapRight.Render(probe) &&
+		left.Body.Render(probe) == right.Body.Render(probe) &&
+		left.ScopedKey.Render(probe) == right.ScopedKey.Render(probe) &&
+		left.Flat.Render(probe) == right.Flat.Render(probe)
+}
+
+func TestEmbeddedComponentStylesAreBuilt(t *testing.T) {
+	styles := New(true)
+	if styles.Input.Focused.Prompt.Render("x") == "" {
+		t.Error("textinput styles were not built")
+	}
+	if styles.Area.Focused.Prompt.Render("x") == "" {
+		t.Error("textarea styles were not built")
+	}
+	if styles.Help.ShortKey.Render("x") == "" {
+		t.Error("help styles were not built")
+	}
+	if len(styles.Spinner.Frames) == 0 {
+		t.Error("spinner token was not built")
+	}
+	if styles.Markdown.Document.Color == nil || *styles.Markdown.Document.Color != darkPalette[FgBase].hex() {
+		t.Error("markdown config was not derived from the palette")
+	}
+	if styles.Markdown.Document.Margin == nil || *styles.Markdown.Document.Margin != 0 {
+		t.Error("markdown document margin must be zeroed")
+	}
+	if styles.Huh == nil || styles.Huh.Focused.Title.Render("x") == "" {
+		t.Error("huh styles were not built")
+	}
+}
+
+func TestRailStylesExistForEveryPriority(t *testing.T) {
+	styles := New(true)
+	for priority := 1; priority < len(styles.Rail); priority++ {
+		if styles.Rail[priority].Render("x") == "" {
+			t.Errorf("resting rail style missing for priority %d", priority)
+		}
+		if styles.RailSel[priority].Render("x") == styles.Rail[priority].Render("x") {
+			t.Errorf("selected rail style for priority %d does not change surface", priority)
+		}
+	}
+}
+
+func TestPressedIsReverseVideo(t *testing.T) {
+	styles := New(true)
+	rendered := styles.Pressed.Render("x")
+	if !strings.Contains(rendered, "\x1b[7m") {
+		t.Errorf("Pressed = %q, want SGR 7 reverse video", rendered)
+	}
+	if styles.Button.Pressed.Render("x") != rendered {
+		t.Error("Button.Pressed must be the same promoted token")
+	}
+}
+
+func distanceTo(from, to rgb) int {
+	return from.distance(to)
+}
