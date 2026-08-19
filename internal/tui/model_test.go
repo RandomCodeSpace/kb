@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -460,6 +461,15 @@ func requireMouseCommand(t *testing.T, command tea.Cmd, action string) tea.Cmd {
 	return command
 }
 
+// reverseVideoPattern matches the SGR reverse attribute in any parameter
+// position. A themed control carries its colors in the same sequence, so the
+// composed frame emits "...;7m" rather than a standalone "\x1b[7m".
+var reverseVideoPattern = regexp.MustCompile(`\x1b\[[0-9;]*\b7[;m]`)
+
+func containsReverseVideo(content string) bool {
+	return reverseVideoPattern.MatchString(content)
+}
+
 func pointerCommandForLabel(t *testing.T, model *Model, label string) tea.Cmd {
 	t.Helper()
 	view := model.View()
@@ -475,7 +485,7 @@ func pointerCommandForLabel(t *testing.T, model *Model, label string) tea.Cmd {
 				t.Fatalf("press %q returned domain command", label)
 			}
 			pressedView := model.View()
-			if !strings.Contains(pressedView.Content, "\x1b[7m") {
+			if !containsReverseVideo(pressedView.Content) {
 				t.Fatalf("press %q did not render feedback", label)
 			}
 			release := requireMouseCommand(t,

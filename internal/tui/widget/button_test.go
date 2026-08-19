@@ -1,6 +1,7 @@
 package widget
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -59,10 +60,15 @@ func TestButtonStatePrecedence(t *testing.T) {
 	}
 }
 
-func TestButtonPressedWrapsInReverseVideo(t *testing.T) {
+// reverseVideoPattern matches the SGR reverse attribute in any parameter
+// position: a button carries its colors in the same sequence, so the attribute
+// is never emitted as a standalone escape.
+var reverseVideoPattern = regexp.MustCompile(`\x1b\[[0-9;]*\b7[;m]`)
+
+func TestButtonPressedCarriesReverseVideo(t *testing.T) {
 	styles := theme.New(true)
 	pressed := Button(styles, ButtonOpts{Text: "Ship", UnderlineIndex: -1, Pressed: true})
-	if !strings.Contains(pressed, "\x1b[7m") {
+	if !reverseVideoPattern.MatchString(pressed) {
 		t.Errorf("pressed button = %q, want reverse video", pressed)
 	}
 	if ansi.Strip(pressed) != "Ship" {

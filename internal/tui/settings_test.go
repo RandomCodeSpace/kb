@@ -127,7 +127,7 @@ func clickSettingsText(t *testing.T, model *settingsModel, width, height int, ne
 				t.Fatalf("settings control %q returned a domain command on press", needle)
 			}
 			pressed := model.Surface(width, height)
-			if !strings.Contains(pressed.Content, "\x1b[7m") {
+			if !containsReverseVideo(pressed.Content) {
 				t.Fatalf("settings control %q omitted pressed feedback", needle)
 			}
 			command := pressed.Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})

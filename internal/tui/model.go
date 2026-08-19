@@ -17,6 +17,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/cardeditor"
 	"github.com/RandomCodeSpace/kb/internal/tui/issueimport"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 const (
@@ -98,6 +99,27 @@ type Model struct {
 	actionStatusError bool
 	actionNotice      bool
 	shipped           shippedRecord
+	styles            *theme.Styles
+}
+
+// themeStyles is the resolved design system. Spec section 6.2: it is built once
+// on program start and again only when the terminal reports its background, and
+// threaded down to every view from here.
+func (m Model) themeStyles() *theme.Styles {
+	if m.styles != nil {
+		return m.styles
+	}
+	return theme.New(true)
+}
+
+// applyStyles rebuilds the design system for a terminal background and hands it
+// to every sub-model that renders.
+func (m *Model) applyStyles(styles *theme.Styles) {
+	m.styles = styles
+	m.editor.SetStyles(styles)
+	if m.settings != nil {
+		m.settings.SetStyles(styles)
+	}
 }
 
 func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
@@ -144,6 +166,7 @@ func newModel(
 		height:      defaultHeight,
 		loading:     watcher == nil,
 		readContext: ctx,
+		styles:      theme.New(true),
 		now:         now,
 		renderedAt:  now(),
 		action:      newTaskActionState(),
@@ -418,6 +441,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "s":
 			if m.settingsNew != nil {
 				m.settings = m.settingsNew()
+				m.settings.SetStyles(m.styles)
 				return m, m.settings.Init()
 			}
 		case "a":
@@ -557,6 +581,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.mutateFilter(func(filter *boardFilterState) { filter.clear() })
 	case preferenceSavedMsg:
 		return m, m.finishPreferences(msg)
+	case tea.BackgroundColorMsg:
+		// Spec section 6.3: the palette resolves against the terminal
+		// background exactly once, when the terminal reports it.
+		m.applyStyles(theme.New(msg.IsDark()))
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 {
 			m.width = msg.Width
@@ -833,6 +861,7 @@ func (m *Model) handleBoardFooterClick(key string) tea.Cmd {
 	case "s":
 		if m.settingsNew != nil {
 			m.settings = m.settingsNew()
+			m.settings.SetStyles(m.styles)
 			return m.settings.Init()
 		}
 	case "a":

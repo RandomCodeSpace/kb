@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -72,6 +73,16 @@ func (o *lockedPTYOutput) containsAfter(offset int, marker string) bool {
 	return bytes.Contains(content[offset:], []byte(marker))
 }
 
+func (o *lockedPTYOutput) matchesAfter(offset int, pattern *regexp.Regexp) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	content := o.buf.Bytes()
+	if offset > len(content) {
+		return false
+	}
+	return pattern.Match(content[offset:])
+}
+
 func waitForPTYMarker(t *testing.T, output *lockedPTYOutput, marker string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -94,6 +105,23 @@ func waitForPTYMarkerAfter(t *testing.T, output *lockedPTYOutput, offset int, ma
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("PTY output after byte %d did not contain %q:\n%s", offset, marker, output.string())
+}
+
+// pressMarkerPattern is the cursor move to a control cell followed by the
+// same-width press marker. The editor is themed, so the terminal writes the
+// control's SGR run between the cursor move and the marker glyph.
+var pressMarkerPattern = regexp.MustCompile("H(\x1b\\[[0-9;]*m)*!")
+
+func waitForPTYPatternAfter(t *testing.T, output *lockedPTYOutput, offset int, pattern *regexp.Regexp) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if output.matchesAfter(offset, pattern) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("PTY output after byte %d did not match %s:\n%s", offset, pattern, output.string())
 }
 
 func editorSavePoint(t *testing.T, st *store.Store, task board.Task, width, height int) (int, int) {
@@ -247,7 +275,7 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	// Body controls use a same-width literal marker so sanitization and narrow
 	// terminal clipping cannot erase the feedback. The terminal diff moves to
 	// that cell and writes the marker before release.
-	waitForPTYMarkerAfter(t, &output, pressOffset, "H!")
+	waitForPTYPatternAfter(t, &output, pressOffset, pressMarkerPattern)
 	if _, err := fmt.Fprintf(terminal, "\x1b[<0;%d;%dm", saveX, saveY); err != nil {
 		t.Fatal(err)
 	}

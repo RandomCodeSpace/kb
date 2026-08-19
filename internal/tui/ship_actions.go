@@ -7,12 +7,13 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget"
 )
 
 const autoShipDelay = 350 * time.Millisecond
@@ -829,208 +830,308 @@ func (m Model) shippedCount() int {
 	return len(seen)
 }
 
+// actionLabel is one clickable run inside a dialog row.
+type actionLabel struct {
+	text  string
+	kind  taskActionPointerKind
+	index int
+}
+
+// actionRow is one rendered dialog row and the controls it carries. Only the
+// labels named on a row are ever searched for in it: titles, checklist text
+// and error text are untrusted and must not be able to impersonate a control.
+type actionRow struct {
+	content string
+	labels  []actionLabel
+}
+
+// taskActionSurface composes the task action dialog over the board. Spec
+// section 4: the dialog is an elevation - a shade step and a shadow - not the
+// hand-drawn box frame it used to be.
 func (m Model) taskActionSurface(background string) pointer.Surface {
 	if !m.action.open() {
 		return pointer.Surface{Content: background}
 	}
+	styles := m.themeStyles()
 	width, height := max(m.width, 1), max(m.height, 1)
-	frame := m.renderTaskAction(max(min(width-4, 72), 1))
-	frame = fitActionFrame(frame, width, height)
-	paneWidth := min(ansi.StringWidth(strings.Split(frame, "\n")[0]), width)
-	paneHeight := min(len(strings.Split(frame, "\n")), height)
+	inset := styles.Metrics.OverlayInsetX
+	paneWidth := max(min(width-4, styles.Metrics.Overlay.TaskAction), 1)
+	rows := m.taskActionRows(styles, max(paneWidth-2*inset, 1))
+	paneHeight := min(len(rows)+2, height)
 	x := max((width-paneWidth)/2, 0)
 	y := max((height-paneHeight)/2, 0)
-	content := lipgloss.NewCompositor(
-		lipgloss.NewLayer(background),
-		lipgloss.NewLayer(frame).X(x).Y(y).Z(3),
-	).Render()
-	frameLines := strings.Split(ansi.Strip(frame), "\n")
+
+	opts := widget.OverlayOpts{
+		Title:  m.taskActionTitle(),
+		Seq:    m.taskActionSeq(),
+		Body:   actionRowContent(rows),
+		Footer: m.taskActionFooter(),
+		X:      x, Y: y, W: paneWidth, H: paneHeight,
+	}
+	content := widget.Overlay(styles, background, opts)
+
 	var hits pointer.Map
-	pointerMessage := func(kind taskActionPointerKind, index int) taskActionPointerMsg {
-		return taskActionPointerMsg{
-			session: m.taskActionSession, taskID: m.action.task.ID, mode: m.action.mode,
-			kind: kind, index: index,
+	panel := widget.OverlayRows(styles, opts)
+	for index, line := range panel {
+		var labels []actionLabel
+		switch {
+		case index == 0:
+			continue
+		case index == len(panel)-1:
+			labels = m.taskActionFooterLabels()
+		case index-1 < len(rows):
+			labels = rows[index-1].labels
 		}
-	}
-	addLabel := func(semanticRow int, label string, message taskActionPointerMsg) {
-		// A bordered action frame adds one row before the semantic content. Do
-		// not scan other rows: titles, checklist text, and errors are untrusted.
-		row := semanticRow + 1
-		if row < 0 || row >= len(frameLines) {
-			return
-		}
-		line := frameLines[row]
-		index := strings.Index(line, label)
-		if index < 0 {
-			return
-		}
-		start := ansi.StringWidth(line[:index])
-		hits.AddControl(taskActionControlID(message.kind, message.index), pointer.Rect{X0: x + start, Y0: y + row, X1: x + start + ansi.StringWidth(label), Y1: y + row + 1},
-			func(pointer.Point) tea.Msg { return message })
-	}
-	switch m.action.mode {
-	case taskActionShip:
-		choiceRow := 2
-		if m.action.warning.open > 0 {
-			choiceRow++
-		}
-		if m.action.warning.blocked {
-			choiceRow++
-		}
-		choices := []string{"Cancel", "Ship anyway"}
-		if m.action.warning.open > 0 {
-			choices = []string{"Cancel", "Tick everything", "Ship anyway"}
-		}
-		for index, label := range choices {
-			addLabel(choiceRow, label, pointerMessage(taskActionPointerShipChoice, index))
-		}
-		addLabel(choiceRow+1, "Esc cancel", pointerMessage(taskActionPointerCancel, 0))
-	case taskActionKill:
-		for index, label := range []string{"Cancel", "Kill without reason", "Kill with reason"} {
-			addLabel(4, label, pointerMessage(taskActionPointerKillChoice, index))
-		}
-		addLabel(2, "Reason:", pointerMessage(taskActionPointerKillReason, 0))
-		addLabel(5, "Esc cancel", pointerMessage(taskActionPointerCancel, 0))
-	case taskActionChecklist:
-		for checkIndex := range m.action.task.Checks {
-			row := checkIndex + 2
-			if row >= len(frameLines) {
-				break
-			}
-			line := frameLines[row]
-			marker := strings.Index(line, "[ ]")
-			if marker < 0 {
-				marker = strings.Index(line, "[x]")
-			}
-			if marker < 0 {
+		plain := ansi.Strip(line)
+		for _, label := range labels {
+			offset := strings.Index(plain, label.text)
+			if offset < 0 {
 				continue
 			}
-			index := checkIndex
-			message := pointerMessage(taskActionPointerCheck, index)
-			hits.AddControl(taskActionControlID(message.kind, message.index), pointer.Rect{X0: x + marker, Y0: y + row, X1: x + paneWidth, Y1: y + row + 1},
-				func(pointer.Point) tea.Msg { return message })
+			start := ansi.StringWidth(plain[:offset])
+			message := taskActionPointerMsg{
+				session: m.taskActionSession, taskID: m.action.task.ID, mode: m.action.mode,
+				kind: label.kind, index: label.index,
+			}
+			hits.AddControl(
+				taskActionControlID(label.kind, label.index),
+				pointer.Rect{
+					X0: x + start, Y0: y + index,
+					X1: x + start + ansi.StringWidth(label.text), Y1: y + index + 1,
+				},
+				func(pointer.Point) tea.Msg { return message },
+			)
 		}
-		addLabel(len(m.action.task.Checks)+2, "Esc close", pointerMessage(taskActionPointerCancel, 0))
-	case taskActionPurge:
-		label := "Press Enter to arm permanent delete"
-		if m.action.armed {
-			label = "ARMED - press Enter again to delete permanently"
-		}
-		addLabel(3, label, pointerMessage(taskActionPointerPurge, 0))
-		addLabel(4, "Esc cancel", pointerMessage(taskActionPointerCancel, 0))
 	}
 	return pointer.Surface{Content: content, Pointer: hits.Handler()}
 }
 
-func (m Model) renderTaskAction(width int) string {
-	width = max(width, 1)
-	if width < 5 {
-		lines := m.taskActionLines(1)
-		if len(lines) == 0 {
-			return ""
-		}
-		return ansi.Truncate(lines[0], width, "")
+func actionRowContent(rows []actionRow) []string {
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.content)
 	}
-	inner := max(width-4, 1)
-	lines := m.taskActionLines(inner)
-	for i := range lines {
-		lines[i] = "│ " + padLine(ansi.Truncate(lines[i], inner, ""), inner, " ") + " │"
-	}
-	return "┌" + strings.Repeat("─", width-2) + "┐\n" + strings.Join(lines, "\n") +
-		"\n└" + strings.Repeat("─", width-2) + "┘"
+	return out
 }
 
-func fitActionFrame(frame string, width, height int) string {
-	lines := strings.Split(frame, "\n")
-	if len(lines) > height {
-		lines = lines[:height]
+// taskActionTitle is the header band label of the open dialog.
+func (m Model) taskActionTitle() string {
+	switch m.action.mode {
+	case taskActionShip:
+		return "SHIP CARD"
+	case taskActionKill:
+		return "REJECT CARD"
+	case taskActionChecklist:
+		return "CHECKLIST"
+	case taskActionPurge:
+		return "DELETE CARD"
+	default:
+		return "CARD"
 	}
-	for index := range lines {
-		lines[index] = ansi.Truncate(lines[index], width, "")
-	}
-	return strings.Join(lines, "\n")
 }
 
-func (m Model) taskActionLines(width int) []string {
+func (m Model) taskActionSeq() string {
+	if m.action.task.Seq <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("#%d", m.action.task.Seq)
+}
+
+// taskActionFooter is the hint row, which the panel carries in its footer band
+// instead of spending a body row on it.
+func (m Model) taskActionFooter() string {
+	hints := "Tab choose  Enter confirm  Esc cancel"
+	switch m.action.mode {
+	case taskActionChecklist:
+		hints = "j/k choose  Space toggle  Esc close"
+	case taskActionPurge:
+		hints = "Enter arm  Enter again confirm  Esc cancel"
+	}
+	return m.pointerState.Render(taskActionControlID(taskActionPointerCancel, 0), hints)
+}
+
+func (m Model) taskActionFooterLabels() []actionLabel {
+	label := "Esc cancel"
+	if m.action.mode == taskActionChecklist {
+		label = "Esc close"
+	}
+	return []actionLabel{{text: label, kind: taskActionPointerCancel}}
+}
+
+// taskActionRows renders the dialog body. huh owns the fields spec section 5.2
+// assigns it - the yes/no core of a confirm prompt, the choice rows and the
+// disclaimer notes - and nothing else: it exposes no pointer hit regions and
+// kb's keymap is frozen by v1.0.1, so the fields render kb's state and never
+// receive a message.
+func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 	a := m.action
 	busy := ""
 	if a.busy {
 		busy = " (saving...)"
 	}
+	surface := styles.Overlay.FieldValue
 	switch a.mode {
 	case taskActionShip:
-		lines := []string{"Move " + sanitizeTerminal(a.task.Title) + " to Done?" + busy}
-		if a.warning.open > 0 {
-			lines = append(lines, fmt.Sprintf("%d of %d checklist items are still open.", a.warning.open, a.warning.total))
-		}
-		if a.warning.blocked {
-			lines = append(lines, "This card is flagged blocked.")
-		}
-		choices := []string{"Cancel"}
-		if a.warning.open > 0 {
-			choices = append(choices, "Tick everything")
-		}
-		choices = append(choices, "Ship anyway")
-		lines = append(lines, "", m.pointerActionChoices(choices, a.choice),
-			"Tab choose  Enter confirm  "+m.pointerState.Render(taskActionControlID(taskActionPointerCancel, 0), "Esc cancel"))
-		return appendActionError(lines, a.errorText)
-	case taskActionKill:
-		lines := []string{"Why reject " + sanitizeTerminal(a.task.Title) + "?" + busy,
-			"The card moves to Cancelled. The reason is optional.",
-			m.pointerState.Render(taskActionControlID(taskActionPointerKillReason, 0), "Reason:") + " " + settingsInputDisplay(a.reason, false, true, max(width-8, 1)), "",
-			m.pointerActionChoices([]string{"Cancel", "Kill without reason", "Kill with reason"}, a.choice),
-			"Tab choose  Enter confirm  " + m.pointerState.Render(taskActionControlID(taskActionPointerCancel, 0), "Esc cancel")}
-		return appendActionError(lines, a.errorText)
-	case taskActionChecklist:
-		lines := []string{"Checklist: " + sanitizeTerminal(a.task.Title) + busy}
-		for index, check := range a.task.Checks {
-			marker := "  "
-			if index == a.checkIndex {
-				marker = "> "
-			}
-			box := "[ ]"
-			if check.Done {
-				box = "[x]"
-			}
-			label := box + " " + sanitizeTerminal(check.Text)
-			lines = append(lines, marker+m.pointerState.Render(taskActionControlID(taskActionPointerCheck, index), label))
-		}
-		lines = append(lines, "", "j/k choose  Space toggle  "+m.pointerState.Render(taskActionControlID(taskActionPointerCancel, 0), "Esc close"))
-		return appendActionError(lines, a.errorText)
-	case taskActionPurge:
-		lines := []string{"Delete " + sanitizeTerminal(a.task.Title) + " permanently?" + busy,
-			"The card, comments, links, and kill reason are removed for good."}
-		if a.armed {
-			lines = append(lines, "", m.pointerState.Render(taskActionControlID(taskActionPointerPurge, 0), "ARMED - press Enter again to delete permanently"))
+		rows := []actionRow{{content: surface.Render(actionFit("Move "+sanitizeTerminal(a.task.Title)+" to Done?"+busy, width))}}
+		if notes := shipWarningNotes(a.warning); len(notes) > 0 {
+			// The note already ends in a blank row of its own.
+			rows = append(rows, m.huhRows(huhNote(styles, notes, width), nil)...)
 		} else {
-			lines = append(lines, "", m.pointerState.Render(taskActionControlID(taskActionPointerPurge, 0), "Press Enter to arm permanent delete"))
+			rows = append(rows, actionRow{})
 		}
-		lines = append(lines, m.pointerState.Render(taskActionControlID(taskActionPointerCancel, 0), "Esc cancel"))
-		return appendActionError(lines, a.errorText)
+		rows = append(rows, m.huhRows(m.shipChoiceField(styles, width), shipChoiceLabels(a.warning))...)
+		return appendActionError(styles, rows, a.errorText, width)
+	case taskActionKill:
+		reason := m.pointerState.Render(taskActionControlID(taskActionPointerKillReason, 0), "Reason:") +
+			" " + settingsInputDisplay(a.reason, false, true, max(width-8, 1))
+		rows := []actionRow{
+			{content: surface.Render(actionFit("Why reject "+sanitizeTerminal(a.task.Title)+"?"+busy, width))},
+			m.huhRow(huhNote(styles, []string{"The card moves to Cancelled. The reason is optional."}, width)),
+			{
+				content: surface.Render(actionFit(reason, width)),
+				labels:  []actionLabel{{text: "Reason:", kind: taskActionPointerKillReason}},
+			},
+			{},
+		}
+		rows = append(rows, m.huhRows(m.killChoiceField(styles, width), killChoiceLabels())...)
+		return appendActionError(styles, rows, a.errorText, width)
+	case taskActionChecklist:
+		rows := []actionRow{{content: surface.Render(actionFit("Checklist: "+sanitizeTerminal(a.task.Title)+busy, width))}}
+		for index, check := range a.task.Checks {
+			state := widget.CheckOpen
+			if check.Done {
+				state = widget.CheckDone
+			}
+			label := actionFit(sanitizeTerminal(check.Text), max(width-2, 1))
+			rows = append(rows, actionRow{
+				content: m.pointerState.Render(
+					taskActionControlID(taskActionPointerCheck, index),
+					widget.Check(styles, label, state, index == a.checkIndex),
+				),
+				labels: []actionLabel{{text: label, kind: taskActionPointerCheck, index: index}},
+			})
+		}
+		return appendActionError(styles, rows, a.errorText, width)
+	case taskActionPurge:
+		label := "Press Enter to arm permanent delete"
+		if a.armed {
+			label = "ARMED - press Enter again to delete permanently"
+		}
+		rows := []actionRow{
+			{content: surface.Render(actionFit("Delete "+sanitizeTerminal(a.task.Title)+" permanently?"+busy, width))},
+			{content: styles.Overlay.FieldLabel.Render(actionFit("The card, comments, links, and kill reason are removed for good.", width))},
+			{},
+			{
+				content: m.pointerState.Render(taskActionControlID(taskActionPointerPurge, 0), widget.Button(styles, widget.ButtonOpts{
+					Text:           actionFit(label, width),
+					Armed:          a.armed,
+					Selected:       !a.armed,
+					UnderlineIndex: -1,
+				})),
+				labels: []actionLabel{{text: label, kind: taskActionPointerPurge}},
+			},
+		}
+		return appendActionError(styles, rows, a.errorText, width)
 	default:
 		return nil
 	}
 }
 
-func (m Model) pointerActionChoices(choices []string, selected int) string {
-	parts := make([]string, len(choices))
-	kind := taskActionPointerShipChoice
-	if m.action.mode == taskActionKill {
-		kind = taskActionPointerKillChoice
+// shipChoiceField is the ship guard's choice control. Spec section 5.2 assigns
+// huh's Confirm to the yes/no core and its Select to the three-way form.
+func (m Model) shipChoiceField(styles *theme.Styles, width int) string {
+	choices := shipChoices(m.action.warning)
+	if len(choices) == 2 {
+		return huhConfirm(styles, choices[0], choices[1], m.action.choice == 0, width)
 	}
-	for index, choice := range choices {
-		label := choice
-		if index == selected {
-			label = "[" + choice + "]"
-		}
-		parts[index] = m.pointerState.Render(taskActionControlID(kind, index), label)
-	}
-	return strings.Join(parts, "  ")
+	return huhSelect(styles, choices, m.action.choice, width)
 }
 
-func appendActionError(lines []string, message string) []string {
-	if message == "" {
-		return lines
+func (m Model) killChoiceField(styles *theme.Styles, width int) string {
+	return huhSelect(styles, killChoices(), m.action.choice, width)
+}
+
+func shipChoices(warning shipWarning) []string {
+	choices := []string{"Cancel"}
+	if warning.open > 0 {
+		choices = append(choices, "Tick everything")
 	}
-	return append(lines, "", "error: "+sanitizeTerminal(message))
+	return append(choices, "Ship anyway")
+}
+
+func killChoices() []string {
+	return []string{"Cancel", "Kill without reason", "Kill with reason"}
+}
+
+func shipChoiceLabels(warning shipWarning) []actionLabel {
+	choices := shipChoices(warning)
+	labels := make([]actionLabel, 0, len(choices))
+	for index, choice := range choices {
+		labels = append(labels, actionLabel{text: choice, kind: taskActionPointerShipChoice, index: index})
+	}
+	return labels
+}
+
+func killChoiceLabels() []actionLabel {
+	choices := killChoices()
+	labels := make([]actionLabel, 0, len(choices))
+	for index, choice := range choices {
+		labels = append(labels, actionLabel{text: choice, kind: taskActionPointerKillChoice, index: index})
+	}
+	return labels
+}
+
+func shipWarningNotes(warning shipWarning) []string {
+	notes := []string{}
+	if warning.open > 0 {
+		notes = append(notes, fmt.Sprintf("%d of %d checklist items are still open.", warning.open, warning.total))
+	}
+	if warning.blocked {
+		notes = append(notes, "This card is flagged blocked.")
+	}
+	return notes
+}
+
+// huhRows splits a rendered huh field into dialog rows and attaches the
+// controls each row turned out to carry. A row holding a pressed control is
+// rendered pressed: huh has no notion of kb pointer feedback, so the row is the
+// smallest run kb can promote to the reverse-video token.
+func (m Model) huhRows(rendered string, labels []actionLabel) []actionRow {
+	lines := strings.Split(rendered, "\n")
+	rows := make([]actionRow, 0, len(lines))
+	for _, line := range lines {
+		row := actionRow{content: line}
+		plain := ansi.Strip(line)
+		for _, label := range labels {
+			if !strings.Contains(plain, label.text) {
+				continue
+			}
+			row.labels = append(row.labels, label)
+			row.content = m.pointerState.Render(taskActionControlID(label.kind, label.index), row.content)
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func (m Model) huhRow(rendered string) actionRow {
+	rows := m.huhRows(rendered, nil)
+	if len(rows) == 0 {
+		return actionRow{}
+	}
+	return rows[0]
+}
+
+func appendActionError(styles *theme.Styles, rows []actionRow, message string, width int) []actionRow {
+	if message == "" {
+		return rows
+	}
+	return append(rows, actionRow{}, actionRow{
+		content: styles.On(theme.StatusDanger, theme.OverlaySurf).
+			Render(actionFit("error: "+sanitizeTerminal(message), width)),
+	})
+}
+
+func actionFit(line string, width int) string {
+	return ansi.Truncate(line, max(width, 0), "")
 }

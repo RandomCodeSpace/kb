@@ -8,10 +8,43 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/exp/golden"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
+
+// goldenTaskActionModel is the ship guard on a card that trips every warning,
+// the state the modal goldens pin.
+func goldenTaskActionModel(t *testing.T) Model {
+	t.Helper()
+	task := board.Task{
+		ID: "task", Seq: 42, Title: "Wire the ship guard", Status: board.StatusTodo,
+		Blocked: true, Checks: []board.Check{{Text: "write tests"}, {Text: "ship", Done: true}},
+	}
+	m, _, tasks := actionTestModel(t, task)
+	m.width, m.height = 60, 14
+	m.openShipPrompt(tasks[0], 0)
+	return m
+}
+
+// TestTaskActionModalGolden is the structure golden of the restyled dialog:
+// layout, truncation and drop order, ASCII-pinned per spec section 6.4.
+func TestTaskActionModalGolden(t *testing.T) {
+	m := goldenTaskActionModel(t)
+	content := m.taskActionSurface(actionBackground(m.width, m.height)).Content
+	golden.RequireEqual(t, []byte(ansi.Strip(theme.Downsample(content, theme.StructureProfile))))
+}
+
+// TestTaskActionModalColorGolden is the palette golden spec section 6.4 asks
+// for where none existed: the whole depth model of the dialog is background
+// color, so it pins truecolor.
+func TestTaskActionModalColorGolden(t *testing.T) {
+	m := goldenTaskActionModel(t)
+	content := m.taskActionSurface(actionBackground(m.width, m.height)).Content
+	golden.RequireEqual(t, []byte(theme.Downsample(content, theme.ColorProfile)))
+}
 
 func actionTestModel(t *testing.T, tasks ...board.Task) (Model, *store.Store, []board.Task) {
 	t.Helper()
@@ -755,18 +788,32 @@ func TestActionFailureReloadAndViewEdges(t *testing.T) {
 		{mode: taskActionChecklist, task: task, busy: true, errorText: "no"},
 		{mode: taskActionPurge, task: task, armed: true, busy: true, errorText: "no"},
 	}
+	m.width, m.height = 80, 24
 	for _, action := range views {
 		m.action = action
-		if rendered := m.renderTaskAction(60); !strings.Contains(rendered, "saving") || !strings.Contains(rendered, "error") {
+		rendered := ansi.Strip(m.taskActionSurface(actionBackground(m.width, m.height)).Content)
+		if !strings.Contains(rendered, "saving") || !strings.Contains(rendered, "error") {
 			t.Fatalf("action view %v = %q", action.mode, rendered)
 		}
 	}
-	if got := m.renderTaskAction(1); ansi.StringWidth(got) > 1 {
-		t.Fatalf("one-cell action = %q", got)
+	m.width, m.height = 1, 3
+	m.action = views[0]
+	for _, line := range strings.Split(m.taskActionSurface(actionBackground(1, 3)).Content, "\n") {
+		if ansi.StringWidth(line) > 1 {
+			t.Fatalf("one-cell action = %q", line)
+		}
 	}
-	if got := fitActionFrame("12345\nabcde\nlast", 3, 2); got != "123\nabc" {
-		t.Fatalf("fitActionFrame = %q", got)
+}
+
+// actionBackground is a blank board of the given size, the surface a dialog is
+// composed onto.
+func actionBackground(width, height int) string {
+	row := strings.Repeat(" ", max(width, 1))
+	rows := make([]string, max(height, 1))
+	for index := range rows {
+		rows[index] = row
 	}
+	return strings.Join(rows, "\n")
 }
 
 func TestActionSuccessDetailAndDispatchEdges(t *testing.T) {
