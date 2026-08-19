@@ -17,6 +17,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/cardeditor"
 	"github.com/RandomCodeSpace/kb/internal/tui/issueimport"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 const (
@@ -63,6 +64,7 @@ type Model struct {
 	watcher           dataVersionReader
 	user              string
 	board             board.Board
+	styles            *theme.Styles
 	boardView         boardViewState
 	filter            boardFilterState
 	detail            carddetail.Model
@@ -130,15 +132,19 @@ func newModel(
 	moveStore, _ := store.(taskMoveStore)
 	actionStore, _ := store.(taskActionStore)
 	now := time.Now
+	// Spec section 6.3: the palette is resolved once for a dark terminal and
+	// rebuilt only when tea.BackgroundColorMsg says otherwise.
+	styles := theme.New(true)
 	return Model{
 		store:       store,
+		styles:      styles,
 		moveStore:   moveStore,
 		actionStore: actionStore,
 		watcher:     watcher,
 		user:        user,
 		board:       board.Board{Title: "Board"},
 		filter:      newBoardFilterState(),
-		detail:      carddetail.New(detailReader, user),
+		detail:      carddetail.New(detailReader, user, styles),
 		editor:      cardeditor.New(editorStore, user),
 		width:       defaultWidth,
 		height:      defaultHeight,

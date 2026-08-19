@@ -115,7 +115,7 @@ func TestParityMarkdownAcceptsWebWhitespace(t *testing.T) {
 }
 
 func TestRenderMarkdownPreservesSourceOrdinals(t *testing.T) {
-	got := ansi.Strip(renderMarkdown("0. zero\n3. three\n9. nine\n001. padded", 60))
+	got := ansi.Strip(markdownWith(testStyles())("0. zero\n3. three\n9. nine\n001. padded", 60))
 	for _, want := range []string{"0. zero", "3. three", "9. nine", "001. padded"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered markdown missing source marker %q:\n%s", want, got)
@@ -152,7 +152,7 @@ func TestFrozenJavaScriptBoundaryParity(t *testing.T) {
 }
 
 func TestRenderMarkdownPreservesJavaScriptControlWhitespace(t *testing.T) {
-	got := ansi.Strip(renderMarkdown("*\vx*\n#\vheading\n1.\fitem", 60))
+	got := ansi.Strip(markdownWith(testStyles())("*\vx*\n#\vheading\n1.\fitem", 60))
 	for _, want := range []string{"* x*", "heading", "1. item"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("rendered control whitespace missing %q:\n%s", want, got)
