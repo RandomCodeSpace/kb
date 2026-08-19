@@ -330,6 +330,27 @@ func TestNilReaderAndRenderingHelpers(t *testing.T) {
 	}
 }
 
+// TestSetStylesAdoptsRebuiltTheme is spec section 6.3: the root resolves the
+// palette again when the terminal answers with its background color, and the
+// pane follows it instead of holding the palette it was constructed with.
+func TestSetStylesAdoptsRebuiltTheme(t *testing.T) {
+	m := New(nil, "u", testStyles())
+	before := m.styles
+	m.SetStyles(nil)
+	if m.styles != before {
+		t.Fatal("nil styles replaced the resolved palette")
+	}
+	_ = m.Open(board.Task{ID: "id", Title: "Bare", Status: board.StatusTodo, Prio: 3})
+	rebuilt := theme.New(false)
+	m.SetStyles(rebuilt)
+	if m.styles != rebuilt || m.renderMarkdown == nil {
+		t.Fatalf("rebuilt palette was not adopted: styles=%v renderer=%v", m.styles == rebuilt, m.renderMarkdown != nil)
+	}
+	if got := m.View(40, 12); got == "" {
+		t.Fatal("pane stopped rendering after the rebuild")
+	}
+}
+
 func TestViewClampsScrollToContent(t *testing.T) {
 	m := New(nil, "u", testStyles())
 	task := fullTask()

@@ -128,6 +128,17 @@ func New(reader Reader, user string, styles *theme.Styles) Model {
 	}
 }
 
+// SetStyles adopts a rebuilt design system. Spec section 6.3: the root resolves
+// the palette again when tea.BackgroundColorMsg answers, and every pane it owns
+// has to follow it or the frame renders two palettes at once.
+func (m *Model) SetStyles(styles *theme.Styles) {
+	if styles == nil {
+		return
+	}
+	m.styles = styles
+	m.renderMarkdown = markdownWith(styles)
+}
+
 // IsOpen reports whether the overlay currently owns input and rendering.
 func (m Model) IsOpen() bool { return m.open }
 

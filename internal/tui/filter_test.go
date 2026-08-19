@@ -292,7 +292,10 @@ func TestFilterBarSanitizesTerminalControlsWithoutChangingState(t *testing.T) {
 	m.filter.restore(boardFilter{Text: hostileText, Tags: []string{hostileTag}})
 	storedText := m.filter.input.Value()
 	m.filter.focus = filterLabels
-	view, hits := m.renderFilterBar(160)
+	styled, hits := m.renderFilterBar(160)
+	// The toolbar rows carry the Canvas and Surface tiers, so the scan runs on
+	// the stripped text: the bar's own SGR runs go, an injected escape stays.
+	view := ansi.Strip(styled)
 	for _, r := range view {
 		if r == '\n' {
 			continue

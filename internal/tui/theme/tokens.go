@@ -33,6 +33,7 @@ type Glyphs struct {
 	Focus    string // U+25B8, focused band caret
 	More     string // overflow cue prefix, rendered as "+N more"
 	Ellipsis string // U+2026, the truncation tail of spec section 3.3
+	Blocked  string // U+26D4, the compact blocked mark of spec section 3.4
 }
 
 // defaultGlyphs is the vocabulary of spec sections 2.2, 2.4, 3.4 and 3.6.
@@ -49,6 +50,7 @@ var defaultGlyphs = Glyphs{
 	Focus:    "▸",
 	More:     "+",
 	Ellipsis: "…",
+	Blocked:  "⛔",
 }
 
 // Metrics are the gutter, padding and threshold tokens of spec section 2.5,

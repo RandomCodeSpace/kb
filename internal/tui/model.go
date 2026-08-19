@@ -102,20 +102,11 @@ type Model struct {
 	shipped           shippedRecord
 }
 
-// themeStyles is the resolved design system. Spec section 6.2: it is built once
-// on program start and again only when the terminal reports its background, and
-// threaded down to every view from here.
-func (m Model) themeStyles() *theme.Styles {
-	if m.styles != nil {
-		return m.styles
-	}
-	return theme.New(true)
-}
-
-// applyStyles rebuilds the design system for a terminal background and hands it
-// to every sub-model that renders.
+// applyStyles adopts a rebuilt design system and hands it to every sub-model
+// the root owns.
 func (m *Model) applyStyles(styles *theme.Styles) {
 	m.styles = styles
+	m.detail.SetStyles(styles)
 	m.editor.SetStyles(styles)
 	if m.settings != nil {
 		m.settings.SetStyles(styles)
@@ -585,8 +576,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case preferenceSavedMsg:
 		return m, m.finishPreferences(msg)
 	case tea.BackgroundColorMsg:
-		// Spec section 6.3: the palette resolves against the terminal
-		// background exactly once, when the terminal reports it.
+		// Spec section 6.2: New is called on program start and here, nowhere
+		// else. Every style in the tree is rebuilt exactly once per answer, and
+		// every pane the root owns adopts the same instance.
 		m.applyStyles(theme.New(msg.IsDark()))
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 {

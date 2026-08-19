@@ -2,11 +2,9 @@ package tui
 
 import (
 	"fmt"
-	"image/color"
 	"strings"
+	"sync"
 	"time"
-	"unicode/utf16"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -14,9 +12,36 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget"
 )
 
-const wideBoardWidth = 100
+// fallbackStyles is the theme a zero-value Model renders through. The root
+// model resolves its own on construction and again on tea.BackgroundColorMsg
+// (spec section 6.3); this is built once, never mutated, and exists only so a
+// Model assembled field by field still has a palette to draw with.
+var fallbackStyles = sync.OnceValue(func() *theme.Styles { return theme.New(true) })
+
+func (m Model) themeStyles() *theme.Styles {
+	if m.styles != nil {
+		return m.styles
+	}
+	return fallbackStyles()
+}
+
+// columnHue maps a board status onto its column identity hue (spec 1.3).
+func columnHue(status board.Status) theme.Slot {
+	switch status {
+	case board.StatusDoing:
+		return theme.HueDoing
+	case board.StatusDone:
+		return theme.HueDone
+	case board.StatusCancelled:
+		return theme.HueCancelled
+	default:
+		return theme.HueTodo
+	}
+}
 
 type boardAction uint8
 
@@ -265,82 +290,171 @@ func taskIndex(current board.Board, status board.Status, id string) int {
 }
 
 func (m Model) renderBoard() (string, []boardHit) {
+	styles := m.themeStyles()
+	metrics := styles.Metrics
 	width := max(m.width, 1)
 	height := max(m.height, 8)
-	title := strings.TrimSpace(m.board.Title)
-	if title == "" {
-		title = "Board"
-	}
-	header := fitLine(fmt.Sprintf("kb / %s / %s", title, m.user), width)
-	if shipped := m.shippedCount(); shipped > 0 {
-		header = fitLine(fmt.Sprintf("kb / %s / %s / ×%d shipped today", title, m.user, shipped), width)
-	}
-	filterLine, filterHits := m.renderFilterBar(width)
 
 	statuses := m.boardView.visibleStatuses()
-	if width < wideBoardWidth {
+	if width < metrics.WideFrame {
 		statuses = statuses[m.boardView.column : m.boardView.column+1]
 	}
-	bodyHeight := height - 4
-	columnWidths := splitWidths(width, len(statuses))
+	layout := boardColumnLayout(metrics, width, len(statuses))
+	density := metrics.DensityFor(height, layout.inner)
+
+	rows := []string{m.renderTopBar(styles, width)}
+	filterLine, filterHits := m.renderFilterBar(width)
+	rows = append(rows, strings.Split(filterLine, "\n")...)
+	for range metrics.PagePad(density) {
+		rows = append(rows, fillRow(styles.Board.PagePad, "", width))
+	}
+
+	chromeTop := len(rows)
+	bodyHeight := max(height-chromeTop-1, 1)
 	columns := make([]renderedColumn, 0, len(statuses))
 	for i, status := range statuses {
-		columns = append(columns, m.renderBoardColumn(status, columnWidths[i], bodyHeight))
+		columns = append(columns, m.renderBoardColumnAt(status, layout.widths[i], bodyHeight, density))
 	}
-	body, hits := joinColumns(columns)
+	body, hits := joinColumns(styles, columns, layout, width)
 	for i := range hits {
-		hits[i].y0 += 3
-		hits[i].y1 += 3
+		hits[i].y0 += chromeTop
+		hits[i].y1 += chromeTop
 	}
 	hits = append(filterHits, hits...)
+	rows = append(rows, body...)
 
-	state := "ready"
-	moveActive := m.move.lifted != nil || m.move.saving
-	movePriority := moveActive || m.move.notice
-	showMoveStatus := movePriority && m.move.status != ""
-	if showMoveStatus {
-		state = sanitizeTerminal(m.move.status)
-	} else if m.actionNotice && m.actionStatus != "" {
-		state = sanitizeTerminal(m.actionStatus)
-	} else if m.loadErr != nil {
-		state = "error: " + m.loadErr.Error()
-	} else if m.pollErr != nil {
-		state = "error: " + m.pollErr.Error()
-	} else if m.preferenceErr != nil {
-		state = "error: " + m.preferenceErr.Error()
-	} else if m.move.status != "" {
-		state = sanitizeTerminal(m.move.status)
-	} else if (m.loading && !m.haveBoardSnapshot) || (m.watcher != nil && !m.haveVersion) {
-		state = "loading board..."
-	}
+	state, stateSlot := m.boardState()
 	cancelled := "off"
 	if m.boardView.showCancelled {
 		cancelled = "on"
 	}
 	help := "j/k cards | h/l/tab columns | 1-4 jump | ? help | q quit"
-	if width >= 100 {
+	if width >= metrics.WideFrame {
 		help = "j/k cards | h/l/tab columns | 1-4 jump | c cancelled:" + cancelled + " | ? help | q quit"
 	}
 	if m.editor.Enabled() {
 		help = "n new | e edit | " + help
 	}
-	if showMoveStatus || m.actionNotice || (m.move.status != "" && m.loadErr == nil && m.pollErr == nil && m.preferenceErr == nil) {
-		footer := fitLine(state, width)
-		return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
-	}
-	if m.settingsNew != nil {
-		footer := settingsBoardFooter(state, cancelled, m.editor.Enabled(), m.adr.Enabled(), width)
+	footer := ""
+	switch {
+	case m.noticeOwnsFooter():
+		footer = fitLine(state, width)
+	case m.settingsNew != nil:
+		footer = settingsBoardFooter(state, cancelled, m.editor.Enabled(), m.adr.Enabled(), width)
 		if m.issueImport.Enabled() && width >= 24 {
 			footer = fitLine("i import | "+footer, width)
 		}
 		hits = append(hits, boardFooterHits(footer, height-1, width)...)
-		footer = m.styleBoardFooter(footer)
-		return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
+	default:
+		footer = fitLine(state+" | "+help, width)
+		hits = append(hits, boardFooterHits(footer, height-1, width)...)
 	}
-	footer := fitLine(state+" | "+help, width)
-	hits = append(hits, boardFooterHits(footer, height-1, width)...)
-	footer = m.styleBoardFooter(footer)
-	return strings.Join([]string{header, filterLine, body, footer}, "\n"), hits
+	rows = append(rows, m.renderFooter(styles, footer, stateSlot, width))
+	return strings.Join(rows, "\n"), hits
+}
+
+// noticeOwnsFooter reports whether a transient move or action notice replaces
+// the whole hint ladder, which is also why that footer carries no hit regions.
+func (m Model) noticeOwnsFooter() bool {
+	moveActive := m.move.lifted != nil || m.move.saving
+	if (moveActive || m.move.notice) && m.move.status != "" {
+		return true
+	}
+	if m.actionNotice {
+		return true
+	}
+	return m.move.status != "" && m.loadErr == nil && m.pollErr == nil && m.preferenceErr == nil
+}
+
+// boardState resolves the footer's state segment and the semantic hue it
+// carries (spec section 1.5).
+func (m Model) boardState() (string, theme.Slot) {
+	moveActive := m.move.lifted != nil || m.move.saving
+	switch {
+	case (moveActive || m.move.notice) && m.move.status != "":
+		return sanitizeTerminal(m.move.status), theme.StatusWarn
+	case m.actionNotice && m.actionStatus != "":
+		if m.actionStatusError {
+			return sanitizeTerminal(m.actionStatus), theme.StatusDanger
+		}
+		return sanitizeTerminal(m.actionStatus), theme.StatusOK
+	case m.loadErr != nil:
+		return "error: " + m.loadErr.Error(), theme.StatusDanger
+	case m.pollErr != nil:
+		return "error: " + m.pollErr.Error(), theme.StatusDanger
+	case m.preferenceErr != nil:
+		return "error: " + m.preferenceErr.Error(), theme.StatusDanger
+	case m.move.status != "":
+		return sanitizeTerminal(m.move.status), theme.StatusWarn
+	case (m.loading && !m.haveBoardSnapshot) || (m.watcher != nil && !m.haveVersion):
+		return "loading board...", theme.FgMuted
+	default:
+		return "ready", theme.StatusOK
+	}
+}
+
+// renderTopBar is the Canvas row of spec section 2.1: the wordmark in the brand
+// hue, the board identity, and the shipped counter in the success hue.
+func (m Model) renderTopBar(styles *theme.Styles, width int) string {
+	title := strings.TrimSpace(sanitizeTerminal(m.board.Title))
+	if title == "" {
+		title = "Board"
+	}
+	line := styles.OnBold(theme.Brand, theme.Canvas).Render("kb") +
+		styles.Board.TopBar.Render(" / "+title+" / "+sanitizeTerminal(m.user))
+	if shipped := m.shippedCount(); shipped > 0 {
+		line += styles.On(theme.StatusOK, theme.Canvas).Render(fmt.Sprintf(" / ×%d shipped today", shipped))
+	}
+	return fillRow(styles.Board.Canvas, fitLine(line, width), width)
+}
+
+// boardLayout is the resolved column geometry of spec section 2.5: a page
+// margin on a wide frame, columns split evenly and clamped to MaxColumnWidth so
+// extra terminal width becomes margin rather than stretched cards.
+type boardLayout struct {
+	margin int   // left page margin; the first column starts here
+	widths []int // panel width per visible column
+	inner  int   // narrowest card inner width, for the compaction threshold
+}
+
+func boardColumnLayout(metrics theme.Metrics, width, count int) boardLayout {
+	margin := metrics.PageMargin(width)
+	widths := splitWidths(max(width-2*margin, 1), count)
+	if widths[0] > metrics.MaxColumnWidth {
+		for i := range widths {
+			widths[i] = metrics.MaxColumnWidth
+		}
+		used := count*metrics.MaxColumnWidth + (count-1)*metrics.ColumnGutter
+		margin = max((width-used)/2, 0)
+	}
+	narrowest := widths[len(widths)-1]
+	return boardLayout{
+		margin: margin,
+		widths: widths,
+		inner:  metrics.CardInner(max(narrowest-2*metrics.ColumnPadX, 0), theme.DensityNormal),
+	}
+}
+
+// renderFooter draws the status band of spec section 2.1: one Surface row whose
+// leading segment carries the state hue and whose action hints keep the pointer
+// identities the footer has always had.
+func (m Model) renderFooter(styles *theme.Styles, text string, state theme.Slot, width int) string {
+	parts := strings.Split(text, " | ")
+	separator := styles.On(theme.FgMuted, theme.Surface).Render(" | ")
+	rendered := make([]string, 0, len(parts))
+	for index, part := range parts {
+		key := boardFooterKey(part)
+		style := styles.Board.Footer
+		if index == 0 && key == "" {
+			style = styles.On(state, theme.Surface)
+		}
+		content := style.Render(part)
+		if key != "" {
+			content = m.pointerState.Render(boardFooterControlID(key), content)
+		}
+		rendered = append(rendered, content)
+	}
+	return fillRow(styles.Board.Footer, fitLine(strings.Join(rendered, separator), width), width)
 }
 
 func boardFooterHits(footer string, row, width int) []boardHit {
@@ -408,32 +522,28 @@ func boardCardLabelControlID(taskID, tag string) pointer.ControlID {
 	return pointer.ControlID("board-card-label:" + taskID + ":" + tag)
 }
 
-func (m Model) styleBoardFooter(footer string) string {
-	parts := strings.Split(footer, " | ")
-	for index, part := range parts {
-		if key := boardFooterKey(part); key != "" {
-			parts[index] = m.pointerState.Render(boardFooterControlID(key), part)
-		}
-	}
-	return strings.Join(parts, " | ")
-}
-
+// renderFilterBar draws the two toolbar rows on the Canvas tier with the filter
+// field on Surface (spec section 2.1). The row's text vocabulary is unchanged
+// from v1.0.1: the [+ tag] / [x tag] markers are the filter's state affordance
+// and every click region is keyed to their plain-text widths, so this slice
+// restyles the tiers and hues and leaves the glyphs alone.
 func (m Model) renderFilterBar(width int) (string, []boardHit) {
+	styles := m.themeStyles()
 	width = max(width, 1)
+	canvas := styles.Board.Canvas
+	separator := styles.On(theme.FgMuted, theme.Canvas).Render(" | ")
 	hits := make([]boardHit, 0, 2+len(m.filterLabels()))
 	lines := [2][]string{}
-	appendPart := func(row int, part string, kind boardHitKind, tag string) {
+	appendPart := func(row int, part string, style lipgloss.Style, kind boardHitKind, tag string) {
 		x := ansi.StringWidth(strings.Join(lines[row], ""))
 		if len(lines[row]) > 0 {
-			lines[row] = append(lines[row], " | ")
+			lines[row] = append(lines[row], separator)
 			x += 3
 		}
 		start := x
 		partWidth := ansi.StringWidth(part)
 		hit := boardHit{x0: start, x1: min(start+partWidth, width), y0: row + 1, y1: row + 2, kind: kind, tag: tag}
-		part = m.pointerState.Render(boardHitControlID(hit), part)
-		lines[row] = append(lines[row], part)
-		x += partWidth
+		lines[row] = append(lines[row], m.pointerState.Render(boardHitControlID(hit), style.Render(part)))
 		if kind != boardHitDefault && start < width {
 			hits = append(hits, hit)
 		}
@@ -452,7 +562,13 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 	if m.filter.focus == filterLabels && len(labels) > 0 {
 		focusTag = labels[min(max(m.filter.labelIndex, 0), len(labels)-1)]
 	}
-	appendLabel := func(tag string) {
+	labelStyle := func(tag string) lipgloss.Style {
+		if !m.filter.hasTag(tag) {
+			return styles.On(theme.FgMuted, theme.Canvas)
+		}
+		return styles.OnBold(theme.LabelSlot(widget.LabelWheel(tag)), theme.Canvas)
+	}
+	appendLabel := func(row int, tag string) {
 		marker := "+"
 		if m.filter.hasTag(tag) {
 			marker = "x"
@@ -461,38 +577,32 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 		if tag == focusTag {
 			label = ">" + label + "<"
 		}
-		appendPart(0, label, boardHitFilterLabel, tag)
+		appendPart(row, label, labelStyle(tag), boardHitFilterLabel, tag)
 	}
 	if focusTag != "" {
-		appendLabel(focusTag)
+		appendLabel(0, focusTag)
 	}
-	appendPart(0, text, boardHitFilterText, "")
+	appendPart(0, text, styles.On(theme.FgBase, theme.Surface), boardHitFilterText, "")
 	if m.filter.active() {
-		appendPart(1, fmt.Sprintf("%d of %d cards", len(m.filteredBoard().Tasks), len(m.board.Tasks)), boardHitDefault, "")
-	}
-	appendLabelOnControls := func(tag string) {
-		marker := "+"
-		if m.filter.hasTag(tag) {
-			marker = "x"
-		}
-		appendPart(1, "["+marker+" "+sanitizeTerminal(tag)+"]", boardHitFilterLabel, tag)
+		count := fmt.Sprintf("%d of %d cards", len(m.filteredBoard().Tasks), len(m.board.Tasks))
+		appendPart(1, count, styles.On(theme.FgMuted, theme.Canvas), boardHitDefault, "")
 	}
 	for _, tag := range labels {
 		if tag != focusTag && m.filter.hasTag(tag) {
-			appendLabelOnControls(tag)
+			appendLabel(1, tag)
 		}
 	}
 	if m.filter.active() {
-		appendPart(1, "[clear]", boardHitFilterClear, "")
+		appendPart(1, "[clear]", styles.On(theme.StatusDanger, theme.Canvas), boardHitFilterClear, "")
 	}
 	for _, tag := range labels {
 		if tag != focusTag && !m.filter.hasTag(tag) {
-			appendLabelOnControls(tag)
+			appendLabel(1, tag)
 		}
 	}
 	return strings.Join([]string{
-		fitLine(strings.Join(lines[0], ""), width),
-		fitLine(strings.Join(lines[1], ""), width),
+		fillRow(canvas, fitLine(strings.Join(lines[0], ""), width), width),
+		fillRow(canvas, fitLine(strings.Join(lines[1], ""), width), width),
 	}, "\n"), hits
 }
 
@@ -576,114 +686,235 @@ func splitWidths(total, count int) []int {
 }
 
 func (m Model) renderBoardColumn(status board.Status, width, height int) renderedColumn {
-	if width < 3 {
-		label := statusLabel(status)
-		lines := make([]string, height)
-		lines[0] = m.pointerState.Render(pointer.ControlID("board-column:"+string(status)), fitLine(label, width))
-		return renderedColumn{lines: lines, hits: []boardHit{
-			{x1: width, y1: height, status: status},
-			{x1: width, y1: 1, status: status, kind: boardHitColumnHeading},
-		}}
-	}
-	inner := width - 2
+	metrics := m.themeStyles().Metrics
+	inner := metrics.CardInner(max(width-2*metrics.ColumnPadX, 0), theme.DensityNormal)
+	return m.renderBoardColumnAt(status, width, height, metrics.DensityFor(max(m.height, 8), inner))
+}
+
+// renderBoardColumnAt draws one column panel at the density the frame resolved
+// to. Depth is the shade step from the band to the panel body to the cards;
+// there is no border anywhere in it (spec section 2.2).
+func (m Model) renderBoardColumnAt(status board.Status, width, height int, density theme.Density) renderedColumn {
+	styles := m.themeStyles()
+	metrics := styles.Metrics
+	index := statusIndex(status)
 	tasks := tasksInStatus(m.filteredBoard(), status)
-	focused := m.boardView.column == statusIndex(status)
-	heading := fmt.Sprintf("%d %s  %d", statusIndex(status)+1, statusLabel(status), len(tasks))
-	if focused {
-		heading = "[" + heading + "]"
-	}
-	heading = m.pointerState.Render(pointer.ControlID("board-column:"+string(status)), heading)
-	lines := []string{"┌" + padLine(heading, inner, "─") + "┐"}
 	hits := []boardHit{
 		{x1: width, y1: height, status: status},
 		{x1: width, y1: 1, status: status, kind: boardHitColumnHeading},
 	}
+	if width <= 0 || height <= 0 {
+		return renderedColumn{hits: hits}
+	}
 
-	contentHeight := max(height-2, 0)
-	cardLines, owners, labelSpans := m.renderTaskLines(tasks, status, inner)
-	columnIndex := statusIndex(status)
+	meta := ""
+	metaRows := 0
+	if !density.Compact() {
+		if meta = columnMetaLine(tasks); meta != "" {
+			metaRows = 1
+		}
+	}
+	inset := metrics.ColumnPad(density)
+	cardLines, owners, spans := m.renderTaskLines(tasks, status, max(width-2*inset, 0), density)
+
+	contentHeight := max(height-1-metaRows, 0)
+	if len(cardLines) > contentHeight && contentHeight > 0 {
+		contentHeight-- // the overflow cue of spec section 3.7 owns the last row
+	}
 	maxScroll := max(len(cardLines)-contentHeight, 0)
-	start := visibleCardStart(cardLines, owners, m.boardView.rows[columnIndex], contentHeight)
-	if m.boardView.manualScroll[columnIndex] {
-		start = min(max(m.boardView.scrolls[columnIndex], 0), maxScroll)
+	start := visibleCardStart(cardLines, owners, m.boardView.rows[index], contentHeight)
+	if m.boardView.manualScroll[index] {
+		start = min(max(m.boardView.scrolls[index], 0), maxScroll)
 	}
 	hits[0].scroll = start
 	hits[0].maxScroll = maxScroll
+
+	body := make([]string, 0, contentHeight)
 	for row := 0; row < contentHeight; row++ {
 		source := start + row
 		line := ""
 		if source < len(cardLines) {
 			line = cardLines[source]
 		}
-		lines = append(lines, "│"+padLine(line, inner, " ")+"│")
+		body = append(body, line)
+		y := 1 + metaRows + row
 		if source < len(owners) && owners[source] != "" {
-			hits = append(hits, boardHit{x1: width, y0: row + 1, y1: row + 2, status: status, taskID: owners[source]})
+			hits = append(hits, boardHit{x1: width, y0: y, y1: y + 1, status: status, taskID: owners[source]})
 		}
-		if source < len(labelSpans) {
-			for _, span := range labelSpans[source] {
+		if source < len(spans) {
+			for _, span := range spans[source] {
 				hits = append(hits, boardHit{
-					x0: 1 + span.x0, x1: min(1+span.x1, width-1),
-					y0: row + 1, y1: row + 2, status: status,
+					x0: inset + span.x0, x1: min(inset+span.x1, width),
+					y0: y, y1: y + 1, status: status,
 					kind: boardHitFilterLabel, tag: span.tag, taskID: owners[source],
 				})
 			}
 		}
 	}
-	lines = append(lines, "└"+strings.Repeat("─", inner)+"┘")
+
+	lines := widget.Panel(styles, widget.PanelOpts{
+		Header: widget.BandOpts{
+			Index:   index + 1,
+			Label:   statusLabel(status),
+			Count:   len(tasks),
+			Hue:     columnHue(status),
+			Focused: m.boardView.column == index,
+		},
+		Meta:    meta,
+		Body:    body,
+		More:    hiddenCards(owners, start+contentHeight),
+		Width:   width,
+		Height:  height,
+		Density: density,
+	})
+	// The band is the column's click target, so the pressed state wraps the row
+	// the panel drew rather than the panel wrapping the pointer.
+	lines[0] = m.pointerState.Render(pointer.ControlID("board-column:"+string(status)), lines[0])
 	return renderedColumn{lines: lines, hits: hits}
 }
 
-func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width int) ([]string, []string, [][]labelSpan) {
-	if len(tasks) == 0 {
-		return []string{"(empty)"}, []string{""}, [][]labelSpan{nil}
+// columnMetaLine is the row under the band (spec section 2.3). The blocked
+// segment appears only when the count is non-zero.
+func columnMetaLine(tasks []board.Task) string {
+	blocked := 0
+	for _, task := range tasks {
+		if task.Blocked {
+			blocked++
+		}
 	}
-	lines := make([]string, 0, len(tasks)*3)
-	owners := make([]string, 0, len(tasks)*3)
-	spans := make([][]labelSpan, 0, len(tasks)*3)
-	selected := m.boardView.rows[statusIndex(status)]
+	line := fmt.Sprintf("%d cards", len(tasks))
+	if len(tasks) == 1 {
+		line = "1 card"
+	}
+	if blocked > 0 {
+		line += fmt.Sprintf(" · %d blocked", blocked)
+	}
+	return line
+}
+
+// hiddenCards counts the cards whose rows start below the visible window.
+func hiddenCards(owners []string, from int) int {
+	count, previous := 0, ""
+	for index, owner := range owners {
+		if owner != "" && owner != previous && index >= from {
+			count++
+		}
+		previous = owner
+	}
+	return count
+}
+
+func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width int, density theme.Density) ([]string, []string, [][]labelSpan) {
+	styles := m.themeStyles()
+	if len(tasks) == 0 {
+		return []string{styles.Column.Meta.Render("(empty)")}, []string{""}, [][]labelSpan{nil}
+	}
+	index := statusIndex(status)
+	focused := m.boardView.column == index
+	selected := m.boardView.rows[index]
+	descLines := styles.Metrics.DescLines(max(m.height, 8), density)
+	gap := styles.Metrics.CardGapRows(density)
+	lines := make([]string, 0, len(tasks)*5)
+	owners := make([]string, 0, len(tasks)*5)
+	spans := make([][]labelSpan, 0, len(tasks)*5)
 	for i, task := range tasks {
-		marker := "  "
-		if m.boardView.column == statusIndex(status) && i == selected {
-			marker = "› "
+		isSelected := focused && i == selected
+		alternate := density.Compact() && i%2 == 1
+		surface := styles.Surface(isSelected, alternate)
+		tags := make([]string, 0, len(task.Tags))
+		for _, tag := range task.Tags {
+			tags = append(tags, sanitizeTerminal(tag))
 		}
-		if m.move.lifted != nil && task.ID == m.move.lifted.taskID {
-			marker = "↕ "
+		rows, cardSpans := widget.CardWithSpans(styles, widget.CardOpts{
+			Title:     sanitizeTerminal(task.Title),
+			Emoji:     sanitizeTerminal(task.Emoji),
+			Seq:       seqLabel(task),
+			Desc:      sanitizeTerminal(task.Desc),
+			Meta:      m.cardMeta(styles, task, surface, density),
+			Labels:    tags,
+			Priority:  task.Prio,
+			Selected:  isSelected,
+			Alt:       alternate,
+			Width:     width,
+			DescLines: descLines,
+			Density:   density,
+		})
+		rowSpans := make([][]labelSpan, len(rows))
+		for _, span := range cardSpans {
+			// The span reports its position in CardOpts.Labels, so the hit keeps
+			// the task's exact tag while the card renders the sanitized one.
+			rowSpans[span.Row] = append(rowSpans[span.Row],
+				labelSpan{x0: span.X0, x1: span.X1, tag: task.Tags[span.Index]})
 		}
-		first := cardHeading(task, m.renderedAt)
-		for lineIndex, line := range wrapTokens(first, max(width-2, 1)) {
-			prefix := "  "
-			if lineIndex == 0 {
-				prefix = marker
-			}
-			lines = append(lines, prefix+line)
-			owners = append(owners, task.ID)
-			spans = append(spans, nil)
-		}
-		metaLines, metaSpans := wrapMeta(cardMetaEntries(task, m.renderedAt), max(width-2, 1))
-		for lineIndex, line := range metaLines {
-			for spanIndex := len(metaSpans[lineIndex]) - 1; spanIndex >= 0; spanIndex-- {
-				span := metaSpans[lineIndex][spanIndex]
+		for rowIndex, line := range rows {
+			for spanIndex := len(rowSpans[rowIndex]) - 1; spanIndex >= 0; spanIndex-- {
+				span := rowSpans[rowIndex][spanIndex]
 				line = ansi.Cut(line, 0, span.x0) +
 					m.pointerState.Render(boardCardLabelControlID(task.ID, span.tag), ansi.Cut(line, span.x0, span.x1)) +
 					ansi.Cut(line, span.x1, ansi.StringWidth(line))
 			}
-			lines = append(lines, "  "+line)
+			lines = append(lines, line)
 			owners = append(owners, task.ID)
-			lineSpans := make([]labelSpan, len(metaSpans[lineIndex]))
-			for spanIndex, span := range metaSpans[lineIndex] {
-				span.x0 += 2
-				span.x1 += 2
-				lineSpans[spanIndex] = span
-			}
-			spans = append(spans, lineSpans)
+			spans = append(spans, rowSpans[rowIndex])
 		}
 		if i+1 < len(tasks) {
-			lines = append(lines, "")
-			owners = append(owners, "")
-			spans = append(spans, nil)
+			for range gap {
+				lines = append(lines, "")
+				owners = append(owners, "")
+				spans = append(spans, nil)
+			}
 		}
 	}
 	return lines, owners, spans
+}
+
+// seqLabel is the right-aligned card sequence of spec section 3.2.
+func seqLabel(task board.Task) string {
+	if task.Seq <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("#%d", task.Seq)
+}
+
+// cardMeta is the chip row of spec section 3.4, in survival order: priority,
+// age, blocked, due, effort. Compact degrades the pills to flat marks.
+func (m Model) cardMeta(styles *theme.Styles, task board.Task, surface theme.Slot, density theme.Density) []string {
+	flat := density.Compact()
+	meta := []string{
+		widget.Priority(styles, task.Prio, surface),
+		styles.On(theme.FgMuted, surface).Render(ageChip(task, m.renderedAt)),
+	}
+	if task.Blocked {
+		if flat {
+			meta = append(meta, styles.OnBold(theme.StatusWarn, surface).Render(styles.Glyph.Blocked))
+		} else {
+			meta = append(meta, widget.Chip(styles, widget.ChipOpts{Text: "blocked", Fill: theme.StatusWarn, On: surface}))
+		}
+	}
+	if task.Due != "" {
+		label, overdue := dueChip(sanitizeTerminal(task.Due), m.renderedAt)
+		fill := theme.StatusInfo
+		if overdue {
+			fill = theme.StatusDanger
+		}
+		if flat {
+			meta = append(meta, styles.OnBold(fill, surface).Render("!"+compactDue(label)))
+		} else {
+			meta = append(meta, widget.Chip(styles, widget.ChipOpts{Text: label, Fill: fill, On: surface}))
+		}
+	}
+	if task.Effort != "" {
+		meta = append(meta, styles.On(theme.FgSubtle, surface).Render(styles.Glyph.Diamond+sanitizeTerminal(task.Effort)))
+	}
+	return meta
+}
+
+// compactDue drops the "overdue · " prefix the pill spells out in full.
+func compactDue(label string) string {
+	if _, rest, found := strings.Cut(label, "· "); found {
+		return rest
+	}
+	return label
 }
 
 func visibleCardStart(lines, owners []string, selected, height int) int {
@@ -705,36 +936,42 @@ func visibleCardStart(lines, owners []string, selected, height int) int {
 	return min(max(selectedLine-1, 0), len(lines)-height)
 }
 
-func joinColumns(columns []renderedColumn) (string, []boardHit) {
+// joinColumns lays the panels out side by side with a Canvas gutter and the
+// page margin of spec section 2.5, and moves every hit region onto the frame.
+func joinColumns(styles *theme.Styles, columns []renderedColumn, layout boardLayout, width int) ([]string, []boardHit) {
 	if len(columns) == 0 {
-		return "", nil
+		return nil, nil
 	}
+	canvas := styles.Board.Canvas
+	gutter := styles.Metrics.ColumnGutter
 	height := len(columns[0].lines)
 	lines := make([]string, height)
-	hits := make([]boardHit, 0)
-	x := 0
-	for columnIndex, column := range columns {
-		if columnIndex > 0 {
-			for row := range lines {
-				lines[row] += " "
+	for row := range lines {
+		line := pad(canvas, layout.margin)
+		for index, column := range columns {
+			if index > 0 {
+				line += pad(canvas, gutter)
 			}
-			x++
-		}
-		for row := range lines {
 			if row < len(column.lines) {
-				lines[row] += column.lines[row]
+				line += column.lines[row]
 			}
+		}
+		lines[row] = fillRow(canvas, fitLine(line, width), width)
+	}
+	hits := make([]boardHit, 0)
+	x := layout.margin
+	for index, column := range columns {
+		if index > 0 {
+			x += gutter
 		}
 		for _, hit := range column.hits {
 			hit.x0 += x
-			hit.x1 += x
+			hit.x1 = min(hit.x1+x, width)
 			hits = append(hits, hit)
 		}
-		if len(column.lines) > 0 {
-			x += ansi.StringWidth(column.lines[0])
-		}
+		x += layout.widths[index]
 	}
-	return strings.Join(lines, "\n"), hits
+	return lines, hits
 }
 
 func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.Cmd {
@@ -913,134 +1150,6 @@ func statusLabel(status board.Status) string {
 	}[status]
 }
 
-func cardHeading(task board.Task, now time.Time) []string {
-	tokens := make([]string, 0, 5)
-	if task.Emoji != "" {
-		tokens = append(tokens, task.Emoji)
-	}
-	tokens = append(tokens, task.Title)
-	if task.Seq > 0 {
-		tokens = append(tokens, fmt.Sprintf("#%d", task.Seq))
-	}
-	tokens = append(tokens, ageChip(task, now))
-	return tokens
-}
-
-type metaEntry struct {
-	text string
-	tag  string
-}
-
-func cardMetaEntries(task board.Task, now time.Time) []metaEntry {
-	tokens := []metaEntry{{text: priorityChip(task.Prio)}}
-	if task.Blocked {
-		tokens = append(tokens, metaEntry{text: chip("⛔ blocked", lipgloss.Color("#ffb020"))})
-	}
-	if task.Due != "" {
-		label, overdue := dueChip(task.Due, now)
-		color := lipgloss.Color("#e2f4e0")
-		if overdue {
-			color = lipgloss.Color("#ffe0dc")
-		}
-		tokens = append(tokens, metaEntry{text: chip(label, color)})
-	}
-	if task.Effort != "" {
-		tokens = append(tokens, metaEntry{text: "[" + task.Effort + "]"})
-	}
-	for _, tag := range task.Tags {
-		tokens = append(tokens, metaEntry{text: labelChip(tag), tag: tag})
-	}
-	return tokens
-}
-
-func wrapMeta(entries []metaEntry, width int) ([]string, [][]labelSpan) {
-	if width <= 0 {
-		return []string{""}, [][]labelSpan{nil}
-	}
-	lines := make([]string, 0, 2)
-	spans := make([][]labelSpan, 0, 2)
-	line := ""
-	lineSpans := make([]labelSpan, 0)
-	flush := func() {
-		lines = append(lines, line)
-		spans = append(spans, lineSpans)
-		line = ""
-		lineSpans = nil
-	}
-	for _, entry := range entries {
-		if entry.text == "" {
-			continue
-		}
-		separator := ""
-		if line != "" {
-			separator = " "
-		}
-		if line != "" && ansi.StringWidth(line+separator+entry.text) > width {
-			flush()
-			separator = ""
-		}
-		start := ansi.StringWidth(line) + ansi.StringWidth(separator)
-		visible := ansi.Truncate(entry.text, max(width-start, 0), "")
-		line += separator + visible
-		if entry.tag != "" && ansi.StringWidth(visible) > 0 {
-			lineSpans = append(lineSpans, labelSpan{x0: start, x1: start + ansi.StringWidth(visible), tag: entry.tag})
-		}
-	}
-	if line != "" || len(lines) == 0 {
-		flush()
-	}
-	return lines, spans
-}
-
-var priorityColors = map[int]color.Color{
-	1: lipgloss.Color("#ff5a48"),
-	2: lipgloss.Color("#ffb020"),
-	3: lipgloss.Color("#4f8ef7"),
-	4: lipgloss.Color("#b8bdc7"),
-}
-
-func priorityChip(priority int) string {
-	if priority < 1 || priority > 4 {
-		priority = 3
-	}
-	return lipgloss.NewStyle().Foreground(priorityColors[priority]).Bold(true).Render(fmt.Sprintf("P%d", priority))
-}
-
-func chip(label string, fill color.Color) string {
-	return lipgloss.NewStyle().Background(fill).Foreground(lipgloss.Color("#20242c")).Render("[" + label + "]")
-}
-
-var labelColors = [...]color.Color{
-	lipgloss.Color("#ff7b54"),
-	lipgloss.Color("#4f8ef7"),
-	lipgloss.Color("#3f9d58"),
-	lipgloss.Color("#b98af7"),
-	lipgloss.Color("#ffb020"),
-}
-
-func labelColor(tag string) color.Color {
-	first, _ := utf8.DecodeRuneInString(tag)
-	if first == utf8.RuneError && tag == "" {
-		first = 0
-	}
-	units := 0
-	for _, r := range tag {
-		units += utf16.RuneLen(r)
-	}
-	return labelColors[(units+int(first))%len(labelColors)]
-}
-
-func labelChip(tag string) string {
-	color := labelColor(tag)
-	key, value, scoped := strings.Cut(tag, "::")
-	if !scoped || key == "" || value == "" {
-		return chip("#"+tag, color)
-	}
-	keyPart := lipgloss.NewStyle().Background(lipgloss.Color("#20242c")).Foreground(lipgloss.Color("#ffffff")).Render("[" + key + ":")
-	valuePart := lipgloss.NewStyle().Background(color).Foreground(lipgloss.Color("#20242c")).Render(value + "]")
-	return keyPart + valuePart
-}
-
 const day = 24 * time.Hour
 
 func ageChip(task board.Task, now time.Time) string {
@@ -1087,33 +1196,18 @@ func dueChip(due string, now time.Time) (string, bool) {
 	}
 }
 
-func wrapTokens(tokens []string, width int) []string {
+// pad renders width cells of one shade tier, so a padded row carries its
+// background all the way to the edge instead of punching a hole in it.
+func pad(style lipgloss.Style, width int) string {
 	if width <= 0 {
-		return []string{""}
+		return ""
 	}
-	lines := make([]string, 0, 2)
-	line := ""
-	for _, token := range tokens {
-		if token == "" {
-			continue
-		}
-		candidate := token
-		if line != "" {
-			candidate = line + " " + token
-		}
-		if ansi.StringWidth(candidate) <= width {
-			line = candidate
-			continue
-		}
-		if line != "" {
-			lines = append(lines, line)
-		}
-		line = ansi.Truncate(token, width, "")
-	}
-	if line != "" || len(lines) == 0 {
-		lines = append(lines, line)
-	}
-	return lines
+	return style.Render(strings.Repeat(" ", width))
+}
+
+// fillRow right-pads already-styled content to an exact frame width.
+func fillRow(style lipgloss.Style, content string, width int) string {
+	return content + pad(style, width-ansi.StringWidth(content))
 }
 
 func fitLine(line string, width int) string {

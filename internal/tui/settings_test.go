@@ -809,7 +809,7 @@ func TestRootRoutesSettingsWithoutStoppingBoardPolling(t *testing.T) {
 		t.Fatal("settings pane stopped the board poll chain")
 	}
 	updateTestModel(t, &root, tea.KeyPressMsg{Code: tea.KeyEscape})
-	if root.settings != nil || !strings.Contains(root.View().Content, "kb / Board / alice") {
+	if root.settings != nil || !strings.Contains(ansi.Strip(root.View().Content), "kb / Board / alice") {
 		t.Fatal("escape did not return to board")
 	}
 }
