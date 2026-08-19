@@ -183,18 +183,23 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	go output.writeFrom(terminal)
 	waitForPTYMarker(t, &output, "Drag through raw SGR")
 
-	// SGR coordinates are one-based. The first card is row 5 in Todo; Doing
-	// starts after the first 30-cell column. Exercise the terminal decoder,
-	// not Model.Update with fabricated mouse messages.
-	if _, err := io.WriteString(terminal, "\x1b[<0;2;5M"); err != nil {
+	// SGR coordinates are one-based. The board spends four chrome rows (top
+	// bar, two toolbar rows, page padding), then each column spends a header
+	// band and a meta line, so the first card in Todo is row 7; Doing starts
+	// after the page margin and the first 39-cell column. Exercise the terminal
+	// decoder, not Model.Update with fabricated mouse messages.
+	if _, err := io.WriteString(terminal, "\x1b[<0;2;7M"); err != nil {
 		t.Fatal(err)
 	}
 	waitForPTYMarker(t, &output, "Lifted Drag through raw SGR")
-	if _, err := io.WriteString(terminal, "\x1b[<32;45;5M"); err != nil {
+	moveOffset := output.length()
+	if _, err := io.WriteString(terminal, "\x1b[<32;45;7M"); err != nil {
 		t.Fatal(err)
 	}
-	waitForPTYMarker(t, &output, "2 DOING  1")
-	if _, err := io.WriteString(terminal, "\x1b[<0;45;5m"); err != nil {
+	// The preview redraws the card under Doing. Its title is the only stable
+	// marker: the band's count is right-aligned away from the column name.
+	waitForPTYMarkerAfter(t, &output, moveOffset, "Drag through raw SGR")
+	if _, err := io.WriteString(terminal, "\x1b[<0;45;7m"); err != nil {
 		t.Fatal(err)
 	}
 	waitForTaskStatus(t, st, "pointer-pty", task.ID, board.StatusDoing)

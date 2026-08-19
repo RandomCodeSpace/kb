@@ -17,6 +17,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/cardeditor"
 	"github.com/RandomCodeSpace/kb/internal/tui/issueimport"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 const (
@@ -98,6 +99,7 @@ type Model struct {
 	actionStatusError bool
 	actionNotice      bool
 	shipped           shippedRecord
+	styles            *theme.Styles
 }
 
 func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
@@ -147,6 +149,9 @@ func newModel(
 		now:         now,
 		renderedAt:  now(),
 		action:      newTaskActionState(),
+		// Spec section 6.3: the palette defaults to dark and is rebuilt once,
+		// when the terminal answers with its background color.
+		styles: theme.New(true),
 	}
 }
 
@@ -557,6 +562,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.mutateFilter(func(filter *boardFilterState) { filter.clear() })
 	case preferenceSavedMsg:
 		return m, m.finishPreferences(msg)
+	case tea.BackgroundColorMsg:
+		// Spec section 6.2: New is called on program start and here, nowhere
+		// else. Every style in the tree is rebuilt exactly once per answer.
+		m.styles = theme.New(msg.IsDark())
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 {
 			m.width = msg.Width

@@ -62,9 +62,19 @@ func fill(style lipgloss.Style, content string, width int) string {
 // individually and shorter chips behind them are still attempted, never a
 // blanket right-trim.
 func join(style lipgloss.Style, entries []string, width int) string {
+	line, _ := joinAt(style, entries, width)
+	return line
+}
+
+// joinAt is join plus the starting column of every entry it emitted, so a
+// caller can map a rendered pill back onto a pointer hit region. A skipped or
+// empty entry reports -1.
+func joinAt(style lipgloss.Style, entries []string, width int) (string, []int) {
 	line := ""
 	used := 0
-	for _, entry := range entries {
+	starts := make([]int, len(entries))
+	for index, entry := range entries {
+		starts[index] = -1
 		if entry == "" {
 			continue
 		}
@@ -79,8 +89,9 @@ func join(style lipgloss.Style, entries []string, width int) string {
 		if separator == 1 {
 			line += pad(style, 1)
 		}
+		starts[index] = used + separator
 		line += entry
 		used += cost
 	}
-	return line
+	return line, starts
 }

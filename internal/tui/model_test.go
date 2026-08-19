@@ -337,8 +337,8 @@ func TestModelLoadsRoutesAndRenders(t *testing.T) {
 	if !wide.AltScreen || wide.MouseMode != tea.MouseModeCellMotion {
 		t.Fatalf("view terminal modes = alt:%v mouse:%v", wide.AltScreen, wide.MouseMode)
 	}
-	for _, want := range []string{"kb / Work / alice", "[1 TO DO  1]", "one", "DOING", "DONE", "ready"} {
-		if !strings.Contains(wide.Content, want) {
+	for _, want := range []string{"kb / Work / alice", "▸ 1 TO DO", "one", "DOING", "DONE", "ready"} {
+		if !strings.Contains(ansi.Strip(wide.Content), want) {
 			t.Errorf("wide view missing %q:\n%s", want, wide.Content)
 		}
 	}
@@ -347,8 +347,8 @@ func TestModelLoadsRoutesAndRenders(t *testing.T) {
 	m = updated.(Model)
 	updated, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 0})
 	m = updated.(Model)
-	narrow := m.View().Content
-	if !strings.Contains(narrow, "[2 DOING  0]") || strings.Contains(narrow, "TO DO") {
+	narrow := ansi.Strip(m.View().Content)
+	if !strings.Contains(narrow, "▸ 2 DOING") || strings.Contains(narrow, "TO DO") {
 		t.Fatalf("narrow focused view:\n%s", narrow)
 	}
 
@@ -812,8 +812,10 @@ func TestBoardMouseWheelScrollsHoveredColumn(t *testing.T) {
 
 	beforeBoard := ansi.Strip(m.View().Content)
 	boardMouse := requireMouseHandler(t, m.View().OnMouse, "board")
+	// The column group is centered inside the frame (spec section 2.5), so the
+	// hovered cell is the middle of the frame rather than its left edge.
 	scrollDown := requireMouseCommand(t,
-		boardMouse(tea.MouseWheelMsg{X: 1, Y: 4, Button: tea.MouseWheelDown}),
+		boardMouse(tea.MouseWheelMsg{X: 40, Y: 4, Button: tea.MouseWheelDown}),
 		"board wheel down",
 	)
 	if command := updateTestModel(t, &m, scrollDown()); command != nil {
@@ -826,7 +828,7 @@ func TestBoardMouseWheelScrollsHoveredColumn(t *testing.T) {
 	if afterBoard == beforeBoard || strings.Contains(afterBoard, "Card 0") {
 		t.Fatalf("board did not scroll the hovered column:\n%s", afterBoard)
 	}
-	if command := m.View().OnMouse(tea.MouseWheelMsg{X: 1, Y: 4, Button: tea.MouseWheelUp}); command == nil {
+	if command := m.View().OnMouse(tea.MouseWheelMsg{X: 40, Y: 4, Button: tea.MouseWheelUp}); command == nil {
 		t.Fatal("board wheel up was ignored")
 	} else {
 		updateTestModel(t, &m, command())
@@ -1339,7 +1341,9 @@ func TestRenderFitsNarrowTerminal(t *testing.T) {
 					t.Errorf("line %d width = %d, terminal = %d: %q", lineNumber+1, got, width, line)
 				}
 			}
-			if width >= 3 && !strings.Contains(output, "┌") {
+			// The frame is borderless now: the focused column's band caret is
+			// the last thing a narrow terminal keeps (spec section 2.2).
+			if !strings.Contains(ansi.Strip(output), "▸") {
 				t.Errorf("width %d lost the board frame:\n%s", width, output)
 			}
 		})
@@ -1941,16 +1945,29 @@ func (s *sgrStyle) applyColor(parts []string, index *int, code int) {
 	case code >= 40 && code <= 47, code >= 100 && code <= 107:
 		s.background = strconv.Itoa(code)
 	case code == 38 || code == 48:
-		if *index+2 >= len(parts) {
+		// 38;5;N is three parameters, 38;2;R;G;B is five. Reading the indexed
+		// length for a truecolor run would keep one channel and re-parse the
+		// other two as attributes, which collapses distinct colors onto the
+		// same cell key.
+		length := 0
+		if *index+1 < len(parts) {
+			switch parts[*index+1] {
+			case "5":
+				length = 2
+			case "2":
+				length = 4
+			}
+		}
+		if length == 0 || *index+length >= len(parts) {
 			return
 		}
-		value := strings.Join(parts[*index:*index+3], ";")
+		value := strings.Join(parts[*index:*index+length+1], ";")
 		if code == 38 {
 			s.foreground = value
 		} else {
 			s.background = value
 		}
-		*index += 2
+		*index += length
 	}
 }
 

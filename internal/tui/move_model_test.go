@@ -17,6 +17,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 func moveFixture() board.Board {
@@ -671,7 +672,7 @@ func TestMoveBoardViewCoverageEdges(t *testing.T) {
 	if got := taskIndex(moveFixture(), board.StatusDone, "missing"); got != 0 {
 		t.Fatalf("missing task index = %d", got)
 	}
-	if body, hits := joinColumns(nil); body != "" || hits != nil {
+	if body, hits := joinColumns(theme.New(true), nil, boardLayout{}, 10); body != nil || hits != nil {
 		t.Fatalf("empty columns = %q,%v", body, hits)
 	}
 	if got := settingsBoardFooter("ready", "off", false, false, 1); got != "q" {
@@ -765,7 +766,9 @@ func TestMoveFooterSanitizesTitlesStatusesAndStoreErrors(t *testing.T) {
 	assertSafeFooter := func(t *testing.T, model Model, wants ...string) {
 		t.Helper()
 		lines := strings.Split(model.render(), "\n")
-		footer := lines[len(lines)-1]
+		// The footer is a shade-tier band, so its own SGR runs are stripped
+		// before the scan; anything the payload injected survives the strip.
+		footer := ansi.Strip(lines[len(lines)-1])
 		for _, want := range wants {
 			if !strings.Contains(footer, want) {
 				t.Errorf("footer missing %q: %q", want, footer)

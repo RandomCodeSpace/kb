@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"image/color"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,10 +14,12 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/exp/teatest/v2"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget"
 )
 
 func boardViewFixture(now time.Time) board.Board {
@@ -81,28 +85,34 @@ func TestDueChipParity(t *testing.T) {
 	}
 }
 
+// TestLabelColorUsesWebHash pins the label wheel the board has always used.
+// The hash and the pill vocabulary now live in the widget package (spec
+// sections 1.6 and 3.5), but the colors a tag lands on are unchanged.
 func TestLabelColorUsesWebHash(t *testing.T) {
-	tests := []struct {
-		tag  string
-		want color.Color
-	}{
-		{"backend", lipgloss.Color("#ff7b54")},
-		{"🙂", lipgloss.Color("#ff7b54")}, // JavaScript length is two UTF-16 units.
-		{"", lipgloss.Color("#ff7b54")},
-	}
-	for _, test := range tests {
-		if got := labelColor(test.tag); !reflect.DeepEqual(got, test.want) {
-			t.Errorf("labelColor(%q) = %v, want %v", test.tag, got, test.want)
+	styles := theme.New(true)
+	for _, tag := range []string{
+		"backend",
+		"🙂", // JavaScript length is two UTF-16 units.
+		"",
+	} {
+		if got := theme.LabelSlot(widget.LabelWheel(tag)); got != theme.Label1 {
+			t.Errorf("label slot(%q) = %v, want %v", tag, got, theme.Label1)
 		}
 	}
-	if got := plain(labelChip("type::feature")); got != "[type:feature]" {
-		t.Fatalf("scoped chip = %q", got)
+	for _, test := range []struct {
+		tag  string
+		want string
+	}{
+		{"type::feature", "▐type:feature▌"},
+		{"backend", "▐#backend▌"},
+		{"broken::", "▐#broken::▌"},
+	} {
+		if got := plain(widget.Label(styles, test.tag, theme.Card, false)); got != test.want {
+			t.Errorf("label pill(%q) = %q, want %q", test.tag, got, test.want)
+		}
 	}
-	if got := plain(labelChip("backend")); got != "[#backend]" {
-		t.Fatalf("plain chip = %q", got)
-	}
-	if got := plain(labelChip("broken::")); got != "[#broken::]" {
-		t.Fatalf("empty scoped value chip = %q", got)
+	if got := plain(widget.Label(styles, "type::feature", theme.Card, true)); got != "feature" {
+		t.Fatalf("compact scoped label = %q", got)
 	}
 }
 
@@ -239,20 +249,32 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	m.board = boardViewFixture(now)
 	m.now = func() time.Time { return now }
 	m.renderedAt = now
-	m.width, m.height = 160, 22
+	m.width, m.height = 160, 40
 	m.boardView.showCancelled = true
 
 	content, hits := m.renderBoard()
 	text := plain(content)
 	for _, want := range []string{
-		"[1 TO DO  2]", "2 DOING  1", "3 DONE  1", "4 CANCELLED  1",
-		"🚀 Ship terminal board", "#7", "new", "P1", "[⛔ blocked]", "[today]", "[M]", "[#backend]", "[type:feature]",
+		"▸ 1 TO DO", "● 2 DOING", "● 3 DONE", "● 4 CANCELLED", "2 cards · 1 blocked",
+		"🚀 Ship terminal board", "#7", "new", "P1", "▐blocked▌", "▐today▌", "◇M", "▐#backend▌", "▐type:feature▌",
 		"3h here", "shipped", "1d old", "c cancelled:on",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("wide render missing %q:\n%s", want, text)
 		}
 	}
+	// Compaction drops the description, the meta line and the pill end caps.
+	m.height = 22
+	compact := plain(m.render())
+	for _, want := range []string{"P1 new ⛔ !today ◇M #backend feature", "P2 3h here !tomorrow"} {
+		if !strings.Contains(compact, want) {
+			t.Errorf("compact render missing %q:\n%s", want, compact)
+		}
+	}
+	if strings.Contains(compact, "cards · ") || strings.Contains(compact, "▐blocked▌") {
+		t.Errorf("compact render kept normal-density chrome:\n%s", compact)
+	}
+	m.height = 40
 	if len(hits) < 9 { // four columns and five cards.
 		t.Fatalf("render hits = %+v", hits)
 	}
@@ -282,7 +304,7 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	m.width = 99
 	m.boardView.column = 2
 	narrow := plain(m.render())
-	if !strings.Contains(narrow, "[3 DONE  1]") || strings.Contains(narrow, "TO DO") || strings.Contains(narrow, "CANCELLED") {
+	if !strings.Contains(narrow, "▸ 3 DONE") || strings.Contains(narrow, "TO DO") || strings.Contains(narrow, "CANCELLED") {
 		t.Fatalf("narrow focused column:\n%s", narrow)
 	}
 	for _, line := range strings.Split(m.render(), "\n") {
@@ -290,6 +312,82 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 			t.Fatalf("narrow line width %d: %q", ansi.StringWidth(line), line)
 		}
 	}
+}
+
+// TestBoardCardsColorGolden is the palette golden of spec section 6.4: the
+// depth model is background color, so the board's second golden pins truecolor
+// and records the shade tiers, the band hues, the priority rails and the pills.
+func TestBoardCardsColorGolden(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	fixture := boardViewFixture(now)
+	fixture.Tasks[0].Desc = "Pointer capture leaks when the column scrolls under the drag ghost"
+	m := NewModel(stubBoardReader{board: fixture}, nil, "alice")
+	m.loading = false
+	m.board = fixture
+	m.now = func() time.Time { return now }
+	m.renderedAt = now
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = sized.(Model)
+	tm := teatest.NewTestModel(t, m,
+		teatest.WithInitialTermSize(120, 40),
+		teatest.WithProgramOptions(theme.PinColor()),
+	)
+	t.Cleanup(func() { _ = tm.Quit() })
+	var captured bytes.Buffer
+	teatest.WaitFor(t, io.TeeReader(tm.Output(), &captured), func(output []byte) bool {
+		return bytes.Contains(output, []byte("Ship terminal board"))
+	}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	frame, ok := finalFullScreenFrame(captured.Bytes())
+	if !ok {
+		t.Fatal("teatest output did not contain a full-screen frame")
+	}
+	grid, err := renderedCellGrid(frame, 120, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	teatest.RequireEqualOutput(t, grid)
+	tm.Send(tea.KeyPressMsg{Code: 'q'})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(5*time.Second))
+}
+
+// TestNarrowTallBoardGolden is the 60x50 capture ticket #141 asked for to tune
+// the compaction width axis. Below the wide-frame threshold kb shows a single
+// column, and the spec's MaxColumnWidth clamp holds it at 52, so a card's inner
+// field is 47 cells and the width axis does not fire at this size: the frame is
+// tall, the description gets its second line, and the density stays normal. The
+// 22 threshold is therefore left at the spec's value; it fires between frame
+// widths 100 and ~116, where four columns share the frame.
+func TestNarrowTallBoardGolden(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	fixture := boardViewFixture(now)
+	fixture.Tasks[0].Desc = "Pointer capture leaks when the column scrolls under the drag ghost and the row grid stays fixed"
+	m := NewModel(stubBoardReader{board: fixture}, nil, "alice")
+	m.loading = false
+	m.board = fixture
+	m.now = func() time.Time { return now }
+	m.renderedAt = now
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 50})
+	m = sized.(Model)
+	tm := teatest.NewTestModel(t, m,
+		teatest.WithInitialTermSize(60, 50),
+		teatest.WithProgramOptions(theme.PinStructure()),
+	)
+	t.Cleanup(func() { _ = tm.Quit() })
+	var captured bytes.Buffer
+	teatest.WaitFor(t, io.TeeReader(tm.Output(), &captured), func(output []byte) bool {
+		return bytes.Contains(output, []byte("Ship terminal"))
+	}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	frame, ok := finalFullScreenFrame(captured.Bytes())
+	if !ok {
+		t.Fatal("teatest output did not contain a full-screen frame")
+	}
+	grid, err := renderedCellGrid(frame, 60, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	teatest.RequireEqualOutput(t, grid)
+	tm.Send(tea.KeyPressMsg{Code: 'q'})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(5*time.Second))
 }
 
 func TestViewIsByteStableAcrossMovingWallClock(t *testing.T) {
@@ -348,7 +446,8 @@ func TestPollTickRefreshesRenderTimeAtRolloverBoundary(t *testing.T) {
 	}
 
 	rolled := plain(m.View().Content)
-	for _, want := range []string{"1d old", "overdue · 1d"} {
+	// The frame is short, so the due pill is the compact "!" mark.
+	for _, want := range []string{"1d old", "!1d"} {
 		if !strings.Contains(rolled, want) {
 			t.Fatalf("post-tick render missing %q:\n%s", want, rolled)
 		}
@@ -448,21 +547,91 @@ func TestBoardViewSmallHelpers(t *testing.T) {
 	if statusIndex("unknown") != 0 || statusLabel("unknown") != "" {
 		t.Fatal("unknown status helpers changed")
 	}
-	if got := plain(priorityChip(99)); got != "P3" {
+	if got := columnHue("unknown"); got != theme.HueTodo {
+		t.Fatalf("unknown column hue = %v", got)
+	}
+	if got := plain(widget.Priority(theme.New(true), 99, theme.Card)); got != "P3" {
 		t.Fatalf("invalid priority fallback = %q", got)
 	}
 	if got := padLine("abcdef", 3, "-"); got != "abc" {
 		t.Fatalf("truncated pad = %q", got)
 	}
-	if got := wrapTokens([]string{"one", "two", "verylong"}, 4); !reflect.DeepEqual(got, []string{"one", "two", "very"}) {
-		t.Fatalf("wrapTokens = %q", got)
+	if got := compactDue("overdue · 2d"); got != "2d" {
+		t.Fatalf("compact due = %q", got)
+	}
+	if got := columnMetaLine([]board.Task{{}}); got != "1 card" {
+		t.Fatalf("single card meta = %q", got)
+	}
+	if got := hiddenCards([]string{"a", "a", "", "b"}, 2); got != 1 {
+		t.Fatalf("hidden cards = %d", got)
 	}
 	if got := visibleCardStart([]string{"a", "", "b"}, []string{"a", "", "b"}, 1, 2); got != 1 {
 		t.Fatalf("visible start = %d", got)
 	}
+	// A Model assembled field by field still renders: the board falls back to
+	// the default dark palette when no theme was resolved for it.
 	column := Model{board: board.Board{Tasks: []board.Task{{ID: "x", Title: "x", Status: board.StatusTodo}}}, boardView: boardViewState{}, renderedAt: time.Now()}.renderBoardColumn(board.StatusTodo, 2, 4)
-	if len(column.lines) != 4 || !strings.Contains(column.lines[0], "TO") {
+	if len(column.lines) != 4 || plain(column.lines[0]) != "▸ " {
 		t.Fatalf("tiny column = %+v", column)
+	}
+	if empty := (Model{}).renderBoardColumnAt(board.StatusTodo, 0, 0, theme.DensityCompact); len(empty.lines) != 0 || len(empty.hits) != 2 {
+		t.Fatalf("zero-sized column = %+v", empty)
+	}
+}
+
+// TestBoardStateCarriesSemanticHue pins the footer's state segment onto the
+// status colors of spec section 1.5.
+func TestBoardStateCarriesSemanticHue(t *testing.T) {
+	base := NewModel(stubBoardReader{}, nil, "u")
+	base.loading = false
+	for _, test := range []struct {
+		name  string
+		setup func(*Model)
+		want  string
+		slot  theme.Slot
+	}{
+		{"ready", func(*Model) {}, "ready", theme.StatusOK},
+		{"action ok", func(m *Model) {
+			m.actionNotice, m.actionStatus = true, "shipped one card"
+		}, "shipped one card", theme.StatusOK},
+		{"action error", func(m *Model) {
+			m.actionNotice, m.actionStatus, m.actionStatusError = true, "ship failed", true
+		}, "ship failed", theme.StatusDanger},
+		{"load error", func(m *Model) { m.loadErr = errors.New("gone") }, "error: gone", theme.StatusDanger},
+		{"poll error", func(m *Model) { m.pollErr = errors.New("stale") }, "error: stale", theme.StatusDanger},
+		{"preference error", func(m *Model) { m.preferenceErr = errors.New("disk") }, "error: disk", theme.StatusDanger},
+		{"move status", func(m *Model) { m.move.status = "moved" }, "moved", theme.StatusWarn},
+		{"loading", func(m *Model) { m.loading, m.haveBoardSnapshot = true, false }, "loading board...", theme.FgMuted},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := base
+			test.setup(&m)
+			state, slot := m.boardState()
+			if state != test.want || slot != test.slot {
+				t.Fatalf("board state = %q,%v want %q,%v", state, slot, test.want, test.slot)
+			}
+			if !strings.Contains(plain(m.render()), test.want) {
+				t.Fatalf("footer dropped %q:\n%s", test.want, plain(m.render()))
+			}
+		})
+	}
+}
+
+// TestBackgroundColorRebuildsTheme is spec section 6.3: the palette defaults to
+// dark and is rebuilt exactly once, when the terminal answers.
+func TestBackgroundColorRebuildsTheme(t *testing.T) {
+	m := NewModel(stubBoardReader{}, nil, "u")
+	m.loading = false
+	before := m.styles
+	if before == nil {
+		t.Fatal("constructed model carries no resolved theme")
+	}
+	updateTestModel(t, &m, tea.BackgroundColorMsg{Color: color.White})
+	if m.styles == nil || m.styles == before {
+		t.Fatal("background color answer did not rebuild the theme")
+	}
+	if !strings.Contains(plain(m.render()), "ready") {
+		t.Fatal("rebuilt theme stopped rendering the board")
 	}
 }
 
