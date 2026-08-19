@@ -102,6 +102,17 @@ type Model struct {
 	shipped           shippedRecord
 }
 
+// applyStyles adopts a rebuilt design system and hands it to every sub-model
+// the root owns.
+func (m *Model) applyStyles(styles *theme.Styles) {
+	m.styles = styles
+	m.detail.SetStyles(styles)
+	m.editor.SetStyles(styles)
+	if m.settings != nil {
+		m.settings.SetStyles(styles)
+	}
+}
+
 func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
 	if runner == nil {
 		return
@@ -424,6 +435,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "s":
 			if m.settingsNew != nil {
 				m.settings = m.settingsNew()
+				m.settings.SetStyles(m.styles)
 				return m, m.settings.Init()
 			}
 		case "a":
@@ -566,9 +578,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BackgroundColorMsg:
 		// Spec section 6.2: New is called on program start and here, nowhere
 		// else. Every style in the tree is rebuilt exactly once per answer, and
-		// the panes the root owns adopt the same instance.
-		m.styles = theme.New(msg.IsDark())
-		m.detail.SetStyles(m.styles)
+		// every pane the root owns adopts the same instance.
+		m.applyStyles(theme.New(msg.IsDark()))
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 {
 			m.width = msg.Width
@@ -845,6 +856,7 @@ func (m *Model) handleBoardFooterClick(key string) tea.Cmd {
 	case "s":
 		if m.settingsNew != nil {
 			m.settings = m.settingsNew()
+			m.settings.SetStyles(m.styles)
 			return m.settings.Init()
 		}
 	case "a":

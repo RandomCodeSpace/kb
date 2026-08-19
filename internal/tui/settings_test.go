@@ -14,6 +14,7 @@ import (
 	kbai "github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 const (
@@ -115,8 +116,9 @@ func clickSettingsText(t *testing.T, model *settingsModel, width, height int, ne
 	if surface.Pointer == nil {
 		t.Fatal("settings surface has no pointer handler")
 	}
-	for y, line := range strings.Split(surface.Content, "\n") {
-		if x := strings.Index(line, needle); x >= 0 {
+	for y, line := range strings.Split(ansi.Strip(surface.Content), "\n") {
+		if index := strings.Index(line, needle); index >= 0 {
+			x := ansi.StringWidth(line[:index])
 			press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 			if press == nil {
 				t.Fatalf("settings control %q ignored press", needle)
@@ -125,7 +127,7 @@ func clickSettingsText(t *testing.T, model *settingsModel, width, height int, ne
 				t.Fatalf("settings control %q returned a domain command on press", needle)
 			}
 			pressed := model.Surface(width, height)
-			if !strings.Contains(pressed.Content, "\x1b[7m") {
+			if !containsReverseVideo(pressed.Content) {
 				t.Fatalf("settings control %q omitted pressed feedback", needle)
 			}
 			command := pressed.Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
@@ -168,9 +170,9 @@ func TestSettingsRejectsPointerReleaseFromClosedInstance(t *testing.T) {
 	loadSettingsForTest(t, old)
 	surface := old.Surface(80, 40)
 	x, y := -1, -1
-	for row, line := range strings.Split(surface.Content, "\n") {
+	for row, line := range strings.Split(ansi.Strip(surface.Content), "\n") {
 		if column := strings.Index(line, "[Save AI settings]"); column >= 0 {
-			x, y = column, row
+			x, y = ansi.StringWidth(line[:column]), row
 			break
 		}
 	}
@@ -213,7 +215,7 @@ func TestSettingsPointerFocusesSourceRowFromItsVisibleHeader(t *testing.T) {
 	)
 	loadSettingsForTest(t, model)
 
-	clickSettingsText(t, model, 80, 30, "-- work (saved) --")
+	clickSettingsText(t, model, 80, 30, "work (saved)")
 	if model.focus != "forge:source:work:base" {
 		t.Fatalf("source header focus = %q, want first editable source field", model.focus)
 	}
@@ -660,7 +662,7 @@ func TestSettingsViewportKeepsEveryFocusedControlVisible(t *testing.T) {
 		model.focus = target
 		model.applyFocus()
 		view := model.View(42, 7)
-		if !strings.Contains("\n"+view, "\n>") {
+		if !settingsShowsFocusMarker(view) {
 			t.Fatalf("focused control %q is outside viewport:\n%s", target, view)
 		}
 		lines := strings.Split(view, "\n")
@@ -678,9 +680,21 @@ func TestSettingsViewportKeepsEveryFocusedControlVisible(t *testing.T) {
 	}
 	model.focus = "ai:base"
 	model.applyFocus()
-	if view := model.View(42, 7); !strings.Contains(view, "> Base URL") {
+	if view := ansi.Strip(model.View(42, 7)); !strings.Contains(view, "> Base URL") {
 		t.Fatalf("viewport did not scroll back to AI focus:\n%s", view)
 	}
+}
+
+// settingsShowsFocusMarker reports whether a rendered pane carries the focus
+// marker on some row. The overlay panel insets its body, so the marker is no
+// longer the first cell of the line.
+func settingsShowsFocusMarker(view string) bool {
+	for _, line := range strings.Split(ansi.Strip(view), "\n") {
+		if strings.HasPrefix(strings.TrimLeft(line, " "), ">") {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSettingsInputCursorAndHorizontalViewport(t *testing.T) {
@@ -740,7 +754,9 @@ func TestSettingsViewStripsTerminalControlsWithoutChangingValues(t *testing.T) {
 	beforeName, beforeKind := row.name.Value(), row.kind
 	beforeBase, beforeProject, beforeToken := row.baseURL.Value(), row.project.Value(), row.token.Value()
 
-	view := model.View(100, 30)
+	// The pane is themed, so its own SGR sequences are expected; what must not
+	// survive is anything the stored values carried.
+	view := ansi.Strip(model.View(100, 30))
 	for _, r := range view {
 		if r == '\n' {
 			continue
@@ -843,7 +859,23 @@ func TestSettingsPaneGolden(t *testing.T) {
 			t.Fatalf("golden output contains persisted secret %q", secret)
 		}
 	}
-	golden.RequireEqual(t, output)
+	golden.RequireEqual(t, []byte(ansi.Strip(theme.Downsample(output, theme.StructureProfile))))
+}
+
+// TestSettingsPaneColorGolden is the palette golden of spec section 6.4: the
+// structure golden above strips the colors that carry the whole depth model,
+// so the palette needs a truecolor-pinned golden of its own.
+func TestSettingsPaneColorGolden(t *testing.T) {
+	st := newSettingsTestStore(t)
+	base, modelName := "https://api.example/v1", "gpt-example"
+	if _, err := st.SetAISettings("alice", &base, &modelName, stringPointer(settingsStoredAIKey)); err != nil {
+		t.Fatal(err)
+	}
+	model := newSettingsModelWithBackends(st, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background())
+	loadSettingsForTest(t, model)
+	model.focus = "ai:test"
+	model.applyFocus()
+	golden.RequireEqual(t, []byte(theme.Downsample(model.View(48, 12), theme.ColorProfile)))
 }
 
 func TestSettingsKeyboardAndFailureStateBranches(t *testing.T) {
@@ -851,7 +883,7 @@ func TestSettingsKeyboardAndFailureStateBranches(t *testing.T) {
 	broken := &faultSettingsStore{aiErr: loadFailure}
 	model := newSettingsModelWithBackends(broken, &recordingAIProber{}, &recordingForgeProber{}, "alice", nil)
 	model.Update(model.Init()())
-	if model.loaded || !model.statusIsError || !strings.Contains(model.View(30, 6), "load failed") {
+	if model.loaded || !model.statusIsError || !strings.Contains(ansi.Strip(model.View(44, 6)), "load failed") {
 		t.Fatalf("AI load failure = loaded:%v error:%v status:%q", model.loaded, model.statusIsError, model.status)
 	}
 	model.Close() // no active cancellation is also a supported close path.

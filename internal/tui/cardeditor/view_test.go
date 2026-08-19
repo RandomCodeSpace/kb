@@ -11,7 +11,18 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
+
+// rowText joins the unstyled text of body rows, the form the control-safety
+// assertions read.
+func rowText(rows []editorRow) string {
+	lines := make([]string, 0, len(rows))
+	for _, row := range rows {
+		lines = append(lines, row.plain())
+	}
+	return strings.Join(lines, "\n")
+}
 
 func fullEditorTask() board.Task {
 	return board.Task{
@@ -31,11 +42,21 @@ func TestEditorGolden(t *testing.T) {
 		{Link: "github#12", Title: "Editor planning", Via: "import"},
 	}
 	model.focus = "save"
-	lines := strings.Split(ansi.Strip(model.View(84, 32)), "\n")
+	lines := strings.Split(ansi.Strip(theme.Downsample(model.View(84, 32), theme.StructureProfile)), "\n")
 	for i := range lines {
 		lines[i] = strings.TrimSpace(lines[i])
 	}
 	golden.RequireEqual(t, strings.Trim(strings.Join(lines, "\n"), "\n")+"\n")
+}
+
+// TestEditorColorGolden is the palette golden of spec section 6.4: an
+// ASCII-pinned golden of a design whose depth model is background color
+// asserts nothing about the design, so this one pins truecolor.
+func TestEditorColorGolden(t *testing.T) {
+	model := New(newTestStore(t), "default")
+	model.OpenEdit(fullEditorTask())
+	model.focus = "save"
+	golden.RequireEqual(t, []byte(theme.Downsample(model.View(48, 14), theme.ColorProfile)))
 }
 
 func TestViewCoversErrorsSuggestionsGuardsAndControlSafety(t *testing.T) {
@@ -53,7 +74,7 @@ func TestViewCoversErrorsSuggestionsGuardsAndControlSafety(t *testing.T) {
 	model.statusMessage = "save\x1b[31m\nrefused"
 	model.statusIsError = true
 	view := ansi.Strip(model.View(72, 24))
-	for _, want := range []string{"EDIT CARD #90", "one Extended_Pictographic", "suggestions", "alphabet"} {
+	for _, want := range []string{"EDIT CARD", "#90", "one Extended_Pictographic", "suggestions", "alphabet"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view missing %q:\n%s", want, view)
 		}
@@ -68,21 +89,21 @@ func TestViewCoversErrorsSuggestionsGuardsAndControlSafety(t *testing.T) {
 
 	model.labels = []string{"alpha"}
 	model.tags = []string{"alpha"}
-	if got := strings.Join(model.labelSuggestionLines(), "\n"); !strings.Contains(got, "no label suggestions") {
+	if got := rowText(model.labelSuggestionRows()); !strings.Contains(got, "no label suggestions") {
 		t.Fatalf("empty suggestions = %q", got)
 	}
 	model.similarLoading = true
-	if got := strings.Join(model.similarLines(), "\n"); !strings.Contains(got, "searching") {
+	if got := rowText(model.similarRows()); !strings.Contains(got, "searching") {
 		t.Fatalf("loading similar = %q", got)
 	}
 	model.similarLoading = false
 	model.similarErr = errors.New("lookup failed")
-	if got := strings.Join(model.similarLines(), "\n"); !strings.Contains(got, "lookup failed") {
+	if got := rowText(model.similarRows()); !strings.Contains(got, "lookup failed") {
 		t.Fatalf("failed similar = %q", got)
 	}
 	model.similarErr = nil
 	model.similar = []store.SimilarHit{{Title: "plain"}, {Link: "x", Title: "imported", Via: "import"}}
-	if got := strings.Join(model.similarLines(), "\n"); !strings.Contains(got, "[card] plain") || !strings.Contains(got, "[import] imported") {
+	if got := rowText(model.similarRows()); !strings.Contains(got, "[card] plain") || !strings.Contains(got, "[import] imported") {
 		t.Fatalf("similar variants = %q", got)
 	}
 
@@ -156,7 +177,7 @@ func TestViewHelpersCoverCursorAndChoiceEdges(t *testing.T) {
 	if safeList(nil) != "(none)" || safeList([]string{"a"}) != "[a]" {
 		t.Fatal("safe list mismatch")
 	}
-	if got := fitBlock("a\nb\nc", 1, 2); got != "a\nb" {
-		t.Fatalf("fit block = %q", got)
+	if got := fit("abcdef", 3); got != "abc" {
+		t.Fatalf("fit = %q", got)
 	}
 }

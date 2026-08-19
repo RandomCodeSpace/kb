@@ -249,7 +249,7 @@ func build(table paletteRGB, isDark bool) *Styles {
 	built.Help = helpStyles(on)
 	built.Spinner = spinner.Dot
 	built.Markdown = markdownStyles(table)
-	built.Huh = huhStyles(on, onBold, isDark)
+	built.Huh = huhStyles(pal, on, onBold, isDark)
 	return built
 }
 
@@ -267,6 +267,15 @@ func (s *Styles) ChipRuns(fill, surface Slot) ChipStyles {
 		ScopedKey: s.On(FgSubtle, Surface),
 		Flat:      s.OnBold(fill, surface),
 	}
+}
+
+// HuhTheme hands the already-built huh styles to a huh field. Spec section 6.3
+// registers the factory itself as huh.ThemeFunc; a field rendered from a
+// *Styles that New has already resolved must not rebuild the palette per frame,
+// so the func closes over the built styles and ignores the background argument
+// it was resolved for.
+func (s *Styles) HuhTheme() huh.Theme {
+	return huh.ThemeFunc(func(bool) *huh.Styles { return s.Huh })
 }
 
 func inputStyles(pal Palette, on styleFunc, isDark bool) textinput.Styles {
@@ -362,20 +371,30 @@ func markdownStyles(table paletteRGB) glamour.StyleConfig {
 // ThemeFunc signature matches New exactly, so a caller registers
 // huh.ThemeFunc(func(d bool) *huh.Styles { return theme.New(d).Huh }).
 // The dependency is declared and themed here; no flow is wired to it yet.
-func huhStyles(on, onBold styleFunc, isDark bool) *huh.Styles {
+func huhStyles(pal Palette, on, onBold styleFunc, isDark bool) *huh.Styles {
 	built := huh.ThemeBase(isDark)
 	built.Focused.Base = on(FgBase, OverlaySurf)
 	built.Focused.Title = onBold(Brand, OverlaySurf)
 	built.Focused.Description = on(FgMuted, OverlaySurf)
 	built.Focused.ErrorIndicator = on(StatusDanger, OverlaySurf)
 	built.Focused.ErrorMessage = on(StatusDanger, OverlaySurf)
-	built.Focused.SelectSelector = on(Brand, OverlaySurf)
+	// huh reads the selector as a SetString, not as a rendered run: replacing
+	// the style without restoring the string leaves the selected option with no
+	// cursor at all. Card is the surface a Note is drawn on and carries the base
+	// theme's thick left border until it is replaced here.
+	built.Focused.Card = built.Focused.Base
+	built.Focused.SelectSelector = on(Brand, OverlaySurf).SetString(defaultGlyphs.Focus + " ")
 	built.Focused.Option = on(FgBase, OverlaySurf)
-	built.Focused.MultiSelectSelector = on(Brand, OverlaySurf)
+	built.Focused.MultiSelectSelector = on(Brand, OverlaySurf).SetString(defaultGlyphs.Focus + " ")
 	built.Focused.SelectedOption = on(StatusOK, OverlaySurf)
 	built.Focused.UnselectedOption = on(FgSubtle, OverlaySurf)
-	built.Focused.FocusedButton = onBold(FgOnAccent, Brand)
-	built.Focused.BlurredButton = on(FgBase, OverlayBand)
+	// huh joins the buttons of a confirm horizontally with no separation of its
+	// own, so the padding and the gap are part of the token. The margin carries
+	// the panel tier so the gap does not punch a hole in the surface.
+	built.Focused.FocusedButton = onBold(FgOnAccent, Brand).
+		Padding(0, 1).MarginRight(1).MarginBackground(pal[OverlaySurf])
+	built.Focused.BlurredButton = on(FgBase, OverlayBand).
+		Padding(0, 1).MarginRight(1).MarginBackground(pal[OverlaySurf])
 	built.Focused.NoteTitle = onBold(FgSubtle, OverlaySurf)
 	built.Blurred = built.Focused
 	built.Blurred.Title = on(FgSubtle, OverlaySurf)

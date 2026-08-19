@@ -29,13 +29,15 @@ type ButtonOpts struct {
 // state the user must not misread.
 func Button(styles *theme.Styles, opts ButtonOpts) string {
 	style := buttonStyle(styles, opts)
-	body := style.Render(strings.Repeat(" ", max(opts.Padding[0], 0))) +
+	if opts.Pressed {
+		// The pressed token is an attribute on the button's own style, not a
+		// wrapper: a wrapping run is cancelled by the reset the inner style
+		// emits, and the feedback would vanish under composition.
+		style = style.Reverse(true)
+	}
+	return style.Render(strings.Repeat(" ", max(opts.Padding[0], 0))) +
 		underlined(style, opts.Text, opts.UnderlineIndex) +
 		style.Render(strings.Repeat(" ", max(opts.Padding[1], 0)))
-	if opts.Pressed {
-		return styles.Pressed.Render(body)
-	}
-	return body
 }
 
 // ButtonGroup lays buttons out left to right with gap cells between them. The

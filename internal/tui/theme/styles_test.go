@@ -180,6 +180,24 @@ func TestEmbeddedComponentStylesAreBuilt(t *testing.T) {
 	if styles.Huh == nil || styles.Huh.Focused.Title.Render("x") == "" {
 		t.Error("huh styles were not built")
 	}
+	if styles.Huh.Focused.SelectSelector.String() == "" {
+		t.Error("huh select selector lost its cursor string")
+	}
+}
+
+// TestHuhThemeHandsOverTheBuiltStyles pins spec section 6.3: a huh field takes
+// the styles New already resolved and never rebuilds the palette per frame.
+func TestHuhThemeHandsOverTheBuiltStyles(t *testing.T) {
+	styles := New(true)
+	theme := styles.HuhTheme()
+	if theme == nil {
+		t.Fatal("HuhTheme returned no theme")
+	}
+	for _, isDark := range []bool{true, false} {
+		if theme.Theme(isDark) != styles.Huh {
+			t.Errorf("HuhTheme(%v) rebuilt the styles instead of reusing them", isDark)
+		}
+	}
 }
 
 func TestRailStylesExistForEveryPriority(t *testing.T) {

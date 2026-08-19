@@ -1,7 +1,11 @@
 // Package pointer maps rendered terminal cells to pointer interactions.
 package pointer
 
-import tea "charm.land/bubbletea/v2"
+import (
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
+)
 
 // Point is a zero-based terminal cell.
 type Point struct {
@@ -51,11 +55,17 @@ func (s State) Active() bool { return s.pressed != "" }
 
 // Render applies same-width reverse-video feedback to the active control.
 // The caller supplies already-sanitized terminal content.
+//
+// A themed control renders its own styles inside this run, and every one of
+// them ends in a reset that would cancel the feedback for the rest of the row,
+// so the attribute is re-armed after each reset.
 func (s State) Render(id ControlID, content string) string {
 	if !s.IsPressed(id) {
 		return content
 	}
-	return "\x1b[7m" + content + "\x1b[27m"
+	rearmed := strings.ReplaceAll(content, "\x1b[m", "\x1b[m\x1b[7m")
+	rearmed = strings.ReplaceAll(rearmed, "\x1b[0m", "\x1b[0m\x1b[7m")
+	return "\x1b[7m" + rearmed + "\x1b[27m"
 }
 
 // Update consumes pointer feedback messages. The returned command emits the

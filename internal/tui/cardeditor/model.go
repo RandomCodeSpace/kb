@@ -20,6 +20,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 const (
@@ -163,14 +164,33 @@ type Model struct {
 	scroll            int
 	manualScroll      bool
 	pointerState      pointer.State
+	styles            *theme.Styles
 }
 
 // New creates a closed editor. A nil store keeps the feature unavailable in
 // lightweight root-model tests.
 func New(st Store, user string) Model {
-	m := Model{store: st, user: user, now: time.Now, ctx: context.Background()}
+	m := Model{store: st, user: user, now: time.Now, ctx: context.Background(), styles: theme.New(true)}
 	m.resetInputs()
 	return m
+}
+
+// SetStyles hands the editor the resolved design system. Spec section 6.2: the
+// root builds it once per terminal background and threads it down; the editor
+// never constructs one per frame.
+func (m *Model) SetStyles(styles *theme.Styles) {
+	if styles != nil {
+		m.styles = styles
+	}
+}
+
+// themeStyles is the resolved design system, defaulting to the dark reference
+// palette for a zero-value editor that no root has handed one to.
+func (m *Model) themeStyles() *theme.Styles {
+	if m.styles == nil {
+		m.styles = theme.New(true)
+	}
+	return m.styles
 }
 
 // SetAIRunner wires the shared runner and the root program context. A nil
