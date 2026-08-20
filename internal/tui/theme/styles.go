@@ -49,6 +49,7 @@ type Styles struct {
 	blankBold  lipgloss.Style
 	pressedOn  string
 	pressedOff string
+	surfaceOn  [numSlots]string
 }
 
 // BoardStyles are the page-level surfaces of spec section 2.1.
@@ -164,6 +165,23 @@ func (s *Styles) PressedRun(content string) string {
 	return s.pressedOn + rearmed + s.pressedOff
 }
 
+// SurfaceRun lays an already-composed run onto a surface slot. An adopted charm
+// component paints its own runs and closes each one with a reset, which drops
+// the panel surface for every cell the component itself did not paint - the
+// single space bubbles/help writes between its key and description columns is
+// the case this exists for. The background is armed once at the front and
+// re-armed after every reset, so a component's output carries the surface edge
+// to edge without kb reformatting what the component rendered.
+//
+// The run closes with a full reset because it is laid down as a whole row, not
+// substituted into the middle of one the way PressedRun is.
+func (s *Styles) SurfaceRun(surface Slot, content string) string {
+	on := s.surfaceOn[surface]
+	rearmed := strings.ReplaceAll(content, shortReset, shortReset+on)
+	rearmed = strings.ReplaceAll(rearmed, explicitReset, explicitReset+on)
+	return on + rearmed + shortReset
+}
+
 // On returns the cached blank style carrying a foreground and background slot.
 // The widget API of spec section 5.1 is slot-parameterized (chip fills, column
 // hues), so the surface a run lands on is only known at render time; resolving
@@ -208,6 +226,9 @@ func build(table paletteRGB, isDark bool) *Styles {
 		blankBold:  blank.Bold(true),
 		pressedOn:  ansi.Style{}.Reverse(true).String(),
 		pressedOff: ansi.Style{}.Reverse(false).String(),
+	}
+	for slot := Slot(0); slot < numSlots; slot++ {
+		built.surfaceOn[slot] = ansi.Style{}.BackgroundColor(pal[slot]).String()
 	}
 	on := func(foreground, background Slot) lipgloss.Style {
 		return blank.Foreground(pal[foreground]).Background(pal[background])

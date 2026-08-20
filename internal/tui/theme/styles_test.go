@@ -239,6 +239,27 @@ func TestPressedRunSurvivesInnerResets(t *testing.T) {
 	}
 }
 
+// TestSurfaceRunPaintsGapsAnAdoptedComponentLeaves covers the seam issue #153
+// needed: bubbles/help writes plain spaces between its key and description
+// columns and where lipgloss joins columns of unequal length. Laying the run on
+// a surface slot has to arm the background and re-arm it after every reset the
+// component's own styles emit, or those cells punch holes in the panel.
+func TestSurfaceRunPaintsGapsAnAdoptedComponentLeaves(t *testing.T) {
+	styles := New(true)
+	armed := styles.SurfaceRun(OverlaySurf, "")
+	if armed == "" || !strings.HasSuffix(armed, "\x1b[m") {
+		t.Fatalf("SurfaceRun of empty content = %q", armed)
+	}
+	background := strings.TrimSuffix(armed, "\x1b[m")
+	composed := styles.SurfaceRun(OverlaySurf, styles.Help.FullKey.Render("j/k")+" "+"select card"+"\x1b[0m")
+	if got := strings.Count(composed, background); got != 3 {
+		t.Fatalf("re-armed %d times, want 3: %q", got, composed)
+	}
+	if styles.SurfaceRun(OverlayBand, "x") == styles.SurfaceRun(OverlaySurf, "x") {
+		t.Fatal("SurfaceRun ignored the surface slot")
+	}
+}
+
 func distanceTo(from, to rgb) int {
 	return from.distance(to)
 }
