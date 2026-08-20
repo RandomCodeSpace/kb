@@ -173,7 +173,8 @@ func (m Model) inputRows(width int) []importRow {
 		})
 	}
 	return append(rows, importRow{}, m.actionsRow(styles,
-		[2]string{"import", "Import"}, [2]string{"cancel", "Cancel"}))
+		importAction{target: "import", label: "Import", variant: theme.ButtonPrimary},
+		importAction{target: "cancel", label: "Cancel"}))
 }
 
 // sourceRow is the forge choice. Spec section 5.2 assigns huh's Select to the
@@ -269,7 +270,9 @@ func (m Model) reviewRows(width, height int) []importRow {
 		rows = append(rows, importRow{}, bar)
 	}
 	return append(rows, importRow{}, m.actionsRow(styles,
-		[2]string{"import", "Import"}, [2]string{"back", "Back"}, [2]string{"close", "Close"}))
+		importAction{target: "import", label: "Import", variant: theme.ButtonPrimary},
+		importAction{target: "back", label: "Back"},
+		importAction{target: "close", label: "Close"}))
 }
 
 // issueRow is one proposal. Spec section 5.1 assigns the checklist mark to the
@@ -336,22 +339,31 @@ func (m Model) fieldRow(target, text string) importRow {
 	}
 }
 
+// importAction is one button of an action row: its target, its frozen label,
+// and what it means (issue #157).
+type importAction struct {
+	target  string
+	label   string
+	variant theme.ButtonVariant
+}
+
 // actionsRow lays out the row's buttons and records where each one starts, so
 // the pointer map keys a rect to the button rather than to a matched label.
-func (m Model) actionsRow(styles *theme.Styles, specs ...[2]string) importRow {
+func (m Model) actionsRow(styles *theme.Styles, actions ...importAction) importRow {
 	const gap = "    "
-	row := importRow{buttons: make([]importButton, 0, len(specs))}
-	for index, spec := range specs {
+	row := importRow{buttons: make([]importButton, 0, len(actions))}
+	for index, action := range actions {
 		if index > 0 {
 			row.text += gap
 			row.rendered += styles.Overlay.Surf.Render(gap)
 		}
-		label := "[ " + spec[1] + " ]"
-		row.buttons = append(row.buttons, importButton{label: label, target: spec[0], x0: ansi.StringWidth(row.text)})
+		label := "[ " + action.label + " ]"
+		row.buttons = append(row.buttons, importButton{label: label, target: action.target, x0: ansi.StringWidth(row.text)})
 		row.text += label
 		row.rendered += widget.Button(styles, widget.ButtonOpts{
 			Text:           label,
-			Pressed:        m.pressed(spec[0]),
+			Variant:        action.variant,
+			Pressed:        m.pressed(action.target),
 			UnderlineIndex: -1,
 		})
 	}

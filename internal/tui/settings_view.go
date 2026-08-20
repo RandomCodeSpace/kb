@@ -38,15 +38,16 @@ const (
 // width is only known once every label in the pane has been seen, and the input
 // display has to be cut to it.
 type settingsRenderRow struct {
-	line   string
-	label  string
-	value  string
-	input  *textinput.Model
-	secret bool
-	button string
-	target string
-	armed  bool
-	kind   settingsRowKind
+	line    string
+	label   string
+	value   string
+	input   *textinput.Model
+	secret  bool
+	button  string
+	target  string
+	variant theme.ButtonVariant
+	armed   bool
+	kind    settingsRowKind
 }
 
 func settingsControlID(target string) pointer.ControlID {
@@ -112,8 +113,8 @@ func (m *settingsModel) Surface(background string, width, height int) pointer.Su
 			m.inputModelRow("ai:base", "Base URL", &m.aiBase, false),
 			m.inputModelRow("ai:model", "Model", &m.aiModel, false),
 			m.inputModelRow("ai:key", keyLabel("API key", m.hasKey), &m.aiKey, true),
-			m.actionRow("ai:test", "Test connection", inner),
-			m.actionRow("ai:save", "Save AI settings", inner),
+			m.actionRow("ai:test", "Test connection", theme.ButtonNeutral, inner),
+			m.actionRow("ai:save", "Save AI settings", theme.ButtonPrimary, inner),
 			settingsRenderRow{line: ""},
 			settingsRenderRow{line: "FORGE INTEGRATIONS", kind: settingsRowSection},
 		)
@@ -123,7 +124,7 @@ func (m *settingsModel) Surface(background string, width, height int) pointer.Su
 		for i := range m.rows {
 			body = append(body, m.renderForgeRow(&m.rows[i], inner)...)
 		}
-		body = append(body, m.actionRow("forge:add", "+ Add integration", inner))
+		body = append(body, m.actionRow("forge:add", "+ Add integration", theme.ButtonNeutral, inner))
 	}
 	m.layoutSettingsTable(body, inner)
 	status := m.status
@@ -225,6 +226,7 @@ func (m *settingsModel) renderSettingsRow(row settingsRenderRow, width int) stri
 			marker := strings.TrimSuffix(line, padded)
 			return styles.Overlay.Surf.Render(marker) + widget.Button(styles, widget.ButtonOpts{
 				Text:           row.button,
+				Variant:        row.variant,
 				Selected:       m.focus == row.target,
 				Armed:          row.armed,
 				Pressed:        m.pointerState.IsPressed(settingsControlID(row.target)),
@@ -281,15 +283,15 @@ func (m *settingsModel) renderForgeRow(row *integrationSettingsRow, width int) [
 		m.inputModelRow(prefix+"base", "Base URL", &row.baseURL, false),
 		m.inputModelRow(prefix+"project", "Project", &row.project, false),
 		m.inputModelRow(prefix+"token", keyLabel("Token", row.hasToken), &row.token, true),
-		m.actionRow(prefix+"test", "Test", width),
+		m.actionRow(prefix+"test", "Test", theme.ButtonNeutral, width),
 	)
 	remove := "Remove"
 	if m.armedRemove == row.id {
 		remove = "Confirm remove"
 	}
-	removeRow := m.actionRow(prefix+"remove", remove, width)
+	removeRow := m.actionRow(prefix+"remove", remove, theme.ButtonDanger, width)
 	removeRow.armed = m.armedRemove == row.id
-	return append(lines, m.actionRow(prefix+"save", "Save", width), removeRow)
+	return append(lines, m.actionRow(prefix+"save", "Save", theme.ButtonPrimary, width), removeRow)
 }
 
 func settingsInputDisplay(input textinput.Model, secret, focused bool, width int) string {
@@ -412,16 +414,17 @@ func (m *settingsModel) layoutSettingsTable(body []settingsRenderRow, width int)
 	}
 }
 
-func (m *settingsModel) actionRow(target, label string, width int) settingsRenderRow {
+func (m *settingsModel) actionRow(target, label string, variant theme.ButtonVariant, width int) settingsRenderRow {
 	marker := "  "
 	if m.focus == target {
 		marker = "> "
 	}
 	return settingsRenderRow{
-		line:   settingsFit(marker+settingsButtonPad+label+settingsButtonPad, width),
-		button: label,
-		target: target,
-		kind:   settingsRowButton,
+		line:    settingsFit(marker+settingsButtonPad+label+settingsButtonPad, width),
+		button:  label,
+		target:  target,
+		variant: variant,
+		kind:    settingsRowButton,
 	}
 }
 

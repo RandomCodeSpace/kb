@@ -14,8 +14,13 @@ import (
 //
 // UnderlineIndex is the rune offset of the hotkey letter, or a negative value
 // for no hotkey. Padding is the left and right padding in cells.
+//
+// Variant is what the button does (issue #157): the zero value is Neutral, so a
+// caller that states no meaning gets the calmest surface rather than an
+// accidental accent.
 type ButtonOpts struct {
 	Text           string
+	Variant        theme.ButtonVariant
 	Selected       bool
 	Hovered        bool
 	Armed          bool
@@ -56,15 +61,16 @@ func ButtonGroup(styles *theme.Styles, on theme.Slot, gap int, buttons ...string
 }
 
 func buttonStyle(styles *theme.Styles, opts ButtonOpts) lipgloss.Style {
+	variant := styles.Button.Variant(opts.Variant)
 	switch {
 	case opts.Armed:
-		return styles.Button.Armed
+		return variant.Armed
 	case opts.Selected:
-		return styles.Button.Focused
+		return variant.Focused
 	case opts.Hovered:
-		return styles.Button.Hovered
+		return variant.Hovered
 	default:
-		return styles.Button.Rest
+		return variant.Rest
 	}
 }
 

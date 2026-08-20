@@ -1062,6 +1062,7 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 			{
 				content: widget.Button(styles, widget.ButtonOpts{
 					Text:           actionFit(label, max(width-2*choiceButtonPad, 1)),
+					Variant:        theme.ButtonDanger,
 					Armed:          a.armed,
 					Selected:       !a.armed,
 					Pressed:        m.pointerState.IsPressed(taskActionControlID(taskActionPointerPurge, 0)),
@@ -1085,7 +1086,7 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 func (m Model) shipChoiceRows(styles *theme.Styles, width int) []actionRow {
 	choices := shipChoices(m.action.warning)
 	if len(choices) == 2 {
-		rendered := formview.HuhConfirm(styles, choices[0], choices[1], m.action.choice == 0, width)
+		rendered := formview.HuhConfirm(styles, choices[0].label, choices[1].label, m.action.choice == 0, width)
 		return m.huhRows(rendered, shipChoiceLabels(m.action.warning))
 	}
 	return m.choiceButtonRows(styles, choices, m.action.choice, taskActionPointerShipChoice, width)
@@ -1096,7 +1097,7 @@ func (m Model) shipChoiceRows(styles *theme.Styles, width int) []actionRow {
 // narrow terminal loses the layout rather than the choices.
 func (m Model) choiceButtonRows(
 	styles *theme.Styles,
-	choices []string,
+	choices []dialogChoice,
 	selected int,
 	kind taskActionPointerKind,
 	width int,
@@ -1106,17 +1107,18 @@ func (m Model) choiceButtonRows(
 	group := 0
 	for index, choice := range choices {
 		buttons = append(buttons, widget.Button(styles, widget.ButtonOpts{
-			Text:           choice,
+			Text:           choice.label,
+			Variant:        choice.variant,
 			Selected:       index == selected,
 			Pressed:        m.pointerState.IsPressed(taskActionControlID(kind, index)),
 			UnderlineIndex: -1,
 			Padding:        [2]int{choiceButtonPad, choiceButtonPad},
 		}))
-		labels = append(labels, actionLabel{text: choice, kind: kind, index: index, pad: choiceButtonPad})
+		labels = append(labels, actionLabel{text: choice.label, kind: kind, index: index, pad: choiceButtonPad})
 		if index > 0 {
 			group += choiceButtonGap
 		}
-		group += ansi.StringWidth(choice) + 2*choiceButtonPad
+		group += ansi.StringWidth(choice.label) + 2*choiceButtonPad
 	}
 	if group <= width {
 		return []actionRow{{
@@ -1138,23 +1140,36 @@ const (
 	choiceButtonGap = 1
 )
 
-func shipChoices(warning shipWarning) []string {
-	choices := []string{"Cancel"}
-	if warning.open > 0 {
-		choices = append(choices, "Tick everything")
-	}
-	return append(choices, "Ship anyway")
+// dialogChoice is one button of a dialog choice row: the frozen label, and
+// what the choice means (issue #157). Ship anyway is Danger rather than a
+// warning shade: it overrides a guard the board raised, and the variant set of
+// spec section 1.9 spends no fifth token family on a single button.
+type dialogChoice struct {
+	label   string
+	variant theme.ButtonVariant
 }
 
-func killChoices() []string {
-	return []string{"Cancel", "Kill without reason", "Kill with reason"}
+func shipChoices(warning shipWarning) []dialogChoice {
+	choices := []dialogChoice{{label: "Cancel"}}
+	if warning.open > 0 {
+		choices = append(choices, dialogChoice{label: "Tick everything", variant: theme.ButtonSuccess})
+	}
+	return append(choices, dialogChoice{label: "Ship anyway", variant: theme.ButtonDanger})
+}
+
+func killChoices() []dialogChoice {
+	return []dialogChoice{
+		{label: "Cancel"},
+		{label: "Kill without reason", variant: theme.ButtonDanger},
+		{label: "Kill with reason", variant: theme.ButtonDanger},
+	}
 }
 
 func shipChoiceLabels(warning shipWarning) []actionLabel {
 	choices := shipChoices(warning)
 	labels := make([]actionLabel, 0, len(choices))
 	for index, choice := range choices {
-		labels = append(labels, actionLabel{text: choice, kind: taskActionPointerShipChoice, index: index})
+		labels = append(labels, actionLabel{text: choice.label, kind: taskActionPointerShipChoice, index: index})
 	}
 	return labels
 }
