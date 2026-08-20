@@ -354,6 +354,16 @@ func (m *Model) updateInput(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "enter":
 		return m.startPreview()
+	}
+	// The reference input owns every remaining key while it has focus. The
+	// source and count steppers read left/right/h/l, which are cursor motions
+	// and plain text to a focused field, so they only run for their own focus.
+	if m.focus == 1 {
+		var command tea.Cmd
+		m.ref, command = m.ref.Update(msg)
+		return command
+	}
+	switch key {
 	case "left", "h":
 		if m.focus == 0 && len(m.sources) > 0 {
 			m.source = (m.source - 1 + len(m.sources)) % len(m.sources)
@@ -368,11 +378,6 @@ func (m *Model) updateInput(msg tea.KeyPressMsg) tea.Cmd {
 			m.max = min(maxIssues, m.max+1)
 		}
 		return nil
-	}
-	if m.focus == 1 {
-		var command tea.Cmd
-		m.ref, command = m.ref.Update(msg)
-		return command
 	}
 	if m.focus == 2 && len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
 		value, _ := strconv.Atoi(key)
