@@ -397,7 +397,7 @@ func TestCardDetailOpensFromKeyboardAndClick(t *testing.T) {
 	}
 	updateTestModel(t, &m, load())
 	view := ansi.Strip(m.View().Content)
-	if !strings.Contains(view, "detail-only description") || !strings.Contains(view, "[Close]") {
+	if !strings.Contains(view, "detail-only description") || !strings.Contains(view, " Close ") {
 		t.Fatalf("detail overlay missing content:\n%s", view)
 	}
 	columnBefore := m.boardView.column
@@ -2353,8 +2353,8 @@ func TestWideDetailPanelRemainsInsideTerminalGrid(t *testing.T) {
 				t.Fatalf("%dx%d detail drew border rune %q", width, height, edge)
 			}
 		}
-		if !strings.Contains(content, "[Close]") {
-			t.Fatalf("%dx%d detail lost its footer band", width, height)
+		if !strings.Contains(content, " Close ") {
+			t.Fatalf("%dx%d detail lost its action row", width, height)
 		}
 	}
 
@@ -2411,8 +2411,10 @@ func TestWideDetailPTYRendersCompletePanelInsideCellGrid(t *testing.T) {
 				t.Fatalf("cell grid detail drew border rune %q", edge)
 			}
 		}
-		if !strings.Contains(plain, "[Close]") {
-			t.Fatal("cell grid lost the detail footer band")
+		// The grid drops a trailing blank cell at the end of a rendered run, so
+		// the button's right padding is not part of the marker.
+		if !strings.Contains(plain, " Close") {
+			t.Fatal("cell grid lost the detail action row")
 		}
 	}
 
@@ -2434,7 +2436,7 @@ func TestWideDetailPTYRendersCompletePanelInsideCellGrid(t *testing.T) {
 		}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
-	waitFor(t, "[Close]")
+	waitFor(t, " Close ")
 	assertGrid(t, 427, 73)
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	waitForGrid(t, 427, 73, "9/")
@@ -2443,10 +2445,10 @@ func TestWideDetailPTYRendersCompletePanelInsideCellGrid(t *testing.T) {
 	waitForGrid(t, 427, 73, "12/")
 	assertGrid(t, 427, 73)
 	tm.Send(tea.WindowSizeMsg{Width: 80, Height: 20})
-	waitFor(t, "[Close]")
+	waitFor(t, " Close ")
 	assertGrid(t, 80, 20)
 	tm.Send(tea.WindowSizeMsg{Width: 427, Height: 73})
-	waitFor(t, "[Close]")
+	waitFor(t, " Close ")
 	assertGrid(t, 427, 73)
 	tm.Send(tea.KeyPressMsg{Code: 'q'})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(5*time.Second))

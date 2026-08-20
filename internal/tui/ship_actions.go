@@ -832,11 +832,15 @@ func (m Model) shippedCount() int {
 	return len(seen)
 }
 
-// actionLabel is one clickable run inside a dialog row.
+// actionLabel is one clickable run inside a dialog row. pad widens the hit
+// region by that many cells on each side, which is how a padded button's own
+// filled surface stays clickable even though only its label text is searched
+// for in the rendered row.
 type actionLabel struct {
 	text  string
 	kind  taskActionPointerKind
 	index int
+	pad   int
 }
 
 // actionRow is one rendered dialog row and the controls it carries. Only the
@@ -904,8 +908,8 @@ func (m Model) taskActionSurface(background string) pointer.Surface {
 			hits.AddControl(
 				taskActionControlID(label.kind, label.index),
 				pointer.Rect{
-					X0: x + start, Y0: y + index,
-					X1: x + start + ansi.StringWidth(label.text), Y1: y + index + 1,
+					X0: x + start - label.pad, Y0: y + index,
+					X1: x + start + ansi.StringWidth(label.text) + label.pad, Y1: y + index + 1,
 				},
 				func(pointer.Point) tea.Msg { return message },
 			)
@@ -1001,7 +1005,7 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 		} else {
 			rows = append(rows, actionRow{})
 		}
-		rows = append(rows, m.huhRows(m.shipChoiceField(styles, width), shipChoiceLabels(a.warning))...)
+		rows = append(rows, m.shipChoiceRows(styles, width)...)
 		return appendActionError(styles, rows, a.errorText, width)
 	case taskActionKill:
 		reason := m.pointerState.Render(styles, taskActionControlID(taskActionPointerKillReason, 0), "Reason:") +
@@ -1015,7 +1019,7 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 			},
 			{},
 		}
-		rows = append(rows, m.huhRows(m.killChoiceField(styles, width), killChoiceLabels())...)
+		rows = append(rows, m.choiceButtonRows(styles, killChoices(), a.choice, taskActionPointerKillChoice, width)...)
 		return appendActionError(styles, rows, a.errorText, width)
 	case taskActionChecklist:
 		rows := []actionRow{{content: surface.Render(actionFit("Checklist: "+sanitizeTerminal(a.task.Title)+busy, width))}}
@@ -1044,13 +1048,15 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 			{content: styles.Overlay.FieldLabel.Render(actionFit("The card, comments, links, and kill reason are removed for good.", width))},
 			{},
 			{
-				content: m.pointerState.Render(styles, taskActionControlID(taskActionPointerPurge, 0), widget.Button(styles, widget.ButtonOpts{
-					Text:           actionFit(label, width),
+				content: widget.Button(styles, widget.ButtonOpts{
+					Text:           actionFit(label, max(width-2*choiceButtonPad, 1)),
 					Armed:          a.armed,
 					Selected:       !a.armed,
+					Pressed:        m.pointerState.IsPressed(taskActionControlID(taskActionPointerPurge, 0)),
 					UnderlineIndex: -1,
-				})),
-				labels: []actionLabel{{text: label, kind: taskActionPointerPurge}},
+					Padding:        [2]int{choiceButtonPad, choiceButtonPad},
+				}),
+				labels: []actionLabel{{text: label, kind: taskActionPointerPurge, pad: choiceButtonPad}},
 			},
 		}
 		return appendActionError(styles, rows, a.errorText, width)
@@ -1059,19 +1065,66 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 	}
 }
 
-// shipChoiceField is the ship guard's choice control. Spec section 5.2 assigns
-// huh's Confirm to the yes/no core and its Select to the three-way form.
-func (m Model) shipChoiceField(styles *theme.Styles, width int) string {
+// shipChoiceRows is the ship guard's choice control. Spec section 5.2 keeps
+// huh's Confirm for the yes/no core - it already renders buttons, and the theme
+// dresses them in the widget's own tokens - while the three-way guard renders
+// as a kb button row, because huh's Select is an option list and issue #152
+// requires every dialog choice to be a visible padded button.
+func (m Model) shipChoiceRows(styles *theme.Styles, width int) []actionRow {
 	choices := shipChoices(m.action.warning)
 	if len(choices) == 2 {
-		return formview.HuhConfirm(styles, choices[0], choices[1], m.action.choice == 0, width)
+		rendered := formview.HuhConfirm(styles, choices[0], choices[1], m.action.choice == 0, width)
+		return m.huhRows(rendered, shipChoiceLabels(m.action.warning))
 	}
-	return formview.HuhSelect(styles, choices, m.action.choice, width)
+	return m.choiceButtonRows(styles, choices, m.action.choice, taskActionPointerShipChoice, width)
 }
 
-func (m Model) killChoiceField(styles *theme.Styles, width int) string {
-	return formview.HuhSelect(styles, killChoices(), m.action.choice, width)
+// choiceButtonRows renders a dialog's choices as visible padded buttons: one
+// row when the group fits the panel, one button per row when it does not, so a
+// narrow terminal loses the layout rather than the choices.
+func (m Model) choiceButtonRows(
+	styles *theme.Styles,
+	choices []string,
+	selected int,
+	kind taskActionPointerKind,
+	width int,
+) []actionRow {
+	buttons := make([]string, 0, len(choices))
+	labels := make([]actionLabel, 0, len(choices))
+	group := 0
+	for index, choice := range choices {
+		buttons = append(buttons, widget.Button(styles, widget.ButtonOpts{
+			Text:           choice,
+			Selected:       index == selected,
+			Pressed:        m.pointerState.IsPressed(taskActionControlID(kind, index)),
+			UnderlineIndex: -1,
+			Padding:        [2]int{choiceButtonPad, choiceButtonPad},
+		}))
+		labels = append(labels, actionLabel{text: choice, kind: kind, index: index, pad: choiceButtonPad})
+		if index > 0 {
+			group += choiceButtonGap
+		}
+		group += ansi.StringWidth(choice) + 2*choiceButtonPad
+	}
+	if group <= width {
+		return []actionRow{{
+			content: widget.ButtonGroup(styles, theme.OverlaySurf, choiceButtonGap, buttons...),
+			labels:  labels,
+		}}
+	}
+	rows := make([]actionRow, 0, len(buttons))
+	for index, button := range buttons {
+		rows = append(rows, actionRow{content: button, labels: []actionLabel{labels[index]}})
+	}
+	return rows
 }
+
+// choiceButtonPad and choiceButtonGap are the button padding and the surface
+// gap between two buttons in a dialog choice row.
+const (
+	choiceButtonPad = 1
+	choiceButtonGap = 1
+)
 
 func shipChoices(warning shipWarning) []string {
 	choices := []string{"Cancel"}
@@ -1090,15 +1143,6 @@ func shipChoiceLabels(warning shipWarning) []actionLabel {
 	labels := make([]actionLabel, 0, len(choices))
 	for index, choice := range choices {
 		labels = append(labels, actionLabel{text: choice, kind: taskActionPointerShipChoice, index: index})
-	}
-	return labels
-}
-
-func killChoiceLabels() []actionLabel {
-	choices := killChoices()
-	labels := make([]actionLabel, 0, len(choices))
-	for index, choice := range choices {
-		labels = append(labels, actionLabel{text: choice, kind: taskActionPointerKillChoice, index: index})
 	}
 	return labels
 }

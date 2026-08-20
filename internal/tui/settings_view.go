@@ -206,14 +206,15 @@ func (m *settingsModel) renderSettingsRow(row settingsRenderRow, width int) stri
 	styles := m.themeStyles()
 	line := settingsFit(row.line, width)
 	if row.kind == settingsRowButton {
-		if label := settingsFit(row.button, width); strings.HasSuffix(line, label) {
-			marker := strings.TrimSuffix(line, label)
+		if padded := settingsFit(settingsButtonPad+row.button+settingsButtonPad, width); strings.HasSuffix(line, padded) {
+			marker := strings.TrimSuffix(line, padded)
 			return styles.Overlay.Surf.Render(marker) + widget.Button(styles, widget.ButtonOpts{
-				Text:           label,
+				Text:           row.button,
 				Selected:       m.focus == row.target,
 				Armed:          row.armed,
 				Pressed:        m.pointerState.IsPressed(settingsControlID(row.target)),
 				UnderlineIndex: -1,
+				Padding:        [2]int{1, 1},
 			})
 		}
 	}
@@ -357,14 +358,17 @@ func (m *settingsModel) actionRow(target, label string, width int) settingsRende
 	if m.focus == target {
 		marker = "> "
 	}
-	button := "[" + label + "]"
 	return settingsRenderRow{
-		line:   settingsFit(marker+button, width),
-		button: button,
+		line:   settingsFit(marker+settingsButtonPad+label+settingsButtonPad, width),
+		button: label,
 		target: target,
 		kind:   settingsRowButton,
 	}
 }
+
+// settingsButtonPad is one cell of filled surface on each side of a button
+// label, the crush ButtonOpts look of spec section 5.1 (issue #152).
+const settingsButtonPad = " "
 
 // settingsScrollHint is the section 5.1 scroll indicator, shown only while the
 // pane has more rows than the window.

@@ -251,13 +251,14 @@ func (m *Model) renderRow(row editorRow, width int) string {
 	line := fit(row.text, width)
 	switch row.kind {
 	case rowButton:
-		if label := fit(row.button, width); strings.HasSuffix(line, label) {
-			marker := strings.TrimSuffix(line, label)
+		if padded := fit(buttonPadding+row.button+buttonPadding, width); strings.HasSuffix(line, padded) {
+			marker := strings.TrimSuffix(line, padded)
 			return styles.Overlay.Surf.Render(marker) + widget.Button(styles, widget.ButtonOpts{
-				Text:           label,
+				Text:           row.button,
 				Selected:       m.focus == row.target,
 				Pressed:        m.pointerState.IsPressed(pointer.ControlID(row.target)),
 				UnderlineIndex: -1,
+				Padding:        [2]int{1, 1},
 			})
 		}
 		return styles.Overlay.Surf.Render(line)
@@ -401,15 +402,21 @@ func (m *Model) choiceRow(target, label, value string) editorRow {
 	}
 }
 
+// actionRow is one visible button row (issue #152). The row's plain text spells
+// the button's own cells - one pad, the label, one pad - so the rendered button
+// and the text the pointer geometry measures stay the same width.
 func (m *Model) actionRow(target, label string) editorRow {
-	button := "[" + label + "]"
 	return editorRow{
-		text:   m.controlMarker(target) + button,
-		button: button,
+		text:   m.controlMarker(target) + buttonPadding + label + buttonPadding,
+		button: label,
 		target: target,
 		kind:   rowButton,
 	}
 }
+
+// buttonPadding is one cell of filled surface on each side of a button label,
+// the crush ButtonOpts look of spec section 5.1.
+const buttonPadding = " "
 
 func (m *Model) areaBlock(target, label string, area textarea.Model, width, rows int) []editorRow {
 	out := []editorRow{{
@@ -475,9 +482,10 @@ func (m Model) similarRows() []editorRow {
 			kind:   rowBody,
 		})
 	}
+	const dismissAll = "Dismiss all similar items"
 	return append(rows, editorRow{
-		text:   m.similarMarker("similar:all") + "[Dismiss all similar items]",
-		button: "[Dismiss all similar items]",
+		text:   m.similarMarker("similar:all") + buttonPadding + dismissAll + buttonPadding,
+		button: dismissAll,
 		target: "similar:all",
 		kind:   rowButton,
 	})
