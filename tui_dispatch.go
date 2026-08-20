@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -23,14 +22,13 @@ var (
 	tuiStderr io.Writer = os.Stderr
 )
 
-// runTUI opens the same local store as the task CLI: kb tui [--data DIR]
-// [--user NAME]. Remote KB_SERVER mode is deliberately not part of this
-// direct-SQLite wayfinder slice.
+// runTUI opens the same local store as the task CLI: kb tui [--data DIR]. The
+// board namespace is always defaultBoardUser; remote KB_SERVER mode is
+// deliberately not part of this direct-SQLite wayfinder slice.
 func runTUI(args []string) error {
 	fs := flag.NewFlagSet("kb tui", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	dataDir := fs.String("data", "", "board storage directory (default $KB_DATA or ~/.local/share/kb)")
-	user := fs.String("user", envOr("KB_USER", "default"), "board owner (env KB_USER)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -45,18 +43,10 @@ func runTUI(args []string) error {
 			return fmt.Errorf("cannot determine home directory, set KB_DATA or --data: %w", err)
 		}
 	}
-	owner := strings.TrimSpace(*user)
-	if owner == "" {
-		owner = "default"
-	}
-	owner, err := store.SanitizeUser(owner)
-	if err != nil {
-		return err
-	}
 	st, err := openTUIStore(resolvedData, tuiStderr)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	return runTUIProgram(st, filepath.Join(resolvedData, "kb.db"), owner)
+	return runTUIProgram(st, filepath.Join(resolvedData, "kb.db"), defaultBoardUser)
 }

@@ -24,7 +24,7 @@ type viewJSON struct {
 // in both local and remote mode; comments are local-only until the server
 // API grows comment endpoints.
 func (a *app) cmdView(args []string) int {
-	fs, user, data := a.newFlagSet("view")
+	fs, data := a.newFlagSet("view")
 	jsonF := fs.Bool("json", false, "print the task and its comments as JSON")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
@@ -35,7 +35,7 @@ func (a *app) cmdView(args []string) int {
 	}
 	ref := pos[0]
 
-	return a.withBackend(*user, *data, func(be backend) error {
+	return a.withBackend(*data, func(be backend) error {
 		it, comments, links, err := be.view(ref)
 		if err != nil {
 			return err

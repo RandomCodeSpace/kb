@@ -10,7 +10,7 @@ import (
 // cmdLink records a blocks edge: kb link <a> blocks <b> ("a blocks b") or
 // kb link <a> blocked-by <b> ("b blocks a"). Local-only, like comments.
 func (a *app) cmdLink(args []string) int {
-	fs, user, data := a.newFlagSet("link")
+	fs, data := a.newFlagSet("link")
 	jsonF := fs.Bool("json", false, "print both linked tasks as JSON")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
@@ -27,7 +27,7 @@ func (a *app) cmdLink(args []string) int {
 	default:
 		return a.usageErr(fmt.Errorf("unknown relation %q (want blocks or blocked-by)", pos[1]))
 	}
-	return a.withBackend(*user, *data, func(be backend) error {
+	return a.withBackend(*data, func(be backend) error {
 		blocker, blocked, err := be.link(blockerRef, blockedRef)
 		if err != nil {
 			return err
@@ -45,7 +45,7 @@ func (a *app) cmdLink(args []string) int {
 
 // cmdUnlink removes the edge between two tasks, whichever way it points.
 func (a *app) cmdUnlink(args []string) int {
-	fs, user, data := a.newFlagSet("unlink")
+	fs, data := a.newFlagSet("unlink")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -53,7 +53,7 @@ func (a *app) cmdUnlink(args []string) int {
 	if len(pos) != 2 {
 		return a.usageErr(errors.New("unlink needs exactly two <id> arguments"))
 	}
-	return a.withBackend(*user, *data, func(be backend) error {
+	return a.withBackend(*data, func(be backend) error {
 		if err := be.unlink(pos[0], pos[1]); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return fmt.Errorf("no link between %q and %q", pos[0], pos[1])

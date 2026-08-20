@@ -33,8 +33,7 @@ func TestRemoteFullFieldWritesEndToEnd(t *testing.T) {
 	out, errS, code := runCmd(t, "add", "Everything",
 		"--desc", "long form", "--emoji", "🚀", "--prio", "2", "--due", "2026-09-01",
 		"--effort", "M", "--blocked", "--status", "doing",
-		"--tag", "a", "--tag", "b", "--check", "one", "--check", "two",
-		"--user", "alice")
+		"--tag", "a", "--tag", "b", "--check", "one", "--check", "two")
 	if code != 0 {
 		t.Fatalf("full-field add failed (code %d): %s", code, errS)
 	}
@@ -45,8 +44,7 @@ func TestRemoteFullFieldWritesEndToEnd(t *testing.T) {
 	out, errS, code = runCmd(t, "update", "1",
 		"--title", "Renamed", "--desc", "new body", "--emoji", "🎯", "--prio", "3",
 		"--due", "2026-10-01", "--effort", "L", "--no-blocked",
-		"--tag", "c", "--check", "three",
-		"--user", "alice")
+		"--tag", "c", "--check", "three")
 	if code != 0 {
 		t.Fatalf("full-field update failed (code %d): %s", code, errS)
 	}
@@ -54,7 +52,7 @@ func TestRemoteFullFieldWritesEndToEnd(t *testing.T) {
 		t.Fatalf("update output = %q", out)
 	}
 
-	tasks := listJSON(t, "--user", "alice")
+	tasks := listJSON(t)
 	if len(tasks) != 1 {
 		t.Fatalf("list = %+v", tasks)
 	}
@@ -70,7 +68,7 @@ func TestRemoteFullFieldWritesEndToEnd(t *testing.T) {
 
 func TestRemoteErrorPathsEndToEnd(t *testing.T) {
 	remoteEnv(t)
-	if _, _, code := runCmd(t, "add", "Seed", "--user", "alice"); code != 0 {
+	if _, _, code := runCmd(t, "add", "Seed"); code != 0 {
 		t.Fatal("seed add failed")
 	}
 
@@ -89,8 +87,7 @@ func TestRemoteErrorPathsEndToEnd(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			args := append(tt.args, "--user", "alice")
-			_, errS, code := runCmd(t, args...)
+			_, errS, code := runCmd(t, tt.args...)
 			if code != 1 || !strings.Contains(errS, tt.want) {
 				t.Fatalf("code=%d stderr=%q, want %q", code, errS, tt.want)
 			}
@@ -114,7 +111,6 @@ func TestRemoteRejectsEphemeralIndexesOnEveryVerb(t *testing.T) {
 	}
 	for _, args := range cases {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			args := append(args, "--user", "alice")
 			_, errS, code := runCmd(t, args...)
 			if code != 1 || !strings.Contains(errS, "ephemeral i-N task ids are gone") {
 				t.Fatalf("code=%d stderr=%q", code, errS)
@@ -125,13 +121,13 @@ func TestRemoteRejectsEphemeralIndexesOnEveryVerb(t *testing.T) {
 
 func TestRemoteCommentListTruncatesMultilineBodies(t *testing.T) {
 	remoteEnv(t)
-	if _, _, code := runCmd(t, "add", "Seed", "--user", "alice"); code != 0 {
+	if _, _, code := runCmd(t, "add", "Seed"); code != 0 {
 		t.Fatal("seed add failed")
 	}
-	if _, errS, code := runCmd(t, "comment", "add", "1", "first line\nsecond line", "--user", "alice"); code != 0 {
+	if _, errS, code := runCmd(t, "comment", "add", "1", "first line\nsecond line"); code != 0 {
 		t.Fatalf("comment add failed: %s", errS)
 	}
-	out, _, code := runCmd(t, "comment", "list", "1", "--user", "alice")
+	out, _, code := runCmd(t, "comment", "list", "1")
 	if code != 0 || !strings.Contains(out, "first line ...") || strings.Contains(out, "second line") {
 		t.Fatalf("comment list output:\n%s", out)
 	}
@@ -139,10 +135,10 @@ func TestRemoteCommentListTruncatesMultilineBodies(t *testing.T) {
 
 func TestViewRendersDashForMissingEffort(t *testing.T) {
 	remoteEnv(t)
-	if _, _, code := runCmd(t, "add", "Dated", "--due", "2026-09-01", "--user", "alice"); code != 0 {
+	if _, _, code := runCmd(t, "add", "Dated", "--due", "2026-09-01"); code != 0 {
 		t.Fatal("seed add failed")
 	}
-	out, _, code := runCmd(t, "view", "1", "--user", "alice")
+	out, _, code := runCmd(t, "view", "1")
 	if code != 0 || !strings.Contains(out, "due: 2026-09-01   effort: -") {
 		t.Fatalf("view output:\n%s", out)
 	}

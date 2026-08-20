@@ -25,9 +25,10 @@ type preferenceSavedMsg struct {
 }
 
 // tuiPreferencesPath keeps display state beside its SQLite board. Hashing the
-// canonical configured database path together with the sanitized board owner
-// isolates both alternate --data paths and KB_USER namespaces without putting
-// user-controlled text in a filename.
+// canonical configured database path together with the board owner isolates
+// alternate --data paths without putting user-controlled text in a filename.
+// The owner is the constant "default" for every local surface; it stays in the
+// hash because kb serve still keeps one board per identity.
 func tuiPreferencesPath(databasePath, user string) (string, error) {
 	databasePath, err := filepath.Abs(databasePath)
 	if err != nil {

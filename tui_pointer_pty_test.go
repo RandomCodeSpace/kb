@@ -126,7 +126,7 @@ func waitForPTYPatternAfter(t *testing.T, output *lockedPTYOutput, offset int, p
 
 func editorSavePoint(t *testing.T, st *store.Store, task board.Task, width, height int) (int, int) {
 	t.Helper()
-	editor := cardeditor.New(st, "pointer-pty")
+	editor := cardeditor.New(st, "default")
 	editor.SetAIRunner(ai.NewRunner(st, "", nil, nil), context.Background())
 	editor.OpenEdit(task)
 	for row, line := range strings.Split(ansi.Strip(editor.View(width, height)), "\n") {
@@ -187,14 +187,14 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	task, err := st.AddTask("pointer-pty", board.Task{Title: "Drag through raw SGR", Status: board.StatusTodo, Prio: 3})
+	task, err := st.AddTask("default", board.Task{Title: "Drag through raw SGR", Status: board.StatusTodo, Prio: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, binary, "tui", "--data", data, "--user", "pointer-pty")
+	command := exec.CommandContext(ctx, binary, "tui", "--data", data)
 	command.Env = append(os.Environ(), "TERM=xterm-256color")
 	const terminalWidth, terminalHeight = 120, 40
 	terminal, err := pty.StartWithSize(command, &pty.Winsize{Rows: terminalHeight, Cols: terminalWidth})
@@ -230,7 +230,7 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	if _, err := io.WriteString(terminal, "\x1b[<0;45;7m"); err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskStatus(t, st, "pointer-pty", task.ID, board.StatusDoing)
+	waitForTaskStatus(t, st, "default", task.ID, board.StatusDoing)
 	editOffset := output.length()
 	if _, err := io.WriteString(terminal, "e"); err != nil {
 		t.Fatal(err)
@@ -240,7 +240,7 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	if _, err := io.WriteString(terminal, "X\x13"); err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskTitle(t, st, "pointer-pty", task.ID, "Drag through raw SGRX")
+	waitForTaskTitle(t, st, "default", task.ID, "Drag through raw SGRX")
 	waitForPTYMarkerAfter(t, &output, boardOffset, "DOING")
 
 	editOffset = output.length()
@@ -255,7 +255,7 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	if _, err := io.WriteString(terminal, "\x1b[FY\x1b[13;5u"); err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskTitle(t, st, "pointer-pty", task.ID, "Drag through raw SGRXY")
+	waitForTaskTitle(t, st, "default", task.ID, "Drag through raw SGRXY")
 	waitForPTYMarkerAfter(t, &output, boardOffset, "DOING")
 
 	editOffset = output.length()
@@ -266,7 +266,7 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	if _, err := io.WriteString(terminal, "\x1b[FZ"); err != nil {
 		t.Fatal(err)
 	}
-	current, err := st.Task("pointer-pty", task.ID)
+	current, err := st.Task("default", task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	if _, err := fmt.Fprintf(terminal, "\x1b[<0;%d;%dm", saveX, saveY); err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskTitle(t, st, "pointer-pty", task.ID, "Drag through raw SGRXYZ")
+	waitForTaskTitle(t, st, "default", task.ID, "Drag through raw SGRXYZ")
 	if _, err := io.WriteString(terminal, "q"); err != nil {
 		t.Fatal(err)
 	}

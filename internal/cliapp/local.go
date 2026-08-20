@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
@@ -77,7 +78,30 @@ func OpenLocalStore(dataDir string, stderr io.Writer) (*store.Store, error) {
 	if _, err := st.ImportMarkdownDir(dataDir); err != nil {
 		fmt.Fprintf(stderr, "kb: warning: legacy markdown import: %v\n", err)
 	}
+	warnOrphanedNamespaces(st, stderr)
 	return st, nil
+}
+
+// warnOrphanedNamespaces prints one stderr line when the database still holds
+// tasks under a namespace other than defaultUser. The --user/KB_USER surface
+// is gone, so the local commands can no longer reach those rows; nothing is
+// deleted and kb serve still serves them.
+func warnOrphanedNamespaces(st *store.Store, stderr io.Writer) {
+	users, err := st.Users()
+	if err != nil {
+		return
+	}
+	orphans := make([]string, 0, len(users))
+	for _, u := range users {
+		if u.User != defaultUser && u.Tasks > 0 {
+			orphans = append(orphans, u.User)
+		}
+	}
+	if len(orphans) == 0 {
+		return
+	}
+	fmt.Fprintf(stderr, "kb: warning: tasks exist under non-default namespaces (%s); local commands only use %q and leave that data untouched\n",
+		strings.Join(orphans, ", "), defaultUser)
 }
 
 func (l *localBackend) close() error { return l.st.Close() }

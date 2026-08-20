@@ -31,6 +31,7 @@ func TestRunTUIDiscoversLocalStoreAndUser(t *testing.T) {
 	restoreTUISeams(t)
 	data := t.TempDir()
 	t.Setenv("KB_DATA", data)
+	// KB_USER is dead: the TUI always opens the "default" board.
 	t.Setenv("KB_USER", " Alice ")
 	var gotPath, gotUser string
 	runTUIProgram = func(st *store.Store, path, user string, _ ...tea.ProgramOption) error {
@@ -43,7 +44,7 @@ func TestRunTUIDiscoversLocalStoreAndUser(t *testing.T) {
 	if err := runTUI(nil); err != nil {
 		t.Fatalf("runTUI: %v", err)
 	}
-	if gotPath != filepath.Join(data, "kb.db") || gotUser != "alice" {
+	if gotPath != filepath.Join(data, "kb.db") || gotUser != "default" {
 		t.Fatalf("path/user = %q/%q", gotPath, gotUser)
 	}
 	for _, name := range []string{"secret", "kb.db"} {
@@ -56,12 +57,11 @@ func TestRunTUIDiscoversLocalStoreAndUser(t *testing.T) {
 func TestRunTUIErrors(t *testing.T) {
 	restoreTUISeams(t)
 	t.Setenv("KB_DATA", t.TempDir())
-	t.Setenv("KB_USER", "bad/user")
-	if err := runTUI(nil); err == nil || !strings.Contains(err.Error(), "invalid character") {
-		t.Fatalf("invalid user error = %v", err)
+	if err := runTUI([]string{"--user", "alice"}); err == nil ||
+		!strings.Contains(err.Error(), "flag provided but not defined: -user") {
+		t.Fatalf("--user should be rejected: %v", err)
 	}
 
-	t.Setenv("KB_USER", "")
 	if err := runTUI([]string{"extra"}); err == nil || !strings.Contains(err.Error(), "positional") {
 		t.Fatalf("positional error = %v", err)
 	}
@@ -86,7 +86,6 @@ func TestRunTUIPropagatesProgramFailureAndDefaultsBlankUser(t *testing.T) {
 	restoreTUISeams(t)
 	data := t.TempDir()
 	t.Setenv("KB_DATA", data)
-	t.Setenv("KB_USER", "   ")
 	want := errors.New("program failed")
 	runTUIProgram = func(_ *store.Store, _ string, user string, _ ...tea.ProgramOption) error {
 		if user != "default" {
