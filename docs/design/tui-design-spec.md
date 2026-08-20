@@ -282,17 +282,27 @@ See §8, contestable call 3.
 | `CardRail` | `1` column | Reserved on the card's left edge, always |
 | `CardPadLeft` | `1` at normal, `0` at compact | Between rail and content |
 | `CardPadRight` | `1` | Always |
-| `MaxColumnWidth` | `52` | Terminal analogue of a web max-width container |
+| `MinColumnWidth` | `16` | Narrowest panel a column may shrink to and still hold a title |
 | `OverlayInsetX` | `2` | Overlay content inset from the panel edge |
 
 **Chrome row budget.** Normal density spends 4 rows: top bar, toolbar, page
 padding, footer. Compact spends 3 (no page padding). Everything else is board.
 
 **Column widths.** Available width = `frameW - 2*PageMarginX - (n-1)*ColumnGutter`,
-split evenly with the remainder distributed to the leftmost columns. If the
-resulting width exceeds `MaxColumnWidth`, every column is clamped to 52 and the
-whole group is centered; the leftover becomes page margin. Extra terminal width
-must never become stretched cards.
+split evenly with the remainder distributed to the leftmost columns. The split
+is the whole rule: the columns own the entire frame and there is no upper clamp.
+If the even split falls below `MinColumnWidth`, every column takes the floor
+instead and the row is clipped at the frame edge — fewer readable columns beats
+a screenful of slivers.
+
+**Amended by [#151](https://github.com/RandomCodeSpace/kb/issues/151).** The
+original rule clamped every column to a `MaxColumnWidth` of 52 and centered the
+group, on the reasoning that extra terminal width must never become stretched
+cards. On the reference hardware — a 14-inch laptop terminal, roughly 180-220
+columns by 45-60 rows — that produced a 211-column board rendered as a centered
+strip with ~50 dead columns of canvas either side of it. The web UI the TUI is
+at parity with filled its window. Dead canvas is the worse failure, so the clamp
+is gone and a floor takes its place.
 
 **Card geometry.** For a card of width `W`:
 
@@ -461,11 +471,52 @@ Elevation is a shade step plus a shadow, never a frame.
 6. **Footer band**, last row of the panel: `OverlayBand`, `FgSubtle`, action
    hints inset `OverlayInsetX`.
 
-**Geometry.** `pw = min(72, frameW - 8)`, `ph = min(13, frameH - 6)` for the card
-detail pane; centered. Below `pw < 24` or `ph < 8` the overlay does not render as
-a panel and the view falls back to full-frame. Per-overlay width caps that
-already exist stay as tokens: card detail 92, editor 96, ADR split 100, issue
-import 88, task action 72, help 56.
+**Geometry.** Every content overlay — card detail, card editor, settings, ADR
+split, issue import — resolves the same panel size, centered. The rule has two
+regimes, split at the `WideFrame` threshold of 100 the board already collapses
+on, which is how a responsive modal behaves:
+
+| Regime | Panel width | Panel height |
+|---|---|---|
+| `frameW < 100` | `frameW - NarrowSlackW` | `frameH - NarrowSlackH` |
+| `frameW >= 100` | `round(frameW * WidthPct / 100)` | `round(frameH * HeightPct / 100)` |
+
+| Token | Value | Applies to |
+|---|---|---|
+| `WidthPct` | `85` | Share of a wide frame's width the panel spans |
+| `HeightPct` | `88` | Share of a wide frame's height the panel spans |
+| `FrameSlackW` | `2` | Columns a proportional panel always leaves free |
+| `FrameSlackH` | `2` | Rows a proportional panel always leaves free |
+| `NarrowSlackW` | `4` | Columns a narrow-frame panel leaves free |
+| `NarrowSlackH` | `2` | Rows a narrow-frame panel leaves free |
+| `MinPaneW` | `24` | Narrowest panel the proportional rule will produce |
+| `MinPaneH` | `8` | Shortest panel the proportional rule will produce |
+| `ContentMax` | `96` | Readable measure cap for prose inside a panel |
+
+In the proportional regime the share is raised to `MinPaneW` / `MinPaneH` and
+then capped at `frame - FrameSlack` on each axis, so the panel never touches the
+edge it casts its shadow onto. Below `pw < 24` or `ph < 8` the overlay does not
+render as a panel and the view falls back to full-frame, which is what keeps the
+frozen v1.0.1 dismissal behaviors reachable on a terminal too small to center
+anything in.
+
+**Content measure.** A body row inside a panel is `min(pw - 2*OverlayInsetX,
+ContentMax)` wide. The panel grows with the frame; the prose column inside it
+stops at the point where a line stops being scannable. Bands (header, footer,
+section breaks) always span the full panel width.
+
+The two content-sized dialogs keep fixed width caps, because their height is
+their content and a proportional panel would frame a handful of rows in a
+screenful of surface: task action 72, help 56.
+
+**Amended by [#151](https://github.com/RandomCodeSpace/kb/issues/151).** The
+original geometry was `pw = min(72, frameW - 8)`, `ph = min(13, frameH - 6)` for
+the card detail pane, with per-overlay width caps of card detail 92, editor 96,
+ADR split 100 and issue import 88. On a 211x52 laptop terminal that rendered the
+detail pane at 72x13 — 34% of the frame width, 25% of its height — against a web
+UI whose detail modal was a large centered panel. Those caps are replaced by the
+proportional rule above; the narrow regime reproduces the v1.0.1 sizes on frames
+below 100 columns, so nothing on a small terminal shrank to buy this.
 
 **Field rows** inside an overlay: label at inset `OverlayInsetX` in `FgMuted`,
 fixed 12-column label gutter, value at `OverlayInsetX + 12` in `FgBase`.
