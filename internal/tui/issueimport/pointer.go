@@ -51,7 +51,7 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 		})
 	}
 	if m.stage == stageReview && m.operation == "" {
-		maxScroll := max(len(m.rows)-reviewLimit(height), 0)
+		maxScroll := max(len(m.rows)-reviewLimit(max(frame.height-2, 1)), 0)
 		hitMap.AddWheel(pane, func(delta int) tea.Msg {
 			return pointerActionMsg{target: "scroll", session: m.session, generation: m.generation, scrollDelta: delta * 3, maxScroll: maxScroll}
 		})
