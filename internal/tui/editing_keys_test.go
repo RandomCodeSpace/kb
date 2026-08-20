@@ -77,3 +77,37 @@ func TestSettingsInputReceivesLineEditingKeys(t *testing.T) {
 	model.settings.applyFocus()
 	assertLineEditing(t, &model, func() string { return model.settings.aiBase.Value() }, "host")
 }
+
+// An integration row shares the settings key path with the AI block, but adds
+// a kind control that owns left and right. That stepper must not reach the row
+// text inputs, which need the arrows for cursor motion.
+func TestIntegrationRowInputReceivesLineEditingKeys(t *testing.T) {
+	backend := newSettingsTestStore(t)
+	settings := newSettingsModel(backend, "alice", context.Background())
+	loadSettingsForTest(t, settings)
+	settings.addForgeDraft()
+	row, _ := settings.focusedRow()
+	if row == nil {
+		t.Fatal("draft row not focused")
+	}
+	settings.focus = "forge:" + row.id + ":base"
+	settings.applyFocus()
+
+	for _, r := range "kb.example" {
+		settings.updateKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	settings.updateKey(tea.KeyPressMsg{Code: tea.KeyHome})
+	settings.updateKey(tea.KeyPressMsg{Code: '<', Text: "<"})
+	settings.updateKey(tea.KeyPressMsg{Code: tea.KeyEnd})
+	settings.updateKey(tea.KeyPressMsg{Code: '>', Text: ">"})
+	settings.updateKey(tea.KeyPressMsg{Code: tea.KeyLeft})
+	settings.updateKey(tea.KeyPressMsg{Code: '!', Text: "!"})
+
+	row, _ = settings.focusedRow()
+	if got := row.baseURL.Value(); got != "<kb.example!>" {
+		t.Fatalf("integration base = %q, want %q", got, "<kb.example!>")
+	}
+	if row.kind != "gitlab" {
+		t.Fatalf("row kind = %q, want gitlab unchanged", row.kind)
+	}
+}
