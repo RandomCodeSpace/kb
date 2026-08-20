@@ -21,7 +21,7 @@ must come back, not invent one.
 
 ## 1. Semantic palette
 
-One palette, ~30 named slots, roles not hues. Nothing outside the theme package
+One palette, ~34 named slots, roles not hues. Nothing outside the theme package
 names a hex.
 
 The `x256` column is the xterm-256 index each hex quantizes to under nearest-RGB
@@ -108,6 +108,7 @@ Mapping is exact-match on 1/2/4, everything else falls to `Prio3`
 | `StatusWarn` | `#ffb020` | 214 | blocked chip, warnings |
 | `StatusDanger` | `#ff5a48` | 203 | overdue chip, errors, purge arm state |
 | `StatusInfo` | `#4f8ef7` | 69 | due chip (not overdue), informational |
+| `StatusAlarm` | `#b31f14` | 124 | the armed fill of a two-step destructive confirm (§1.9) |
 
 ### 1.6 Label pill wheel
 
@@ -148,8 +149,16 @@ FgSubtle        #9aa5b6 -> 248     StatusOK     #3fbf7f ->  72
 FgMuted         #6b7686 -> 243     StatusWarn   #ffb020 -> 214
 FgOnAccent      #0b0e14 -> 233     StatusDanger #ff5a48 -> 203
                                    StatusInfo   #4f8ef7 ->  69
+                                   StatusAlarm  #b31f14 -> 124
                                    Label1..5    209 / 69 / 71 / 141 / 214
+
+TintPrimary     #a8b6ff -> 147     TintSuccess  #7fe0b0 -> 115
+TintDanger      #ffa7a0 -> 217
 ```
+
+The four slots added for the button variants of §1.9 are audited by the same
+test as every other: they occupy 124, 147, 115 and 217, all previously free, so
+the real-collision set is still empty and the alias set is unchanged.
 
 **Same-hex aliases** (intended, not collisions):
 `Canvas`/`FgOnAccent` (233); `Raised`/`BandRest` (238);
@@ -175,7 +184,7 @@ the real-collision set is **empty**, with the alias set exactly as listed above.
 A new slot that lands on an occupied index with a different hex fails the build
 until it is re-hued, or until the alias is justified in writing here. This is the
 mechanism that keeps 256 honest; the audit is not a one-time exercise. It is
-cheap — a pure function over ~29 colors, no terminal involved.
+cheap — a pure function over ~34 colors, no terminal involved.
 
 ### 1.8 Dimmed variant
 
@@ -187,6 +196,73 @@ Dim(c) = c*(1-0.66) + Canvas*0.66   // per channel, 8-bit, round-half-up
 ```
 
 Built once alongside the base palette. Never computed per frame.
+
+### 1.9 Button variants
+
+Added by [#157](https://github.com/RandomCodeSpace/kb/issues/157). The dogfood
+finding: every button in the card-detail action row rendered the same `Raised`
+surface, so a row of them said nothing about what any one of them did. A button
+carries its meaning in its color, and the meaning is a *role*, never a hue the
+caller picks.
+
+Four variants, `theme.ButtonVariant`. Neutral is the zero value: a caller that
+states no meaning gets the calmest surface rather than an accidental accent.
+
+| Variant | Means |
+|---|---|
+| `ButtonNeutral` | dismissal, navigation, a side action |
+| `ButtonPrimary` | the pane's main affirmative |
+| `ButtonSuccess` | the state-advancing action |
+| `ButtonDanger` | the destructive action |
+
+Three new tint slots carry the readable-on-`Raised` form of a variant's hue, and
+double as the fill its hovered state wears:
+
+| Slot | Hex | x256 | Role |
+|---|---|---|---|
+| `TintPrimary` | `#a8b6ff` | 147 | blurred Primary label; hovered Primary fill |
+| `TintSuccess` | `#7fe0b0` | 115 | blurred Success label; hovered Success fill |
+| `TintDanger` | `#ffa7a0` | 217 | blurred Danger label; hovered Danger fill |
+
+**State matrix.** The hue carries the meaning; the state carries the elevation.
+A blurred button wears its variant as a tint on the resting surface, a hovered
+one wears the tint as a fill, and a focused one wears the saturated hue.
+
+| Variant | Blurred | Hovered | Focused |
+|---|---|---|---|
+| Neutral | `FgBase` on `Raised` | `FgBase` bold on `OverlayBand` | `FgOnAccent` bold on `FgSubtle` |
+| Primary | `TintPrimary` on `Raised` | `FgOnAccent` on `TintPrimary` | `FgOnAccent` bold on `Brand` |
+| Success | `TintSuccess` on `Raised` | `FgOnAccent` on `TintSuccess` | `FgOnAccent` bold on `StatusOK` |
+| Danger | `TintDanger` on `Raised` | `FgOnAccent` on `TintDanger` | `FgOnAccent` bold on `StatusDanger` |
+
+Neutral has no hue to spend, so its hovered state stays the surface step the
+widget always used. That asymmetry is deliberate: hover is pointer feedback, and
+on a variant with no hue the only honest cue left is elevation.
+
+**Armed** is `FgBase` bold on `StatusAlarm`, for every variant. Arming is only
+ever destructive, so it does not vary; it gets its own deeper fill because a
+purge button arms *from* the Danger variant, and an armed button that rendered
+the same fill as a focused Danger one would be the single state a user must not
+misread. **Pressed** is unchanged: SGR 7 reverse video over whatever the state
+resolved to, which preserves the pair's contrast ratio by construction.
+
+**Contrast guard.** A button label is the smallest run in the TUI a user must
+read before acting on it, so every pair above clears WCAG 2.x AA for normal text
+— 4.5:1 — in truecolor *and* again after 256-color quantization. Measured:
+
+| Variant | Blurred | Hovered | Focused | Armed |
+|---|---|---|---|---|
+| Neutral | 8.61 / 8.39 | 5.82 / 5.50 | 7.76 / 7.88 | 5.51 / 6.41 |
+| Primary | 5.41 / 4.82 | 9.93 / 9.28 | 6.02 / 5.71 | 5.51 / 6.41 |
+| Success | 6.60 / 5.74 | 12.13 / 11.03 | 8.25 / 7.11 | 5.51 / 6.41 |
+| Danger | 5.65 / 5.57 | 10.38 / 10.71 | 6.26 / 6.29 | 5.51 / 6.41 |
+
+(truecolor / x256; worst cell 4.82.) The theme package ships the audit as a
+test, the same mechanism §1.7 uses for the palette: re-hue a variant below the
+floor and the build fails. A second test asserts the four variants stay
+separable at 256 colors — a variant that collapsed onto another's index would
+reproduce the finding this section exists for, on the terminals least able to
+afford it.
 
 ---
 
@@ -562,7 +638,7 @@ underline + `ButtonGroup`).
 | Chip / pill | kb `widget` | `Chip(o ChipOpts) string` — `ChipOpts{Text, Key string, Fill, On theme.Slot, Flat bool}`; `Key` non-empty selects the scoped two-tone form, `Flat` the compact degradation |
 | Label pill | kb `widget` | `Label(tag string, on theme.Slot, flat bool) string` — wraps `Chip`, owns the `%5` wheel |
 | Priority marker | kb `widget` | `Priority(p int, on theme.Slot) string` |
-| Button / action | kb `widget` | `Button(o ButtonOpts) string` + `ButtonGroup(gap int, bs ...string) string` — `ButtonOpts{Text string, Selected, Hovered, Armed bool, UnderlineIndex int, Padding [2]int}`; `Armed` is kb's addition for the purge/remove two-step. A rendered button is `Padding{1,1}` and a group's gap is 1, so an action reads as a filled surface wider than its label. `UnderlineIndex` marks the hotkey where the label spells it; where it does not, the caller appends the key in parentheses and underlines that. This is a display convention, never a keymap change |
+| Button / action | kb `widget` | `Button(o ButtonOpts) string` + `ButtonGroup(gap int, bs ...string) string` — `ButtonOpts{Text string, Variant theme.ButtonVariant, Selected, Hovered, Armed bool, UnderlineIndex int, Padding [2]int}`; `Armed` is kb's addition for the purge/remove two-step, and `Variant` is the semantic role of §1.9, assigned per surface in §5.4. A rendered button is `Padding{1,1}` and a group's gap is 1, so an action reads as a filled surface wider than its label. `UnderlineIndex` marks the hotkey where the label spells it; where it does not, the caller appends the key in parentheses and underlines that. This is a display convention, never a keymap change |
 | Status line / footer | kb `widget` | `StatusBar(o StatusOpts) string` — `StatusOpts{Dot theme.Slot, State string, Hints []string, Width int}`; responsive hint ladder is the caller's |
 | Filter bar | kb `widget` | `FilterBar(o FilterOpts) string` — `FilterOpts{Field string, Chips []string, Count string, Width int}` |
 | Top bar | kb `widget` | `TopBar(o TopBarOpts) string` — brand pill, title, user, right-aligned counters |
@@ -588,7 +664,7 @@ underline + `ButtonGroup`).
 | Spinner | `bubbles/v2 spinner` | Adopt for every `…ing…` busy state (drafting, saving, fetching, importing) that is currently static text. |
 | Progress | `bubbles/v2 progress` | Adopt for `issueimport`'s `writing i/N`. |
 | Confirm dialog | `huh/v2 Confirm` | Assigned: the ship / kill confirm prompt's yes-no core. |
-| Choice row | `huh/v2 Select` | Assigned: the single-row `Priority` / `Effort` / `Source` / `Max stories` choice fields, in its inline form. **Amended by [#152](https://github.com/RandomCodeSpace/kb/issues/152):** the three-way `Cancel / Tick everything / Ship anyway` guard and the kill prompt's choices are no longer Select's. Select renders a vertical option list; those two are dialog choices and the dogfood verdict of map #136 requires a dialog choice to be a visible button, so they render as a `ButtonGroup` row that stacks one button per row when the panel is too narrow for the group. Confirm keeps the yes/no core, with its `FocusedButton` and `BlurredButton` built from the same `Styles.Button` tokens the widget uses. |
+| Choice row | `huh/v2 Select` | Assigned: the single-row `Priority` / `Effort` / `Source` / `Max stories` choice fields, in its inline form. **Amended by [#152](https://github.com/RandomCodeSpace/kb/issues/152):** the three-way `Cancel / Tick everything / Ship anyway` guard and the kill prompt's choices are no longer Select's. Select renders a vertical option list; those two are dialog choices and the dogfood verdict of map #136 requires a dialog choice to be a visible button, so they render as a `ButtonGroup` row that stacks one button per row when the panel is too narrow for the group. Confirm keeps the yes/no core, with its `FocusedButton` and `BlurredButton` built from the same `Styles.Button` tokens the widget uses. **Amended by [#157](https://github.com/RandomCodeSpace/kb/issues/157):** those two tokens are the Neutral variant's focused and blurred states, and that is a limitation, not a preference — huh exposes one button pair per Confirm, while the pair spans two meanings (`Cancel` and `Ship anyway`). Painting it with either meaning would lie about the other, so the confirm carries the calmest variant and the hued treatment lives in the `ButtonGroup` form of the same guard. |
 | Note / disclaimer block | `huh/v2 Note` | Assigned: the AI disclaimer blocks in `adrsplit` and `carddetail/drift`. |
 
 ### 5.3 Explicitly not sourced from charm, with reasons
@@ -631,6 +707,59 @@ background and re-arms it after every reset in the content, the same shape
 `PressedRun` already had for the pressed attribute. Any view laying a
 component's output onto a shade tier goes through it.
 
+### 5.4 Button variant assignment
+
+Added by [#157](https://github.com/RandomCodeSpace/kb/issues/157). Every button
+surface in the TUI, and the variant of §1.9 it carries. The variant is a
+property of the *action*, carried structurally on the control or the row that
+owns it — never recovered by matching a rendered label.
+
+| Surface | Button | Variant |
+|---|---|---|
+| Card detail action row | `Edit` | Primary |
+| | `Check`, `Restore` | Success |
+| | `Kill`, `Del`, `Unlink`, `Purge` | Danger |
+| | `Drift`, `Comment`, `Link`, `Close` | Neutral |
+| Card detail, comment mode | `Save comment` | Primary |
+| Card detail, link mode | `Add link` | Primary |
+| | `Toggle direction`, `Cancel` | Neutral |
+| Card detail, delete confirm | `Delete`, `Confirm delete` | Danger |
+| | `Cancel` | Neutral |
+| Card detail, drift mode | `Check selected`, `Update baseline` | Primary |
+| | `Back` | Neutral |
+| Card editor | `Save card` | Primary |
+| | `Cancel`, `Draft`, `Cancel draft`, `Dismiss all similar items` | Neutral |
+| Settings | `Save AI settings`, `Save` | Primary |
+| | `Test connection`, `Test`, `+ Add integration` | Neutral |
+| | `Remove`, `Confirm remove` | Danger (armed on the second step) |
+| Ship guard | `Tick everything` | Success |
+| | `Ship anyway` | Danger |
+| | `Cancel` | Neutral |
+| Kill prompt | `Kill without reason`, `Kill with reason` | Danger |
+| | `Cancel` | Neutral |
+| Purge prompt | the single arm button | Danger (armed on the second step) |
+| ADR split | `Propose stories`, `Add selected (N)` | Primary |
+| | `Cancel`, `Close`, `Back to source` | Neutral |
+| Issue import | `Import` | Primary |
+| | `Cancel`, `Back`, `Close` | Neutral |
+| huh `Confirm` | both buttons | Neutral (§5.2: one pair, two meanings) |
+
+**Recorded judgment calls.**
+
+- `Ship anyway` is **Danger**, not a warning shade. It overrides a guard the
+  board raised over open checklist items or a blocked flag; the variant set
+  spends no fifth token family on a single button, and the guard's other
+  affirmative (`Tick everything`) already carries Success, so the pair reads as
+  "do the work" against "skip the work".
+- `Unlink` is **Danger**. It removes a relation, which is a delete with a softer
+  name; `Link`, which creates one, is Neutral because it opens a picker rather
+  than committing anything.
+- The AI actions (`Draft`, `Test connection`, `Test`) are **Neutral**. A pane has
+  one primary affirmative, and in every one of those panes it is `Save`.
+- `Add selected (N)` is **Primary**, not Success: it is the affirmative of the
+  ADR split's second stage, and Success is reserved for advancing a card's state
+  on the board.
+
 ---
 
 ## 6. Theme package contract
@@ -667,7 +796,7 @@ type Styles struct {
     Label   [5]ChipStyles  // the wheel
     Status  StatusStyles   // OK, Warn, Danger, Info, Dot
     Overlay OverlayStyles  // Surf, HeaderBand, SectionBand, FooterBand, Shadow, FieldLabel, FieldValue
-    Button  ButtonStyles   // Rest, Focused, Hovered, Armed, Pressed
+    Button  ButtonSet      // [4]ButtonStyles by variant (§1.9); Rest, Focused, Hovered, Armed, Pressed
     Pressed lipgloss.Style
     Table   TableStyles    // Cell, Last — layout-only cells handed to lipgloss table
 
