@@ -466,9 +466,12 @@ func huhStyles(pal Palette, on, onBold styleFunc, isDark bool) *huh.Styles {
 	// huh joins the buttons of a confirm horizontally with no separation of its
 	// own, so the padding and the gap are part of the token. The margin carries
 	// the panel tier so the gap does not punch a hole in the surface.
+	// The two button states are the widget's own tokens (spec section 5.1) so a
+	// huh Confirm and a kb Button read as the same control: issue #152 makes
+	// every dialog choice a visible padded button.
 	built.Focused.FocusedButton = onBold(FgOnAccent, Brand).
 		Padding(0, 1).MarginRight(1).MarginBackground(pal[OverlaySurf])
-	built.Focused.BlurredButton = on(FgBase, OverlayBand).
+	built.Focused.BlurredButton = on(FgBase, Raised).
 		Padding(0, 1).MarginRight(1).MarginBackground(pal[OverlaySurf])
 	built.Focused.NoteTitle = onBold(FgSubtle, OverlaySurf)
 	built.Blurred = built.Focused

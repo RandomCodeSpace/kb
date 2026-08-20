@@ -3,6 +3,7 @@ package carddetail
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
@@ -12,6 +13,8 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget"
 )
 
 // Writer is the direct SQLite projection used by detail actions. Reader stays
@@ -289,8 +292,8 @@ func (m *Model) focusActionSelection() {
 			break
 		}
 	}
-	_, paneHeight, _ := m.paneSize(m.width, m.height)
-	bodyRows := max(paneHeight-2, 1)
+	paneWidth, paneHeight, _ := m.paneSize(m.width, m.height)
+	bodyRows := max(m.bodyRowCount(paneWidth, paneHeight), 1)
 	// Frozen v1.0.1 follow: a focus row above the window becomes the first
 	// visible row, one below it becomes the last. viewport.EnsureVisible would
 	// make both the first, so the offset is set explicitly and the component
@@ -535,37 +538,31 @@ func selectionWindow(count, selection, limit int) (int, int) {
 	return start, start + limit
 }
 
+// actionFooter is the footer band of spec section 4 step 6: keyboard hints
+// only. The clickable affordances left the band for the pinned action row of
+// issue #152, so the band no longer competes with the buttons for the width.
 func (m Model) actionFooter(width int) string {
 	if m.driftMode != driftNone {
-		controls := m.pointerFooterText(m.pointerFooterControls(width), width)
-		status := m.driftFooter()
-		if controls != "" && m.statusMessage != "" {
-			return fitDetailLine(controls+" | "+status, width)
-		}
-		if controls != "" {
-			return controls
-		}
-		return status
+		return fitDetailLine(m.driftFooter(), width)
 	}
 	if m.saving {
 		return "write in progress | esc stays here"
 	}
-	controls := m.pointerFooterText(m.pointerFooterControls(width), width)
 	if m.confirm && (m.action == actionDeleteComment || m.action == actionDeleteLink) {
-		return controls + " | enter confirm delete | esc cancel"
+		return fitDetailLine("enter confirm delete | esc cancel", width)
 	}
+	hints := "up/down scroll | esc close"
 	switch m.action {
 	case actionAddComment:
-		return controls + " | ctrl+s add comment | esc back"
+		hints = "ctrl+s add comment | esc back"
 	case actionDeleteComment:
-		return controls + " | up/down choose | enter delete | esc back"
+		hints = "up/down choose | enter delete | esc back"
 	case actionAddLink:
-		return controls + " | tab direction | enter add | esc back"
+		hints = "tab direction | enter add | esc back"
 	case actionDeleteLink:
-		return controls + " | up/down choose | enter remove | esc back"
-	default:
-		return controls
+		hints = "up/down choose | enter remove | esc back"
 	}
+	return fitDetailLine(hints, width)
 }
 
 type detailPointerControl struct {
@@ -651,7 +648,7 @@ func (m Model) pointerFooterControls(width int) []detailPointerControl {
 		detailPointerControl{label: "Unlink", message: key('u')},
 		detailPointerControl{label: "Close", message: mouseDismissMsg{}},
 	)...)
-	if pointerFooterWidth(full) <= width {
+	if detailControlsWidth(full) <= width {
 		return full
 	}
 	primary := append([]detailPointerControl(nil), taskControls...)
@@ -660,30 +657,95 @@ func (m Model) pointerFooterControls(width int) []detailPointerControl {
 		detailPointerControl{label: "Link", message: key('b')},
 		detailPointerControl{label: "Close", message: mouseDismissMsg{}},
 	)...)
-	for len(primary) > 1 && pointerFooterWidth(primary) > width {
+	for len(primary) > 1 && detailControlsWidth(primary) > width {
 		primary = append(primary[:len(primary)-2], primary[len(primary)-1])
 	}
 	return primary
 }
 
-func (m Model) pointerFooterText(controls []detailPointerControl, width int) string {
-	parts := make([]string, 0, len(controls))
-	for _, control := range controls {
-		label := "[" + control.label + "]"
-		parts = append(parts, m.pointerState.Render(m.styles, detailFooterControlID(control), label))
+// detailButtonPad is the left and right padding of one action button, the
+// crush ButtonOpts look of spec section 5.1: a filled surface wider than its
+// label on both sides.
+const detailButtonPad = 1
+
+// detailButtonGap is the surface-filled gap between two buttons in the row.
+const detailButtonGap = 1
+
+// detailButtonLabel is the button's text and the rune offset of its hotkey.
+// The frozen keymap is not touched here: the key the control already sends is
+// underlined where the label spells it, and appended where it does not, so
+// every button states the shortcut that still drives it from the keyboard.
+func detailButtonLabel(control detailPointerControl) (string, int) {
+	hotkey, ok := detailControlHotkey(control)
+	if !ok {
+		return control.label, -1
 	}
-	return fitDetailLine(strings.Join(parts, " "), width)
+	if index := detailHotkeyIndex(control.label, hotkey); index >= 0 {
+		return control.label, index
+	}
+	return control.label + " (" + string(hotkey) + ")", len([]rune(control.label)) + 2
 }
 
-func pointerFooterWidth(controls []detailPointerControl) int {
+// detailControlHotkey reports the single printable rune the control sends, if
+// it sends one. Enter, Escape, Tab and chorded keys carry no text and are
+// stated by the footer band instead.
+func detailControlHotkey(control detailPointerControl) (rune, bool) {
+	press, ok := control.message.(tea.KeyPressMsg)
+	if !ok || press.Mod != 0 {
+		return 0, false
+	}
+	runes := []rune(press.Text)
+	if len(runes) != 1 {
+		return 0, false
+	}
+	return runes[0], true
+}
+
+// detailHotkeyIndex is the first offset in label that spells hotkey, ignoring
+// case, or a negative value when the label does not carry it.
+func detailHotkeyIndex(label string, hotkey rune) int {
+	wanted := unicode.ToLower(hotkey)
+	for index, letter := range []rune(label) {
+		if unicode.ToLower(letter) == wanted {
+			return index
+		}
+	}
+	return -1
+}
+
+// detailButtonWidth is the rendered cell width of one action button.
+func detailButtonWidth(control detailPointerControl) int {
+	label, _ := detailButtonLabel(control)
+	return ansi.StringWidth(label) + 2*detailButtonPad
+}
+
+// detailControlsWidth is the width the whole action row spends, gaps included.
+func detailControlsWidth(controls []detailPointerControl) int {
 	width := 0
 	for index, control := range controls {
 		if index > 0 {
-			width++
+			width += detailButtonGap
 		}
-		width += ansi.StringWidth("[" + control.label + "]")
+		width += detailButtonWidth(control)
 	}
 	return width
+}
+
+// actionButtonRow renders the pinned action row of issue #152: the
+// state-appropriate controls as visible padded buttons on the panel surface,
+// replacing the bracket-text labels the footer band used to carry.
+func (m Model) actionButtonRow(controls []detailPointerControl) string {
+	buttons := make([]string, 0, len(controls))
+	for _, control := range controls {
+		label, underline := detailButtonLabel(control)
+		buttons = append(buttons, widget.Button(m.styles, widget.ButtonOpts{
+			Text:           label,
+			Pressed:        m.pointerState.IsPressed(detailFooterControlID(control)),
+			UnderlineIndex: underline,
+			Padding:        [2]int{detailButtonPad, detailButtonPad},
+		}))
+	}
+	return widget.ButtonGroup(m.styles, theme.OverlaySurf, detailButtonGap, buttons...)
 }
 
 func textInputLine(input textinput.Model, width int) string {

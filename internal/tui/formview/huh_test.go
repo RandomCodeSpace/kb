@@ -18,14 +18,6 @@ func TestHuhFieldsRenderThemedChoicesNotesAndConfirms(t *testing.T) {
 		t.Fatalf("confirm = %q", confirm)
 	}
 
-	if got := HuhSelect(styles, nil, 0, 20); got != "" {
-		t.Fatalf("empty select = %q", got)
-	}
-	list := ansi.Strip(HuhSelect(styles, []string{"one", "two"}, 1, 20))
-	if !strings.Contains(list, "one") || !strings.Contains(list, "two") {
-		t.Fatalf("select = %q", list)
-	}
-
 	if got := HuhInlineSelect(styles, nil, 0, 20); got != "" {
 		t.Fatalf("empty inline select = %q", got)
 	}

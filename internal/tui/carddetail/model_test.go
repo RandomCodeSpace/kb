@@ -377,7 +377,7 @@ func TestViewClampsScrollToContent(t *testing.T) {
 		t.Fatalf("shorter content scroll = %d", m.scrollOffset())
 	}
 	view := ansi.Strip(m.View(40, 10))
-	if !strings.Contains(view, "[Close]") || !strings.Contains(view, "/") {
+	if !strings.Contains(view, " Close ") || !strings.Contains(view, "/") {
 		t.Fatalf("scrolled overlay footer missing:\n%s", view)
 	}
 }

@@ -1,6 +1,7 @@
 package carddetail
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -12,9 +13,20 @@ import (
 )
 
 const (
-	pointerWidth  = 80
+	// The frame is wide enough for the detail pane's full action-row ladder,
+	// so a pointer test can reach every state-appropriate button.
+	pointerWidth  = 110
 	pointerHeight = 24
 )
+
+// reverseVideoPattern matches the SGR reverse attribute in any parameter
+// position. A pressed button carries its colors in the same sequence, so the
+// composed frame emits "\x1b[7;38;..." rather than a standalone "\x1b[7m".
+var reverseVideoPattern = regexp.MustCompile(`\x1b\[[0-9;]*\b7[;m]`)
+
+func containsReverseVideo(content string) bool {
+	return reverseVideoPattern.MatchString(content)
+}
 
 // clickControl drives the immutable pointer snapshot produced by the same
 // render that showed the control. It deliberately knows no internal hit map.
@@ -30,7 +42,7 @@ func clickControl(t *testing.T, m *Model, label string) tea.Cmd {
 		t.Fatalf("%q did not enter pressed state", label)
 	}
 	pressed := m.PointerSurface("board", pointerWidth, pointerHeight)
-	if !strings.Contains(pressed.Content, "\x1b[7m") {
+	if !containsReverseVideo(pressed.Content) {
 		t.Fatalf("%q did not render pressed feedback", label)
 	}
 	command := pressed.Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
@@ -48,12 +60,17 @@ func clickControl(t *testing.T, m *Model, label string) tea.Cmd {
 	return m.Update(message)
 }
 
+// renderedControlPoint finds a padded action button by its label. Buttons carry
+// one cell of surface padding on each side, so the label is bounded by spaces;
+// the search runs bottom-up because the action row is pinned above the footer
+// and the body above it is untrusted card text.
 func renderedControlPoint(t *testing.T, content, label string) (int, int) {
 	t.Helper()
-	needle := "[" + label + "]"
-	for y, line := range strings.Split(ansi.Strip(content), "\n") {
-		if index := strings.Index(line, needle); index >= 0 {
-			return ansi.StringWidth(line[:index]) + 1, y
+	needle := " " + label + " "
+	lines := strings.Split(ansi.Strip(content), "\n")
+	for y := len(lines) - 1; y >= 0; y-- {
+		if index := strings.Index(lines[y], needle); index >= 0 {
+			return ansi.StringWidth(lines[y][:index]) + 1, y
 		}
 	}
 	t.Fatalf("rendered control %q missing:\n%s", needle, ansi.Strip(content))

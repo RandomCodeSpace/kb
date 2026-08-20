@@ -513,21 +513,27 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 	inset := m.styles.Metrics.OverlayInsetX
 	displayWidth := layout.contentWidth
 	footerY := y + paneHeight - 1
+	// The action row is pinned directly above the footer band, so the buttons
+	// land on the row the scroll window stops short of.
+	actionY := y + 1 + layout.bodyRows
+	bodyBottom := actionY
+	if len(layout.controls) == 0 {
+		bodyBottom = footerY
+	}
 	xCursor := x + inset
-	for _, control := range m.pointerFooterControls(layout.footerWidth) {
-		label := "[" + control.label + "]"
-		labelWidth := ansi.StringWidth(label)
-		if xCursor+labelWidth > x+paneWidth || footerY < y || footerY >= y+paneHeight {
+	for _, control := range layout.controls {
+		buttonWidth := detailButtonWidth(control)
+		if xCursor+buttonWidth > x+paneWidth-inset || actionY < y+1 || actionY >= footerY {
 			break
 		}
-		rect := pointer.Rect{X0: xCursor, Y0: footerY, X1: xCursor + labelWidth, Y1: footerY + 1}
+		rect := pointer.Rect{X0: xCursor, Y0: actionY, X1: xCursor + buttonWidth, Y1: actionY + 1}
 		message := wrap(control.message)
 		hitMap.AddControl(detailFooterControlID(control), rect, func(pointer.Point) tea.Msg { return message })
-		xCursor += labelWidth + 1
+		xCursor += buttonWidth + detailButtonGap
 	}
 	if m.driftMode == driftSelect && m.driftBusy == "" {
 		viewport := pointer.Viewport{
-			Rect:   pointer.Rect{X0: x + inset, Y0: y + 1, X1: x + paneWidth - inset, Y1: footerY},
+			Rect:   pointer.Rect{X0: x + inset, Y0: y + 1, X1: x + paneWidth - inset, Y1: bodyBottom},
 			Scroll: m.scrollOffset(),
 		}
 		for index := range m.driftChoices {
@@ -548,7 +554,7 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 			logicalRow++
 		}
 		viewport := pointer.Viewport{
-			Rect:   pointer.Rect{X0: x + inset, Y0: y + 1, X1: x + paneWidth - inset, Y1: footerY},
+			Rect:   pointer.Rect{X0: x + inset, Y0: y + 1, X1: x + paneWidth - inset, Y1: bodyBottom},
 			Scroll: m.scrollOffset(),
 		}
 		for index := start; index < end; index++ {
@@ -569,6 +575,8 @@ type paneLayout struct {
 	elevated     bool
 	contentWidth int
 	footerWidth  int
+	controls     []detailPointerControl
+	bodyRows     int
 }
 
 func (m *Model) layout(width, height int) paneLayout {
@@ -578,13 +586,21 @@ func (m *Model) layout(width, height int) paneLayout {
 	paneWidth, paneHeight, elevated := m.paneSize(width, height)
 	contentWidth := m.contentWidth(paneWidth)
 
-	bodyRows := max(paneHeight-2, 0)
+	controls := m.pointerFooterControls(m.actionRowWidth(paneWidth))
+	bodyRows := m.bodyRowCount(paneWidth, paneHeight)
 	maxScroll := max(0, len(m.bodyLines)-bodyRows)
 	// The viewport owns the offset and has already clamped it against this
 	// geometry; the widget still owns the rows, because a panel body row carries
 	// the OverlaySurf token edge to edge and viewport.View would pad it plain.
 	start := min(m.scrollOffset(), maxScroll)
 	end := min(start+bodyRows, len(m.bodyLines))
+	body := append([]string(nil), m.bodyLines[start:end]...)
+	if len(controls) > 0 {
+		for len(body) < bodyRows {
+			body = append(body, "")
+		}
+		body = append(body, widget.OverlayRow(m.styles, m.actionButtonRow(controls), paneWidth))
+	}
 	hint := ""
 	// A band insets its content from the left and right-aligns its tail at its
 	// own edge, so the footer hints have one inset less than a body row.
@@ -597,7 +613,7 @@ func (m *Model) layout(width, height int) paneLayout {
 		opts: widget.OverlayOpts{
 			Title:  m.headerTitle(),
 			Seq:    m.headerSeq(),
-			Body:   m.bodyLines[start:end],
+			Body:   body,
 			Footer: m.actionFooter(footerWidth),
 			Hint:   hint,
 			Width:  paneWidth,
@@ -606,7 +622,26 @@ func (m *Model) layout(width, height int) paneLayout {
 		elevated:     elevated,
 		contentWidth: contentWidth,
 		footerWidth:  footerWidth,
+		controls:     controls,
+		bodyRows:     bodyRows,
 	}
+}
+
+// actionRowWidth is the width the pinned action row has between the overlay
+// insets, which is the budget its responsive button ladder trims against.
+func (m Model) actionRowWidth(paneWidth int) int {
+	return max(paneWidth-2*m.styles.Metrics.OverlayInsetX, 1)
+}
+
+// bodyRowCount is the scrollable body height. The pinned action row spends one
+// of the panel's body rows whenever the pane's state offers any action, so the
+// scroll window and the pointer viewports resolve it from one place.
+func (m Model) bodyRowCount(paneWidth, paneHeight int) int {
+	rows := max(paneHeight-2, 0)
+	if len(m.pointerFooterControls(m.actionRowWidth(paneWidth))) > 0 {
+		rows = max(rows-1, 0)
+	}
+	return rows
 }
 
 // headerTitle is the header band's bold title: the emoji and the card title.
@@ -676,7 +711,7 @@ func (m *Model) syncScroll() {
 	}
 	paneWidth, paneHeight, _ := m.paneSize(m.width, m.height)
 	m.body.SetWidth(paneWidth)
-	m.body.SetHeight(max(paneHeight-2, 0))
+	m.body.SetHeight(m.bodyRowCount(paneWidth, paneHeight))
 	m.body.SetContentLines(m.bodyLines)
 	m.body.SetYOffset(m.body.YOffset())
 }
@@ -698,8 +733,8 @@ func (m *Model) scrollBy(delta int) {
 }
 
 func (m Model) maxScroll() int {
-	_, paneHeight, _ := m.paneSize(m.width, m.height)
-	return max(0, len(m.bodyLines)-max(paneHeight-2, 0))
+	paneWidth, paneHeight, _ := m.paneSize(m.width, m.height)
+	return max(0, len(m.bodyLines)-m.bodyRowCount(paneWidth, paneHeight))
 }
 
 func (m *Model) ensureBody(width, height int) {

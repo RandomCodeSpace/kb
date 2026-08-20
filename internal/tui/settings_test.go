@@ -110,6 +110,12 @@ func runSettingsCommand(t *testing.T, model *settingsModel, command tea.Cmd) {
 	model.Update(command())
 }
 
+// settingsButtonNeedle is a padded button label bounded by the row padding that
+// follows it, so settingsButtonNeedle("Save") does not match inside " Save AI settings ".
+func settingsButtonNeedle(label string) string {
+	return " " + label + "  "
+}
+
 func clickSettingsText(t *testing.T, model *settingsModel, width, height int, needle string) tea.Cmd {
 	t.Helper()
 	return clickSettingsTextAt(t, model, width, height, 0, needle)
@@ -184,7 +190,7 @@ func TestSettingsRejectsPointerReleaseFromClosedInstance(t *testing.T) {
 	surface := old.Surface("", 80, 40)
 	x, y := -1, -1
 	for row, line := range strings.Split(ansi.Strip(surface.Content), "\n") {
-		if column := strings.Index(line, "[Save AI settings]"); column >= 0 {
+		if column := strings.Index(line, "Save AI settings"); column >= 0 {
 			x, y = ansi.StringWidth(line[:column]), row
 			break
 		}
@@ -273,11 +279,11 @@ func TestSettingsPointerActivatesVisibleActionsThroughExistingStateMachines(t *t
 	model := newSettingsModelWithBackends(backend, aiProbe, forgeProbe, "alice", context.Background())
 	loadSettingsForTest(t, model)
 
-	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Test connection]"))
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "Test connection"))
 	if aiProbe.user != "alice" || model.status != "connection ok" {
 		t.Fatalf("pointer AI test = user:%q status:%q", aiProbe.user, model.status)
 	}
-	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Save AI settings]"))
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "Save AI settings"))
 	if model.status != "AI settings saved" {
 		t.Fatalf("pointer AI save status = %q", model.status)
 	}
@@ -286,27 +292,27 @@ func TestSettingsPointerActivatesVisibleActionsThroughExistingStateMachines(t *t
 	if model.focus != "forge:source:work:project" {
 		t.Fatalf("pointer source input focus = %q", model.focus)
 	}
-	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Test]"))
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, settingsButtonNeedle("Test")))
 	if forgeProbe.config.Name != "work" || model.status != "connection ok" {
 		t.Fatalf("pointer forge test = config:%+v status:%q", forgeProbe.config, model.status)
 	}
-	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Save]"))
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, settingsButtonNeedle("Save")))
 	if model.status != "integration saved" {
 		t.Fatalf("pointer forge save status = %q", model.status)
 	}
 
-	if command := clickSettingsText(t, model, 80, 40, "[Remove]"); command != nil {
+	if command := clickSettingsText(t, model, 80, 40, settingsButtonNeedle("Remove")); command != nil {
 		t.Fatalf("first pointer remove dispatched a write: %#v", command())
 	}
 	if model.armedRemove != "source:work" {
 		t.Fatalf("pointer remove armed %q", model.armedRemove)
 	}
-	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Confirm remove]"))
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "Confirm remove"))
 	if len(model.rows) != 0 {
 		t.Fatalf("pointer-confirmed remove retained rows: %+v", model.rows)
 	}
 
-	if command := clickSettingsText(t, model, 80, 40, "[+ Add integration]"); command != nil {
+	if command := clickSettingsText(t, model, 80, 40, "+ Add integration"); command != nil {
 		t.Fatalf("pointer add returned an async command: %#v", command())
 	}
 	if len(model.rows) != 1 || model.focus != "forge:draft:1:name" {
@@ -409,13 +415,13 @@ func TestSettingsPointerPersistsAndRemovesDraftIntegration(t *testing.T) {
 		st, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background(),
 	)
 	loadSettingsForTest(t, model)
-	clickSettingsText(t, model, 80, 40, "[+ Add integration]")
+	clickSettingsText(t, model, 80, 40, "+ Add integration")
 	draft := &model.rows[0]
 	draft.name.SetValue("work")
 	draft.baseURL.SetValue("https://gitlab.example")
 	draft.token.SetValue("token")
 
-	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Save]"))
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, settingsButtonNeedle("Save")))
 	if len(model.rows) != 1 || !model.rows[0].persisted || model.rows[0].id != "source:work" {
 		t.Fatalf("pointer-saved draft = %+v", model.rows)
 	}
@@ -423,15 +429,15 @@ func TestSettingsPointerPersistsAndRemovesDraftIntegration(t *testing.T) {
 		t.Fatalf("pointer-saved source = %+v, %v", sources, err)
 	}
 
-	clickSettingsText(t, model, 80, 40, "[Remove]")
-	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "[Confirm remove]"))
+	clickSettingsText(t, model, 80, 40, settingsButtonNeedle("Remove"))
+	runSettingsCommand(t, model, clickSettingsText(t, model, 80, 40, "Confirm remove"))
 	if sources, err := st.ForgeSources("alice"); err != nil || len(sources) != 0 || len(model.rows) != 0 {
 		t.Fatalf("pointer-removed source = store:%+v model:%+v err:%v", sources, model.rows, err)
 	}
 
-	clickSettingsText(t, model, 80, 40, "[+ Add integration]")
-	clickSettingsText(t, model, 80, 40, "[Remove]")
-	if command := clickSettingsText(t, model, 80, 40, "[Confirm remove]"); command != nil {
+	clickSettingsText(t, model, 80, 40, "+ Add integration")
+	clickSettingsText(t, model, 80, 40, settingsButtonNeedle("Remove"))
+	if command := clickSettingsText(t, model, 80, 40, "Confirm remove"); command != nil {
 		t.Fatalf("draft removal unexpectedly became asynchronous: %#v", command())
 	}
 	if len(model.rows) != 0 || model.focus != "forge:add" {
