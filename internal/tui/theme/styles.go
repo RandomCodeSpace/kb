@@ -35,6 +35,7 @@ type Styles struct {
 	Button  ButtonStyles
 	Pressed lipgloss.Style
 
+	Table    TableStyles
 	Input    textinput.Styles
 	Area     textarea.Styles
 	Help     help.Styles
@@ -50,6 +51,25 @@ type Styles struct {
 	pressedOn  string
 	pressedOff string
 	surfaceOn  [numSlots]string
+}
+
+// TableStyles are the cell styles of an adopted lipgloss/v2 table. They carry
+// layout only - the column gutter of spec section 2.5 and nothing else - so a
+// table lays out plain text that the view then paints with the token its row
+// role names. A cell style that carried a color would fight the surface the
+// row is composed onto.
+type TableStyles struct {
+	Cell lipgloss.Style // every column but the last: carries the gutter
+	Last lipgloss.Style // the last column: no trailing gutter to spend
+}
+
+// Column returns the cell style for column index of a row that has count
+// columns.
+func (t TableStyles) Column(index, count int) lipgloss.Style {
+	if index >= count-1 {
+		return t.Last
+	}
+	return t.Cell
 }
 
 // BoardStyles are the page-level surfaces of spec section 2.1.
@@ -295,6 +315,10 @@ func build(table paletteRGB, isDark bool) *Styles {
 		Pressed: built.Pressed,
 	}
 
+	built.Table = TableStyles{
+		Cell: blank.PaddingRight(defaultMetrics.TableGutter),
+		Last: blank,
+	}
 	built.Input = inputStyles(pal, on, isDark)
 	built.Area = areaStyles(pal, on, isDark)
 	built.Help = helpStyles(on)

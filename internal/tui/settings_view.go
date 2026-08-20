@@ -27,8 +27,21 @@ const (
 	settingsRowHint
 )
 
+// settingsRenderRow is one rendered pane row. A row with a label is a table
+// row: its two cells are laid out by lipgloss/v2 table against every other
+// label/value row in the pane, so the values share one column instead of each
+// starting wherever its own label ended. Everything else - sections, buttons,
+// blanks - carries its line directly.
+//
+// A field whose value is a live text input resolves late: the value column's
+// width is only known once every label in the pane has been seen, and the input
+// display has to be cut to it.
 type settingsRenderRow struct {
 	line   string
+	label  string
+	value  string
+	input  *textinput.Model
+	secret bool
 	button string
 	target string
 	armed  bool
@@ -95,9 +108,9 @@ func (m *settingsModel) Surface(background string, width, height int) pointer.Su
 		body = append(body, settingsRenderRow{line: "loading settings...", kind: settingsRowHint})
 	} else {
 		body = append(body,
-			m.inputModelRow("ai:base", "Base URL", m.aiBase, false, inner),
-			m.inputModelRow("ai:model", "Model", m.aiModel, false, inner),
-			m.inputModelRow("ai:key", keyLabel("API key", m.hasKey), m.aiKey, true, inner),
+			m.inputModelRow("ai:base", "Base URL", &m.aiBase, false),
+			m.inputModelRow("ai:model", "Model", &m.aiModel, false),
+			m.inputModelRow("ai:key", keyLabel("API key", m.hasKey), &m.aiKey, true),
 			m.actionRow("ai:test", "Test connection", inner),
 			m.actionRow("ai:save", "Save AI settings", inner),
 			settingsRenderRow{line: ""},
@@ -111,6 +124,7 @@ func (m *settingsModel) Surface(background string, width, height int) pointer.Su
 		}
 		body = append(body, m.actionRow("forge:add", "+ Add integration", inner))
 	}
+	m.layoutSettingsTable(body, inner)
 	status := m.status
 	if status == "" {
 		status = "ready"
@@ -249,19 +263,19 @@ func (m *settingsModel) renderForgeRow(row *integrationSettingsRow, width int) [
 	}
 	if row.persisted {
 		lines = append(lines,
-			settingsRenderRow{line: settingsFit("  Name: "+row.name.Value()+" (locked)", width), kind: settingsRowHint},
-			settingsRenderRow{line: settingsFit("  Kind: "+row.kind+" (locked)", width), kind: settingsRowHint},
+			m.lockedRow("Name", row.name.Value()),
+			m.lockedRow("Kind", row.kind),
 		)
 	} else {
 		lines = append(lines,
-			m.inputRow(prefix+"kind", "Kind", row.kind, width),
-			m.inputModelRow(prefix+"name", "Name", row.name, false, width),
+			m.inputRow(prefix+"kind", "Kind", row.kind),
+			m.inputModelRow(prefix+"name", "Name", &row.name, false),
 		)
 	}
 	lines = append(lines,
-		m.inputModelRow(prefix+"base", "Base URL", row.baseURL, false, width),
-		m.inputModelRow(prefix+"project", "Project", row.project, false, width),
-		m.inputModelRow(prefix+"token", keyLabel("Token", row.hasToken), row.token, true, width),
+		m.inputModelRow(prefix+"base", "Base URL", &row.baseURL, false),
+		m.inputModelRow(prefix+"project", "Project", &row.project, false),
+		m.inputModelRow(prefix+"token", keyLabel("Token", row.hasToken), &row.token, true),
 		m.actionRow(prefix+"test", "Test", width),
 	)
 	remove := "Remove"
@@ -320,13 +334,21 @@ func keyLabel(label string, saved bool) string {
 	return label
 }
 
-func (m *settingsModel) inputRow(target, label, value string, width int) settingsRenderRow {
+// settingsLabelCell is the label column of a table row: the focus marker, the
+// label and its colon. The colon stays on the label so the table's own padding
+// falls between the two columns rather than inside the label.
+func (m *settingsModel) settingsLabelCell(target, label string) string {
 	marker := "  "
 	if m.focus == target {
 		marker = "> "
 	}
+	return marker + label + ":"
+}
+
+func (m *settingsModel) inputRow(target, label, value string) settingsRenderRow {
 	return settingsRenderRow{
-		line:   settingsFit(marker+label+": "+value, width),
+		label:  m.settingsLabelCell(target, label),
+		value:  value,
 		target: target,
 		kind:   settingsRowField,
 	}
@@ -334,21 +356,54 @@ func (m *settingsModel) inputRow(target, label, value string, width int) setting
 
 func (m *settingsModel) inputModelRow(
 	target, label string,
-	input textinput.Model,
+	input *textinput.Model,
 	secret bool,
-	width int,
 ) settingsRenderRow {
-	marker := "  "
-	if m.focus == target {
-		marker = "> "
-	}
-	prefix := marker + label + ": "
-	available := max(width-ansi.StringWidth(prefix), 1)
-	value := settingsInputDisplay(input, secret, m.focus == target, available)
 	return settingsRenderRow{
-		line:   settingsFit(prefix+value, width),
+		label:  m.settingsLabelCell(target, label),
+		input:  input,
+		secret: secret,
 		target: target,
 		kind:   settingsRowField,
+	}
+}
+
+// lockedRow is a persisted forge field the pane shows but does not edit.
+func (m *settingsModel) lockedRow(label, value string) settingsRenderRow {
+	return settingsRenderRow{
+		label: "  " + label + ":",
+		value: value + " (locked)",
+		kind:  settingsRowHint,
+	}
+}
+
+// layoutSettingsTable resolves every label/value row in the pane through one
+// lipgloss table. Rows keep their index, so the pointer hit regions keyed to
+// logical rows are untouched by the adoption.
+func (m *settingsModel) layoutSettingsTable(body []settingsRenderRow, width int) {
+	styles := m.themeStyles()
+	labelWidth, indices := 0, make([]int, 0, len(body))
+	for index := range body {
+		if body[index].label == "" {
+			continue
+		}
+		labelWidth = max(labelWidth, ansi.StringWidth(body[index].label))
+		indices = append(indices, index)
+	}
+	if len(indices) == 0 {
+		return
+	}
+	valueWidth := max(width-labelWidth-styles.Metrics.TableGutter, 1)
+	cells := make([][]string, 0, len(indices))
+	for _, index := range indices {
+		row := &body[index]
+		if row.input != nil {
+			row.value = settingsInputDisplay(*row.input, row.secret, m.focus == row.target, valueWidth)
+		}
+		cells = append(cells, []string{row.label, settingsFit(row.value, valueWidth)})
+	}
+	for position, line := range widget.Table(styles, cells) {
+		body[indices[position]].line = settingsFit(line, width)
 	}
 }
 

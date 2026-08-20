@@ -179,6 +179,7 @@ func TestMetricsCarrySpecNumbers(t *testing.T) {
 		"MinColumnWidth":  {metrics.MinColumnWidth, 16},
 		"OverlayInsetX":   {metrics.OverlayInsetX, 2},
 		"OverlayLabelW":   {metrics.OverlayLabelW, 12},
+		"TableGutter":     {metrics.TableGutter, 1},
 		"CompactBelow":    {metrics.CompactBelow, 30},
 		"CompactInnerW":   {metrics.CompactInnerW, 22},
 		"DescTwoLines":    {metrics.DescTwoLines, 45},
