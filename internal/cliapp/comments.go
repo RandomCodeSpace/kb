@@ -57,7 +57,7 @@ func (a *app) cmdComment(args []string) int {
 }
 
 func (a *app) cmdCommentAdd(args []string) int {
-	fs, user, data := a.newFlagSet("comment add")
+	fs, data := a.newFlagSet("comment add")
 	jsonF := fs.Bool("json", false, "print the comment as JSON")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
@@ -69,7 +69,7 @@ func (a *app) cmdCommentAdd(args []string) int {
 	if strings.TrimSpace(pos[1]) == "" {
 		return a.usageErr(errors.New("comment text must not be empty"))
 	}
-	return a.withBackend(*user, *data, func(be backend) error {
+	return a.withBackend(*data, func(be backend) error {
 		c, err := be.commentAdd(pos[0], pos[1])
 		if err != nil {
 			return err
@@ -83,7 +83,7 @@ func (a *app) cmdCommentAdd(args []string) int {
 }
 
 func (a *app) cmdCommentList(args []string) int {
-	fs, user, data := a.newFlagSet("comment list")
+	fs, data := a.newFlagSet("comment list")
 	jsonF := fs.Bool("json", false, "print comments as JSON")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
@@ -92,7 +92,7 @@ func (a *app) cmdCommentList(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("comment list needs exactly one <id> argument"))
 	}
-	return a.withBackend(*user, *data, func(be backend) error {
+	return a.withBackend(*data, func(be backend) error {
 		comments, err := be.comments(pos[0])
 		if err != nil {
 			return err
@@ -116,7 +116,7 @@ func (a *app) cmdCommentList(args []string) int {
 }
 
 func (a *app) cmdCommentRm(args []string) int {
-	fs, user, data := a.newFlagSet("comment rm")
+	fs, data := a.newFlagSet("comment rm")
 	yes := fs.Bool("yes", false, "confirm deletion")
 	jsonF := fs.Bool("json", false, "print the deleted comment as JSON")
 	pos, err := parseInterleaved(fs, args)
@@ -133,7 +133,7 @@ func (a *app) cmdCommentRm(args []string) int {
 	if !*yes {
 		return a.fail(fmt.Errorf("refusing to delete comment c%d; re-run with --yes", id))
 	}
-	return a.withBackend(*user, *data, func(be backend) error {
+	return a.withBackend(*data, func(be backend) error {
 		c, err := be.commentRm(id)
 		if errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("no comment matches id c%d", id)

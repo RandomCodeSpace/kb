@@ -24,6 +24,11 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
+// defaultUser is the only board namespace the local surfaces ever open. The
+// per-user surface (--user / KB_USER) was removed; the store API keeps its
+// user parameter because kb serve still serves one board per identity.
+const defaultUser = "default"
+
 const noBlockedFlagName = "no-blocked"
 const forceFlagUsage = "finish a task with open checklist items or a blocked flag"
 const jsonFlagUsage = "print the affected task as JSON"
@@ -64,7 +69,6 @@ other modes (not task commands):
   kb mcp                 serve the board to AI agents over MCP stdio
 
 common flags (every command):
-  --user name    board owner (default $KB_USER or "default")
   --data dir     data directory (default $KB_DATA or ~/.local/share/kb)
   --json         machine output: list prints an array of full tasks, every
                  other command prints the affected task as one JSON object
@@ -198,10 +202,10 @@ func (a *app) parseResult(err error) (code int, done bool) {
 	return a.usageErr(err), true
 }
 
-// withBackend opens the backend for user/data, runs fn, and maps its error
-// to the exit code.
-func (a *app) withBackend(user, data string, fn func(backend) error) int {
-	be, err := openBackend(user, data, a.stderr)
+// withBackend opens the backend for data, runs fn, and maps its error to the
+// exit code.
+func (a *app) withBackend(data string, fn func(backend) error) int {
+	be, err := openBackend(data, a.stderr)
 	if err != nil {
 		return a.fail(err)
 	}
@@ -241,23 +245,14 @@ type item struct {
 	task board.Task
 }
 
-// openBackend picks remote mode when KB_SERVER is set, local otherwise. The
-// user name is normalized with the exact rules of the server's identity
-// sanitization (store.SanitizeUser: trimmed, lowercased, charset-checked),
-// so CLI, MCP, and SPA hit the same board.
-func openBackend(user, dataDir string, stderr io.Writer) (backend, error) {
-	user = strings.TrimSpace(user)
-	if user == "" {
-		user = "default"
-	}
-	user, err := store.SanitizeUser(user)
-	if err != nil {
-		return nil, err
-	}
+// openBackend picks remote mode when KB_SERVER is set, local otherwise. Both
+// operate on the defaultUser namespace: the local per-user surface is gone,
+// while the store and the wire API keep their user parameter for kb serve.
+func openBackend(dataDir string, stderr io.Writer) (backend, error) {
 	if base := strings.TrimSpace(os.Getenv("KB_SERVER")); base != "" {
-		return newRemote(strings.TrimRight(base, "/"), os.Getenv("KB_SERVER_TOKEN"), user), nil
+		return newRemote(strings.TrimRight(base, "/"), os.Getenv("KB_SERVER_TOKEN"), defaultUser), nil
 	}
-	return openLocal(user, dataDir, stderr)
+	return openLocal(defaultUser, dataDir, stderr)
 }
 
 // --- flag plumbing ---
@@ -268,23 +263,13 @@ type stringList []string
 func (s *stringList) String() string     { return strings.Join(*s, ",") }
 func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 
-// envUser resolves the default board owner: KB_USER if set, else "default" —
-// the same environment contract kb mcp honors, so both agent surfaces land
-// on the same board without per-command flags.
-func envUser() string {
-	if v := strings.TrimSpace(os.Getenv("KB_USER")); v != "" {
-		return v
-	}
-	return "default"
-}
-
-// newFlagSet builds a silent FlagSet with the common --user/--data flags.
-func (a *app) newFlagSet(name string) (fs *flag.FlagSet, user, data *string) {
+// newFlagSet builds a silent FlagSet with the common --data flag. There is no
+// --user flag: every local command operates on the defaultUser namespace.
+func (a *app) newFlagSet(name string) (fs *flag.FlagSet, data *string) {
 	fs = flag.NewFlagSet("kb "+name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	user = fs.String("user", envUser(), `board owner (env KB_USER)`)
 	data = fs.String("data", "", "data directory (default $KB_DATA or ~/.local/share/kb)")
-	return fs, user, data
+	return fs, data
 }
 
 // cardFlags holds the card-field flags shared by add and update.
@@ -465,7 +450,7 @@ func taskFromAddFlags(title string, cf cardFlags, set map[string]bool) (board.Ta
 }
 
 func (a *app) cmdAdd(args []string) int {
-	fs, user, data := a.newFlagSet("add")
+	fs, data := a.newFlagSet("add")
 	var cf cardFlags
 	registerCardFlags(fs, &cf, false)
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
@@ -484,7 +469,7 @@ func (a *app) cmdAdd(args []string) int {
 	if err != nil {
 		return a.usageErr(err)
 	}
-	return a.withBackend(*user, *data, func(be backend) error {
+	return a.withBackend(*data, func(be backend) error {
 		it, err := be.add(t)
 		if err != nil {
 			return err
@@ -569,7 +554,7 @@ func (a *app) cmdUsers(args []string) int {
 }
 
 func (a *app) cmdList(args []string) int {
-	fs, user, data := a.newFlagSet("list")
+	fs, data := a.newFlagSet("list")
 	statusF := fs.String("status", "", "show one column only")
 	searchF := fs.String("search", "", "free text over title, description, and tags")
 	var tagsF stringList
@@ -591,7 +576,7 @@ func (a *app) cmdList(args []string) int {
 		}
 		filter.Status = s
 	}
-	return a.withBackend(*user, *data, func(be backend) error {
+	return a.withBackend(*data, func(be backend) error {
 		return outputList(be, filter, *allF, *jsonF, a.stdout)
 	})
 }
@@ -682,7 +667,7 @@ func updatePatch(cf *cardFlags, set map[string]bool) (store.TaskPatch, *board.St
 }
 
 func (a *app) cmdUpdate(args []string) int {
-	fs, user, data := a.newFlagSet("update")
+	fs, data := a.newFlagSet("update")
 	var cf cardFlags
 	registerCardFlags(fs, &cf, true)
 	force := fs.Bool("force", false, forceFlagUsage)
@@ -698,7 +683,7 @@ func (a *app) cmdUpdate(args []string) int {
 	if err != nil {
 		return a.usageErr(err)
 	}
-	return a.withBackend(*user, *data, func(be backend) error {
+	return a.withBackend(*data, func(be backend) error {
 		it, err := be.update(pos[0], p, moveTo, *force)
 		if err != nil {
 			return err
@@ -712,7 +697,7 @@ func (a *app) cmdUpdate(args []string) int {
 }
 
 func (a *app) cmdMove(args []string) int {
-	fs, user, data := a.newFlagSet("move")
+	fs, data := a.newFlagSet("move")
 	force := fs.Bool("force", false, forceFlagUsage)
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
@@ -726,11 +711,11 @@ func (a *app) cmdMove(args []string) int {
 	if err != nil {
 		return a.usageErr(err)
 	}
-	return a.moveTo(*user, *data, pos[0], st, *force, *jsonF)
+	return a.moveTo(*data, pos[0], st, *force, *jsonF)
 }
 
 func (a *app) cmdDone(args []string) int {
-	fs, user, data := a.newFlagSet("done")
+	fs, data := a.newFlagSet("done")
 	force := fs.Bool("force", false, forceFlagUsage)
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
@@ -740,13 +725,13 @@ func (a *app) cmdDone(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("done needs exactly one <id-prefix> argument"))
 	}
-	return a.moveTo(*user, *data, pos[0], board.StatusDone, *force, *jsonF)
+	return a.moveTo(*data, pos[0], board.StatusDone, *force, *jsonF)
 }
 
 // cmdCancel soft-deletes a task: it moves to the cancelled column and stays
 // on the board, unlike rm --yes which deletes the row for good.
 func (a *app) cmdCancel(args []string) int {
-	fs, user, data := a.newFlagSet("cancel")
+	fs, data := a.newFlagSet("cancel")
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
@@ -755,12 +740,12 @@ func (a *app) cmdCancel(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("cancel needs exactly one <id-prefix> argument"))
 	}
-	return a.moveTo(*user, *data, pos[0], board.StatusCancelled, false, *jsonF)
+	return a.moveTo(*data, pos[0], board.StatusCancelled, false, *jsonF)
 }
 
 // cmdRestore undoes a cancel, putting the task back at the end of To Do.
 func (a *app) cmdRestore(args []string) int {
-	fs, user, data := a.newFlagSet("restore")
+	fs, data := a.newFlagSet("restore")
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
@@ -769,15 +754,15 @@ func (a *app) cmdRestore(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("restore needs exactly one <id-prefix> argument"))
 	}
-	return a.moveTo(*user, *data, pos[0], board.StatusTodo, false, *jsonF)
+	return a.moveTo(*data, pos[0], board.StatusTodo, false, *jsonF)
 }
 
 // moveTo is the shared body of move, done, cancel, and restore. Moving to
 // done with open checklist items or a blocked flag is refused unless force
 // is set: the CLI has no interactive confirmation, so it errors out rather
 // than shipping something the user may not have meant to.
-func (a *app) moveTo(user, data, ref string, to board.Status, force, asJSON bool) int {
-	return a.withBackend(user, data, func(be backend) error {
+func (a *app) moveTo(data, ref string, to board.Status, force, asJSON bool) int {
+	return a.withBackend(data, func(be backend) error {
 		it, err := be.move(ref, to, force)
 		if err != nil {
 			return err
@@ -791,7 +776,7 @@ func (a *app) moveTo(user, data, ref string, to board.Status, force, asJSON bool
 }
 
 func (a *app) cmdRm(args []string) int {
-	fs, user, data := a.newFlagSet("rm")
+	fs, data := a.newFlagSet("rm")
 	yes := fs.Bool("yes", false, "confirm deletion")
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
@@ -802,7 +787,7 @@ func (a *app) cmdRm(args []string) int {
 		return a.usageErr(errors.New("rm needs exactly one <id-prefix> argument"))
 	}
 	ref := pos[0]
-	return a.withBackend(*user, *data, func(be backend) error {
+	return a.withBackend(*data, func(be backend) error {
 		if !*yes {
 			items, err := be.list(store.TaskFilter{})
 			if err != nil {

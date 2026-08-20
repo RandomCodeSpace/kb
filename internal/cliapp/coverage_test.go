@@ -73,13 +73,10 @@ func TestBackendSelectionDefaultsAndOpenFailures(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	if be, err := openBackend("  ", t.TempDir(), &stderr); err != nil {
-		t.Fatalf("blank user should normalize to default: %v", err)
+	if be, err := openBackend(t.TempDir(), &stderr); err != nil {
+		t.Fatalf("open local backend: %v", err)
 	} else if err := be.close(); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := openBackend("bad/user", t.TempDir(), &stderr); err == nil {
-		t.Fatal("invalid user unexpectedly opened a backend")
 	}
 
 	notDir := filepath.Join(t.TempDir(), "file")
@@ -89,8 +86,8 @@ func TestBackendSelectionDefaultsAndOpenFailures(t *testing.T) {
 	if _, err := openLocal("default", notDir, &stderr); err == nil || !strings.Contains(err.Error(), "create data dir") {
 		t.Fatalf("file data path: err=%v", err)
 	}
-	if _, stderr, code := runCmd(t, "list", "--user", "bad/user", "--data", t.TempDir()); code != 1 || !strings.Contains(stderr, "user identity") {
-		t.Fatalf("invalid user command: code=%d stderr=%q", code, stderr)
+	if _, stderr, code := runCmd(t, "list", "--user", "alice", "--data", t.TempDir()); code != 2 || !strings.Contains(stderr, "flag provided but not defined: -user") {
+		t.Fatalf("--user should be rejected: code=%d stderr=%q", code, stderr)
 	}
 }
 

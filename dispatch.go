@@ -183,15 +183,26 @@ func versionString(info *debug.BuildInfo, ok bool) string {
 	return out
 }
 
-// runMCP serves the board over MCP stdio: kb mcp [--data DIR] [--user NAME].
+// defaultBoardUser is the single board namespace every local surface (CLI,
+// TUI, MCP) operates on. The --user/KB_USER selection was removed; the store
+// and the HTTP wire API keep their user parameter for kb serve.
+const defaultBoardUser = "default"
+
+// runMCP serves the board over MCP stdio: kb mcp [--data DIR].
 func runMCP(args []string) error {
-	fs := flag.NewFlagSet("kb mcp", flag.ExitOnError)
+	return runMCPWithFlagOutput(args, os.Stderr)
+}
+
+// runMCPWithFlagOutput keeps flag failures returnable (kb serve does the same)
+// so an unknown flag is a testable usage error instead of a process exit.
+func runMCPWithFlagOutput(args []string, output io.Writer) error {
+	fs := flag.NewFlagSet("kb mcp", flag.ContinueOnError)
+	fs.SetOutput(output)
 	dataDir := fs.String("data", defaultDataDir(), "board storage directory (env KB_DATA)")
-	user := fs.String("user", envOr("KB_USER", "default"), "board user the tools operate on (env KB_USER)")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return &webFlagError{err: err}
 	}
-	return mcpRun(*dataDir, *user)
+	return mcpRun(*dataDir, defaultBoardUser)
 }
 
 // defaultDataDir resolves the board storage directory: KB_DATA if set, else

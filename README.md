@@ -49,15 +49,15 @@ kb
 When both stdin and stdout are TTYs, a bare `kb` opens the full-screen TUI.
 When either stream is redirected, it prints root help and exits successfully
 without creating or opening the data directory. `kb tui` remains the explicit
-form and accepts `--data` and `--user`.
+form and accepts `--data`.
 
 ```sh
-kb tui --data ~/.local/share/kb --user default
+kb tui --data ~/.local/share/kb
 kb --help
 ```
 
-The default data directory is `$KB_DATA` or `~/.local/share/kb`. The default
-board owner is `$KB_USER` or `default`.
+The default data directory is `$KB_DATA` or `~/.local/share/kb`. Local modes
+always operate on the `default` board.
 
 ## Terminal UI
 
@@ -67,7 +67,7 @@ The TUI is the primary human interface. It includes:
 - card detail, markdown rendering, comments, and blocker links;
 - create/edit forms with labels, due dates, effort, priority, checklists, and
   blocked state;
-- persistent text and label filters per board owner;
+- persistent text and label filters per board;
 - keyboard lift/drop and mouse drag moves with filtered-order correctness;
 - completion guards, tick-all/force-ship choices, auto-ship, unship, cancel,
   restore, and permanent deletion;
@@ -105,11 +105,14 @@ The data directory contains:
 - `kb.db`, the SQLite database;
 - `secret`, the generated encryption secret when `KB_SECRET` is unset;
 - `skills/`, optional user skill overrides;
-- TUI preference state scoped by database and board owner.
+- TUI preference state scoped by database path.
 
-Board owners are normalized to lowercase and may contain ASCII letters,
-digits, `.`, `_`, `@`, and `-`. Use `--user NAME` or `KB_USER` consistently
-across the TUI, CLI, and MCP server.
+The TUI, task CLI, and MCP server all operate on the single `default` board.
+Board owners still exist in the schema, because `kb serve` serves one board per
+authenticated identity, but they are not selectable from local commands. A
+database written by an older version that holds tasks under another owner keeps
+them; local commands print one warning line naming those namespaces and leave
+the data alone. `kb users` lists them, and `kb serve` still serves them.
 
 Provider API keys and forge tokens are encrypted at rest with AES-256-GCM.
 Keep the `secret` file with the database. Losing it makes stored credentials
@@ -140,9 +143,9 @@ Root server flags are rejected with exit code 2 and point to `kb serve`, so an
 old service fails visibly instead of silently launching the wrong mode.
 
 If an old Entra-backed deployment used the immutable `oid` claim as its board
-owner, pass that value with `--user` or `KB_USER`. Token-mode deployments use
-the former `X-KB-User` value. Browser-only session tokens and display state are
-not database records and are not migrated.
+owner, that board is still served by `kb serve` under the same identity.
+Browser-only session tokens and display state are not database records and are
+not migrated.
 
 Update service units and container commands before replacing the binary. A
 reverse proxy may continue forwarding `/api/*` for API clients, but there is no
@@ -173,13 +176,12 @@ unique UUID prefix also work. `cancel` is reversible. `rm --yes` permanently
 deletes a Cancelled task. Moving to Done is refused while checklist items or
 blockers remain unless `--force` is explicit.
 
-Every task command accepts `--data`, `--user`, and `--json`. Set `KB_SERVER` to
-use the same verbs against an optional HTTP server:
+Every task command accepts `--data` and `--json`. Set `KB_SERVER` to use the
+same verbs against an optional HTTP server:
 
 ```sh
 export KB_SERVER=http://127.0.0.1:8080
 export KB_SERVER_TOKEN=shared-secret
-export KB_USER=alice
 kb list
 ```
 
@@ -191,7 +193,7 @@ kb list
 HTTP server is required.
 
 ```sh
-kb mcp --data ~/.local/share/kb --user default
+kb mcp --data ~/.local/share/kb
 ```
 
 Example configuration:
@@ -331,7 +333,6 @@ returned in settings responses.
 | Variable | Used by | Meaning |
 | --- | --- | --- |
 | `KB_DATA` | all local modes, serve | Data directory |
-| `KB_USER` | TUI, CLI, MCP | Default board owner |
 | `KB_SECRET` | all store users | Encryption secret override |
 | `KB_SERVER` | task CLI | Optional remote API base URL |
 | `KB_SERVER_TOKEN` | task CLI | Bearer token for remote mode |

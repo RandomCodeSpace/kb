@@ -83,11 +83,19 @@ func TestRunMCPPassesResolvedFlags(t *testing.T) {
 		return nil
 	}
 	wantData := filepath.Join(t.TempDir(), "boards")
-	if err := runMCP([]string{"--data", wantData, "--user", "Alice.Work"}); err != nil {
+	if err := runMCP([]string{"--data", wantData}); err != nil {
 		t.Fatalf("runMCP: %v", err)
 	}
-	if gotData != wantData || gotUser != "Alice.Work" {
-		t.Fatalf("mcp args = %q, %q; want %q, Alice.Work", gotData, gotUser, wantData)
+	if gotData != wantData || gotUser != defaultBoardUser {
+		t.Fatalf("mcp args = %q, %q; want %q, %s", gotData, gotUser, wantData, defaultBoardUser)
+	}
+
+	// The board namespace is no longer selectable from the command line.
+	var flagOutput bytes.Buffer
+	err := runMCPWithFlagOutput([]string{"--user", "alice"}, &flagOutput)
+	var flagErr *webFlagError
+	if !errors.As(err, &flagErr) || !strings.Contains(err.Error(), "flag provided but not defined: -user") {
+		t.Fatalf("--user should be rejected: %v", err)
 	}
 
 	mcpRun = func(string, string) error { return errors.New("serve failed") }

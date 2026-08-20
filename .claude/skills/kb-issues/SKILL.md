@@ -14,10 +14,8 @@ chosen, where a workflow reaches for `gh issue` or `glab issue`, use the
 
 ## Environment
 
-- `KB_USER` — board owner every command operates on (default `default`).
-  An explicit `--user` flag beats it. Identities are lowercased; stick to
-  `[a-z0-9._@-]`.
-- `KB_DATA` — data directory override.
+- `KB_DATA` — data directory override. Local commands always operate on the
+  single `default` board; there is no per-user selection.
 - `KB_SERVER` + `KB_SERVER_TOKEN` — operate against a running kb server
   over HTTP instead of the local database.
 - MCP-capable agents can run `kb mcp` and use the board tools directly
@@ -43,7 +41,7 @@ chosen, where a workflow reaches for `gh issue` or `glab issue`, use the
 | `gh issue comment N --body B` | `kb comment add <id> "B"` |
 | view comments | `kb comment list <id> [--json]` |
 | delete a comment | `kb comment rm <cid> --yes` (ids are `c1, c2, ...`, stable) |
-| assignees | one board per user: `--user name`; `kb users` lists boards |
+| assignees | not modelled: local kb is one board. `kb users` lists any legacy owners still in the database |
 
 Run `kb help` for every flag (priority, due dates, effort, checklists,
 blocked flag, status moves).

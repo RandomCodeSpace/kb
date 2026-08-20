@@ -257,15 +257,15 @@ run_native_smokes() {
   grep -F '  add "title"' "$smoke/cli-help.txt" >/dev/null || \
     die 'CLI help smoke omitted kb add'
 
-  "$native" add 'Release smoke' --data "$smoke/cli-data" --user release-smoke \
+  "$native" add 'Release smoke' --data "$smoke/cli-data" \
     >"$smoke/add.txt"
-  "$native" list --data "$smoke/cli-data" --user release-smoke --json \
+  "$native" list --data "$smoke/cli-data" --json \
     >"$smoke/list.json"
   grep -F 'Release smoke' "$smoke/list.json" >/dev/null || \
     die 'local CLI smoke did not round-trip its task'
 
-  printf -v tui_command '%q tui --data %q --user %q' \
-    "$native" "$smoke/tui-data" release-smoke
+  printf -v tui_command '%q tui --data %q' \
+    "$native" "$smoke/tui-data"
   if ! printf 'q' | TERM=xterm-256color timeout 10s \
     script --quiet --return --command "$tui_command" "$smoke/tui.typescript" \
     >"$smoke/tui.txt" 2>&1; then
