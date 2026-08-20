@@ -2,6 +2,7 @@ package theme
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"testing"
 )
@@ -36,6 +37,10 @@ var specIndices = map[Slot]uint8{
 	StatusWarn:   214,
 	StatusDanger: 203,
 	StatusInfo:   69,
+	StatusAlarm:  124,
+	TintPrimary:  147,
+	TintSuccess:  115,
+	TintDanger:   217,
 	Label1:       209,
 	Label2:       69,
 	Label3:       71,
@@ -70,6 +75,10 @@ var specHexes = map[Slot]string{
 	StatusWarn:   "#ffb020",
 	StatusDanger: "#ff5a48",
 	StatusInfo:   "#4f8ef7",
+	StatusAlarm:  "#b31f14",
+	TintPrimary:  "#a8b6ff",
+	TintSuccess:  "#7fe0b0",
+	TintDanger:   "#ffa7a0",
 	Label1:       "#ff7b54",
 	Label2:       "#4f8ef7",
 	Label3:       "#3f9d58",
@@ -172,6 +181,98 @@ func TestRejectedHexesStayRejected(t *testing.T) {
 			t.Errorf("rejected hex %s is now Zebra itself", hex)
 		}
 	}
+}
+
+// buttonContrastFloor is the readability floor every button token pair clears,
+// in truecolor and again after 256-color quantization: WCAG 2.x AA for normal
+// text. A button label is the smallest run in the TUI a user must read before
+// acting on it, so it gets no large-text exemption. Spec section 1.9.
+const buttonContrastFloor = 4.5
+
+// TestButtonTokensStayReadable is the contrast half of the section 1.9 audit:
+// every variant, in every state, on both color profiles. A re-hued variant that
+// puts a label below the floor fails here rather than in a user's terminal.
+func TestButtonTokensStayReadable(t *testing.T) {
+	for variant := ButtonVariant(0); variant < numButtonVariants; variant++ {
+		tokens := buttonTokens[variant]
+		states := map[string]buttonToken{
+			"rest":    tokens.rest,
+			"hovered": tokens.hovered,
+			"focused": tokens.focused,
+			"armed":   tokens.armed,
+		}
+		for state, token := range states {
+			truecolor := contrastRatio(darkPalette[token.fg], darkPalette[token.bg])
+			if truecolor < buttonContrastFloor {
+				t.Errorf("variant %d %s: truecolor contrast %.2f, floor is %.2f",
+					variant, state, truecolor, buttonContrastFloor)
+			}
+			quantized := contrastRatio(
+				xterm256(int(index256(darkPalette[token.fg]))),
+				xterm256(int(index256(darkPalette[token.bg]))),
+			)
+			if quantized < buttonContrastFloor {
+				t.Errorf("variant %d %s: 256-color contrast %.2f, floor is %.2f",
+					variant, state, quantized, buttonContrastFloor)
+			}
+		}
+	}
+}
+
+// TestButtonVariantsStaySeparableAt256 is the honesty half: the dogfood finding
+// of issue #157 was buttons that all looked alike, and a variant that collapses
+// onto another variant's index at 256 colors reproduces it on the terminals
+// least able to afford it.
+func TestButtonVariantsStaySeparableAt256(t *testing.T) {
+	seen := map[uint8]ButtonVariant{}
+	for variant := ButtonVariant(0); variant < numButtonVariants; variant++ {
+		for _, token := range []buttonToken{buttonTokens[variant].rest, buttonTokens[variant].focused} {
+			index := index256(darkPalette[token.fg])
+			if token.fg == FgOnAccent {
+				index = index256(darkPalette[token.bg])
+			}
+			if other, ok := seen[index]; ok && other != variant {
+				t.Errorf("variants %d and %d both read as index %d at 256 colors", other, variant, index)
+			}
+			seen[index] = variant
+		}
+	}
+}
+
+// TestArmedIsNotAFocusedDangerButton keeps the two-step arm state distinct from
+// the destructive button it arms. Spec section 1.9: armed is the state a user
+// must not misread.
+func TestArmedIsNotAFocusedDangerButton(t *testing.T) {
+	armed := buttonTokens[ButtonDanger].armed
+	focused := buttonTokens[ButtonDanger].focused
+	if darkPalette[armed.bg] == darkPalette[focused.bg] {
+		t.Errorf("armed and focused danger share the fill %s", darkPalette[armed.bg].hex())
+	}
+	if index256(darkPalette[armed.bg]) == index256(darkPalette[focused.bg]) {
+		t.Error("armed and focused danger collapse onto one index at 256 colors")
+	}
+}
+
+// contrastRatio is the WCAG 2.x contrast ratio of two colors.
+func contrastRatio(left, right rgb) float64 {
+	lighter, darker := left.luminance(), right.luminance()
+	if lighter < darker {
+		lighter, darker = darker, lighter
+	}
+	return (lighter + 0.05) / (darker + 0.05)
+}
+
+// luminance is the WCAG relative luminance of an 8-bit color.
+func (c rgb) luminance() float64 {
+	return 0.2126*channelLuminance(c.R) + 0.7152*channelLuminance(c.G) + 0.0722*channelLuminance(c.B)
+}
+
+func channelLuminance(value uint8) float64 {
+	channel := float64(value) / 255
+	if channel <= 0.04045 {
+		return channel / 12.92
+	}
+	return math.Pow((channel+0.055)/1.055, 2.4)
 }
 
 func TestXterm256CoversEveryBand(t *testing.T) {

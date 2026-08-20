@@ -565,9 +565,13 @@ func (m Model) actionFooter(width int) string {
 	return fitDetailLine(hints, width)
 }
 
+// detailPointerControl is one action of the pinned action row: its label, the
+// frozen message the control sends, and what the action means (issue #157).
+// The variant is a property of the action, not of the row it lands in.
 type detailPointerControl struct {
 	label   string
 	message tea.Msg
+	variant theme.ButtonVariant
 }
 
 func detailFooterControlID(control detailPointerControl) pointer.ControlID {
@@ -590,13 +594,13 @@ func (m Model) pointerFooterControls(width int) []detailPointerControl {
 		}
 		if m.driftMode == driftSelect {
 			return controls(
-				detailPointerControl{label: "Check selected", message: tea.KeyPressMsg{Code: tea.KeyEnter}},
+				detailPointerControl{label: "Check selected", message: tea.KeyPressMsg{Code: tea.KeyEnter}, variant: theme.ButtonPrimary},
 				detailPointerControl{label: "Back", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
 			)
 		}
 		if m.driftResult.State == "drifted" {
 			return controls(
-				detailPointerControl{label: "Update baseline", message: key('u')},
+				detailPointerControl{label: "Update baseline", message: key('u'), variant: theme.ButtonPrimary},
 				detailPointerControl{label: "Back", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
 			)
 		}
@@ -604,48 +608,48 @@ func (m Model) pointerFooterControls(width int) []detailPointerControl {
 	}
 	if m.confirm && (m.action == actionDeleteComment || m.action == actionDeleteLink) {
 		return controls(
-			detailPointerControl{label: "Confirm delete", message: tea.KeyPressMsg{Code: tea.KeyEnter}},
+			detailPointerControl{label: "Confirm delete", message: tea.KeyPressMsg{Code: tea.KeyEnter}, variant: theme.ButtonDanger},
 			detailPointerControl{label: "Cancel", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
 		)
 	}
 	switch m.action {
 	case actionAddComment:
 		return controls(
-			detailPointerControl{label: "Save comment", message: tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}},
+			detailPointerControl{label: "Save comment", message: tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}, variant: theme.ButtonPrimary},
 			detailPointerControl{label: "Cancel", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
 		)
 	case actionDeleteComment, actionDeleteLink:
 		return controls(
-			detailPointerControl{label: "Delete", message: tea.KeyPressMsg{Code: tea.KeyEnter}},
+			detailPointerControl{label: "Delete", message: tea.KeyPressMsg{Code: tea.KeyEnter}, variant: theme.ButtonDanger},
 			detailPointerControl{label: "Cancel", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
 		)
 	case actionAddLink:
 		return controls(
 			detailPointerControl{label: "Toggle direction", message: tea.KeyPressMsg{Code: tea.KeyTab}},
-			detailPointerControl{label: "Add link", message: tea.KeyPressMsg{Code: tea.KeyEnter}},
+			detailPointerControl{label: "Add link", message: tea.KeyPressMsg{Code: tea.KeyEnter}, variant: theme.ButtonPrimary},
 			detailPointerControl{label: "Cancel", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
 		)
 	}
 	taskControls := controls(
-		detailPointerControl{label: "Check", message: key('t')},
-		detailPointerControl{label: "Kill", message: key('x')},
+		detailPointerControl{label: "Check", message: key('t'), variant: theme.ButtonSuccess},
+		detailPointerControl{label: "Kill", message: key('x'), variant: theme.ButtonDanger},
 	)
 	if m.task.Status == board.StatusCancelled {
 		taskControls = controls(
-			detailPointerControl{label: "Restore", message: key('r')},
-			detailPointerControl{label: "Purge", message: key('D')},
+			detailPointerControl{label: "Restore", message: key('r'), variant: theme.ButtonSuccess},
+			detailPointerControl{label: "Purge", message: key('D'), variant: theme.ButtonDanger},
 		)
 	}
 	full := append([]detailPointerControl(nil), taskControls...)
 	if m.task.Status != board.StatusCancelled {
-		full = append(controls(detailPointerControl{label: "Edit", message: key('e')}), full...)
+		full = append(controls(detailPointerControl{label: "Edit", message: key('e'), variant: theme.ButtonPrimary}), full...)
 	}
 	full = append(full, controls(
 		detailPointerControl{label: "Drift", message: key('v')},
 		detailPointerControl{label: "Comment", message: key('c')},
-		detailPointerControl{label: "Del", message: key('d')},
+		detailPointerControl{label: "Del", message: key('d'), variant: theme.ButtonDanger},
 		detailPointerControl{label: "Link", message: key('b')},
-		detailPointerControl{label: "Unlink", message: key('u')},
+		detailPointerControl{label: "Unlink", message: key('u'), variant: theme.ButtonDanger},
 		detailPointerControl{label: "Close", message: mouseDismissMsg{}},
 	)...)
 	if detailControlsWidth(full) <= width {
@@ -740,6 +744,7 @@ func (m Model) actionButtonRow(controls []detailPointerControl) string {
 		label, underline := detailButtonLabel(control)
 		buttons = append(buttons, widget.Button(m.styles, widget.ButtonOpts{
 			Text:           label,
+			Variant:        control.variant,
 			Pressed:        m.pointerState.IsPressed(detailFooterControlID(control)),
 			UnderlineIndex: underline,
 			Padding:        [2]int{detailButtonPad, detailButtonPad},

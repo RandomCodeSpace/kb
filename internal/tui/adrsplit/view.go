@@ -41,6 +41,7 @@ type splitRow struct {
 	rendered string
 	button   string
 	target   string
+	variant  theme.ButtonVariant
 	kind     rowKind
 }
 
@@ -183,6 +184,7 @@ func (m *Model) renderRow(row splitRow, width int) string {
 			marker := strings.TrimSuffix(line, label)
 			return styles.Overlay.Surf.Render(marker) + widget.Button(styles, widget.ButtonOpts{
 				Text:           label,
+				Variant:        row.variant,
 				Selected:       m.focus == row.target,
 				Pressed:        m.pressed(row.target),
 				UnderlineIndex: -1,
@@ -228,8 +230,8 @@ func (m *Model) inputRows(width int) []splitRow {
 	rows = append(rows,
 		m.choiceRow("max", "Max stories", storyCountChoices(), m.max-1, "  (1-20)", width),
 		splitRow{},
-		m.actionRow("cancel", "Cancel"),
-		m.actionRow("split", "Propose stories"),
+		m.actionRow("cancel", "Cancel", theme.ButtonNeutral),
+		m.actionRow("split", "Propose stories", theme.ButtonPrimary),
 	)
 	return rows
 }
@@ -265,9 +267,9 @@ func (m *Model) reviewRows(width int) []splitRow {
 	return append(rows,
 		m.choiceRow("dest", "Destination", statusChoices(), statusIndex(m.dest), "", width),
 		splitRow{},
-		m.actionRow("back", "Back to source"),
-		m.actionRow("cancel", "Close"),
-		m.actionRow("add", fmt.Sprintf("Add selected (%d)", m.selectedCount())),
+		m.actionRow("back", "Back to source", theme.ButtonNeutral),
+		m.actionRow("cancel", "Close", theme.ButtonNeutral),
+		m.actionRow("add", fmt.Sprintf("Add selected (%d)", m.selectedCount()), theme.ButtonPrimary),
 	)
 }
 
@@ -356,13 +358,14 @@ func (m *Model) choiceRow(target, label string, choices []string, selected int, 
 	}
 }
 
-func (m *Model) actionRow(target, label string) splitRow {
+func (m *Model) actionRow(target, label string, variant theme.ButtonVariant) splitRow {
 	button := "[ " + sanitize(label) + " ]"
 	return splitRow{
-		text:   m.controlPrefix(target) + button,
-		button: button,
-		target: target,
-		kind:   rowButton,
+		text:    m.controlPrefix(target) + button,
+		button:  button,
+		target:  target,
+		variant: variant,
+		kind:    rowButton,
 	}
 }
 

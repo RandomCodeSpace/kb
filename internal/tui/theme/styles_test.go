@@ -212,14 +212,27 @@ func TestRailStylesExistForEveryPriority(t *testing.T) {
 	}
 }
 
+// TestButtonVariantFallsBackToNeutral pins the render-path guarantee of the
+// variant lookup: a caller that hands it a variant outside the set gets the
+// calmest surface, never a panic in a View.
+func TestButtonVariantFallsBackToNeutral(t *testing.T) {
+	styles := New(true)
+	neutral := styles.Button.Variant(ButtonNeutral)
+	if got := styles.Button.Variant(numButtonVariants); got.Rest.Render("x") != neutral.Rest.Render("x") {
+		t.Error("an out-of-range variant must resolve to Neutral")
+	}
+}
+
 func TestPressedIsReverseVideo(t *testing.T) {
 	styles := New(true)
 	rendered := styles.Pressed.Render("x")
 	if !strings.Contains(rendered, "\x1b[7m") {
 		t.Errorf("Pressed = %q, want SGR 7 reverse video", rendered)
 	}
-	if styles.Button.Pressed.Render("x") != rendered {
-		t.Error("Button.Pressed must be the same promoted token")
+	for variant := ButtonVariant(0); variant < numButtonVariants; variant++ {
+		if styles.Button.Variant(variant).Pressed.Render("x") != rendered {
+			t.Errorf("variant %d Pressed must be the same promoted token", variant)
+		}
 	}
 }
 
