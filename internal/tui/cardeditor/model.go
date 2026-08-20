@@ -19,6 +19,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
@@ -141,6 +142,7 @@ type Model struct {
 	label       textinput.Model
 	checks      textarea.Model
 	draftPrompt textarea.Model
+	mark        formview.Mark
 	prio        int
 	effort      string
 	blocked     bool
@@ -529,6 +531,12 @@ func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	}
+	// The focused field's mark runs ahead of every editor key, Escape included:
+	// a marked field is typing context, so its first Escape drops the mark
+	// rather than closing the form.
+	if m.markKey(msg) {
+		return nil
+	}
 	if key == "ctrl+s" || key == "ctrl+enter" {
 		return m.startSave()
 	}
@@ -802,6 +810,34 @@ func (m *Model) addLabels(raw string) {
 	m.labelsOpen = true
 }
 
+// markKey routes a key through the select-all mark of the focused text field.
+// It reports whether the mark consumed it; every other focus target has no
+// field to mark and passes straight through.
+func (m *Model) markKey(msg tea.KeyPressMsg) bool {
+	switch m.focus {
+	case "title":
+		return m.mark.Input(m.focus, &m.title, msg)
+	case "emoji":
+		return m.mark.Input(m.focus, &m.emoji, msg)
+	case "due":
+		return m.mark.Input(m.focus, &m.due, msg)
+	case "labels":
+		return m.mark.Input(m.focus, &m.label, msg)
+	case "desc":
+		return m.mark.Area(m.focus, &m.desc, msg)
+	case "checks":
+		return m.mark.Area(m.focus, &m.checks, msg)
+	case "ai-prompt":
+		return m.mark.Area(m.focus, &m.draftPrompt, msg)
+	}
+	return false
+}
+
+// marked reports whether a body row belongs to the field the mark is on.
+func (m *Model) marked(target string) bool {
+	return target != "" && target == m.focus && m.mark.Active(target)
+}
+
 func (m *Model) updateFocusedInput(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	switch m.focus {
@@ -860,6 +896,7 @@ func (m Model) focusTargets() []string {
 }
 
 func (m *Model) applyFocus() tea.Cmd {
+	m.mark.Drop()
 	m.title.Blur()
 	m.emoji.Blur()
 	m.desc.Blur()

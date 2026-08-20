@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 	"github.com/RandomCodeSpace/kb/internal/tui/widget"
@@ -584,7 +585,10 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 	if focusTag != "" {
 		appendLabel(0, focusTag)
 	}
-	appendPart(0, text, styles.On(theme.FgBase, theme.Surface), boardHitFilterText, "")
+	appendPart(0, text, formview.Selection(
+		styles.On(theme.FgBase, theme.Surface),
+		m.filter.focus == filterText && m.filter.mark.Active(filterMarkField),
+	), boardHitFilterText, "")
 	if m.filter.active() {
 		count := fmt.Sprintf("%d of %d cards", len(m.filteredBoard().Tasks), len(m.board.Tasks))
 		appendPart(1, count, styles.On(theme.FgMuted, theme.Canvas), boardHitDefault, "")

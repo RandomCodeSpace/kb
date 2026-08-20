@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 	"github.com/RandomCodeSpace/kb/internal/tui/widget"
@@ -242,7 +243,10 @@ func (m *settingsModel) renderSettingsRow(row settingsRenderRow, width int) stri
 		return styles.Overlay.FieldLabel.Render(line)
 	case settingsRowField:
 		if m.focus == row.target {
-			return styles.OnBold(theme.FgBase, theme.OverlaySurf).Render(line)
+			return formview.Selection(
+				styles.OnBold(theme.FgBase, theme.OverlaySurf),
+				m.mark.Active(row.target),
+			).Render(line)
 		}
 		return styles.Overlay.FieldValue.Render(line)
 	default:

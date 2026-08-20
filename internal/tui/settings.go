@@ -14,6 +14,7 @@ import (
 	kbai "github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
@@ -104,6 +105,7 @@ type settingsModel struct {
 	testCancel    context.CancelFunc
 	closed        bool
 	styles        *theme.Styles
+	mark          formview.Mark
 }
 
 // SetStyles hands the settings pane the resolved design system. Spec section
@@ -314,6 +316,14 @@ func persistedIntegrationRow(source store.ForgeSource) integrationSettingsRow {
 
 func (m *settingsModel) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
+	// The focused field's mark runs ahead of the pane's own keys, Escape
+	// included: a marked field is typing context and its first Escape only
+	// drops the mark.
+	if m.loaded && m.busy == "" {
+		if input := m.focusedInput(); input != nil && m.mark.Input(m.focus, input, msg) {
+			return nil
+		}
+	}
 	if key == "esc" {
 		if strings.Contains(m.busy, ":test") && m.testCancel != nil {
 			m.testCancel()
@@ -388,6 +398,7 @@ func (m *settingsModel) focusTargets() []string {
 }
 
 func (m *settingsModel) applyFocus() tea.Cmd {
+	m.mark.Drop()
 	m.aiBase.Blur()
 	m.aiModel.Blur()
 	m.aiKey.Blur()
@@ -421,6 +432,39 @@ func (m *settingsModel) applyFocus() tea.Cmd {
 		return row.project.Focus()
 	case "token":
 		return row.token.Focus()
+	}
+	return nil
+}
+
+// focusedInput is the text input the current focus names, or nil when focus
+// sits on a control that is not one. It resolves the same targets
+// updateFocusedInput dispatches to, so the select-all mark and the key dispatch
+// never disagree about which field is being edited.
+func (m *settingsModel) focusedInput() *textinput.Model {
+	switch m.focus {
+	case "ai:base":
+		return &m.aiBase
+	case "ai:model":
+		return &m.aiModel
+	case "ai:key":
+		return &m.aiKey
+	}
+	row, control := m.focusedRow()
+	if row == nil {
+		return nil
+	}
+	switch control {
+	case "name":
+		if row.persisted {
+			return nil
+		}
+		return &row.name
+	case "base":
+		return &row.baseURL
+	case "project":
+		return &row.project
+	case "token":
+		return &row.token
 	}
 	return nil
 }

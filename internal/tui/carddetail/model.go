@@ -21,6 +21,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 	"github.com/RandomCodeSpace/kb/internal/tui/widget"
@@ -96,6 +97,7 @@ type Model struct {
 	actionSession uint64
 	commentInput  textarea.Model
 	linkInput     textinput.Model
+	mark          formview.Mark
 	currentBlocks bool
 	selection     int
 	confirm       bool

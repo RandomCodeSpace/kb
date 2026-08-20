@@ -270,11 +270,15 @@ func (m *Model) renderRow(row editorRow, width int) string {
 		return styles.Overlay.FieldLabel.Render(line)
 	case rowField:
 		if m.focus == row.target {
-			return styles.OnBold(theme.FgBase, theme.OverlaySurf).Render(line)
+			return formview.Selection(
+				styles.OnBold(theme.FgBase, theme.OverlaySurf),
+				m.marked(row.target),
+			).Render(line)
 		}
 		return styles.Overlay.FieldValue.Render(line)
 	default:
-		return styles.Overlay.Surf.Render(line)
+		// Body rows carry a textarea's own lines, so they take the mark too.
+		return formview.Selection(styles.Overlay.Surf, m.marked(row.target)).Render(line)
 	}
 }
 
