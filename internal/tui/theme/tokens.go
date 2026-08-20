@@ -69,7 +69,7 @@ type Metrics struct {
 	CardPadLeft     int // between rail and content, normal only
 	CardPadRight    int // always
 	CardMinInner    int // below this a card renders surface and rail only
-	MaxColumnWidth  int // terminal analogue of a web max-width container
+	MinColumnWidth  int // narrowest panel a column may shrink to and still hold a title
 	OverlayInsetX   int // overlay content inset from the panel edge
 	OverlayLabelW   int // fixed label gutter of an overlay field row
 	CompactBelow    int // frame height below which density compacts
@@ -78,21 +78,26 @@ type Metrics struct {
 	Overlay         OverlayMetrics
 }
 
-// OverlayMetrics are the panel geometry and the per-overlay width caps that
-// already exist in the views, carried over as tokens (spec section 4).
+// OverlayMetrics is the proportional panel geometry of spec section 4: every
+// content overlay spans a percentage of the frame rather than a fixed cap, so a
+// laptop-sized terminal gets a laptop-sized panel. The two content-sized
+// dialogs (the task action confirm and the keyboard help) keep their own width
+// caps because their height is their content and blowing them up would frame a
+// handful of rows in a screenful of surface.
 type OverlayMetrics struct {
-	PaneW       int // card detail panel width cap
-	PaneH       int // card detail panel height cap
-	FrameSlackW int // frame width the panel leaves free
-	FrameSlackH int // frame height the panel leaves free
-	MinW        int // below this the overlay falls back to full frame
-	MinH        int
-	CardDetail  int
-	Editor      int
-	ADRSplit    int
-	IssueImport int
-	TaskAction  int
-	Help        int
+	WidthPct     int // percent of the frame width a content panel spans
+	HeightPct    int // percent of the frame height a content panel spans
+	FrameSlackW  int // columns a proportional panel always leaves free
+	FrameSlackH  int // rows a proportional panel always leaves free
+	NarrowSlackW int // columns a narrow-frame panel leaves free
+	NarrowSlackH int // rows a narrow-frame panel leaves free
+	MinPaneW     int // narrowest panel the proportional rule will produce
+	MinPaneH     int // shortest panel the proportional rule will produce
+	MinW         int // below this the overlay falls back to full frame
+	MinH         int
+	ContentMax   int // readable measure cap for prose inside a panel
+	TaskAction   int
+	Help         int
 }
 
 // defaultMetrics is spec section 2.5, 2.6 and 4.
@@ -108,25 +113,26 @@ var defaultMetrics = Metrics{
 	CardPadLeft:     1,
 	CardPadRight:    1,
 	CardMinInner:    6,
-	MaxColumnWidth:  52,
+	MinColumnWidth:  16,
 	OverlayInsetX:   2,
 	OverlayLabelW:   12,
 	CompactBelow:    30,
 	CompactInnerW:   22,
 	DescTwoLines:    45,
 	Overlay: OverlayMetrics{
-		PaneW:       72,
-		PaneH:       13,
-		FrameSlackW: 8,
-		FrameSlackH: 6,
-		MinW:        24,
-		MinH:        8,
-		CardDetail:  92,
-		Editor:      96,
-		ADRSplit:    100,
-		IssueImport: 88,
-		TaskAction:  72,
-		Help:        56,
+		WidthPct:     85,
+		HeightPct:    88,
+		FrameSlackW:  2,
+		FrameSlackH:  2,
+		NarrowSlackW: 4,
+		NarrowSlackH: 2,
+		MinPaneW:     24,
+		MinPaneH:     8,
+		MinW:         24,
+		MinH:         8,
+		ContentMax:   96,
+		TaskAction:   72,
+		Help:         56,
 	},
 }
 
@@ -182,6 +188,48 @@ func (m Metrics) CardInner(width int, density Density) int {
 		return 0
 	}
 	return inner
+}
+
+// OverlayPane is the panel geometry of spec section 4. It has two regimes,
+// split at the same WideFrame threshold the board collapses on, which is how a
+// responsive modal behaves: a narrow frame has no width to give away, so the
+// panel takes all of it but the slack; a wide frame gets a proportional panel
+// with real backdrop around it instead of a fixed cap stranded in dead canvas.
+func (m Metrics) OverlayPane(frameWidth, frameHeight int) (paneWidth, paneHeight int) {
+	frameWidth, frameHeight = max(frameWidth, 1), max(frameHeight, 1)
+	overlay := m.Overlay
+	if frameWidth < m.WideFrame {
+		return max(frameWidth-overlay.NarrowSlackW, 1), max(frameHeight-overlay.NarrowSlackH, 1)
+	}
+	paneWidth = clampPane(frameWidth, overlay.WidthPct, overlay.FrameSlackW, overlay.MinPaneW)
+	paneHeight = clampPane(frameHeight, overlay.HeightPct, overlay.FrameSlackH, overlay.MinPaneH)
+	return paneWidth, paneHeight
+}
+
+// OverlayElevated reports whether a panel of this size renders as an elevated
+// panel. Spec section 4: below the minimum the overlay falls back to the full
+// frame, which is what keeps the frozen dismissal behaviors reachable on a
+// terminal too small to center anything in.
+func (m Metrics) OverlayElevated(paneWidth, paneHeight int) bool {
+	return paneWidth >= m.Overlay.MinW && paneHeight >= m.Overlay.MinH
+}
+
+// OverlayContent is the readable measure inside a panel of this width: the
+// panel grows with the frame, the prose column inside it does not grow past the
+// point where a line stops being scannable.
+func (m Metrics) OverlayContent(paneWidth int) int {
+	return max(min(paneWidth-2*m.OverlayInsetX, m.Overlay.ContentMax), 1)
+}
+
+// clampPane resolves one axis of the proportional panel rule: the share of the
+// frame, raised to the floor, then held clear of the frame edge. The slack is
+// applied last so the panel never touches the edge it casts its shadow onto; a
+// frame too small to honor the floor within that slack fails the elevation
+// check instead and falls back to the full frame.
+func clampPane(frame, percent, slack, floor int) int {
+	pane := (frame*percent + 50) / 100
+	pane = max(pane, floor)
+	return max(min(pane, frame-slack), 1)
 }
 
 // DescLines is the number of description snippet rows a card carries. Spec

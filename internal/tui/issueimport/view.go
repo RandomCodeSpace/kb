@@ -96,10 +96,9 @@ func (m Model) panelOpts(frame importFrame) widget.OverlayOpts {
 func (m Model) layout(width, height int) importFrame {
 	width, height = max(width, 1), max(height, 1)
 	metrics := m.themeStyles().Metrics
-	paneWidth := min(max(width-4, 24), metrics.Overlay.IssueImport, width)
-	inner := max(paneWidth-2*metrics.OverlayInsetX, 1)
+	paneWidth, paneHeight := metrics.OverlayPane(width, height)
+	inner := metrics.OverlayContent(paneWidth)
 	rows := m.bodyRows(inner, height)
-	paneHeight := min(len(rows)+2, height)
 	return importFrame{
 		x:      max((width-paneWidth)/2, 0),
 		y:      max((height-paneHeight)/2, 0),

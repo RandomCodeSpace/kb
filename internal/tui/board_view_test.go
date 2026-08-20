@@ -317,6 +317,39 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 // TestBoardCardsColorGolden is the palette golden of spec section 6.4: the
 // depth model is background color, so the board's second golden pins truecolor
 // and records the shade tiers, the band hues, the priority rails and the pills.
+// TestBoardColumnsSpanTheWholeFrame is ticket #151: the columns share the frame
+// proportionally instead of being clamped to a fixed width and centered, so a
+// laptop-sized terminal has no dead canvas either side of the board.
+func TestBoardColumnsSpanTheWholeFrame(t *testing.T) {
+	metrics := theme.New(true).Metrics
+	for _, frame := range []int{100, 120, 160, 200, 220, 400} {
+		layout := boardColumnLayout(metrics, frame, 4)
+		span := 2*layout.margin + 3*metrics.ColumnGutter
+		for _, width := range layout.widths {
+			span += width
+		}
+		if span != frame {
+			t.Errorf("frame %d: columns, gutters and margins span %d, want %d", frame, span, frame)
+		}
+		if narrowest, widest := layout.widths[3], layout.widths[0]; widest-narrowest > 1 {
+			t.Errorf("frame %d: widths %v are not an even split", frame, layout.widths)
+		}
+	}
+}
+
+// TestBoardColumnsKeepAReadableFloor covers the other arm: enough columns to
+// push the even split under the floor takes the floor and clips, rather than
+// shrinking every panel out of legibility.
+func TestBoardColumnsKeepAReadableFloor(t *testing.T) {
+	metrics := theme.New(true).Metrics
+	layout := boardColumnLayout(metrics, 100, 12)
+	for index, width := range layout.widths {
+		if width != metrics.MinColumnWidth {
+			t.Fatalf("column %d is %d wide, want the %d floor", index, width, metrics.MinColumnWidth)
+		}
+	}
+}
+
 func TestBoardCardsColorGolden(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	fixture := boardViewFixture(now)
@@ -352,11 +385,11 @@ func TestBoardCardsColorGolden(t *testing.T) {
 
 // TestNarrowTallBoardGolden is the 60x50 capture ticket #141 asked for to tune
 // the compaction width axis. Below the wide-frame threshold kb shows a single
-// column, and the spec's MaxColumnWidth clamp holds it at 52, so a card's inner
-// field is 47 cells and the width axis does not fire at this size: the frame is
-// tall, the description gets its second line, and the density stays normal. The
-// 22 threshold is therefore left at the spec's value; it fires between frame
-// widths 100 and ~116, where four columns share the frame.
+// column, and ticket #151 gave that column the whole frame, so it spans 60 and
+// a card's inner field is 55 cells: the width axis does not fire at this size,
+// the frame is tall, the description gets its second line, and the density
+// stays normal. The 22 threshold is therefore left at the spec's value; it
+// fires between frame widths 100 and ~116, where four columns share the frame.
 func TestNarrowTallBoardGolden(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	fixture := boardViewFixture(now)

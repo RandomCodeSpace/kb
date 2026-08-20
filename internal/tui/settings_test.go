@@ -112,7 +112,7 @@ func runSettingsCommand(t *testing.T, model *settingsModel, command tea.Cmd) {
 
 func clickSettingsText(t *testing.T, model *settingsModel, width, height int, needle string) tea.Cmd {
 	t.Helper()
-	surface := model.Surface(width, height)
+	surface := model.Surface("", width, height)
 	if surface.Pointer == nil {
 		t.Fatal("settings surface has no pointer handler")
 	}
@@ -126,7 +126,7 @@ func clickSettingsText(t *testing.T, model *settingsModel, width, height int, ne
 			if command := model.Update(press()); command != nil {
 				t.Fatalf("settings control %q returned a domain command on press", needle)
 			}
-			pressed := model.Surface(width, height)
+			pressed := model.Surface("", width, height)
 			if !containsReverseVideo(pressed.Content) {
 				t.Fatalf("settings control %q omitted pressed feedback", needle)
 			}
@@ -168,7 +168,7 @@ func TestSettingsRejectsPointerReleaseFromClosedInstance(t *testing.T) {
 	backend := &faultSettingsStore{ai: store.AISettings{BaseURL: "https://api.example", Model: "model-a"}}
 	old := newSettingsModelWithBackends(backend, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background())
 	loadSettingsForTest(t, old)
-	surface := old.Surface(80, 40)
+	surface := old.Surface("", 80, 40)
 	x, y := -1, -1
 	for row, line := range strings.Split(ansi.Strip(surface.Content), "\n") {
 		if column := strings.Index(line, "[Save AI settings]"); column >= 0 {
@@ -183,7 +183,7 @@ func TestSettingsRejectsPointerReleaseFromClosedInstance(t *testing.T) {
 	if press == nil || old.Update(press()) != nil {
 		t.Fatal("stale settings control did not enter pressed state")
 	}
-	command := old.Surface(80, 40).Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	command := old.Surface("", 80, 40).Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
 	if command == nil {
 		t.Fatal("old settings release produced no message")
 	}
@@ -229,7 +229,7 @@ func TestSettingsPointerWheelMovesFocusAndViewportTogether(t *testing.T) {
 		backend, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background(),
 	)
 	loadSettingsForTest(t, model)
-	surface := model.Surface(42, 7)
+	surface := model.Surface("", 42, 7)
 
 	command := surface.Pointer(tea.MouseWheelMsg{X: 10, Y: 3, Button: tea.MouseWheelDown})
 	if command == nil {
@@ -243,7 +243,7 @@ func TestSettingsPointerWheelMovesFocusAndViewportTogether(t *testing.T) {
 	if model.focus != "ai:model" {
 		t.Fatalf("wheel focus = %q, want ai:model", model.focus)
 	}
-	if view := model.Surface(42, 7).Content; !strings.Contains(view, "> Model:") {
+	if view := model.Surface("", 42, 7).Content; !strings.Contains(view, "> Model:") {
 		t.Fatalf("wheel-selected control is outside viewport:\n%s", view)
 	}
 }
@@ -333,7 +333,7 @@ func TestSettingsPointerViewportOnlyActivatesTheVisibleSourceRow(t *testing.T) {
 	model.focus = "forge:source:source-09:project"
 	model.applyFocus()
 
-	surface := model.Surface(42, 7)
+	surface := model.Surface("", 42, 7)
 	if strings.Contains(surface.Content, "source-00") || !strings.Contains(surface.Content, "source-09") {
 		t.Fatalf("settings viewport projected the wrong source:\n%s", surface.Content)
 	}

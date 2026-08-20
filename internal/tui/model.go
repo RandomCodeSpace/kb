@@ -823,7 +823,7 @@ func (m Model) View() tea.View {
 		hits = nil
 	}
 	if m.settings != nil {
-		surface := m.settings.Surface(m.width, m.height)
+		surface := m.settings.Surface(content, m.width, m.height)
 		content = surface.Content
 		overlayMouse = surface.Pointer
 		hits = nil

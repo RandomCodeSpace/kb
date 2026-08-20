@@ -615,26 +615,28 @@ func fitDetailLine(line string, width int) string {
 	return ansi.Cut(line, 0, width-1) + "…"
 }
 
-// paneSize is the overlay geometry of spec section 4: pw = min(72, frameW-8),
-// ph = min(13, frameH-6), centered. A frame too short for the section 4
-// minimums does not get an elevated panel: the overlay keeps the v1.0.1
+// paneSize is the overlay geometry of spec section 4: the panel spans a share
+// of the frame on both axes and is centered. A frame too small for the section
+// 4 minimums does not get an elevated panel: the overlay keeps the v1.0.1
 // full-frame pane height, whose backdrop margin the frozen dismissal behavior
 // depends on, and casts no shadow.
 func (m Model) paneSize(width, height int) (paneWidth, paneHeight int, elevated bool) {
 	width = max(width, 1)
 	height = max(height, 1)
-	metrics := m.styles.Metrics.Overlay
-	paneWidth = max(min(metrics.PaneW, width-metrics.FrameSlackW), min(width, minPaneWidth))
-	paneHeight = min(metrics.PaneH, height-metrics.FrameSlackH)
-	if paneWidth >= metrics.MinW && paneHeight >= metrics.MinH {
+	metrics := m.styles.Metrics
+	paneWidth, paneHeight = metrics.OverlayPane(width, height)
+	paneWidth = max(paneWidth, min(width, minPaneWidth))
+	if metrics.OverlayElevated(paneWidth, paneHeight) {
 		return paneWidth, paneHeight, true
 	}
 	return paneWidth, min(max(min(height-2, height), 5), height), false
 }
 
-// contentWidth is the width a body row has between the overlay insets.
+// contentWidth is the width a body row has between the overlay insets, held to
+// the readable measure of spec section 4 so a wide panel does not become a
+// single very long line of prose.
 func (m Model) contentWidth(paneWidth int) int {
-	return max(paneWidth-2*m.styles.Metrics.OverlayInsetX, 1)
+	return m.styles.Metrics.OverlayContent(paneWidth)
 }
 
 func (m *Model) clampScroll() {
