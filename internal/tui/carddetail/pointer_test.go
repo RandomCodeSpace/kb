@@ -228,7 +228,7 @@ func TestPointerSurfaceWheelAndIdleBackdropRespectPaneOwnership(t *testing.T) {
 	}
 	if command := surface.Pointer(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown}); command != nil {
 		m.Update(command())
-		if m.scroll != 0 {
+		if m.scrollOffset() != 0 {
 			t.Fatal("wheel outside the detail pane scrolled content")
 		}
 	}
@@ -242,7 +242,7 @@ func TestPointerSurfaceWheelAndIdleBackdropRespectPaneOwnership(t *testing.T) {
 		message, _ := m.ResolvePointerMessage(followup())
 		m.Update(message)
 	}
-	if m.scroll == 0 {
+	if m.scrollOffset() == 0 {
 		t.Fatal("detail wheel did not use its existing scroll path")
 	}
 

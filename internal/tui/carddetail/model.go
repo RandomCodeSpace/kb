@@ -12,6 +12,7 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
@@ -64,7 +65,8 @@ type pointerControlMsg struct {
 	message         tea.Msg
 }
 
-// Model owns the overlay's task snapshot, enriched detail, and scroll state.
+// Model owns the overlay's task snapshot, enriched detail, and the bubbles
+// viewport that carries its scroll state.
 type Model struct {
 	reader         Reader
 	writer         Writer
@@ -79,7 +81,7 @@ type Model struct {
 	commentsErr    error
 	linksErr       error
 	tombstoneErr   error
-	scroll         int
+	body           viewport.Model
 	generation     uint64
 	width          int
 	height         int
@@ -124,8 +126,25 @@ func New(reader Reader, user string, styles *theme.Styles) Model {
 	writer, _ := reader.(Writer)
 	return Model{
 		reader: reader, writer: writer, user: user, width: defaultWidth, height: defaultHeight,
-		styles: styles, renderMarkdown: markdownWith(styles),
+		styles: styles, renderMarkdown: markdownWith(styles), body: newBodyViewport(),
 	}
+}
+
+// newBodyViewport is the bubbles viewport that owns the body scroll offset.
+// Map #136 component sourcing: the hand-rolled offset and clamp are gone, the
+// charm component keeps the offset instead. It is driven programmatically
+// rather than through viewport.Update, because the frozen v1.0.1 keymap and
+// wheel deltas are the pane's, not the component's defaults: soft wrap and
+// horizontal scrolling stay off so the panel-width rows the widget renders are
+// never re-cut, and the wheel is routed through the pointer map that owns the
+// pane's hit regions.
+func newBodyViewport() viewport.Model {
+	built := viewport.New()
+	built.SoftWrap = false
+	built.FillHeight = false
+	built.MouseWheelEnabled = false
+	built.SetHorizontalStep(0)
+	return built
 }
 
 // SetStyles adopts a rebuilt design system. Spec section 6.3: the root resolves
@@ -166,7 +185,7 @@ func (m *Model) Open(task board.Task) tea.Cmd {
 	m.commentsErr = nil
 	m.linksErr = nil
 	m.tombstoneErr = nil
-	m.scroll = 0
+	m.body.SetYOffset(0)
 	m.action = actionNone
 	m.selection = 0
 	m.confirm = false
@@ -215,7 +234,7 @@ func (m *Model) Close() {
 	m.task = board.Task{}
 	m.bodyLines = nil
 	m.bodyWidth = 0
-	m.scroll = 0
+	m.syncScroll()
 	m.action = actionNone
 	m.selection = 0
 	m.confirm = false
@@ -234,7 +253,7 @@ func (m *Model) Resize(width, height int) {
 		m.rebuildBody()
 		return
 	}
-	m.clampScroll()
+	m.syncScroll()
 }
 
 // Update handles enrichment results and overlay scrolling.
@@ -274,7 +293,7 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		m.reconcileDeleteActionAfterRefresh()
 		m.rebuildBody()
 	case mouseScrollMsg:
-		m.scroll += msg.delta
+		m.scrollBy(msg.delta)
 	case mouseDismissMsg:
 		m.Close()
 		return nil
@@ -304,14 +323,14 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		}
 		switch msg.String() {
 		case "up", "k", "pgup":
-			m.scroll = max(0, m.scroll-scrollAmount(msg.String()))
+			m.scrollBy(-scrollAmount(msg.String()))
 		case "down", "j", "pgdown":
-			m.scroll += scrollAmount(msg.String())
+			m.scrollBy(scrollAmount(msg.String()))
 		case "home", "g":
-			m.scroll = 0
+			m.body.GotoTop()
 		}
 	}
-	m.clampScroll()
+	m.syncScroll()
 	return nil
 }
 
@@ -509,7 +528,7 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 	if m.driftMode == driftSelect && m.driftBusy == "" {
 		viewport := pointer.Viewport{
 			Rect:   pointer.Rect{X0: x + inset, Y0: y + 1, X1: x + paneWidth - inset, Y1: footerY},
-			Scroll: m.scroll,
+			Scroll: m.scrollOffset(),
 		}
 		for index := range m.driftChoices {
 			if rect, ok := viewport.Row(4+index, 0, displayWidth); ok {
@@ -530,7 +549,7 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 		}
 		viewport := pointer.Viewport{
 			Rect:   pointer.Rect{X0: x + inset, Y0: y + 1, X1: x + paneWidth - inset, Y1: footerY},
-			Scroll: m.scroll,
+			Scroll: m.scrollOffset(),
 		}
 		for index := start; index < end; index++ {
 			if rect, ok := viewport.Row(logicalRow+index-start, 0, displayWidth); ok {
@@ -561,7 +580,10 @@ func (m *Model) layout(width, height int) paneLayout {
 
 	bodyRows := max(paneHeight-2, 0)
 	maxScroll := max(0, len(m.bodyLines)-bodyRows)
-	start := min(m.scroll, maxScroll)
+	// The viewport owns the offset and has already clamped it against this
+	// geometry; the widget still owns the rows, because a panel body row carries
+	// the OverlaySurf token edge to edge and viewport.View would pad it plain.
+	start := min(m.scrollOffset(), maxScroll)
 	end := min(start+bodyRows, len(m.bodyLines))
 	hint := ""
 	// A band insets its content from the left and right-aligns its tail at its
@@ -639,12 +661,40 @@ func (m Model) contentWidth(paneWidth int) int {
 	return m.styles.Metrics.OverlayContent(paneWidth)
 }
 
-func (m *Model) clampScroll() {
+// syncScroll hands the current body and geometry to the viewport, which is what
+// clamps the offset: SetContentLines pulls an over-scrolled pane back to the
+// bottom, so the pane never has to do that arithmetic itself.
+func (m *Model) syncScroll() {
+	m.body.SoftWrap = false
+	m.body.FillHeight = false
+	m.body.MouseWheelEnabled = false
+	m.body.SetHorizontalStep(0)
 	if !m.open {
-		m.scroll = 0
+		m.body.SetContentLines(nil)
+		m.body.SetYOffset(0)
 		return
 	}
-	m.scroll = min(max(m.scroll, 0), m.maxScroll())
+	paneWidth, paneHeight, _ := m.paneSize(m.width, m.height)
+	m.body.SetWidth(paneWidth)
+	m.body.SetHeight(max(paneHeight-2, 0))
+	m.body.SetContentLines(m.bodyLines)
+	m.body.SetYOffset(m.body.YOffset())
+}
+
+// scrollOffset is the first body line the pane shows. The pointer viewport and
+// the body window both read it here rather than from a field.
+func (m *Model) scrollOffset() int {
+	return m.body.YOffset()
+}
+
+// scrollBy moves the offset by whole lines. Frozen v1.0.1 deltas: one line for
+// the arrow and vim keys, eight for a page key, three per wheel notch.
+func (m *Model) scrollBy(delta int) {
+	if delta < 0 {
+		m.body.ScrollUp(-delta)
+		return
+	}
+	m.body.ScrollDown(delta)
 }
 
 func (m Model) maxScroll() int {
@@ -660,21 +710,21 @@ func (m *Model) ensureBody(width, height int) {
 		m.rebuildBody()
 		return
 	}
-	m.clampScroll()
+	m.syncScroll()
 }
 
 func (m *Model) rebuildBody() {
 	if !m.open {
 		m.bodyLines = nil
 		m.bodyWidth = 0
-		m.scroll = 0
+		m.body.SetYOffset(0)
 		return
 	}
 	paneWidth, _, _ := m.paneSize(m.width, m.height)
 	body := m.renderBody(paneWidth)
 	m.bodyLines = strings.Split(strings.TrimRight(body, "\n"), "\n")
 	m.bodyWidth = paneWidth
-	m.clampScroll()
+	m.syncScroll()
 }
 
 func fitTerminal(rendered string, width, height int) string {
