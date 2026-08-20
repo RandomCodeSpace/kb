@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -167,12 +168,14 @@ type Model struct {
 	manualScroll      bool
 	pointerState      pointer.State
 	styles            *theme.Styles
+	spin              spinner.Model
 }
 
 // New creates a closed editor. A nil store keeps the feature unavailable in
 // lightweight root-model tests.
 func New(st Store, user string) Model {
 	m := Model{store: st, user: user, now: time.Now, ctx: context.Background(), styles: theme.New(true)}
+	m.spin = spinner.New(spinner.WithSpinner(m.styles.Spinner))
 	m.resetInputs()
 	return m
 }
@@ -183,6 +186,7 @@ func New(st Store, user string) Model {
 func (m *Model) SetStyles(styles *theme.Styles) {
 	if styles != nil {
 		m.styles = styles
+		m.spin.Spinner = styles.Spinner
 	}
 }
 
@@ -243,12 +247,31 @@ func IsMessage(message tea.Msg) bool {
 		return true
 	}
 	switch message.(type) {
-	case labelsLoadedMsg, similarDebounceMsg, similarLoadedMsg, saveCompletedMsg, draftCompletedMsg, pointerClickMsg, pointerWheelMsg:
+	case labelsLoadedMsg, similarDebounceMsg, similarLoadedMsg, saveCompletedMsg, draftCompletedMsg,
+		pointerClickMsg, pointerWheelMsg, spinner.TickMsg:
 		return true
 	default:
 		return false
 	}
 }
+
+// busy reports whether a spinner-worthy operation is in flight. Spec section
+// 5.2 names the editor's drafting and saving states for the bubbles spinner.
+func (m Model) busy() bool { return m.drafting || m.saving }
+
+// spinTick advances the busy indicator. The tick loop stops as soon as nothing
+// is in flight, so an idle editor costs no timers.
+func (m *Model) spinTick(msg spinner.TickMsg) tea.Cmd {
+	if !m.busy() {
+		return nil
+	}
+	var command tea.Cmd
+	m.spin, command = m.spin.Update(msg)
+	return command
+}
+
+// startSpinner is the command that begins the tick loop for a new operation.
+func (m Model) startSpinner() tea.Cmd { return m.spin.Tick }
 
 // OpenAdd resets the form for a card appended to status.
 func (m *Model) OpenAdd(status board.Status) tea.Cmd {
@@ -388,6 +411,8 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return nil
 	}
 	switch msg := message.(type) {
+	case spinner.TickMsg:
+		return m.spinTick(msg)
 	case labelsLoadedMsg:
 		if msg.session != m.session {
 			return nil
@@ -620,7 +645,7 @@ func (m *Model) startDraft() tea.Cmd {
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.draftCancel, m.drafting = cancel, true
 	m.statusMessage, m.statusIsError = "drafting card...", false
-	return func() tea.Msg {
+	return tea.Batch(m.startSpinner(), func() tea.Msg {
 		run, err := m.runner.RunSkill(ctx, m.user, ai.ScopeReadOnly, "story-draft", input, 1, draftMaxTokens)
 		if err == nil && len(run.Cards) == 0 {
 			err = errors.New("the model returned no usable card")
@@ -630,7 +655,7 @@ func (m *Model) startDraft() tea.Cmd {
 			draft = run.Cards[0]
 		}
 		return draftCompletedMsg{session: session, generation: generation, draft: draft, err: err}
-	}
+	})
 }
 
 func (m *Model) currentCardJSON() ([]byte, error) {
@@ -947,17 +972,17 @@ func (m *Model) startSave() tea.Cmd {
 	m.statusMessage, m.statusIsError = "saving card...", false
 	session := m.session
 	if m.mode == modeAdd {
-		return func() tea.Msg {
+		return tea.Batch(m.startSpinner(), func() tea.Msg {
 			created, saveErr := m.store.AddTask(m.user, task)
 			return saveCompletedMsg{session: session, task: created, err: saveErr}
-		}
+		})
 	}
 	id := m.base.ID
 	expected := expectedTaskFields(m.canonical, m.changedFields())
-	return func() tea.Msg {
+	return tea.Batch(m.startSpinner(), func() tea.Msg {
 		updated, saveErr := m.store.UpdateTaskIfFieldsMatch(m.user, id, expected, patch)
 		return saveCompletedMsg{session: session, task: updated, err: saveErr}
-	}
+	})
 }
 
 func expectedTaskFields(task board.Task, changed editedFields) store.TaskPatch {

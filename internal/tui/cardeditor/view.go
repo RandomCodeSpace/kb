@@ -313,11 +313,21 @@ func (m *Model) footerLine(width int) string {
 		return line
 	}
 	if m.drafting {
-		footer = "drafting card... | esc cancel"
+		footer = m.busyPrefix() + "drafting card... | esc cancel"
 	} else if m.saving {
-		footer = "saving card..."
+		footer = m.busyPrefix() + "saving card..."
 	}
 	return fit(footer, width)
+}
+
+// busyPrefix is the spinner frame of spec section 5.2: the drafting and saving
+// states that were static text carry the bubbles spinner instead. The frame is
+// plain text so the footer band renders it in the band's own tier.
+func (m Model) busyPrefix() string {
+	if len(m.spin.Spinner.Frames) == 0 {
+		return ""
+	}
+	return ansi.Strip(m.spin.View())
 }
 
 func (m Model) pressedLabel(target, label string) string {

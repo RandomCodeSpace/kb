@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
@@ -149,6 +150,36 @@ func boardLoadFromBatch(t *testing.T, command tea.Cmd) tea.Cmd {
 		t.Fatalf("load and poll command = %#v, want two-command batch", batch)
 	}
 	return batch[0]
+}
+
+// resultSkippingSpinnerTick runs a command and returns the result message it
+// produced. An overlay operation batches its busy-spinner tick alongside the
+// work, so the batch is walked and the tick - a timer, not a result - skipped.
+func resultSkippingSpinnerTick(t *testing.T, command tea.Cmd) tea.Msg {
+	t.Helper()
+	if command == nil {
+		t.Fatal("command is nil")
+	}
+	message := command()
+	batch, batched := message.(tea.BatchMsg)
+	if !batched {
+		return message
+	}
+	for _, sub := range batch {
+		if sub == nil {
+			continue
+		}
+		if result := sub(); !isSpinnerTickMsg(result) {
+			return result
+		}
+	}
+	t.Fatal("batch produced no result message")
+	return nil
+}
+
+func isSpinnerTickMsg(message tea.Msg) bool {
+	_, tick := message.(spinner.TickMsg)
+	return tick
 }
 
 func TestIssueImportOwnsRootInputAndCancelsLiftOnOpen(t *testing.T) {
@@ -1222,7 +1253,7 @@ func TestRootRoutesCreateEditorAndRefreshesAcknowledgedSave(t *testing.T) {
 	if save == nil {
 		t.Fatal("root ctrl+s did not dispatch editor save")
 	}
-	refresh := updateTestModel(t, &m, save())
+	refresh := updateTestModel(t, &m, resultSkippingSpinnerTick(t, save))
 	if m.editor.IsOpen() || refresh == nil || !m.loading {
 		t.Fatalf("save acknowledgement = editor:%v refresh:%v loading:%v", m.editor.IsOpen(), refresh, m.loading)
 	}
