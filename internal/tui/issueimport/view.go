@@ -96,10 +96,12 @@ func (m Model) panelOpts(frame importFrame) widget.OverlayOpts {
 func (m Model) layout(width, height int) importFrame {
 	width, height = max(width, 1), max(height, 1)
 	metrics := m.themeStyles().Metrics
-	paneWidth := min(max(width-4, 24), metrics.Overlay.IssueImport, width)
-	inner := max(paneWidth-2*metrics.OverlayInsetX, 1)
-	rows := m.bodyRows(inner, height)
-	paneHeight := min(len(rows)+2, height)
+	paneWidth, paneHeight := metrics.OverlayPane(width, height)
+	inner := metrics.OverlayContent(paneWidth)
+	// The panel height no longer follows the row count, so the review window is
+	// sized against the panel body the rows actually land in rather than the
+	// frame around it.
+	rows := m.bodyRows(inner, max(paneHeight-2, 1))
 	return importFrame{
 		x:      max((width-paneWidth)/2, 0),
 		y:      max((height-paneHeight)/2, 0),
@@ -420,8 +422,10 @@ func rowWindow(count, selection, limit int) (int, int) {
 	return start, start + limit
 }
 
-// reviewLimit is the frozen number of proposals one review pane shows.
-func reviewLimit(height int) int { return max(1, min(height-10, 12)) }
+// reviewLimit is how many issue rows the review stage shows in a panel body of
+// this height. The body spends 8 rows on the summary, the ISSUES break, the
+// progress bar and the actions row; the rest is issues, capped at 12.
+func reviewLimit(bodyHeight int) int { return max(1, min(bodyHeight-8, 12)) }
 
 func (m Model) reviewWindow(limit int) (int, int) {
 	count := len(m.rows)

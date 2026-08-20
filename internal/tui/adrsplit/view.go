@@ -120,9 +120,8 @@ func (m *Model) scrollHint(frame splitFrame) string {
 func (m *Model) layout(width, height int) splitFrame {
 	width, height = max(width, 1), max(height, 1)
 	metrics := m.themeStyles().Metrics
-	paneWidth := min(max(width-4, 18), metrics.Overlay.ADRSplit, width)
-	paneHeight := min(max(height-2, 7), height)
-	inner := max(paneWidth-2*metrics.OverlayInsetX, 1)
+	paneWidth, paneHeight := metrics.OverlayPane(width, height)
+	inner := metrics.OverlayContent(paneWidth)
 	bodyHeight := max(paneHeight-2, 1)
 
 	rows := m.bodyRows(inner)

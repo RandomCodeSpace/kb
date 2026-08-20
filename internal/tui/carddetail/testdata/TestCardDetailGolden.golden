@@ -1,4 +1,4 @@
-🧭 Map it                                       #7
+🧭 Map it                                           #7
 DETAIL
 status      doing  blocked
 priority    1
@@ -10,4 +10,9 @@ links       [github#86]
 Plan
 
 • first
-[Check] [Kill] [Comment] [Link] [Close]        1/7
+https://example.com
+CHECKLIST                                          1/2
+☑ done
+☐ left
+completion gate  blocked: 1 of 2 checklist items are
+[Check] [Kill] [Comment] [Link] [Close]            1/2

@@ -409,8 +409,9 @@ func (m Model) renderTopBar(styles *theme.Styles, width int) string {
 }
 
 // boardLayout is the resolved column geometry of spec section 2.5: a page
-// margin on a wide frame, columns split evenly and clamped to MaxColumnWidth so
-// extra terminal width becomes margin rather than stretched cards.
+// margin on a wide frame and the whole remaining width split proportionally
+// across the visible columns, so a wide terminal becomes a wide board instead
+// of a centered strip with dead canvas either side of it.
 type boardLayout struct {
 	margin int   // left page margin; the first column starts here
 	widths []int // panel width per visible column
@@ -420,12 +421,13 @@ type boardLayout struct {
 func boardColumnLayout(metrics theme.Metrics, width, count int) boardLayout {
 	margin := metrics.PageMargin(width)
 	widths := splitWidths(max(width-2*margin, 1), count)
-	if widths[0] > metrics.MaxColumnWidth {
+	if widths[len(widths)-1] < metrics.MinColumnWidth {
+		// A column narrower than the floor stops being a column, so the floor
+		// wins and the overflow is clipped at the frame edge rather than
+		// shrinking every panel into unreadability.
 		for i := range widths {
-			widths[i] = metrics.MaxColumnWidth
+			widths[i] = metrics.MinColumnWidth
 		}
-		used := count*metrics.MaxColumnWidth + (count-1)*metrics.ColumnGutter
-		margin = max((width-used)/2, 0)
 	}
 	narrowest := widths[len(widths)-1]
 	return boardLayout{

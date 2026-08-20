@@ -63,6 +63,85 @@ func TestCompactZeroesTheSpacingTokens(t *testing.T) {
 	}
 }
 
+// TestOverlayPaneHasTwoRegimes pins the geometry of ticket #151: a narrow frame
+// keeps the near-full-frame panel v1.0.1 shipped, a wide frame gets a panel
+// proportional to the frame instead of a fixed cap stranded in dead canvas.
+func TestOverlayPaneHasTwoRegimes(t *testing.T) {
+	metrics := defaultMetrics
+	cases := []struct {
+		frameW, frameH int
+		wantW, wantH   int
+	}{
+		{200, 50, 170, 44}, // reference laptop terminal
+		{220, 60, 187, 53},
+		{120, 35, 102, 31},
+		{100, 30, 85, 26}, // the wide-frame threshold itself
+		{99, 30, 95, 28},  // one cell below it, narrow regime
+		{80, 24, 76, 22},
+		{30, 10, 26, 8},
+		{20, 6, 16, 4},
+		{1, 1, 1, 1},
+		{0, 0, 1, 1},
+	}
+	for _, testCase := range cases {
+		gotW, gotH := metrics.OverlayPane(testCase.frameW, testCase.frameH)
+		if gotW != testCase.wantW || gotH != testCase.wantH {
+			t.Errorf("OverlayPane(%d, %d) = %dx%d, want %dx%d",
+				testCase.frameW, testCase.frameH, gotW, gotH, testCase.wantW, testCase.wantH)
+		}
+		if gotW > max(testCase.frameW, 1) || gotH > max(testCase.frameH, 1) {
+			t.Errorf("OverlayPane(%d, %d) = %dx%d overflows the frame",
+				testCase.frameW, testCase.frameH, gotW, gotH)
+		}
+	}
+}
+
+// TestOverlayPaneFloorsAWidePanel covers the floor arm of the proportional
+// rule: a wide but very short frame cannot reach the minimum panel height, so
+// the slack wins and the elevation check sends the overlay full-frame.
+func TestOverlayPaneFloorsAWidePanel(t *testing.T) {
+	metrics := defaultMetrics
+	paneWidth, paneHeight := metrics.OverlayPane(200, 6)
+	if paneWidth != 170 || paneHeight != 4 {
+		t.Fatalf("OverlayPane(200, 6) = %dx%d, want 170x4", paneWidth, paneHeight)
+	}
+	if metrics.OverlayElevated(paneWidth, paneHeight) {
+		t.Error("a panel below the section 4 minimum height must not elevate")
+	}
+}
+
+func TestOverlayElevatedGuardsBothAxes(t *testing.T) {
+	metrics := defaultMetrics
+	cases := []struct {
+		width, height int
+		want          bool
+	}{
+		{24, 8, true},
+		{170, 44, true},
+		{23, 8, false},
+		{24, 7, false},
+	}
+	for _, testCase := range cases {
+		if got := metrics.OverlayElevated(testCase.width, testCase.height); got != testCase.want {
+			t.Errorf("OverlayElevated(%d, %d) = %v, want %v",
+				testCase.width, testCase.height, got, testCase.want)
+		}
+	}
+}
+
+// TestOverlayContentKeepsAReadableMeasure is the other half of ticket #151: the
+// panel grows with the frame, the prose column inside it does not grow past the
+// point where a line stops being scannable.
+func TestOverlayContentKeepsAReadableMeasure(t *testing.T) {
+	metrics := defaultMetrics
+	cases := [][2]int{{170, 96}, {102, 96}, {100, 96}, {76, 72}, {26, 22}, {4, 1}, {0, 1}}
+	for _, testCase := range cases {
+		if got := metrics.OverlayContent(testCase[0]); got != testCase[1] {
+			t.Errorf("OverlayContent(%d) = %d, want %d", testCase[0], got, testCase[1])
+		}
+	}
+}
+
 func TestCardInnerSpendsTheRailAndPadding(t *testing.T) {
 	metrics := defaultMetrics
 	if got := metrics.CardInner(30, DensityNormal); got != 27 {
@@ -97,20 +176,23 @@ func TestMetricsCarrySpecNumbers(t *testing.T) {
 		"CardRail":        {metrics.CardRail, 1},
 		"CardPadRight":    {metrics.CardPadRight, 1},
 		"CardMinInner":    {metrics.CardMinInner, 6},
-		"MaxColumnWidth":  {metrics.MaxColumnWidth, 52},
+		"MinColumnWidth":  {metrics.MinColumnWidth, 16},
 		"OverlayInsetX":   {metrics.OverlayInsetX, 2},
 		"OverlayLabelW":   {metrics.OverlayLabelW, 12},
 		"CompactBelow":    {metrics.CompactBelow, 30},
 		"CompactInnerW":   {metrics.CompactInnerW, 22},
 		"DescTwoLines":    {metrics.DescTwoLines, 45},
-		"OverlayPaneW":    {metrics.Overlay.PaneW, 72},
-		"OverlayPaneH":    {metrics.Overlay.PaneH, 13},
+		"OverlayWidthPct": {metrics.Overlay.WidthPct, 85},
+		"OverlayHeightPc": {metrics.Overlay.HeightPct, 88},
+		"OverlaySlackW":   {metrics.Overlay.FrameSlackW, 2},
+		"OverlaySlackH":   {metrics.Overlay.FrameSlackH, 2},
+		"OverlayNarrowW":  {metrics.Overlay.NarrowSlackW, 4},
+		"OverlayNarrowH":  {metrics.Overlay.NarrowSlackH, 2},
+		"OverlayMinPaneW": {metrics.Overlay.MinPaneW, 24},
+		"OverlayMinPaneH": {metrics.Overlay.MinPaneH, 8},
 		"OverlayMinW":     {metrics.Overlay.MinW, 24},
 		"OverlayMinH":     {metrics.Overlay.MinH, 8},
-		"CardDetailWidth": {metrics.Overlay.CardDetail, 92},
-		"EditorWidth":     {metrics.Overlay.Editor, 96},
-		"ADRSplitWidth":   {metrics.Overlay.ADRSplit, 100},
-		"IssueImport":     {metrics.Overlay.IssueImport, 88},
+		"OverlayContent":  {metrics.Overlay.ContentMax, 96},
 		"TaskAction":      {metrics.Overlay.TaskAction, 72},
 		"HelpWidth":       {metrics.Overlay.Help, 56},
 	}

@@ -415,7 +415,10 @@ func TestOverlayKeepsBoardAroundPane(t *testing.T) {
 		t.Fatalf("closed overlay changed background: %q", got)
 	}
 	m.Open(board.Task{ID: "id", Title: "detail", Status: board.StatusTodo})
-	got := ansi.Strip(m.Overlay(background, 30, 8))
+	// A wide frame gets a proportional pane (spec section 4), so the board it
+	// leaves around itself is measured on a frame wide enough to have one.
+	wide := strings.TrimRight(strings.Repeat(strings.Repeat("b", 120)+"\n", 30), "\n")
+	got := ansi.Strip(m.Overlay(wide, 120, 30))
 	if !strings.Contains(got, "detail") || !strings.Contains(got, "bbbb") {
 		t.Fatalf("composed overlay lost pane or board:\n%s", got)
 	}

@@ -6,6 +6,7 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
@@ -39,15 +40,45 @@ func settingsControlID(target string) pointer.ControlID {
 }
 
 func (m *settingsModel) View(width, height int) string {
-	return m.Surface(width, height).Content
+	return m.Surface("", width, height).Content
 }
 
-func (m *settingsModel) Surface(width, height int) pointer.Surface {
+// settingsFrame is the resolved panel geometry of spec section 4: a share of
+// the frame, centered, or the whole frame when the terminal is too small for a
+// panel to leave a usable backdrop.
+type settingsFrame struct {
+	x, y     int
+	width    int
+	height   int
+	inset    int
+	inner    int
+	elevated bool
+}
+
+func settingsLayout(metrics theme.Metrics, width, height int) settingsFrame {
+	paneWidth, paneHeight := metrics.OverlayPane(width, height)
+	elevated := metrics.OverlayElevated(paneWidth, paneHeight)
+	if !elevated {
+		paneWidth, paneHeight = width, height
+	}
+	inset := min(metrics.OverlayInsetX, paneWidth/2)
+	return settingsFrame{
+		x:        max((width-paneWidth)/2, 0),
+		y:        max((height-paneHeight)/2, 0),
+		width:    paneWidth,
+		height:   paneHeight,
+		inset:    inset,
+		inner:    max(min(paneWidth-2*inset, metrics.Overlay.ContentMax), 1),
+		elevated: elevated,
+	}
+}
+
+func (m *settingsModel) Surface(background string, width, height int) pointer.Surface {
 	width = max(width, 1)
 	height = max(height, 3)
 	styles := m.themeStyles()
-	inset := min(styles.Metrics.OverlayInsetX, width/2)
-	inner := max(width-2*inset, 1)
+	frame := settingsLayout(styles.Metrics, width, height)
+	inset, inner := frame.inset, frame.inner
 	inputWidth := max(inner-18, 8)
 	m.aiBase.SetWidth(inputWidth)
 	m.aiModel.SetWidth(inputWidth)
@@ -90,7 +121,7 @@ func (m *settingsModel) Surface(width, height int) pointer.Surface {
 	footer := settingsFit("[Close] | "+status+" | tab navigate | enter act", inner)
 	footer = strings.Replace(footer, "[Close]", m.pointerState.Render(styles, settingsControlID("close"), "[Close]"), 1)
 
-	bodyHeight := height - 2
+	bodyHeight := max(frame.height-2, 1)
 	focusLine := -1
 	for i, row := range body {
 		if strings.HasPrefix(row.line, ">") {
@@ -110,14 +141,14 @@ func (m *settingsModel) Surface(width, height int) pointer.Surface {
 	visible := body[m.scroll:end]
 	var hitMap pointer.Map
 	viewport := pointer.Viewport{
-		Rect:   pointer.Rect{X0: 0, Y0: 1, X1: width, Y1: height - 1},
+		Rect:   pointer.Rect{X0: frame.x, Y0: frame.y + 1, X1: frame.x + frame.width, Y1: frame.y + frame.height - 1},
 		Scroll: m.scroll,
 	}
 	for logicalRow, row := range body {
 		if row.target == "" {
 			continue
 		}
-		if rect, ok := viewport.Row(logicalRow, 0, width); ok {
+		if rect, ok := viewport.Row(logicalRow, 0, frame.width); ok {
 			target := row.target
 			hitMap.AddControl(settingsControlID(target), rect, func(pointer.Point) tea.Msg { return settingsPointerMsg{owner: m, target: target} })
 		}
@@ -125,28 +156,49 @@ func (m *settingsModel) Surface(width, height int) pointer.Surface {
 	rendered := make([]string, 0, bodyHeight)
 	for _, row := range visible {
 		if row.kind == settingsRowSection {
-			rendered = append(rendered, widget.Section(styles, settingsFit(row.line, inner), "", width))
+			rendered = append(rendered, widget.Section(styles, settingsFit(row.line, inner), "", frame.width))
 			continue
 		}
-		rendered = append(rendered, widget.OverlayRow(styles, m.renderSettingsRow(row, inner), width))
+		rendered = append(rendered, widget.OverlayRow(styles, m.renderSettingsRow(row, inner), frame.width))
 	}
-	content := widget.Overlay(styles, widget.OverlayOpts{
+	opts := widget.OverlayOpts{
 		Title:  sanitizeTerminal("kb / settings / " + m.user),
 		Body:   rendered,
 		Footer: footer,
 		Hint:   settingsScrollHint(styles, m.scroll+bodyHeight, len(body)),
-		Width:  width,
-		Height: height,
-	})
+		Width:  frame.width,
+		Height: frame.height,
+	}
+	content := settingsCompose(styles, opts, background, frame, width, height)
 
-	footerY := height - 1
+	footerY := frame.y + frame.height - 1
 	hitMap.AddWheel(viewport.Rect, func(delta int) tea.Msg { return settingsWheelMsg{delta: delta} })
 	hitMap.AddControl(
 		settingsControlID("close"),
-		pointer.Rect{X0: inset, Y0: footerY, X1: min(width, inset+7), Y1: footerY + 1},
+		pointer.Rect{X0: frame.x + inset, Y0: footerY, X1: min(frame.x+frame.width, frame.x+inset+7), Y1: footerY + 1},
 		func(pointer.Point) tea.Msg { return settingsPointerMsg{owner: m, target: "close"} },
 	)
 	return pointer.Surface{Content: content, Pointer: hitMap.Handler()}
+}
+
+// settingsCompose elevates the panel over the dimmed board. Spec section 4: an
+// overlay is a shade step plus a shadow over what is behind it. A frame too
+// small for a panel keeps the v1.0.1 full-frame pane and casts no shadow.
+func settingsCompose(styles *theme.Styles, opts widget.OverlayOpts, background string, frame settingsFrame, width, height int) string {
+	panel := widget.Overlay(styles, opts)
+	if !frame.elevated {
+		return panel
+	}
+	if background == "" {
+		// No board behind it: Place centers the panel on the same coordinates
+		// settingsLayout resolved, which is what the hit regions were built for.
+		return fitActionFrame(lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, panel), width, height)
+	}
+	layers := append(
+		[]*lipgloss.Layer{lipgloss.NewLayer(fitActionFrame(background, width, height))},
+		widget.OverlayLayers(styles, opts, frame.x, frame.y)...,
+	)
+	return fitActionFrame(lipgloss.NewCompositor(layers...).Render(), width, height)
 }
 
 // renderSettingsRow applies the token the row's role names.
