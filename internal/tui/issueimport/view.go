@@ -140,7 +140,10 @@ func (m Model) renderRow(row importRow, width int) string {
 		return styles.Overlay.FieldLabel.Render(line)
 	case rowField:
 		if m.focusTarget() == row.target {
-			return styles.OnBold(theme.FgBase, theme.OverlaySurf).Render(line)
+			return formview.Selection(
+				styles.OnBold(theme.FgBase, theme.OverlaySurf),
+				row.target == refMarkField && m.mark.Active(refMarkField),
+			).Render(line)
 		}
 		return styles.Overlay.FieldValue.Render(line)
 	default:
@@ -198,6 +201,10 @@ func (m Model) sourceRow(width int) importRow {
 		kind:     rowField,
 	}
 }
+
+// refMarkField is the reference input's control target, and the field name it
+// carries in the select-all mark.
+const refMarkField = "ref"
 
 // refRow is the reference input. It goes through the shared form renderer for
 // the same reason the other overlays do: a bubbles textinput renders its own

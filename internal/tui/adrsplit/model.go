@@ -21,6 +21,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
@@ -113,6 +114,7 @@ type Model struct {
 
 	adr      textarea.Model
 	filePath textinput.Model
+	mark     formview.Mark
 	max      int
 	dest     board.Status
 	rows     []storyRow
@@ -388,6 +390,12 @@ func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	}
+	// The focused field's mark runs ahead of the overlay's own keys, Escape
+	// included: a marked field is typing context, so its first Escape only
+	// drops the mark.
+	if m.markKey(msg) {
+		return nil
+	}
 	if key == "esc" {
 		m.requestClose()
 		return nil
@@ -404,6 +412,28 @@ func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.updateInputKey(key, msg)
 	}
 	return m.updateReviewKey(key, msg)
+}
+
+// markKey routes a key through the select-all mark of the focused text field.
+// It reports whether the mark consumed it; a focus that is not a text field -
+// or a row already written to the store - has nothing to mark.
+func (m *Model) markKey(msg tea.KeyPressMsg) bool {
+	switch m.focus {
+	case "adr":
+		return m.mark.Area(m.focus, &m.adr, msg)
+	case "file":
+		return m.mark.Input(m.focus, &m.filePath, msg)
+	}
+	index, field, ok := parseRowFocus(m.focus)
+	if !ok || field != "title" || index < 0 || index >= len(m.rows) || m.rows[index].created {
+		return false
+	}
+	return m.mark.Input(m.focus, &m.rows[index].title, msg)
+}
+
+// marked reports whether a body row belongs to the field the mark is on.
+func (m *Model) marked(target string) bool {
+	return target != "" && target == m.focus && m.mark.Active(target)
 }
 
 func (m *Model) updateInputKey(key string, msg tea.KeyPressMsg) tea.Cmd {
@@ -803,6 +833,7 @@ func (m *Model) moveFocus(delta int) {
 
 func (m *Model) applyFocus() tea.Cmd {
 	m.manualScroll = false
+	m.mark.Drop()
 	m.adr.Blur()
 	m.filePath.Blur()
 	for i := range m.rows {

@@ -17,6 +17,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
@@ -87,6 +88,7 @@ type Model struct {
 	sources      []store.ForgeSource
 	source       int
 	ref          textinput.Model
+	mark         formview.Mark
 	max          int
 	focus        int
 	preview      forge.Preview
@@ -340,6 +342,12 @@ func (m *Model) updatePointer(msg pointerActionMsg) tea.Cmd {
 
 func (m *Model) updateInput(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
+	// The reference field's mark runs ahead of the overlay's own keys, Escape
+	// included: a marked field is typing context, so its first Escape only
+	// drops the mark.
+	if m.focus == 1 && m.mark.Input(refMarkField, &m.ref, msg) {
+		return nil
+	}
 	switch key {
 	case "esc":
 		m.Close()
@@ -387,6 +395,7 @@ func (m *Model) updateInput(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (m *Model) applyFocus() tea.Cmd {
+	m.mark.Drop()
 	if m.focus == 1 {
 		return m.ref.Focus()
 	}

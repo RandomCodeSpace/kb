@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 )
 
 type boardFilter struct {
@@ -24,11 +25,15 @@ const (
 	filterLabels
 )
 
+// filterMarkField is the board filter's field name in the select-all mark.
+const filterMarkField = "filter"
+
 type boardFilterState struct {
 	input      textinput.Model
 	tags       []string
 	focus      filterFocus
 	labelIndex int
+	mark       formview.Mark
 }
 
 func newBoardFilterState() boardFilterState {
@@ -76,6 +81,7 @@ func (s *boardFilterState) focusText() tea.Cmd {
 
 func (s *boardFilterState) blur() {
 	s.focus = filterUnfocused
+	s.mark.Drop()
 	s.input.Blur()
 }
 
@@ -191,6 +197,14 @@ func (m *Model) handleFilterKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	labels := m.filterLabels()
 	switch m.filter.focus {
 	case filterText:
+		previous := m.filteredBoard()
+		before := m.filter.input.Value()
+		// The mark runs ahead of the pane's own keys: a filter field with a
+		// live mark is typing context, and its Escape drops the mark instead
+		// of closing the field.
+		if m.filter.mark.Input(filterMarkField, &m.filter.input, msg) {
+			return true, m.filterTextChanged(previous, before, nil)
+		}
 		switch key {
 		case "esc", "enter":
 			m.filter.blur()
@@ -207,15 +221,9 @@ func (m *Model) handleFilterKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 			}
 			return true, nil
 		}
-		previous := m.filteredBoard()
-		before := m.filter.input.Value()
 		updated, inputCmd := m.filter.input.Update(msg)
 		m.filter.input = updated
-		if before == m.filter.input.Value() {
-			return true, inputCmd
-		}
-		m.boardView.adoptBoard(previous, m.filteredBoard())
-		return true, batchCommands(inputCmd, m.queuePreferences())
+		return true, m.filterTextChanged(previous, before, inputCmd)
 	case filterLabels:
 		if len(labels) == 0 {
 			m.filter.blur()
@@ -262,6 +270,17 @@ func (m *Model) handleFilterKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		}
 	}
 	return false, nil
+}
+
+// filterTextChanged settles a key that reached the filter text field: the board
+// is re-projected and the preference write queued only when the value actually
+// moved, whether it moved by typing or by the select-all mark clearing it.
+func (m *Model) filterTextChanged(previous board.Board, before string, inputCmd tea.Cmd) tea.Cmd {
+	if before == m.filter.input.Value() {
+		return inputCmd
+	}
+	m.boardView.adoptBoard(previous, m.filteredBoard())
+	return batchCommands(inputCmd, m.queuePreferences())
 }
 
 func (m Model) filterLabels() []string {

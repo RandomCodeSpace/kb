@@ -65,10 +65,14 @@ type taskActionState struct {
 	choice     int
 	checkIndex int
 	reason     textinput.Model
+	mark       formview.Mark
 	armed      bool
 	busy       bool
 	errorText  string
 }
+
+// killReasonField is the kill prompt's field name in the select-all mark.
+const killReasonField = "kill-reason"
 
 type taskActionPointerKind uint8
 
@@ -282,6 +286,13 @@ func (m *Model) updateTaskActionKey(msg tea.KeyPressMsg) tea.Cmd {
 		return tea.Quit
 	}
 	if m.action.busy {
+		return nil
+	}
+	// The reason field's mark runs ahead of the dialog's Escape: a marked field
+	// is typing context, so the first Escape drops the mark and the dialog
+	// stays open.
+	if m.action.mode == taskActionKill &&
+		m.action.mark.Input(killReasonField, &m.action.reason, msg) {
 		return nil
 	}
 	if msg.String() == "esc" {
@@ -1014,8 +1025,9 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 			{content: surface.Render(actionFit("Why reject "+sanitizeTerminal(a.task.Title)+"?"+busy, width))},
 			m.huhRow(formview.HuhNote(styles, []string{"The card moves to Cancelled. The reason is optional."}, width)),
 			{
-				content: surface.Render(actionFit(reason, width)),
-				labels:  []actionLabel{{text: "Reason:", kind: taskActionPointerKillReason}},
+				content: formview.Selection(surface, a.mark.Active(killReasonField)).
+					Render(actionFit(reason, width)),
+				labels: []actionLabel{{text: "Reason:", kind: taskActionPointerKillReason}},
 			},
 			{},
 		}

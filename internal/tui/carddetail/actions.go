@@ -150,6 +150,7 @@ func (m *Model) beginAction(next actionMode) tea.Cmd {
 	m.statusIsError = false
 	m.commentInput = newCommentInput()
 	m.linkInput = newLinkInput()
+	m.mark.Drop()
 	m.currentBlocks = true
 	if next == actionAddComment {
 		m.commentInput.Focus()
@@ -177,6 +178,7 @@ func (m *Model) cancelAction() {
 	}
 	m.actionSession++
 	m.action = actionNone
+	m.mark.Drop()
 	m.selection = 0
 	m.statusMessage = ""
 	m.statusIsError = false
@@ -186,6 +188,13 @@ func (m *Model) cancelAction() {
 
 func (m *Model) updateActionKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
+	// The field's mark runs ahead of the pane's Escape: a marked field is
+	// typing context, so the first Escape drops the mark and the action pane
+	// stays open.
+	if !m.saving && m.markKey(msg) {
+		m.rebuildBody()
+		return nil
+	}
 	if key == "esc" {
 		m.cancelAction()
 		return nil
@@ -225,6 +234,24 @@ func (m *Model) updateActionKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.updateDeleteKey(key)
 	}
 	return nil
+}
+
+// The field names the two action inputs carry in the select-all mark.
+const (
+	commentMarkField = "comment"
+	linkMarkField    = "link"
+)
+
+// markKey routes a key through the select-all mark of the action pane's field.
+// It reports whether the mark consumed it; the delete panes have no field.
+func (m *Model) markKey(msg tea.KeyPressMsg) bool {
+	switch m.action {
+	case actionAddComment:
+		return m.mark.Area(commentMarkField, &m.commentInput, msg)
+	case actionAddLink:
+		return m.mark.Input(linkMarkField, &m.linkInput, msg)
+	}
+	return false
 }
 
 func (m *Model) updateDeleteKey(key string) tea.Cmd {
@@ -454,10 +481,15 @@ func (m Model) actionBody(width int) string {
 		ref = fmt.Sprintf("#%d", m.task.Seq)
 	}
 	var lines []string
+	// The rows the field owns, so the select-all mark can be applied to them
+	// after the sanitizing pass below strips everything a composed run carries.
+	marked, markFrom, markTo := false, 0, 0
 	switch m.action {
 	case actionAddComment:
 		lines = []string{"ADD COMMENT / " + ref, "", "Comment:"}
+		marked, markFrom = m.mark.Active(commentMarkField), len(lines)
 		lines = append(lines, textareaLines(m.commentInput, width, 8)...)
+		markTo = len(lines)
 	case actionDeleteComment:
 		lines = []string{"DELETE COMMENT / " + ref, ""}
 		start, end := selectionWindow(len(m.comments), m.selection, max(m.height-10, 3))
@@ -489,6 +521,7 @@ func (m Model) actionBody(width int) string {
 			"Direction: " + direction,
 			"Target: " + textInputLine(m.linkInput, width-len("Target: ")),
 		}
+		marked, markFrom, markTo = m.mark.Active(linkMarkField), len(lines)-1, len(lines)
 	case actionDeleteLink:
 		lines = []string{"REMOVE BLOCKER LINK / " + ref, ""}
 		choices := m.linkChoices()
@@ -523,6 +556,11 @@ func (m Model) actionBody(width int) string {
 	}
 	for i := range lines {
 		lines[i] = fitDetailLine(safeText(lines[i], true), max(width, 1))
+	}
+	if marked {
+		for i := markFrom; i < min(markTo, len(lines)); i++ {
+			lines[i] = m.markRun(lines[i])
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -746,6 +784,14 @@ func (m Model) actionButtonRow(controls []detailPointerControl) string {
 		}))
 	}
 	return widget.ButtonGroup(m.styles, theme.OverlaySurf, detailButtonGap, buttons...)
+}
+
+// markRun paints a marked field's row with the theme's pressed token. The
+// action pane sanitizes every composed line before it is painted, so the mark
+// is applied after that pass, and in the run form of the token: PressedRun
+// carries no reset and so survives being wrapped by the row's own style.
+func (m Model) markRun(content string) string {
+	return m.styles.PressedRun(content)
 }
 
 func textInputLine(input textinput.Model, width int) string {
