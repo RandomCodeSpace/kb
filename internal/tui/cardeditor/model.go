@@ -724,12 +724,16 @@ func (m *Model) updateEffort(key string) tea.Cmd {
 	return nil
 }
 
+// updateDuePicker steps the date while the due input has focus. The stepper
+// deliberately owns only [ and ]: alt+left and alt+right are the word motions
+// the bubbles text input binds by default, and a focused field outranks a pane
+// shortcut that collides with it.
 func (m *Model) updateDuePicker(key string) (tea.Cmd, bool) {
 	switch key {
-	case "alt+left", "[":
+	case "[":
 		m.due.SetValue(adjustDate(m.due.Value(), -1, m.now()))
 		return nil, true
-	case "alt+right", "]":
+	case "]":
 		m.due.SetValue(adjustDate(m.due.Value(), 1, m.now()))
 		return nil, true
 	case "ctrl+x":
