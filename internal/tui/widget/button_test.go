@@ -60,6 +60,45 @@ func TestButtonStatePrecedence(t *testing.T) {
 	}
 }
 
+// TestButtonVariantsRenderDistinctly is the dogfood finding of issue #157: a
+// row of resting buttons that all render the same surface says nothing about
+// what any of them does.
+func TestButtonVariantsRenderDistinctly(t *testing.T) {
+	styles := theme.New(true)
+	variants := []theme.ButtonVariant{
+		theme.ButtonNeutral, theme.ButtonPrimary, theme.ButtonSuccess, theme.ButtonDanger,
+	}
+	seen := map[string]theme.ButtonVariant{}
+	for _, variant := range variants {
+		for _, state := range []ButtonOpts{{}, {Selected: true}, {Hovered: true}} {
+			state.Text, state.UnderlineIndex, state.Variant = "Ship", -1, variant
+			rendered := Button(styles, state)
+			if ansi.Strip(rendered) != "Ship" {
+				t.Fatalf("variant %d changed the label to %q", variant, ansi.Strip(rendered))
+			}
+			if other, ok := seen[rendered]; ok {
+				t.Errorf("variants %d and %d render identically: %q", other, variant, rendered)
+			}
+			seen[rendered] = variant
+		}
+	}
+}
+
+// TestArmedIgnoresTheVariant keeps the two-step arm state one look: arming is
+// only ever destructive, and the state precedence of spec section 5.1 puts it
+// above every other.
+func TestArmedIgnoresTheVariant(t *testing.T) {
+	styles := theme.New(true)
+	armed := ButtonOpts{Text: "Purge", UnderlineIndex: -1, Armed: true}
+	want := Button(styles, armed)
+	for _, variant := range []theme.ButtonVariant{theme.ButtonPrimary, theme.ButtonSuccess, theme.ButtonDanger} {
+		armed.Variant = variant
+		if got := Button(styles, armed); got != want {
+			t.Errorf("armed variant %d = %q, want the one armed look %q", variant, got, want)
+		}
+	}
+}
+
 // reverseVideoPattern matches the SGR reverse attribute in any parameter
 // position: a button carries its colors in the same sequence, so the attribute
 // is never emitted as a standalone escape.

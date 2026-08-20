@@ -593,7 +593,7 @@ func TestDialogChoicesStackWhenTheButtonRowDoesNotFit(t *testing.T) {
 		t.Fatalf("narrow choice rows = %d, want %d", len(narrow), len(choices))
 	}
 	for index, row := range narrow {
-		if len(row.labels) != 1 || row.labels[0].text != choices[index] {
+		if len(row.labels) != 1 || row.labels[0].text != choices[index].label {
 			t.Fatalf("narrow row %d labels = %+v", index, row.labels)
 		}
 		if row.labels[0].pad != choiceButtonPad {

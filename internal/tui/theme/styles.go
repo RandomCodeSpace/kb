@@ -32,7 +32,7 @@ type Styles struct {
 	Label   [5]ChipStyles // the section 1.6 wheel
 	Status  StatusStyles
 	Overlay OverlayStyles
-	Button  ButtonStyles
+	Button  ButtonSet
 	Pressed lipgloss.Style
 
 	Table    TableStyles
@@ -138,15 +138,99 @@ type OverlayStyles struct {
 	FieldValue  lipgloss.Style
 }
 
-// ButtonStyles are the states of the button widget. Armed is kb's addition for
-// the purge and remove two-step; Pressed is the promoted reverse-video feedback
-// that pointer.State.Render writes by hand today.
+// ButtonStyles are the states of one button variant. Armed is kb's addition
+// for the purge and remove two-step; Pressed is the promoted reverse-video
+// feedback that pointer.State.Render writes by hand today.
 type ButtonStyles struct {
 	Rest    lipgloss.Style
 	Focused lipgloss.Style
 	Hovered lipgloss.Style
 	Armed   lipgloss.Style
 	Pressed lipgloss.Style
+}
+
+// ButtonVariant names what a button does, never what it looks like. Spec
+// section 5.4 assigns one to every button surface in the TUI.
+type ButtonVariant uint8
+
+// The variants of spec section 1.9. Neutral is the zero value: a caller that
+// states no meaning gets the calmest surface, not an accidental accent.
+const (
+	ButtonNeutral ButtonVariant = iota // dismissal, navigation, a side action
+	ButtonPrimary                      // the pane's main affirmative
+	ButtonSuccess                      // the state-advancing action
+	ButtonDanger                       // the destructive action
+	numButtonVariants
+)
+
+// ButtonSet is the button token matrix: one ButtonStyles per variant, built
+// once beside every other style.
+type ButtonSet [numButtonVariants]ButtonStyles
+
+// Variant returns the styles of one variant. An out-of-range variant resolves
+// to Neutral rather than panicking a render path.
+func (b ButtonSet) Variant(variant ButtonVariant) ButtonStyles {
+	if variant >= numButtonVariants {
+		return b[ButtonNeutral]
+	}
+	return b[variant]
+}
+
+// buttonToken is one cell of the variant matrix of spec section 1.9: the
+// foreground, the fill behind it, and whether the state is bold.
+type buttonToken struct {
+	fg   Slot
+	bg   Slot
+	bold bool
+}
+
+// buttonVariantTokens is one variant's four states. Pressed is not here: it is
+// the reverse-video attribute, shared by every variant.
+type buttonVariantTokens struct {
+	rest    buttonToken
+	hovered buttonToken
+	focused buttonToken
+	armed   buttonToken
+}
+
+// armedToken is the two-step arm state, the same for every variant: arming is
+// only ever destructive, and it must not be mistaken for a focused danger
+// button, so it carries its own deeper fill (spec section 1.9).
+var armedToken = buttonToken{fg: FgBase, bg: StatusAlarm, bold: true}
+
+// buttonTokens is the normative variant matrix of spec section 1.9. The hue
+// carries the meaning and the state carries the elevation: a blurred button
+// wears its variant as a tint on the resting surface, a hovered one wears the
+// tint as a fill, and a focused one wears the saturated hue. Neutral has no hue
+// to spend, so its hovered state is the surface step the widget always used.
+//
+// Every pair here is contrast-audited in truecolor and at 256 colors
+// (audit_test.go); a pair below the readability floor fails the build.
+var buttonTokens = [numButtonVariants]buttonVariantTokens{
+	ButtonNeutral: {
+		rest:    buttonToken{fg: FgBase, bg: Raised},
+		hovered: buttonToken{fg: FgBase, bg: OverlayBand, bold: true},
+		focused: buttonToken{fg: FgOnAccent, bg: FgSubtle, bold: true},
+		armed:   armedToken,
+	},
+	ButtonPrimary: {
+		rest:    buttonToken{fg: TintPrimary, bg: Raised},
+		hovered: buttonToken{fg: FgOnAccent, bg: TintPrimary},
+		focused: buttonToken{fg: FgOnAccent, bg: Brand, bold: true},
+		armed:   armedToken,
+	},
+	ButtonSuccess: {
+		rest:    buttonToken{fg: TintSuccess, bg: Raised},
+		hovered: buttonToken{fg: FgOnAccent, bg: TintSuccess},
+		focused: buttonToken{fg: FgOnAccent, bg: StatusOK, bold: true},
+		armed:   armedToken,
+	},
+	ButtonDanger: {
+		rest:    buttonToken{fg: TintDanger, bg: Raised},
+		hovered: buttonToken{fg: FgOnAccent, bg: TintDanger},
+		focused: buttonToken{fg: FgOnAccent, bg: StatusDanger, bold: true},
+		armed:   armedToken,
+	},
 }
 
 // New resolves the palette for a terminal background and builds every style
@@ -307,12 +391,21 @@ func build(table paletteRGB, isDark bool) *Styles {
 		FieldValue:  on(FgBase, OverlaySurf),
 	}
 	built.Pressed = blank.Reverse(true)
-	built.Button = ButtonStyles{
-		Rest:    on(FgBase, Raised),
-		Focused: onBold(FgOnAccent, Brand),
-		Hovered: onBold(FgBase, OverlayBand),
-		Armed:   onBold(FgOnAccent, StatusDanger),
-		Pressed: built.Pressed,
+	token := func(token buttonToken) lipgloss.Style {
+		if token.bold {
+			return onBold(token.fg, token.bg)
+		}
+		return on(token.fg, token.bg)
+	}
+	for variant := ButtonVariant(0); variant < numButtonVariants; variant++ {
+		tokens := buttonTokens[variant]
+		built.Button[variant] = ButtonStyles{
+			Rest:    token(tokens.rest),
+			Focused: token(tokens.focused),
+			Hovered: token(tokens.hovered),
+			Armed:   token(tokens.armed),
+			Pressed: built.Pressed,
+		}
 	}
 
 	built.Table = TableStyles{
@@ -469,10 +562,23 @@ func huhStyles(pal Palette, on, onBold styleFunc, isDark bool) *huh.Styles {
 	// The two button states are the widget's own tokens (spec section 5.1) so a
 	// huh Confirm and a kb Button read as the same control: issue #152 makes
 	// every dialog choice a visible padded button.
-	built.Focused.FocusedButton = onBold(FgOnAccent, Brand).
-		Padding(0, 1).MarginRight(1).MarginBackground(pal[OverlaySurf])
-	built.Focused.BlurredButton = on(FgBase, Raised).
-		Padding(0, 1).MarginRight(1).MarginBackground(pal[OverlaySurf])
+	//
+	// The variant is Neutral, and that is a limitation, not a preference: huh
+	// exposes one button pair per Confirm, so both choices wear the same token
+	// and the pair spans two meanings (Cancel and Ship anyway). Painting them
+	// with either meaning would lie about the other, so the confirm carries the
+	// calmest variant and the hued treatment lives in the ButtonGroup form of
+	// the same guard (spec section 5.4).
+	neutral := buttonTokens[ButtonNeutral]
+	confirmButton := func(token buttonToken) lipgloss.Style {
+		style := on(token.fg, token.bg)
+		if token.bold {
+			style = style.Bold(true)
+		}
+		return style.Padding(0, 1).MarginRight(1).MarginBackground(pal[OverlaySurf])
+	}
+	built.Focused.FocusedButton = confirmButton(neutral.focused)
+	built.Focused.BlurredButton = confirmButton(neutral.rest)
 	built.Focused.NoteTitle = onBold(FgSubtle, OverlaySurf)
 	built.Blurred = built.Focused
 	built.Blurred.Title = on(FgSubtle, OverlaySurf)

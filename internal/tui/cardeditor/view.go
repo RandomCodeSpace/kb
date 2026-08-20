@@ -36,10 +36,11 @@ const (
 // matching the rendered text: card titles, descriptions and checklist text are
 // untrusted, and text matching let them impersonate a control.
 type editorRow struct {
-	text   string
-	button string
-	target string
-	kind   rowKind
+	text    string
+	button  string
+	target  string
+	variant theme.ButtonVariant
+	kind    rowKind
 }
 
 // plain is the row as unstyled text, the form the pointer geometry and the
@@ -255,6 +256,7 @@ func (m *Model) renderRow(row editorRow, width int) string {
 			marker := strings.TrimSuffix(line, padded)
 			return styles.Overlay.Surf.Render(marker) + widget.Button(styles, widget.ButtonOpts{
 				Text:           row.button,
+				Variant:        row.variant,
 				Selected:       m.focus == row.target,
 				Pressed:        m.pointerState.IsPressed(pointer.ControlID(row.target)),
 				UnderlineIndex: -1,
@@ -341,7 +343,7 @@ func (m *Model) bodyRows(width int) []editorRow {
 		if m.drafting {
 			action = "Cancel draft (Esc)"
 		}
-		rows = append(rows, m.actionRow("ai-draft", action), editorRow{})
+		rows = append(rows, m.actionRow("ai-draft", action, theme.ButtonNeutral), editorRow{})
 	}
 	rows = append(rows,
 		m.inputRow("title", "Title", m.title, width),
@@ -380,7 +382,9 @@ func (m *Model) bodyRows(width int) []editorRow {
 		}
 		rows = append(rows, editorRow{text: prefix + sanitize(m.statusMessage), kind: kind})
 	}
-	return append(rows, editorRow{}, m.actionRow("cancel", "Cancel"), m.actionRow("save", "Save card"))
+	return append(rows, editorRow{},
+		m.actionRow("cancel", "Cancel", theme.ButtonNeutral),
+		m.actionRow("save", "Save card", theme.ButtonPrimary))
 }
 
 func (m *Model) inputRow(target, label string, input textinput.Model, width int, suffix ...string) editorRow {
@@ -405,12 +409,13 @@ func (m *Model) choiceRow(target, label, value string) editorRow {
 // actionRow is one visible button row (issue #152). The row's plain text spells
 // the button's own cells - one pad, the label, one pad - so the rendered button
 // and the text the pointer geometry measures stay the same width.
-func (m *Model) actionRow(target, label string) editorRow {
+func (m *Model) actionRow(target, label string, variant theme.ButtonVariant) editorRow {
 	return editorRow{
-		text:   m.controlMarker(target) + buttonPadding + label + buttonPadding,
-		button: label,
-		target: target,
-		kind:   rowButton,
+		text:    m.controlMarker(target) + buttonPadding + label + buttonPadding,
+		button:  label,
+		target:  target,
+		variant: variant,
+		kind:    rowButton,
 	}
 }
 

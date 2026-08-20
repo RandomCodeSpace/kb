@@ -53,6 +53,13 @@ const (
 	StatusWarn   // #ffb020 x256 214
 	StatusDanger // #ff5a48 x256 203
 	StatusInfo   // #4f8ef7 x256  69
+	StatusAlarm  // #b31f14 x256 124 armed two-step fill
+
+	// Button variant tints (section 1.9): the readable-on-Raised form of a
+	// variant's hue, and the fill its hovered state carries.
+	TintPrimary // #a8b6ff x256 147
+	TintSuccess // #7fe0b0 x256 115
+	TintDanger  // #ffa7a0 x256 217
 
 	// Label pill wheel (section 1.6), selected by the labelColor hash.
 	Label1 // #ff7b54 x256 209
@@ -137,6 +144,10 @@ var darkPalette = paletteRGB{
 	StatusWarn:   {0xff, 0xb0, 0x20},
 	StatusDanger: {0xff, 0x5a, 0x48},
 	StatusInfo:   {0x4f, 0x8e, 0xf7},
+	StatusAlarm:  {0xb3, 0x1f, 0x14},
+	TintPrimary:  {0xa8, 0xb6, 0xff},
+	TintSuccess:  {0x7f, 0xe0, 0xb0},
+	TintDanger:   {0xff, 0xa7, 0xa0},
 	Label1:       {0xff, 0x7b, 0x54},
 	Label2:       {0x4f, 0x8e, 0xf7},
 	Label3:       {0x3f, 0x9d, 0x58},
