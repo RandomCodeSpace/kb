@@ -421,7 +421,7 @@ type boardLayout struct {
 func boardColumnLayout(metrics theme.Metrics, width, count int) boardLayout {
 	margin := metrics.PageMargin(width)
 	widths := splitWidths(max(width-2*margin, 1), count)
-	if metrics.MinColumnWidth > 0 && widths[len(widths)-1] < metrics.MinColumnWidth {
+	if widths[len(widths)-1] < metrics.MinColumnWidth {
 		// A column narrower than the floor stops being a column, so the floor
 		// wins and the overflow is clipped at the frame edge rather than
 		// shrinking every panel into unreadability.

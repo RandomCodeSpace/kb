@@ -190,6 +190,8 @@ func settingsCompose(styles *theme.Styles, opts widget.OverlayOpts, background s
 		return panel
 	}
 	if background == "" {
+		// No board behind it: Place centers the panel on the same coordinates
+		// settingsLayout resolved, which is what the hit regions were built for.
 		return fitActionFrame(lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, panel), width, height)
 	}
 	layers := append(
