@@ -117,16 +117,16 @@ func TestDetailMouseHandlerRoutesOnlyPaneWheelAndOutsideLeftClick(t *testing.T) 
 	} else {
 		m.Update(command())
 	}
-	if m.scroll != 3 {
-		t.Fatalf("wheel down scroll = %d", m.scroll)
+	if m.scrollOffset() != 3 {
+		t.Fatalf("wheel down scroll = %d", m.scrollOffset())
 	}
 	if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelUp}); command == nil {
 		t.Fatal("inside wheel up was ignored")
 	} else {
 		m.Update(command())
 	}
-	if m.scroll != 0 {
-		t.Fatalf("wheel up scroll = %d", m.scroll)
+	if m.scrollOffset() != 0 {
+		t.Fatalf("wheel up scroll = %d", m.scrollOffset())
 	}
 	if command := handler(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command == nil {
 		t.Fatal("outside left click was ignored")
@@ -149,14 +149,14 @@ func TestDetailMouseWheelStopsAtUpperBound(t *testing.T) {
 			m.Update(command())
 		}
 	}
-	if m.scroll != m.maxScroll() {
-		t.Fatalf("wheel down upper bound = %d, want %d", m.scroll, m.maxScroll())
+	if m.scrollOffset() != m.maxScroll() {
+		t.Fatalf("wheel down upper bound = %d, want %d", m.scrollOffset(), m.maxScroll())
 	}
 	if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command != nil {
 		m.Update(command())
 	}
-	if m.scroll != m.maxScroll() {
-		t.Fatalf("wheel down crossed upper bound = %d, want %d", m.scroll, m.maxScroll())
+	if m.scrollOffset() != m.maxScroll() {
+		t.Fatalf("wheel down crossed upper bound = %d, want %d", m.scrollOffset(), m.maxScroll())
 	}
 }
 
@@ -182,14 +182,14 @@ func TestModelHandlesErrorsStaleLoadsScrollAndClose(t *testing.T) {
 	} {
 		m.Update(key)
 	}
-	m.scroll = 10
+	m.body.SetYOffset(10)
 	m.Update(tea.KeyPressMsg{Code: tea.KeyHome})
-	if m.scroll != 0 {
-		t.Fatalf("home scroll = %d", m.scroll)
+	if m.scrollOffset() != 0 {
+		t.Fatalf("home scroll = %d", m.scrollOffset())
 	}
-	m.scroll = 10
+	m.body.SetYOffset(10)
 	m.Update(tea.KeyPressMsg{Code: 'g'})
-	if m.scroll != 0 || scrollAmount("pgdown") != 8 || scrollAmount("down") != 1 {
+	if m.scrollOffset() != 0 || scrollAmount("pgdown") != 8 || scrollAmount("down") != 1 {
 		t.Fatal("scroll controls returned the wrong amount")
 	}
 
@@ -360,21 +360,21 @@ func TestViewClampsScrollToContent(t *testing.T) {
 	for range 100 {
 		m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	}
-	if m.scroll != m.maxScroll() {
-		t.Fatalf("stored scroll = %d, max = %d", m.scroll, m.maxScroll())
+	if m.scrollOffset() != m.maxScroll() {
+		t.Fatalf("stored scroll = %d, max = %d", m.scrollOffset(), m.maxScroll())
 	}
-	before := m.scroll
+	before := m.scrollOffset()
 	m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
-	if m.scroll != before-1 {
-		t.Fatalf("up from bottom = %d, want %d", m.scroll, before-1)
+	if m.scrollOffset() != before-1 {
+		t.Fatalf("up from bottom = %d, want %d", m.scrollOffset(), before-1)
 	}
 	m.Resize(40, 100)
-	if m.scroll != m.maxScroll() {
-		t.Fatalf("resize scroll = %d, max = %d", m.scroll, m.maxScroll())
+	if m.scrollOffset() != m.maxScroll() {
+		t.Fatalf("resize scroll = %d, max = %d", m.scrollOffset(), m.maxScroll())
 	}
 	m.Refresh(board.Task{ID: task.ID, Title: task.Title, Desc: "short", Status: task.Status})
-	if m.scroll != 0 {
-		t.Fatalf("shorter content scroll = %d", m.scroll)
+	if m.scrollOffset() != 0 {
+		t.Fatalf("shorter content scroll = %d", m.scrollOffset())
 	}
 	view := ansi.Strip(m.View(40, 10))
 	if !strings.Contains(view, " Close ") || !strings.Contains(view, "/") {

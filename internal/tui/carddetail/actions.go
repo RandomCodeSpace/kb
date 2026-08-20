@@ -157,7 +157,7 @@ func (m *Model) beginAction(next actionMode) tea.Cmd {
 	if next == actionAddLink {
 		m.linkInput.Focus()
 	}
-	m.scroll = 0
+	m.body.SetYOffset(0)
 	m.rebuildBody()
 	m.focusActionSelection()
 	return nil
@@ -180,7 +180,7 @@ func (m *Model) cancelAction() {
 	m.selection = 0
 	m.statusMessage = ""
 	m.statusIsError = false
-	m.scroll = 0
+	m.body.SetYOffset(0)
 	m.rebuildBody()
 }
 
@@ -294,13 +294,16 @@ func (m *Model) focusActionSelection() {
 	}
 	paneWidth, paneHeight, _ := m.paneSize(m.width, m.height)
 	bodyRows := max(m.bodyRowCount(paneWidth, paneHeight), 1)
-	if focusLine < m.scroll {
-		m.scroll = focusLine
+	// Frozen v1.0.1 follow: a focus row above the window becomes the first
+	// visible row, one below it becomes the last. viewport.EnsureVisible would
+	// make both the first, so the offset is set explicitly and the component
+	// still clamps it.
+	if offset := m.scrollOffset(); focusLine < offset {
+		m.body.SetYOffset(focusLine)
+	} else if focusLine >= offset+bodyRows {
+		m.body.SetYOffset(focusLine - bodyRows + 1)
 	}
-	if focusLine >= m.scroll+bodyRows {
-		m.scroll = focusLine - bodyRows + 1
-	}
-	m.clampScroll()
+	m.syncScroll()
 }
 
 func (m *Model) startAddComment() tea.Cmd {
@@ -409,7 +412,7 @@ func (m *Model) finishMutation(msg mutationCompletedMsg) tea.Cmd {
 		current := board.Task{ID: msg.taskID, Seq: msg.currentSeq}
 		m.setStatus("link between "+taskActionRef(current)+" and "+taskActionRef(msg.other)+" removed", false)
 	}
-	m.scroll = 0
+	m.body.SetYOffset(0)
 	if m.reader == nil {
 		m.rebuildBody()
 		return nil

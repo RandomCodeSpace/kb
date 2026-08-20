@@ -505,7 +505,7 @@ func TestPointerOpensAndClosesHelpFromVisibleControls(t *testing.T) {
 	if !m.helpOpen {
 		t.Fatal("pointer did not open keyboard help")
 	}
-	updateTestModel(t, &m, pointerCommandForLabel(t, &m, "close help")())
+	updateTestModel(t, &m, pointerCommandForLabel(t, &m, helpCloseLabel)())
 	if m.helpOpen {
 		t.Fatal("pointer did not close keyboard help")
 	}
@@ -956,8 +956,8 @@ func TestBoardHelpOverlayDocumentsCoreMutationKeys(t *testing.T) {
 	view := m.View()
 	plainView := ansi.Strip(view.Content)
 	for _, want := range []string{
-		"Keyboard help", "enter  open card", "space  lift or drop card",
-		"/      text filter", "f      label filter", "x      cancel card", "X      clear filter",
+		"Keyboard help", "enter open card", "space lift or drop card",
+		"/     text filter", "f     label filter", "x cancel card", "X     clear filter",
 	} {
 		if !strings.Contains(plainView, want) {
 			t.Errorf("help missing %q:\n%s", want, plainView)
@@ -985,7 +985,7 @@ func TestBoardHelpRoutingAndAvailableFeatureHints(t *testing.T) {
 	if !m.helpOpen {
 		t.Fatal("help closed on ignored board input")
 	}
-	for _, want := range []string{"n      new card", "e      edit card", "s      settings", "a      split ADR", "i      import forge issue"} {
+	for _, want := range []string{"n new card", "e edit card", "s settings", "a split ADR", "i import forge issue"} {
 		if view := ansi.Strip(m.View().Content); !strings.Contains(view, want) {
 			t.Errorf("enabled help missing %q:\n%s", want, view)
 		}
@@ -1004,9 +1004,15 @@ func TestBoardHelpRoutingAndAvailableFeatureHints(t *testing.T) {
 	if got := tiny.keyboardHelpOverlay("board"); got != "board" {
 		t.Fatalf("tiny help changed background: %q", got)
 	}
+	// The footer ladder drops its spelled-out hints on a frame this narrow, but
+	// never the control: clicking it is a frozen dismissal.
 	tiny.width, tiny.height = 30, 4
-	if got := ansi.Strip(tiny.keyboardHelpOverlay("board")); !strings.Contains(got, "esc  close help") {
-		t.Fatalf("short help lost close hint:\n%s", got)
+	if got := ansi.Strip(tiny.keyboardHelpOverlay("board")); !strings.Contains(got, helpCloseLabel) {
+		t.Fatalf("short help lost close control:\n%s", got)
+	}
+	tiny.width, tiny.height = 80, 24
+	if got := ansi.Strip(tiny.keyboardHelpOverlay("board")); !strings.Contains(got, "? or esc close help | q quit") {
+		t.Fatalf("wide help lost the dismissal ladder:\n%s", got)
 	}
 }
 

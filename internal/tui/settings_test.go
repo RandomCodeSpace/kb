@@ -118,12 +118,25 @@ func settingsButtonNeedle(label string) string {
 
 func clickSettingsText(t *testing.T, model *settingsModel, width, height int, needle string) tea.Cmd {
 	t.Helper()
+	return clickSettingsTextAt(t, model, width, height, 0, needle)
+}
+
+// clickSettingsTextAt clicks the line carrying the skip+1'th occurrence of
+// needle. A draft integration's section band repeats the name its Name row
+// carries, so a field row behind a band that quotes it is addressed by
+// occurrence rather than by a longer needle.
+func clickSettingsTextAt(t *testing.T, model *settingsModel, width, height, skip int, needle string) tea.Cmd {
+	t.Helper()
 	surface := model.Surface("", width, height)
 	if surface.Pointer == nil {
 		t.Fatal("settings surface has no pointer handler")
 	}
 	for y, line := range strings.Split(ansi.Strip(surface.Content), "\n") {
 		if index := strings.Index(line, needle); index >= 0 {
+			if skip > 0 {
+				skip--
+				continue
+			}
 			x := ansi.StringWidth(line[:index])
 			press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 			if press == nil {
@@ -372,6 +385,7 @@ func TestSettingsPointerFocusesEveryVisibleEditableField(t *testing.T) {
 	tests := []struct {
 		needle string
 		focus  string
+		skip   int
 	}{
 		{needle: "https://api.ai.example", focus: "ai:base"},
 		{needle: "model-a", focus: "ai:model"},
@@ -379,15 +393,15 @@ func TestSettingsPointerFocusesEveryVisibleEditableField(t *testing.T) {
 		{needle: "https://forge.source.example", focus: "forge:source:work:base"},
 		{needle: "source/project", focus: "forge:source:work:project"},
 		{needle: "Token (saved):", focus: "forge:source:work:token"},
-		{needle: "Kind: github", focus: "forge:draft:1:kind"},
-		{needle: "Name: draft-name", focus: "forge:draft:1:name"},
+		{needle: "github", focus: "forge:draft:1:kind"},
+		{needle: "draft-name", focus: "forge:draft:1:name", skip: 1},
 		{needle: "https://forge.draft.example", focus: "forge:draft:1:base"},
 		{needle: "draft/project", focus: "forge:draft:1:project"},
-		{needle: "Token: ***********", focus: "forge:draft:1:token"},
+		{needle: "***********", focus: "forge:draft:1:token"},
 	}
 	for _, test := range tests {
 		t.Run(test.focus, func(t *testing.T) {
-			clickSettingsText(t, model, 100, 60, test.needle)
+			clickSettingsTextAt(t, model, 100, 60, test.skip, test.needle)
 			if model.focus != test.focus {
 				t.Fatalf("pointer focus = %q, want %q", model.focus, test.focus)
 			}

@@ -72,6 +72,7 @@ type Metrics struct {
 	MinColumnWidth  int // narrowest panel a column may shrink to and still hold a title
 	OverlayInsetX   int // overlay content inset from the panel edge
 	OverlayLabelW   int // fixed label gutter of an overlay field row
+	TableGutter     int // columns between two cells of a lipgloss table row
 	CompactBelow    int // frame height below which density compacts
 	CompactInnerW   int // column inner width below which density compacts
 	DescTwoLines    int // frame height at or above which the snippet gets a second line
@@ -116,6 +117,7 @@ var defaultMetrics = Metrics{
 	MinColumnWidth:  16,
 	OverlayInsetX:   2,
 	OverlayLabelW:   12,
+	TableGutter:     1,
 	CompactBelow:    30,
 	CompactInnerW:   22,
 	DescTwoLines:    45,

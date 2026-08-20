@@ -17,9 +17,9 @@ import (
 // its entry; nothing may be added. A view that cannot render without
 // constructing a style has found a missing token, and the fix is a new token,
 // not an exemption.
-var seamAllowlist = map[string]bool{
-	"help.go": true,
-}
+// The list is empty: issue #153 migrated the last view off hand-built styles by
+// adopting bubbles/help for the ? overlay body. Nothing may be added to it.
+var seamAllowlist = map[string]bool{}
 
 // seamMarker is the construction call the seam bans.
 const seamMarker = "lipgloss.NewStyle"
@@ -48,7 +48,7 @@ func TestNoStyleConstructionOutsideTheme(t *testing.T) {
 // TestSeamAllowlistOnlyShrinks pins the allowlist size so a migration slice
 // cannot quietly trade one exemption for another.
 func TestSeamAllowlistOnlyShrinks(t *testing.T) {
-	const atMost = 1
+	const atMost = 0
 	if len(seamAllowlist) > atMost {
 		t.Fatalf("seam allowlist has %d entries, at most %d are allowed", len(seamAllowlist), atMost)
 	}
