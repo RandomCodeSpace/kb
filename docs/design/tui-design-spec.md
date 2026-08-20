@@ -468,8 +468,17 @@ Elevation is a shade step plus a shadow, never a frame.
    inset `OverlayInsetX`, right-aligned `#seq`.
 5. **Section breaks** are `OverlayBand` rows carrying a bold `FgSubtle` label
    (`DETAIL`, `COMMENTS`, `CHECKLIST`), not rules.
-6. **Footer band**, last row of the panel: `OverlayBand`, `FgSubtle`, action
-   hints inset `OverlayInsetX`.
+6. **Action row**, the last body row of the panel, directly above the footer
+   band: the state-appropriate actions as visible padded buttons, inset
+   `OverlayInsetX`, laid out by `ButtonGroup` on `OverlaySurf`. It is pinned,
+   not scrolled: it spends one of the panel's body rows, and the scroll window,
+   the focus-follow of a choice list and the pointer viewports all resolve the
+   body height from that one subtraction. A panel whose state offers no action
+   -- a write in progress, a check in flight -- spends no row on it.
+7. **Footer band**, last row of the panel: `OverlayBand`, `FgSubtle`, keyboard
+   hints inset `OverlayInsetX`. Hints only: a band re-renders its own style
+   around its content, so an embedded button's reset would drop the band
+   background for the rest of the row. Buttons live in body rows.
 
 **Geometry.** Every content overlay — card detail, card editor, settings, ADR
 split, issue import — resolves the same panel size, centered. The rule has two
@@ -552,7 +561,7 @@ underline + `ButtonGroup`).
 | Chip / pill | kb `widget` | `Chip(o ChipOpts) string` — `ChipOpts{Text, Key string, Fill, On theme.Slot, Flat bool}`; `Key` non-empty selects the scoped two-tone form, `Flat` the compact degradation |
 | Label pill | kb `widget` | `Label(tag string, on theme.Slot, flat bool) string` — wraps `Chip`, owns the `%5` wheel |
 | Priority marker | kb `widget` | `Priority(p int, on theme.Slot) string` |
-| Button / action | kb `widget` | `Button(o ButtonOpts) string` + `ButtonGroup(gap int, bs ...string) string` — `ButtonOpts{Text string, Selected, Hovered, Armed bool, UnderlineIndex int, Padding [2]int}`; `Armed` is kb's addition for the purge/remove two-step |
+| Button / action | kb `widget` | `Button(o ButtonOpts) string` + `ButtonGroup(gap int, bs ...string) string` — `ButtonOpts{Text string, Selected, Hovered, Armed bool, UnderlineIndex int, Padding [2]int}`; `Armed` is kb's addition for the purge/remove two-step. A rendered button is `Padding{1,1}` and a group's gap is 1, so an action reads as a filled surface wider than its label. `UnderlineIndex` marks the hotkey where the label spells it; where it does not, the caller appends the key in parentheses and underlines that. This is a display convention, never a keymap change |
 | Status line / footer | kb `widget` | `StatusBar(o StatusOpts) string` — `StatusOpts{Dot theme.Slot, State string, Hints []string, Width int}`; responsive hint ladder is the caller's |
 | Filter bar | kb `widget` | `FilterBar(o FilterOpts) string` — `FilterOpts{Field string, Chips []string, Count string, Width int}` |
 | Top bar | kb `widget` | `TopBar(o TopBarOpts) string` — brand pill, title, user, right-aligned counters |
@@ -575,7 +584,7 @@ underline + `ButtonGroup`).
 | Spinner | `bubbles/v2 spinner` | Adopt for every `…ing…` busy state (drafting, saving, fetching, importing) that is currently static text. |
 | Progress | `bubbles/v2 progress` | Adopt for `issueimport`'s `writing i/N`. |
 | Confirm dialog | `huh/v2 Confirm` | Assigned: the ship / kill confirm prompt's yes-no core. |
-| Choice row | `huh/v2 Select` | Assigned: the three-way `Cancel / Tick everything / Ship anyway` and `Priority` / `Effort` / `Source` / `Max stories` choice fields. |
+| Choice row | `huh/v2 Select` | Assigned: the single-row `Priority` / `Effort` / `Source` / `Max stories` choice fields, in its inline form. **Amended by [#152](https://github.com/RandomCodeSpace/kb/issues/152):** the three-way `Cancel / Tick everything / Ship anyway` guard and the kill prompt's choices are no longer Select's. Select renders a vertical option list; those two are dialog choices and the dogfood verdict of map #136 requires a dialog choice to be a visible button, so they render as a `ButtonGroup` row that stacks one button per row when the panel is too narrow for the group. Confirm keeps the yes/no core, with its `FocusedButton` and `BlurredButton` built from the same `Styles.Button` tokens the widget uses. |
 | Note / disclaimer block | `huh/v2 Note` | Assigned: the AI disclaimer blocks in `adrsplit` and `carddetail/drift`. |
 
 ### 5.3 Explicitly not sourced from charm, with reasons
