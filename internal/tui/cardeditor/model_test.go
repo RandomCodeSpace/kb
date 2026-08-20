@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -133,7 +134,7 @@ func TestCreatePersistsEveryFieldAndAcknowledgesClose(t *testing.T) {
 	if !model.saving || save == nil {
 		t.Fatalf("save state = saving:%v command:%v", model.saving, save)
 	}
-	model.Update(save())
+	model.Update(commandMsgForEditor(t, save))
 	createdID, saved := model.ConsumeSaved()
 	_, savedAgain := model.ConsumeSaved()
 	if model.IsOpen() || !saved || createdID == "" || savedAgain {
@@ -167,7 +168,7 @@ func TestEditClearSemanticsAndRefusedSavePreserveForm(t *testing.T) {
 	model.effort = ""
 	backend.updateErr = errors.New("database refused\x1b[31m\nretry")
 	save := model.startSave()
-	model.Update(save())
+	model.Update(commandMsgForEditor(t, save))
 	if !model.IsOpen() || model.saving || model.title.Value() != "Edited" || model.due.Value() != "" || model.effort != "" {
 		t.Fatalf("refusal destroyed state: %+v", model.currentSnapshot())
 	}
@@ -180,7 +181,7 @@ func TestEditClearSemanticsAndRefusedSavePreserveForm(t *testing.T) {
 	}
 
 	backend.updateErr = nil
-	model.Update(model.startSave()())
+	model.Update(commandMsgForEditor(t, model.startSave()))
 	stored, _ = backend.Board("alice")
 	if stored.Tasks[0].Title != "Edited" || stored.Tasks[0].Due != "" || stored.Tasks[0].Effort != "" {
 		t.Fatalf("clears did not persist: %+v", stored.Tasks[0])
@@ -298,7 +299,7 @@ func TestEditMergesConcurrentUnrelatedStoreChanges(t *testing.T) {
 	if save == nil {
 		t.Fatalf("unrelated concurrent changes blocked save: %s", model.statusMessage)
 	}
-	model.Update(save())
+	model.Update(commandMsgForEditor(t, save))
 
 	latest, err := concurrentStore.Board("u")
 	if err != nil || len(latest.Tasks) != 1 {
@@ -359,7 +360,7 @@ func TestEditSaveCASRejectsLateSameFieldWriteAndPreservesLateUnrelatedWrite(t *t
 		if save == nil {
 			t.Fatalf("start save: %s", model.statusMessage)
 		}
-		model.Update(save())
+		model.Update(commandMsgForEditor(t, save))
 		latest, readErr := backend.Store.Task("u", created.ID)
 		if readErr != nil {
 			t.Fatal(readErr)
@@ -399,7 +400,7 @@ func TestEditSaveCASRejectsLateSameFieldWriteAndPreservesLateUnrelatedWrite(t *t
 		}
 
 		save := model.startSave()
-		model.Update(save())
+		model.Update(commandMsgForEditor(t, save))
 		latest, readErr := backend.Store.Task("u", created.ID)
 		if readErr != nil {
 			t.Fatal(readErr)
@@ -430,7 +431,7 @@ func TestEditSaveCASRejectsLateSameFieldWriteAndPreservesLateUnrelatedWrite(t *t
 		}
 
 		save := model.startSave()
-		model.Update(save())
+		model.Update(commandMsgForEditor(t, save))
 		latest, readErr := backend.Store.Task("u", created.ID)
 		if readErr != nil {
 			t.Fatal(readErr)
@@ -851,7 +852,7 @@ func TestKeyboardRoutesEveryFieldAndAction(t *testing.T) {
 	if save == nil {
 		t.Fatalf("keyboard save rejected: %s", model.statusMessage)
 	}
-	model.Update(save())
+	model.Update(commandMsgForEditor(t, save))
 	if model.IsOpen() {
 		t.Fatal("keyboard save did not close")
 	}
@@ -867,7 +868,7 @@ func TestCtrlEnterUsesTheKeyboardSavePath(t *testing.T) {
 	if save == nil || !model.saving {
 		t.Fatalf("ctrl+enter save command=%v saving=%v status=%q", save, model.saving, model.statusMessage)
 	}
-	model.Update(save())
+	model.Update(commandMsgForEditor(t, save))
 	if model.IsOpen() {
 		t.Fatal("ctrl+enter left the editor open")
 	}
@@ -888,7 +889,7 @@ func TestPointerFocusAndSaveUseTheRenderedHitRegions(t *testing.T) {
 	if start == nil || !model.saving {
 		t.Fatalf("pointer save did not enter saving state: status=%q", model.statusMessage)
 	}
-	model.Update(start())
+	model.Update(commandMsgForEditor(t, start))
 	if model.IsOpen() {
 		t.Fatal("pointer save left the editor open")
 	}
@@ -1427,10 +1428,33 @@ func TestAIDraftUnavailableBlankStaleAndShutdownBranches(t *testing.T) {
 	model.SetAIRunner(nil, context.Background())
 }
 
+// commandMsgForEditor runs a command and returns the editor message it
+// produced. An operation that also starts the busy spinner returns a batch, so
+// the batch is walked and the spinner tick - a timer, not a result - is
+// skipped.
 func commandMsgForEditor(t *testing.T, command tea.Cmd) tea.Msg {
 	t.Helper()
 	if command == nil {
 		t.Fatal("command is nil")
 	}
-	return command()
+	message := command()
+	batch, batched := message.(tea.BatchMsg)
+	if !batched {
+		return message
+	}
+	for _, sub := range batch {
+		if sub == nil {
+			continue
+		}
+		if result := sub(); !isSpinnerTick(result) {
+			return result
+		}
+	}
+	t.Fatal("batch produced no editor message")
+	return nil
+}
+
+func isSpinnerTick(message tea.Msg) bool {
+	_, tick := message.(spinner.TickMsg)
+	return tick
 }

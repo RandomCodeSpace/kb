@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/spinner"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/golden"
 
@@ -138,6 +139,54 @@ func TestAIDraftControlsRenderProgressAndControlSafePrompt(t *testing.T) {
 	model.focus = "ai-draft"
 	if got := ansi.Strip(model.View(78, 16)); !strings.Contains(got, "esc cancel") || !strings.Contains(got, "Cancel draft") {
 		t.Fatalf("draft progress missing:\n%s", got)
+	}
+}
+
+// TestSpinnerAdvancesOnlyWhileDraftingOrSaving is spec section 5.2: the
+// editor's drafting and saving states carry the bubbles spinner instead of
+// static text, and the tick loop stops as soon as nothing is in flight.
+func TestSpinnerAdvancesOnlyWhileDraftingOrSaving(t *testing.T) {
+	model := New(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	if model.busy() || model.spinTick(spinner.TickMsg{}) != nil {
+		t.Fatal("idle editor kept a spinner tick alive")
+	}
+	if model.busyPrefix() == "" {
+		t.Fatal("a constructed editor has no spinner frames")
+	}
+	bare := Model{}
+	if bare.busyPrefix() != "" {
+		t.Fatal("zero-value editor rendered a spinner frame")
+	}
+	styles := theme.New(true)
+	model.SetStyles(nil)
+	model.SetStyles(styles)
+	if model.spin.Spinner.FPS != styles.Spinner.FPS {
+		t.Fatal("SetStyles did not adopt the design system's spinner")
+	}
+
+	model.drafting = true
+	if !model.busy() || model.spinTick(spinner.TickMsg{ID: model.spin.ID()}) == nil {
+		t.Fatal("drafting editor dropped the spinner tick")
+	}
+	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, model.busyPrefix()+"drafting card...") {
+		t.Fatalf("drafting footer carried no spinner frame:\n%s", got)
+	}
+
+	model.drafting, model.saving = false, true
+	if !model.busy() {
+		t.Fatal("saving is a busy state")
+	}
+	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, model.busyPrefix()+"saving card...") {
+		t.Fatalf("saving footer carried no spinner frame:\n%s", got)
+	}
+
+	model.saving = false
+	if command := model.Update(spinner.TickMsg{ID: model.spin.ID()}); command != nil {
+		t.Fatal("settled editor re-armed the spinner")
+	}
+	if !IsMessage(spinner.TickMsg{}) {
+		t.Fatal("the root does not route the editor's spinner tick")
 	}
 }
 
