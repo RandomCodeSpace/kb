@@ -522,9 +522,9 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 		width int
 		want  string
 	}{
-		{actionNone, 80, "[Comment]"},
-		{actionNone, 30, "[Close]"},
-		{actionNone, 10, "[Close]"},
+		{actionNone, 80, "up/down scroll"},
+		{actionNone, 30, "esc close"},
+		{actionNone, 10, "up/down s"},
 		{actionAddComment, 80, "add comment"},
 		{actionDeleteComment, 80, "enter delete"},
 		{actionAddLink, 80, "direction"},
@@ -547,7 +547,7 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 	footerModel.action = actionNone
 	footerModel.confirm = false
 	footerModel.statusMessage = "visible result"
-	if got := footerModel.actionFooter(80); !strings.Contains(got, "[Comment]") {
+	if got := ansi.Strip(footerModel.actionButtonRow(footerModel.pointerFooterControls(80))); !strings.Contains(got, "Comment") {
 		t.Fatalf("idle controls disappeared after status = %q", got)
 	}
 	footerModel.statusIsError = true

@@ -69,8 +69,8 @@ func TestDriftSelectCheckAndAcceptConflict(t *testing.T) {
 	if m.driftMode != driftReview || m.driftResult.State != "drifted" || backend.checked[0] != "gitlab:gl-key" {
 		t.Fatalf("drift result = %+v checked=%v", m.driftResult, backend.checked)
 	}
-	view := m.View(80, 18)
-	for _, want := range []string{"kb does not sync", "material change", "[Update baseline]"} {
+	view := ansi.Strip(m.View(80, 18))
+	for _, want := range []string{"kb does not sync", "material change", "Update baseline"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view omitted %q:\n%s", want, view)
 		}
@@ -119,7 +119,7 @@ func TestPointerDriftSelectCheckAcceptAndBack(t *testing.T) {
 		t.Fatal("provenance did not enter pressed state")
 	}
 	pressed := m.PointerSurface("board", pointerWidth, pointerHeight)
-	if !strings.Contains(pressed.Content, "\x1b[7m") {
+	if !containsReverseVideo(pressed.Content) {
 		t.Fatal("provenance did not render pressed feedback")
 	}
 	release := pressed.Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})

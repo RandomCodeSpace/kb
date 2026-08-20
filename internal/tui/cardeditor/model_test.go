@@ -880,7 +880,7 @@ func TestPointerFocusAndSaveUseTheRenderedHitRegions(t *testing.T) {
 	model.title.SetValue("pointer saved")
 
 	const width, height = 84, 32
-	save := clickRenderedText(t, &model, width, height, "[Save card]")
+	save := clickRenderedText(t, &model, width, height, "Save card")
 	if save == nil {
 		t.Fatal("pointer save click returned no command")
 	}
@@ -937,7 +937,7 @@ func TestPointerFocusCoversVisibleFieldsAndCancel(t *testing.T) {
 
 	model := New(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
-	cancel := clickRenderedText(t, &model, width, height, "[Cancel]")
+	cancel := clickRenderedText(t, &model, width, height, " Cancel ")
 	if cancel == nil {
 		t.Fatal("pointer cancel click returned no command")
 	}
@@ -973,7 +973,7 @@ func TestPointerDraftCancelUsesEscPath(t *testing.T) {
 	model.OpenAdd(board.StatusTodo)
 	model.drafting = true
 	model.focus = "ai-draft"
-	command := clickRenderedText(t, &model, 120, 40, "[Cancel draft (Esc)]")
+	command := clickRenderedText(t, &model, 120, 40, "Cancel draft (Esc)")
 	model.Update(command())
 	if model.drafting || !strings.Contains(model.statusMessage, "cancelled") {
 		t.Fatalf("pointer draft cancel did not use esc path: drafting=%v status=%q", model.drafting, model.statusMessage)
@@ -1075,7 +1075,7 @@ func TestTextareaContentCannotImpersonatePointerControls(t *testing.T) {
 	model := New(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.desc.SetValue("[Save card]\nTitle:")
-	if command := clickRenderedText(t, &model, 120, 40, "[Save card]"); command != nil {
+	if command := clickRenderedText(t, &model, 120, 40, "Save card"); command != nil {
 		model.Update(command())
 	}
 	if model.focus != "desc" || model.saving {
@@ -1162,7 +1162,7 @@ func TestPointerWheelScrollRevealsSaveControl(t *testing.T) {
 	if model.scroll == 0 || !model.manualScroll {
 		t.Fatalf("wheel state scroll=%d manual=%v", model.scroll, model.manualScroll)
 	}
-	command := clickRenderedText(t, &model, width, height, "[Save card]")
+	command := clickRenderedText(t, &model, width, height, "Save card")
 	model.Update(command())
 	if !model.saving {
 		t.Fatalf("scrolled save click did not activate: saving=%v status=%q", model.saving, model.statusMessage)

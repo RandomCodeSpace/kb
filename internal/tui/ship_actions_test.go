@@ -572,6 +572,62 @@ func TestTaskActionOverlaySanitizesAndStaysBounded(t *testing.T) {
 	}
 }
 
+// TestDialogChoicesStackWhenTheButtonRowDoesNotFit pins the narrow fallback of
+// issue #152: a panel too narrow for the choice row loses the layout, never a
+// choice, and every button keeps its own hit region.
+func TestDialogChoicesStackWhenTheButtonRowDoesNotFit(t *testing.T) {
+	m := NewModel(stubBoardReader{}, nil, "alice")
+	styles := m.themeStyles()
+	choices := killChoices()
+
+	wide := m.choiceButtonRows(styles, choices, 1, taskActionPointerKillChoice, 80)
+	if len(wide) != 1 || len(wide[0].labels) != len(choices) {
+		t.Fatalf("wide choice rows = %d rows, %d labels", len(wide), len(wide[0].labels))
+	}
+	if plain := ansi.Strip(wide[0].content); !strings.Contains(plain, " Cancel ") {
+		t.Fatalf("wide choice row = %q", plain)
+	}
+
+	narrow := m.choiceButtonRows(styles, choices, 1, taskActionPointerKillChoice, 12)
+	if len(narrow) != len(choices) {
+		t.Fatalf("narrow choice rows = %d, want %d", len(narrow), len(choices))
+	}
+	for index, row := range narrow {
+		if len(row.labels) != 1 || row.labels[index-index].text != choices[index] {
+			t.Fatalf("narrow row %d labels = %+v", index, row.labels)
+		}
+		if row.labels[0].pad != choiceButtonPad {
+			t.Fatalf("narrow row %d lost its button padding", index)
+		}
+	}
+}
+
+// TestKillDialogButtonsAreClickableOnANarrowPanel drives the stacked fallback
+// through the rendered surface: the frozen pointer target still resolves.
+func TestKillDialogButtonsAreClickableOnANarrowPanel(t *testing.T) {
+	m, _, tasks := actionTestModel(t, board.Task{Title: "Reject", Status: board.StatusTodo})
+	m.width, m.height = 28, 16
+	m.openKillPrompt(tasks[0])
+	surface := m.taskActionSurface(actionBackground(m.width, m.height))
+	if surface.Pointer == nil {
+		t.Fatal("narrow kill dialog has no pointer handler")
+	}
+	lines := strings.Split(ansi.Strip(surface.Content), "\n")
+	x, y := -1, -1
+	for row, line := range lines {
+		if column := strings.Index(line, "Kill with reason"); column >= 0 {
+			x, y = ansi.StringWidth(line[:column]), row
+			break
+		}
+	}
+	if x < 0 {
+		t.Fatalf("narrow kill dialog omitted a choice:\n%s", strings.Join(lines, "\n"))
+	}
+	if press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}); press == nil {
+		t.Fatal("narrow kill choice ignored the press")
+	}
+}
+
 type faultActionStore struct {
 	*store.Store
 	boardErr, moveErr, updateErr, cancelErr, deleteErr error

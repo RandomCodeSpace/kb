@@ -130,7 +130,7 @@ func editorSavePoint(t *testing.T, st *store.Store, task board.Task, width, heig
 	editor.SetAIRunner(ai.NewRunner(st, "", nil, nil), context.Background())
 	editor.OpenEdit(task)
 	for row, line := range strings.Split(ansi.Strip(editor.View(width, height)), "\n") {
-		if column := strings.Index(line, "[Save card]"); column >= 0 {
+		if column := strings.Index(line, " Save card "); column >= 0 {
 			return ansi.StringWidth(line[:column]) + 1, row + 1
 		}
 	}

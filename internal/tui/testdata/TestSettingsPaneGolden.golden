@@ -5,8 +5,8 @@
       Base URL: https://api.example/v1                                          
       Model: gpt-example                                                        
       API key (saved): blank keeps saved key                                    
-    > [Test connection]                                                         
-      [Save AI settings]                                                        
+    >  Test connection                                                          
+       Save AI settings                                                         
                                                                                 
     FORGE INTEGRATIONS                                                          
                                                                                 
@@ -16,10 +16,10 @@
       Base URL: https://gitlab.example                                          
       Project: owner/project (optional)                                         
       Token (saved): blank keeps saved token                                    
-      [Test]                                                                    
-      [Save]                                                                    
-      [Remove]                                                                  
-      [+ Add integration]                                                       
+       Test                                                                     
+       Save                                                                     
+       Remove                                                                   
+       + Add integration                                                        
                                                                                 
                                                                                 
                                                                                 

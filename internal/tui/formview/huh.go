@@ -51,22 +51,6 @@ func HuhConfirm(styles *theme.Styles, first, second string, firstSelected bool, 
 	return HuhView(field)
 }
 
-// HuhSelect renders a choice row set. Spec section 5.2 assigns huh's Select to
-// the three-way ship guard and the kill prompt's choices.
-func HuhSelect(styles *theme.Styles, choices []string, selected, width int) string {
-	if len(choices) == 0 {
-		return ""
-	}
-	value := choices[min(max(selected, 0), len(choices)-1)]
-	field := huh.NewSelect[string]().
-		Options(huh.NewOptions(choices...)...).
-		Value(&value)
-	field.WithTheme(styles.HuhTheme())
-	field.WithWidth(width)
-	field.Focus()
-	return HuhView(field)
-}
-
 // HuhInlineSelect renders one choice as a single row: the current option
 // between the previous and next indicators. Spec section 5.2 assigns Select to
 // the Source, Max stories, Priority and Effort choice fields, all of which are
