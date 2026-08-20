@@ -284,6 +284,7 @@ See §8, contestable call 3.
 | `CardPadRight` | `1` | Always |
 | `MinColumnWidth` | `16` | Narrowest panel a column may shrink to and still hold a title |
 | `OverlayInsetX` | `2` | Overlay content inset from the panel edge |
+| `TableGutter` | `1` | Columns between two cells of a `lipgloss/v2 table` row (§5.2) |
 
 **Chrome row budget.** Normal density spends 4 rows: top bar, toolbar, page
 padding, footer. Compact spends 3 (no page padding). Everything else is board.
@@ -569,7 +570,8 @@ underline + `ButtonGroup`).
 | Overlay shadow | kb `widget` | folded into `Overlay`; not separately callable |
 | Checkbox row | kb `widget` | `Check(label string, state CheckState, focused bool) string` — `☐ ☑ ☒` |
 | Key/value field row | kb `widget` | `Field(label, value string, w int) string` — the 12-column label gutter of §4 |
-| Scroll indicator | kb `widget` | `ScrollHint(cur, total int) string` — `12/40` in `FgMuted`; kb's overlays scroll by hand-managed offset and `bubbles/viewport` does not expose that offset in a form the pointer regions can consume |
+| Scroll indicator | kb `widget` | `ScrollHint(cur, total int) string` — `12/40` in `FgMuted`; charm ships no scroll-position label, and the offset it reads now comes from the adopted viewport (§5.2) |
+| Table adapter | kb `widget` | `Table(styles, rows [][]string) []string` — the adapter that feeds `lipgloss/v2 table` (§5.2) and hands rows back one line each. Not an element: the only thing in `widget` that wraps a charm component instead of replacing one |
 
 ### 5.2 Charm-sourced components
 
@@ -579,8 +581,10 @@ underline + `ButtonGroup`).
 | Multi-line text input | `bubbles/v2 textarea` | Already in use in 7 files. Same: embed `textarea.Styles`. |
 | Cursor | `bubbles/v2 cursor` | Adopt to replace the three hand-rolled `cursorViewport` helpers. |
 | Markdown | `glamour/v2` | Already in use. The `styles.DarkStyleConfig` clone at `carddetail/model.go:743` becomes `theme.Styles.Markdown ansi.StyleConfig`, derived from the palette, injected through the existing `markdownRenderer` func field. |
-| Keybinding registry | `bubbles/v2 key` | Adopt. Replaces ad-hoc hint strings; feeds both the footer ladder and the help pane. |
-| Help pane | `bubbles/v2 help` | Adopt for the help overlay body. Embed `help.Styles` in kb's Styles. The overlay chrome around it stays kb's `Overlay` widget. |
+| Keybinding registry | `bubbles/v2 key` | **Adopted** (#153) for the help pane: `helpKeys` in `help.go` is the registry, and an unavailable feature is a disabled binding rather than an omitted line, which is the self-managing keymap bubbles documents. The board's own footer ladder is still hint strings; it is not driven by the registry yet. |
+| Help pane | `bubbles/v2 help` | **Adopted** (#153) for the help overlay body: `FullHelpView` renders the two key columns, `help.Styles` is `theme.Styles.Help`. The overlay chrome around it stays kb's `Overlay` widget, and the footer band composes the dismissal ladder from the same registry rather than pulling the component's surface token into a band row. |
+| Overlay body scrolling | `bubbles/v2 viewport` | **Adopted** (#153) for the card detail body. The viewport owns the offset, the clamp and the content; the pane drives it programmatically (`ScrollUp` / `ScrollDown` / `GotoTop` / `SetYOffset`) because the frozen v1.0.1 deltas and focus-follow are kb's, not the component's defaults, and the wheel is routed through the pointer map. `viewport.View` is not used: a panel body row carries `OverlaySurf` edge to edge and the component pads plain. |
+| Aligned key/value rows | `lipgloss/v2 table` | **Adopted** (#153) for the settings pane and its forge-integration rows, through `widget.Table`. Cell styles are layout-only (`theme.Styles.Table`, `TableGutter`): the table lays out plain text and the view paints each row with the token its role names. Columns size to content — a forced table width spreads slack across every column, which is the opposite of what a label gutter wants. |
 | Spinner | `bubbles/v2 spinner` | Adopt for every `…ing…` busy state (drafting, saving, fetching, importing) that is currently static text. |
 | Progress | `bubbles/v2 progress` | Adopt for `issueimport`'s `writing i/N`. |
 | Confirm dialog | `huh/v2 Confirm` | Assigned: the ship / kill confirm prompt's yes-no core. |
@@ -594,11 +598,38 @@ underline + `ButtonGroup`).
 | Card list / column stack | `bubbles/v2 list` | Owns its own filtering, pagination, status bar and keymap; kb's columns are a miller-column board with drag-and-drop lift and per-column scroll windows. Adopting `list` means fighting it. |
 | Comment / blocker-link pickers | `bubbles/v2 list` | Same, plus they need pointer hit regions per row. |
 | Board grid | `bubbles/v2 table` | Cards are multi-row surfaces, not cells. |
-| Overlay scrolling | `bubbles/v2 viewport` | kb's overlays scroll with focus-follow and wheel regions keyed to `pointer.Surface`; `viewport` does not surface the offset/region pairing those need. Revisit if a slice proves otherwise. |
 | Editor form as a whole | `huh/v2 Form` | The card editor carries a label-suggestion dropdown, a similar-items block with per-row dismiss, a stale-refresh banner and mouse hit regions on every control. huh owns layout and focus and exposes no hit regions. Its *fields* are adopted (§5.2); its `Form` container is not. See §8, contestable call 1. |
 | Settings pane | `huh/v2 Form` | Same, plus dynamic forge row groups with locked fields. |
 | ADR split review stage | `huh/v2 Form` | Per-story row groups generated at runtime with independent include/priority/effort state. |
 | Pressed feedback | — | Stays SGR 7 reverse video, but as `Styles.Pressed`, not a raw escape in `pointer.go:54`. |
+
+**Amended by [#153](https://github.com/RandomCodeSpace/kb/issues/153).** The
+sweep that carries the map's final component-sourcing policy — a charm component
+is used wherever one exists — moved four rows out of this table and into §5.2:
+overlay scrolling, the help pane, the keybinding registry and the settings
+key/value rows.
+
+The overlay-scrolling refusal was wrong on the facts. `bubbles/v2 viewport`
+v2.1.1 exposes `YOffset()` and `SetYOffset(n)`, which is exactly the
+offset/region pairing the pointer map needs; the pane reads the offset for its
+`pointer.Viewport` rects and the component keeps the clamp. What the component
+genuinely cannot do here is render: `viewport.View` pads its window with plain
+`lipgloss` width/height padding, and a panel body row has to carry `OverlaySurf`
+to both edges. So the split is offset to the component, rows to the widget.
+
+`bubbles/v2 list` stayed unadopted, and the reasons above are unchanged — the
+board's columns are a drag-and-drop miller board, and the pickers need a hit
+region per row. The map's "do not force-fit" applies: there is no remaining
+list-shaped rendering in the TUI that `list` would own rather than fight.
+
+**Composing an adopted component onto a kb surface.** A charm component paints
+its own runs and closes each with a reset, and it writes plain spaces between
+them — `bubbles/help` does this between its key and description columns, and
+`lipgloss` does it where it joins columns of unequal length. Those cells punch
+holes in a panel. `theme.Styles.SurfaceRun(slot, content)` arms the surface
+background and re-arms it after every reset in the content, the same shape
+`PressedRun` already had for the pressed attribute. Any view laying a
+component's output onto a shade tier goes through it.
 
 ---
 
@@ -638,6 +669,7 @@ type Styles struct {
     Overlay OverlayStyles  // Surf, HeaderBand, SectionBand, FooterBand, Shadow, FieldLabel, FieldValue
     Button  ButtonStyles   // Rest, Focused, Hovered, Armed, Pressed
     Pressed lipgloss.Style
+    Table   TableStyles    // Cell, Last — layout-only cells handed to lipgloss table
 
     Input    textinput.Styles   // handed to bubbles
     Area     textarea.Styles
@@ -664,8 +696,10 @@ style rebuild expensive:
 - The result is stored on the root `Model` and threaded down. No package-level
   mutable style state.
 - **No `lipgloss.NewStyle()` in any `View()` / `render*` path.** This is a
-  reviewable rule, and the migration slice adds a lint or grep-based test that
-  fails on `NewStyle(` under `internal/tui/**` outside `theme/`.
+  reviewable rule, enforced by `theme/seam_test.go`, which walks `internal/tui`
+  and fails on any construction outside `theme/`. Its allowlist may only shrink;
+  as of #153 it is **empty** — `help.go` was the last entry and adopting
+  `bubbles/help` removed it.
 - **No `Style.Inherit`.** The factory sets every property explicitly; `Inherit`
   silently skips padding and margins (research §5, hazard 1) and is a foot-gun in
   a token system.
