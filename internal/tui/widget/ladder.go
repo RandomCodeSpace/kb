@@ -68,10 +68,18 @@ func Hints(styles *theme.Styles, ladder Ladder, width int) (string, []int) {
 	}
 	kept := packed(rungs, head, middle, mark, tail, count)
 
-	// Step 3: nothing of the middle survived and the mark itself is what no
-	// longer fits.
-	if count == 0 && lineWidth(kept, separator) > width {
-		kept = packed(rungs, head, nil, "", tail)
+	// Step 3: nothing of the middle survived, so the mark is suppressed
+	// entirely. A mark with no admitted middle rung reports only that
+	// everything useful is gone, at the price of the cells that could carry the
+	// most important middle rung - "[Close] | …" where "[Close] | ? or esc
+	// close help" fits is the mark working against its purpose. Retry once
+	// without it, then fall back to the pinned set, which step 1 has already
+	// established fits.
+	if count == 0 && len(middle) > 0 {
+		kept = packed(rungs, head, middle, "", tail, 1)
+		if lineWidth(kept, separator) > width {
+			kept = packed(rungs, head, nil, "", tail)
+		}
 	}
 	return render(kept, separator), columnsOf(kept, separator, len(rungs))
 }
