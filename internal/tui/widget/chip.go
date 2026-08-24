@@ -3,8 +3,6 @@ package widget
 import (
 	"strconv"
 	"strings"
-	"unicode/utf16"
-	"unicode/utf8"
 
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
@@ -54,7 +52,7 @@ func Label(styles *theme.Styles, tag string, on theme.Slot, flat bool) string {
 	fill := theme.LabelSlot(LabelWheel(tag))
 	key, value, scoped := strings.Cut(tag, "::")
 	if !scoped || key == "" || value == "" {
-		return Chip(styles, ChipOpts{Text: "#" + tag, Fill: fill, On: on, Flat: flat})
+		return Chip(styles, ChipOpts{Text: styles.Glyph.MarkTag + tag, Fill: fill, On: on, Flat: flat})
 	}
 	if flat {
 		return Chip(styles, ChipOpts{Text: value, Fill: fill, On: on, Flat: true})
@@ -62,27 +60,17 @@ func Label(styles *theme.Styles, tag string, on theme.Slot, flat bool) string {
 	return Chip(styles, ChipOpts{Text: value, Key: key + ":", Fill: fill, On: on})
 }
 
-// LabelWheel is the label color hash. It is the hash board_view.go has always
-// used, carried over unchanged so existing label colors stay stable relative to
-// each other (spec section 1.6).
-func LabelWheel(tag string) int {
-	first, _ := utf8.DecodeRuneInString(tag)
-	if first == utf8.RuneError && tag == "" {
-		first = 0
-	}
-	units := 0
-	for _, letter := range tag {
-		units += utf16.RuneLen(letter)
-	}
-	return (units + int(first)) % theme.LabelWheel
-}
+// LabelWheel is the label color hash of spec section 1.6, unchanged. It lives
+// beside the palette now, because the per-board accent of section 10.7.2
+// derives from the same wheel and the two must not fork.
+func LabelWheel(tag string) int { return theme.WheelIndex(tag) }
 
 // Priority renders the priority marker of spec section 3.4: bold, in the
 // priority hue, never a pill, and only two cells, which is why it survives
 // longest when the chip row runs out of width.
 func Priority(styles *theme.Styles, priority int, on theme.Slot) string {
 	return styles.OnBold(theme.PrioritySlot(priority), on).
-		Render("P" + strconv.Itoa(priorityLabel(priority)))
+		Render(styles.Glyph.MarkPrio + strconv.Itoa(priorityLabel(priority)))
 }
 
 // priorityLabel is the number the marker prints. Spec section 1.4 maps anything

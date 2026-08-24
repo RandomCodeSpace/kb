@@ -9,6 +9,9 @@ package theme
 
 import (
 	"image/color"
+	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 )
@@ -101,6 +104,45 @@ func LabelSlot(index int) Slot {
 
 // LabelWheel is the size of the label pill wheel of spec section 1.6.
 const LabelWheel = 5
+
+// WheelIndex is the label color hash of spec section 1.6: the hash the board
+// has always used, carried over unchanged so existing label colors stay stable
+// relative to each other. It lives here beside LabelSlot because the per-board
+// accent of section 10.7.2 derives from the same wheel, and the derivation must
+// not fork the hash.
+func WheelIndex(tag string) int {
+	first, _ := utf8.DecodeRuneInString(tag)
+	if first == utf8.RuneError && tag == "" {
+		first = 0
+	}
+	units := 0
+	for _, letter := range tag {
+		units += utf16.RuneLen(letter)
+	}
+	return (units + int(first)) % LabelWheel
+}
+
+// unnamedBoard is the title board.Parse defaults to, and the title the zero
+// model carries. Spec section 10.7.2: hashing it would hand every unnamed board
+// the same arbitrary hue and call it identity.
+const unnamedBoard = "board"
+
+// AccentSlot is the per-project accent hue of spec section 10.7.2: a
+// deterministic recognition cue for the board the user named, and nothing else.
+// No state, count, severity or affordance may ever be encoded in it.
+//
+// The accent derives from the section 1.6 label wheel rather than from free
+// HSL, so it is total over {Brand, Label1..Label5} and can emit no hex the
+// section 1.7 audit has not already cleared. The default and empty titles
+// resolve to Brand: a board that declared no name looks exactly like kb looks
+// without one.
+func AccentSlot(title string) Slot {
+	name := strings.ToLower(strings.TrimSpace(title))
+	if name == "" || name == unnamedBoard {
+		return Brand
+	}
+	return LabelSlot(WheelIndex(name))
+}
 
 // Palette resolves every slot to a terminal color.
 type Palette [numSlots]color.Color

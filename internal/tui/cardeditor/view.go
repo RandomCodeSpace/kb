@@ -254,13 +254,16 @@ func (m *Model) renderRow(row editorRow, width int) string {
 	case rowButton:
 		if padded := fit(buttonPadding+row.button+buttonPadding, width); strings.HasSuffix(line, padded) {
 			marker := strings.TrimSuffix(line, padded)
+			// An editor row is driven by focus and Enter, so the resolver of
+			// spec section 10.4.2 marks no hotkey on it.
+			text, underline := widget.Hotkey(row.button, nil)
 			return styles.Overlay.Surf.Render(marker) + widget.Button(styles, widget.ButtonOpts{
-				Text:           row.button,
+				Text:           text,
 				Variant:        row.variant,
 				Selected:       m.focus == row.target,
 				Pressed:        m.pointerState.IsPressed(pointer.ControlID(row.target)),
-				UnderlineIndex: -1,
-				Padding:        [2]int{1, 1},
+				UnderlineIndex: underline,
+				Padding:        [2]int{styles.Metrics.ButtonPadX, styles.Metrics.ButtonPadX},
 			})
 		}
 		return styles.Overlay.Surf.Render(line)

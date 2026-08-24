@@ -21,28 +21,30 @@ type BandOpts struct {
 	Width   int
 }
 
-// bandLabelReserve is the prefix the unfocused band spends before its label:
-// rail, status dot, space, index digit, space (spec section 2.2).
-const bandLabelReserve = 5
-
 // Band renders one column header band. Unfocused it sits on the Raised tier
 // with the column hue as foreground; focused it fills solid with the column hue
 // and the rail becomes a focus caret so the band reads as filled edge to edge.
+//
+// The status dot survives the focus change. Spec section 10.4.4, ratified as
+// contestable call 11: dropping it moved the label from column 5 to column 4,
+// so moving focus across the board jittered every label one cell. Keeping the
+// dot restores the BandHeadW reserve in both states and holds the label column
+// fixed, and it costs nothing.
 func Band(styles *theme.Styles, opts BandOpts) string {
 	if opts.Width <= 0 {
 		return ""
 	}
 	text := styles.OnBold(opts.Hue, theme.BandRest)
-	head := styles.Glyph.Rail + styles.Glyph.Dot
+	head := styles.Glyph.Rail
 	if opts.Focused {
 		text = styles.OnBold(theme.FgOnAccent, opts.Hue)
 		head = styles.Glyph.Focus
 	}
-	head += " " + strconv.Itoa(opts.Index) + " "
+	head += styles.Glyph.Dot + " " + strconv.Itoa(opts.Index) + " "
 
 	count := strconv.Itoa(opts.Count) + " "
 	available := opts.Width - ansi.StringWidth(head)
-	field := min(available-ansi.StringWidth(count), opts.Width-bandLabelReserve)
+	field := min(available-ansi.StringWidth(count), opts.Width-styles.Metrics.BandHeadW)
 	if field < 0 {
 		field = 0
 	}

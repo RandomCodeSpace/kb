@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
@@ -40,6 +41,7 @@ type Styles struct {
 	Area     textarea.Styles
 	Help     help.Styles
 	Spinner  spinner.Spinner
+	Progress progress.Model
 	Markdown glamour.StyleConfig
 	Huh      *huh.Styles
 
@@ -51,6 +53,8 @@ type Styles struct {
 	pressedOn  string
 	pressedOff string
 	surfaceOn  [numSlots]string
+	grad       [numRamps][GradSteps]lipgloss.Style
+	gradBold   [numRamps][GradSteps]lipgloss.Style
 }
 
 // TableStyles are the cell styles of an adopted lipgloss/v2 table. They carry
@@ -412,10 +416,12 @@ func build(table paletteRGB, isDark bool) *Styles {
 		Cell: blank.PaddingRight(defaultMetrics.TableGutter),
 		Last: blank,
 	}
+	built.buildRamps(pal)
 	built.Input = inputStyles(pal, on, isDark)
 	built.Area = areaStyles(pal, on, isDark)
 	built.Help = helpStyles(on)
 	built.Spinner = spinner.Dot
+	built.Progress = meterModel(pal)
 	built.Markdown = markdownStyles(table)
 	built.Huh = huhStyles(pal, on, onBold, isDark)
 	return built

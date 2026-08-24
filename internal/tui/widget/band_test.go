@@ -34,11 +34,11 @@ func TestBandFocusedReplacesTheRailWithACaret(t *testing.T) {
 	styles := theme.New(true)
 	rendered := Band(styles, BandOpts{Index: 2, Label: "DOING", Count: 3, Hue: theme.HueDoing, Focused: true, Width: 42})
 	plain := ansi.Strip(rendered)
-	if !strings.HasPrefix(plain, "▸ 2 DOING") {
+	if !strings.HasPrefix(plain, "▸● 2 DOING") {
 		t.Errorf("focused band = %q, want the focus caret prefix", plain)
 	}
-	if strings.Contains(plain, "●") {
-		t.Error("the focused band drops the status dot")
+	if !strings.Contains(plain, "●") {
+		t.Error("the focused band keeps the status dot, so the label column does not move")
 	}
 	if ansi.StringWidth(rendered) != 42 {
 		t.Errorf("focused band width = %d, want 42", ansi.StringWidth(rendered))

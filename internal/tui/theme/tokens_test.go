@@ -1,6 +1,11 @@
 package theme
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+
+	"github.com/charmbracelet/x/ansi"
+)
 
 func TestDensityForBothAxes(t *testing.T) {
 	metrics := defaultMetrics
@@ -219,10 +224,100 @@ func TestGlyphsCarryTheAccentVocabulary(t *testing.T) {
 		"Focus":    {glyphs.Focus, "▸"},
 		"More":     {glyphs.More, "+"},
 		"Ellipsis": {glyphs.Ellipsis, "…"},
+		"Blocked":  {glyphs.Blocked, "⛔"},
+		"Track":    {glyphs.Track, "░"},
+		"Empty":    {glyphs.Empty, "○"},
+		"Alert":    {glyphs.Alert, "▲"},
+		"MarkPrio": {glyphs.MarkPrio, "P"},
+		"MarkSeq":  {glyphs.MarkSeq, "#"},
+		"MarkTag":  {glyphs.MarkTag, "#"},
+		"MarkDue":  {glyphs.MarkDue, "!"},
 	}
 	for name, pair := range cases {
 		if pair[0] != pair[1] {
 			t.Errorf("glyph %s = %q, spec says %q", name, pair[0], pair[1])
+		}
+	}
+}
+
+// TestGlyphWidthsMatchTheSpecTable is the second guard of spec section 10.4.1:
+// a future re-spelling that silently changes a mark's width fails the build
+// rather than the layout. Every token is one cell except Blocked, which is two,
+// and that is what makes Blocked ineligible as a state alternative to any
+// one-cell mark under the no-reflow rule of section 10.4.4.
+func TestGlyphWidthsMatchTheSpecTable(t *testing.T) {
+	glyphs := New(true).Glyph
+	cases := map[string][2]int{
+		"Rail":     {ansi.StringWidth(glyphs.Rail), 1},
+		"RailFull": {ansi.StringWidth(glyphs.RailFull), 1},
+		"CapL":     {ansi.StringWidth(glyphs.CapL), 1},
+		"CapR":     {ansi.StringWidth(glyphs.CapR), 1},
+		"Dot":      {ansi.StringWidth(glyphs.Dot), 1},
+		"Check":    {ansi.StringWidth(glyphs.Check), 1},
+		"CheckOn":  {ansi.StringWidth(glyphs.CheckOn), 1},
+		"CheckOff": {ansi.StringWidth(glyphs.CheckOff), 1},
+		"Diamond":  {ansi.StringWidth(glyphs.Diamond), 1},
+		"Focus":    {ansi.StringWidth(glyphs.Focus), 1},
+		"More":     {ansi.StringWidth(glyphs.More), 1},
+		"Ellipsis": {ansi.StringWidth(glyphs.Ellipsis), 1},
+		"Blocked":  {ansi.StringWidth(glyphs.Blocked), 2},
+		"Track":    {ansi.StringWidth(glyphs.Track), 1},
+		"Empty":    {ansi.StringWidth(glyphs.Empty), 1},
+		"Alert":    {ansi.StringWidth(glyphs.Alert), 1},
+		"MarkPrio": {ansi.StringWidth(glyphs.MarkPrio), 1},
+		"MarkSeq":  {ansi.StringWidth(glyphs.MarkSeq), 1},
+		"MarkTag":  {ansi.StringWidth(glyphs.MarkTag), 1},
+		"MarkDue":  {ansi.StringWidth(glyphs.MarkDue), 1},
+	}
+	if got := reflect.TypeOf(glyphs).NumField(); got != len(cases) {
+		t.Fatalf("Glyphs has %d fields, the width table covers %d", got, len(cases))
+	}
+	for name, pair := range cases {
+		if pair[0] != pair[1] {
+			t.Errorf("glyph %s is %d cells, spec says %d", name, pair[0], pair[1])
+		}
+	}
+}
+
+// TestCraftMetricsAreTheSpecValues pins the tokens section 10 adds to the
+// metric set: the band head that holds the label column fixed across focus, the
+// button geometry the card-detail pane used to spell as local constants, the
+// always-reserved focus gutter, and the meter's two widths.
+func TestCraftMetricsAreTheSpecValues(t *testing.T) {
+	metrics := defaultMetrics
+	cases := map[string][2]int{
+		"BandHeadW":      {metrics.BandHeadW, 5},
+		"ButtonPadX":     {metrics.ButtonPadX, 1},
+		"ButtonGap":      {metrics.ButtonGap, 1},
+		"FocusGutterW":   {metrics.FocusGutterW, 1},
+		"FocusGutterGap": {metrics.FocusGutterGap, 1},
+		"MeterCells":     {metrics.MeterCells, 24},
+		"MeterMinCells":  {metrics.MeterMinCells, 6},
+		"GradSteps":      {GradSteps, 24},
+	}
+	for name, pair := range cases {
+		if pair[0] != pair[1] {
+			t.Errorf("%s = %d, spec says %d", name, pair[0], pair[1])
+		}
+	}
+}
+
+// TestOverlayFocusContentReservesTheGutter is spec section 10.4.3: a focusable
+// body row's prose column is two narrower than a static row on the same panel,
+// in every state, so focus never reflows the text it lands on.
+func TestOverlayFocusContentReservesTheGutter(t *testing.T) {
+	metrics := defaultMetrics
+	for _, pane := range []int{200, 120, 40, 24, 6, 1, 0, -3} {
+		focus := metrics.OverlayFocusContent(pane)
+		static := metrics.OverlayContent(pane)
+		if focus > static {
+			t.Errorf("pane %d: focusable measure %d exceeds the static %d", pane, focus, static)
+		}
+		if focus < 1 {
+			t.Errorf("pane %d: focusable measure %d, want at least one column", pane, focus)
+		}
+		if static > 3 && focus != static-2 {
+			t.Errorf("pane %d: focusable measure %d, want %d", pane, focus, static-2)
 		}
 	}
 }

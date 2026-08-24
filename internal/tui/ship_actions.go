@@ -1055,18 +1055,21 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 		if a.armed {
 			label = "ARMED - press Enter again to delete permanently"
 		}
+		// The purge control is armed and fired with Enter, so the resolver of
+		// spec section 10.4.2 marks no hotkey on it.
+		purgeText, purgeUnderline := widget.Hotkey(actionFit(label, max(width-2*choiceButtonPad, 1)), nil)
 		rows := []actionRow{
 			{content: surface.Render(actionFit("Delete "+sanitizeTerminal(a.task.Title)+" permanently?"+busy, width))},
 			{content: styles.Overlay.FieldLabel.Render(actionFit("The card, comments, links, and kill reason are removed for good.", width))},
 			{},
 			{
 				content: widget.Button(styles, widget.ButtonOpts{
-					Text:           actionFit(label, max(width-2*choiceButtonPad, 1)),
+					Text:           purgeText,
 					Variant:        theme.ButtonDanger,
 					Armed:          a.armed,
 					Selected:       !a.armed,
 					Pressed:        m.pointerState.IsPressed(taskActionControlID(taskActionPointerPurge, 0)),
-					UnderlineIndex: -1,
+					UnderlineIndex: purgeUnderline,
 					Padding:        [2]int{choiceButtonPad, choiceButtonPad},
 				}),
 				labels: []actionLabel{{text: label, kind: taskActionPointerPurge, pad: choiceButtonPad}},
@@ -1106,15 +1109,18 @@ func (m Model) choiceButtonRows(
 	labels := make([]actionLabel, 0, len(choices))
 	group := 0
 	for index, choice := range choices {
+		// A dialog choice moves with left/right and commits with Enter, so the
+		// resolver of spec section 10.4.2 marks no hotkey on it.
+		text, underline := widget.Hotkey(choice.label, nil)
 		buttons = append(buttons, widget.Button(styles, widget.ButtonOpts{
-			Text:           choice.label,
+			Text:           text,
 			Variant:        choice.variant,
 			Selected:       index == selected,
 			Pressed:        m.pointerState.IsPressed(taskActionControlID(kind, index)),
-			UnderlineIndex: -1,
+			UnderlineIndex: underline,
 			Padding:        [2]int{choiceButtonPad, choiceButtonPad},
 		}))
-		labels = append(labels, actionLabel{text: choice.label, kind: kind, index: index, pad: choiceButtonPad})
+		labels = append(labels, actionLabel{text: text, kind: kind, index: index, pad: choiceButtonPad})
 		if index > 0 {
 			group += choiceButtonGap
 		}

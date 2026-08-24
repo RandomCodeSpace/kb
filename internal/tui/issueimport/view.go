@@ -357,14 +357,17 @@ func (m Model) actionsRow(styles *theme.Styles, actions ...importAction) importR
 			row.text += gap
 			row.rendered += styles.Overlay.Surf.Render(gap)
 		}
-		label := "[ " + action.label + " ]"
+		// The row's actions are driven by focus and Enter rather than by a
+		// single-rune key, so the resolver of spec section 10.4.2 marks no
+		// hotkey here; it is called anyway so no surface resolves its own.
+		label, underline := widget.Hotkey("[ "+action.label+" ]", nil)
 		row.buttons = append(row.buttons, importButton{label: label, target: action.target, x0: ansi.StringWidth(row.text)})
 		row.text += label
 		row.rendered += widget.Button(styles, widget.ButtonOpts{
 			Text:           label,
 			Variant:        action.variant,
 			Pressed:        m.pressed(action.target),
-			UnderlineIndex: -1,
+			UnderlineIndex: underline,
 		})
 	}
 	return row

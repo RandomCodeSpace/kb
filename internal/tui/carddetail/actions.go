@@ -3,7 +3,6 @@ package carddetail
 import (
 	"fmt"
 	"strings"
-	"unicode"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
@@ -690,7 +689,7 @@ func (m Model) pointerFooterControls(width int) []detailPointerControl {
 		detailPointerControl{label: "Unlink", message: key('u'), variant: theme.ButtonDanger},
 		detailPointerControl{label: "Close", message: mouseDismissMsg{}},
 	)...)
-	if detailControlsWidth(full) <= width {
+	if detailControlsWidth(m.styles, full) <= width {
 		return full
 	}
 	primary := append([]detailPointerControl(nil), taskControls...)
@@ -699,76 +698,37 @@ func (m Model) pointerFooterControls(width int) []detailPointerControl {
 		detailPointerControl{label: "Link", message: key('b')},
 		detailPointerControl{label: "Close", message: mouseDismissMsg{}},
 	)...)
-	for len(primary) > 1 && detailControlsWidth(primary) > width {
+	for len(primary) > 1 && detailControlsWidth(m.styles, primary) > width {
 		primary = append(primary[:len(primary)-2], primary[len(primary)-1])
 	}
 	return primary
 }
 
-// detailButtonPad is the left and right padding of one action button, the
-// crush ButtonOpts look of spec section 5.1: a filled surface wider than its
-// label on both sides.
-const detailButtonPad = 1
-
-// detailButtonGap is the surface-filled gap between two buttons in the row.
-const detailButtonGap = 1
-
 // detailButtonLabel is the button's text and the rune offset of its hotkey.
 // The frozen keymap is not touched here: the key the control already sends is
 // underlined where the label spells it, and appended where it does not, so
 // every button states the shortcut that still drives it from the keyboard.
+//
+// The resolver itself is widget.Hotkey, generalized out of this pane by spec
+// section 10.4.2 so every button surface in the TUI resolves the same way.
 func detailButtonLabel(control detailPointerControl) (string, int) {
-	hotkey, ok := detailControlHotkey(control)
-	if !ok {
-		return control.label, -1
-	}
-	if index := detailHotkeyIndex(control.label, hotkey); index >= 0 {
-		return control.label, index
-	}
-	return control.label + " (" + string(hotkey) + ")", len([]rune(control.label)) + 2
-}
-
-// detailControlHotkey reports the single printable rune the control sends, if
-// it sends one. Enter, Escape, Tab and chorded keys carry no text and are
-// stated by the footer band instead.
-func detailControlHotkey(control detailPointerControl) (rune, bool) {
-	press, ok := control.message.(tea.KeyPressMsg)
-	if !ok || press.Mod != 0 {
-		return 0, false
-	}
-	runes := []rune(press.Text)
-	if len(runes) != 1 {
-		return 0, false
-	}
-	return runes[0], true
-}
-
-// detailHotkeyIndex is the first offset in label that spells hotkey, ignoring
-// case, or a negative value when the label does not carry it.
-func detailHotkeyIndex(label string, hotkey rune) int {
-	wanted := unicode.ToLower(hotkey)
-	for index, letter := range []rune(label) {
-		if unicode.ToLower(letter) == wanted {
-			return index
-		}
-	}
-	return -1
+	return widget.Hotkey(control.label, control.message)
 }
 
 // detailButtonWidth is the rendered cell width of one action button.
-func detailButtonWidth(control detailPointerControl) int {
+func detailButtonWidth(styles *theme.Styles, control detailPointerControl) int {
 	label, _ := detailButtonLabel(control)
-	return ansi.StringWidth(label) + 2*detailButtonPad
+	return ansi.StringWidth(label) + 2*styles.Metrics.ButtonPadX
 }
 
 // detailControlsWidth is the width the whole action row spends, gaps included.
-func detailControlsWidth(controls []detailPointerControl) int {
+func detailControlsWidth(styles *theme.Styles, controls []detailPointerControl) int {
 	width := 0
 	for index, control := range controls {
 		if index > 0 {
-			width += detailButtonGap
+			width += styles.Metrics.ButtonGap
 		}
-		width += detailButtonWidth(control)
+		width += detailButtonWidth(styles, control)
 	}
 	return width
 }
@@ -785,10 +745,10 @@ func (m Model) actionButtonRow(controls []detailPointerControl) string {
 			Variant:        control.variant,
 			Pressed:        m.pointerState.IsPressed(detailFooterControlID(control)),
 			UnderlineIndex: underline,
-			Padding:        [2]int{detailButtonPad, detailButtonPad},
+			Padding:        [2]int{m.styles.Metrics.ButtonPadX, m.styles.Metrics.ButtonPadX},
 		}))
 	}
-	return widget.ButtonGroup(m.styles, theme.OverlaySurf, detailButtonGap, buttons...)
+	return widget.ButtonGroup(m.styles, theme.OverlaySurf, m.styles.Metrics.ButtonGap, buttons...)
 }
 
 // markRun paints a marked field's row with the theme's pressed token. The

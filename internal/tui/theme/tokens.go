@@ -20,9 +20,13 @@ func (d Density) Compact() bool { return d == DensityCompact }
 // Known risk, carried consciously (map #136): the accent vocabulary is built
 // from U+2588 / U+258C / U+2590. On fonts without block glyphs it degrades
 // worse than a border would. Accepted at the issue #137 resolution.
+// Spec section 10.4.1 makes this struct the only place under internal/tui where
+// a display glyph or a separator may be written as a literal: views and widgets
+// name tokens, and a view that needs a mark the vocabulary does not carry has
+// found a missing token, not a reason for a literal.
 type Glyphs struct {
-	Rail     string // U+258C, resting card rail and unfocused band rail
-	RailFull string // U+2588, selected card rail
+	Rail     string // U+258C, resting card rail, unfocused band rail, meter fill
+	RailFull string // U+2588, selected card rail, scrollbar thumb
 	CapL     string // U+2590, pill left end cap (spec section 3.6)
 	CapR     string // U+258C, pill right end cap
 	Dot      string // U+25CF, column status dot
@@ -34,9 +38,24 @@ type Glyphs struct {
 	More     string // overflow cue prefix, rendered as "+N more"
 	Ellipsis string // U+2026, the truncation tail of spec section 3.3
 	Blocked  string // U+26D4, the compact blocked mark of spec section 3.4
+	Track    string // U+2591, progress meter and scrollbar track (section 10.1.3)
+	Empty    string // U+25CB, empty-state mark (section 10.8.3)
+	Alert    string // U+25B2, failure mark (section 10.8.5)
+
+	// Markers are the ASCII prefixes of spec section 10.4.1 that are display
+	// vocabulary rather than prose. MarkSeq and MarkTag are a same-text alias,
+	// deliberate and not a collision: they answer to different sections and
+	// either may be re-spelled without the other.
+	MarkPrio string // priority chip prefix, "P1" (section 3.4)
+	MarkSeq  string // card reference prefix, "#142" (section 3.2)
+	MarkTag  string // plain label pill prefix, "#tag" (section 3.5)
+	MarkDue  string // compact due prefix, "!2d" (section 3.4)
 }
 
-// defaultGlyphs is the vocabulary of spec sections 2.2, 2.4, 3.4 and 3.6.
+// defaultGlyphs is the vocabulary of spec sections 2.2, 2.4, 3.4, 3.6 and
+// 10.4.1. Every token is one cell wide except Blocked, which is two; the width
+// table of section 10.4.1 is asserted in tokens_test.go so a re-spelling that
+// silently changes a mark's width fails the build rather than the layout.
 var defaultGlyphs = Glyphs{
 	Rail:     "▌",
 	RailFull: "█",
@@ -51,6 +70,13 @@ var defaultGlyphs = Glyphs{
 	More:     "+",
 	Ellipsis: "…",
 	Blocked:  "⛔",
+	Track:    "░",
+	Empty:    "○",
+	Alert:    "▲",
+	MarkPrio: "P",
+	MarkSeq:  "#",
+	MarkTag:  "#",
+	MarkDue:  "!",
 }
 
 // Metrics are the gutter, padding and threshold tokens of spec section 2.5,
@@ -70,6 +96,13 @@ type Metrics struct {
 	CardPadRight    int // always
 	CardMinInner    int // below this a card renders surface and rail only
 	MinColumnWidth  int // narrowest panel a column may shrink to and still hold a title
+	BandHeadW       int // band prefix before its label, fixed across focus (section 10.4.4)
+	ButtonPadX      int // left and right padding of one button (section 10.4.2)
+	ButtonGap       int // surface-filled gap between two buttons in a row
+	FocusGutterW    int // gutter column, reserved on every focusable non-card row
+	FocusGutterGap  int // column between the gutter and the row's content
+	MeterCells      int // default bar width of the progress meter (section 10.1.3)
+	MeterMinCells   int // below this a meter renders its label only, no bar
 	OverlayInsetX   int // overlay content inset from the panel edge
 	OverlayLabelW   int // fixed label gutter of an overlay field row
 	TableGutter     int // columns between two cells of a lipgloss table row
@@ -115,6 +148,13 @@ var defaultMetrics = Metrics{
 	CardPadRight:    1,
 	CardMinInner:    6,
 	MinColumnWidth:  16,
+	BandHeadW:       5,
+	ButtonPadX:      1,
+	ButtonGap:       1,
+	FocusGutterW:    1,
+	FocusGutterGap:  1,
+	MeterCells:      24,
+	MeterMinCells:   6,
 	OverlayInsetX:   2,
 	OverlayLabelW:   12,
 	TableGutter:     1,
@@ -221,6 +261,14 @@ func (m Metrics) OverlayElevated(paneWidth, paneHeight int) bool {
 // point where a line stops being scannable.
 func (m Metrics) OverlayContent(paneWidth int) int {
 	return max(min(paneWidth-2*m.OverlayInsetX, m.Overlay.ContentMax), 1)
+}
+
+// OverlayFocusContent is the readable measure inside a panel for a row that can
+// take focus. Spec section 10.4.3: the focus gutter and its gap are reserved in
+// every state, so a focusable row's prose column is two narrower than a static
+// row on the same panel rather than reflowing when focus arrives.
+func (m Metrics) OverlayFocusContent(paneWidth int) int {
+	return max(m.OverlayContent(paneWidth)-m.FocusGutterW-m.FocusGutterGap, 1)
 }
 
 // clampPane resolves one axis of the proportional panel rule: the share of the
