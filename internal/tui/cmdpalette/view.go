@@ -106,7 +106,7 @@ func (m Model) scrollHint() string {
 	if len(m.entries) == 0 {
 		return ""
 	}
-	return widget.ScrollHint(m.themeStyles(), m.cursor+1, len(m.entries), theme.OverlayBand)
+	return widget.ScrollHint(m.themeStyles(), m.acting()+1, len(m.entries), theme.OverlayBand)
 }
 
 // bodyRows is the query field followed by the windowed result list, or by the
@@ -131,11 +131,28 @@ func (m Model) bodyRows(panel frame) []string {
 			Width:    panel.inner,
 		}), panel.width))
 	}
-	list := m.listRows()
-	for _, row := range window(list, m.cursorRow(list), visible) {
+	for _, row := range m.visibleRows(panel) {
 		rows = append(rows, m.renderListRow(panel, row))
 	}
 	return rows
+}
+
+// visibleRows is the windowed slice of the result list the body draws, and the
+// one place that window is resolved. The pointer map of spec section 10.5.3
+// reads the same slice, so a hit region can never address a row the body did not
+// draw, and the two cannot fork as the list grows a feature.
+//
+// The window follows the keyboard cursor and never the pointer: the pointer is
+// inside the drawn window by construction, so there is nothing for it to scroll
+// to, and a hover that moved the window would drag the list out from under the
+// hand holding the mouse.
+func (m Model) visibleRows(panel frame) []listRow {
+	visible := panel.rows - 1
+	if visible <= 0 || len(m.entries) == 0 {
+		return nil
+	}
+	list := m.listRows()
+	return window(list, m.cursorRow(list), visible)
 }
 
 // queryRow is the search field. It is a focusable row and always has the
@@ -191,15 +208,21 @@ func window(list []listRow, focus, size int) []listRow {
 }
 
 // renderListRow draws one line of the result list.
+//
+// Spec section 10.5.2: while mouse mode is on the hovered row is the acting
+// selection and the keyboard cursor's own position renders nothing, so exactly
+// one row wears the cursor cue at any moment. Hover raises that row's fill on
+// top of it, which is a separate signal and not a second cursor.
 func (m Model) renderListRow(panel frame, row listRow) string {
 	styles := m.themeStyles()
 	if row.kind == rowSection {
 		return widget.Section(styles, row.group.Label(), "", panel.width)
 	}
 	entry := m.entries[row.entry]
-	focused := row.entry == m.cursor
-	gutter := widget.Gutter(styles, focused, theme.Brand, theme.OverlaySurf)
-	return widget.OverlayRow(styles, gutter+m.entryText(entry, focused, panel.focus), panel.width)
+	focused := row.entry == m.acting()
+	on := styles.RowSurface(m.pointerState.IsHovered(controlID(row.entry)))
+	gutter := widget.Gutter(styles, focused, theme.Brand, on)
+	return widget.OverlayRowOn(styles, gutter+m.entryText(entry, focused, panel.focus, on), panel.width, on)
 }
 
 // entryText is one action's name with its matched runs highlighted, and its key
@@ -208,7 +231,7 @@ func (m Model) renderListRow(panel frame, row listRow) string {
 // The name is cut to the columns it has before the highlight is resolved, and
 // the match offsets are cut with it: styling a run that truncation removed
 // would put the cue on whatever text slid into its place.
-func (m Model) entryText(entry Entry, focused bool, width int) string {
+func (m Model) entryText(entry Entry, focused bool, width int, on theme.Slot) string {
 	styles := m.themeStyles()
 	hint := entry.Action.Hint
 	hintWidth := ansi.StringWidth(hint)
@@ -218,19 +241,19 @@ func (m Model) entryText(entry Entry, focused bool, width int) string {
 		nameWidth = width
 	}
 	name := fit(entry.Action.Name, nameWidth)
-	base := styles.On(theme.FgBase, theme.OverlaySurf)
+	base := styles.On(theme.FgBase, on)
 	if focused {
-		base = styles.OnBold(theme.FgBase, theme.OverlaySurf)
+		base = styles.OnBold(theme.FgBase, on)
 	}
-	rendered := widget.Highlight(base, styles.OnBold(theme.Brand, theme.OverlaySurf), name, within(entry.Matched, name))
+	rendered := widget.Highlight(base, styles.OnBold(theme.Brand, on), name, within(entry.Matched, name))
 	gap := max(width-ansi.StringWidth(name)-hintWidth, 0)
-	surface := styles.On(theme.FgBase, theme.OverlaySurf)
+	surface := styles.On(theme.FgBase, on)
 	if hint == "" {
 		return rendered + surface.Render(strings.Repeat(" ", gap))
 	}
 	return rendered +
 		surface.Render(strings.Repeat(" ", gap)) +
-		styles.On(theme.FgMuted, theme.OverlaySurf).Render(hint)
+		styles.On(theme.FgMuted, on).Render(hint)
 }
 
 // within drops the match offsets truncation removed.

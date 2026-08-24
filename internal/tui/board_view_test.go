@@ -107,11 +107,11 @@ func TestLabelColorUsesWebHash(t *testing.T) {
 		{"backend", "▐#backend▌"},
 		{"broken::", "▐#broken::▌"},
 	} {
-		if got := plain(widget.Label(styles, test.tag, theme.Card, false)); got != test.want {
+		if got := plain(widget.Label(styles, test.tag, theme.Card, false, false)); got != test.want {
 			t.Errorf("label pill(%q) = %q, want %q", test.tag, got, test.want)
 		}
 	}
-	if got := plain(widget.Label(styles, "type::feature", theme.Card, true)); got != "feature" {
+	if got := plain(widget.Label(styles, "type::feature", theme.Card, true, false)); got != "feature" {
 		t.Fatalf("compact scoped label = %q", got)
 	}
 }

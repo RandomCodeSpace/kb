@@ -17,6 +17,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 type runnerCall struct {
@@ -584,8 +585,12 @@ func TestPointerControlsAreRenderDerivedAndSessionScoped(t *testing.T) {
 			t.Fatal("stale pointer action changed reopened session")
 		}
 	}
+	// Spec section 10.5.3: bare motion resolves hover and nothing else, so the
+	// only command it may produce is pointer feedback.
 	if command := m.MouseHandler(80, 24)(tea.MouseMotionMsg{X: x, Y: line}); command != nil {
-		t.Fatal("pointer motion produced a model action")
+		if message := command(); !pointer.IsMessage(message) {
+			t.Fatalf("pointer motion produced a model action: %T", message)
+		}
 	}
 }
 

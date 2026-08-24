@@ -244,6 +244,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 	if pointer.IsMessage(message) {
 		switch {
+		case m.palette.IsOpen():
+			// Spec section 10.5.3: overlays receive mouse before the board, in
+			// the section 4 z-order, and the palette is the topmost surface.
+			return m, m.palette.Update(message)
 		case m.issueImport.IsOpen():
 			return m, m.issueImport.Update(message)
 		case m.action.open():
@@ -268,6 +272,13 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 		m.issueImport.IsOpen() || m.palette.IsOpen() || m.settings != nil || m.editor.IsOpen() ||
 		m.adr.IsOpen() || m.detail.IsOpen()) {
 		return m, nil
+	}
+	if m.palette.IsOpen() && cmdpalette.IsMessage(message) {
+		command := m.palette.Update(message)
+		if choice, ok := m.palette.ConsumeChoice(); ok {
+			return m.runPaletteAction(choice, command)
+		}
+		return m, command
 	}
 	if m.palette.IsOpen() {
 		switch msg := message.(type) {
@@ -980,11 +991,8 @@ func (m Model) View() tea.View {
 		hits = nil
 	}
 	if m.palette.IsOpen() {
-		// The palette is keyboard-only in this slice: it installs no pointer
-		// handler and clears the board's, so a click lands on nothing rather
-		// than on a board it is covering. Mouse wiring is the hover slice's.
 		content = m.palette.Overlay(content, m.width, m.height)
-		overlayMouse = nil
+		overlayMouse = m.palette.MouseHandler(m.width, m.height)
 		hits = nil
 	}
 	view := tea.NewView(content)
