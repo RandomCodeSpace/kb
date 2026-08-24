@@ -2,6 +2,9 @@ package cliapp
 
 import (
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -394,7 +397,6 @@ func TestProjectUsageErrors(t *testing.T) {
 		code int
 		want string
 	}{
-		{[]string{"project"}, 2, "usage: kb project"},
 		{[]string{"project", "wat"}, 2, `unknown project subcommand "wat"`},
 		{[]string{"project", "use"}, 2, "exactly one <name>"},
 		{[]string{"project", "use", "a", "b"}, 2, "exactly one <name>"},
@@ -409,6 +411,9 @@ func TestProjectUsageErrors(t *testing.T) {
 		if code != tc.code || !strings.Contains(stderr, tc.want) {
 			t.Errorf("%v: code=%d stderr=%q, want code %d containing %q", tc.args, code, stderr, tc.code, tc.want)
 		}
+	}
+	if _, stderr, code := runCmd(t, "project"); code != 2 || !strings.Contains(stderr, "usage: kb project") {
+		t.Errorf("bare project: code=%d stderr=%q", code, stderr)
 	}
 	out, _, code := runCmd(t, "project", "help")
 	if code != 0 || !strings.Contains(out, "usage: kb project") {
@@ -533,6 +538,165 @@ func TestProjectBackfillReportsStoreFailures(t *testing.T) {
 	}
 	if _, err := backfillProjects(st, defaultUser); err == nil {
 		t.Error("backfill over a closed store succeeded")
+	}
+}
+
+// stubTempFile is a stateTempFile whose write, sync, and close can each be
+// made to fail.
+type stubTempFile struct {
+	name                        string
+	writeErr, syncErr, closeErr error
+	closed                      bool
+}
+
+func (f *stubTempFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return len(p), nil
+}
+func (f *stubTempFile) Name() string { return f.name }
+func (f *stubTempFile) Sync() error  { return f.syncErr }
+func (f *stubTempFile) Close() error { f.closed = true; return f.closeErr }
+
+// stubStateOps builds ops around one stub temp file, defaulting every
+// filesystem call to success.
+func stubStateOps(file *stubTempFile, removed *bool) stateFileOps {
+	return stateFileOps{
+		mkdirAll:  func(string, os.FileMode) error { return nil },
+		createTmp: func(string, string) (stateTempFile, error) { return file, nil },
+		rename:    func(string, string) error { return nil },
+		remove:    func(string) error { *removed = true; return nil },
+	}
+}
+
+func TestSaveCLIStateReportsEveryWriteFailure(t *testing.T) {
+	boom := errors.New("boom")
+	cases := []struct {
+		name string
+		ops  func(*stubTempFile, *bool) stateFileOps
+		file *stubTempFile
+		want string
+	}{
+		{"mkdir", func(f *stubTempFile, r *bool) stateFileOps {
+			ops := stubStateOps(f, r)
+			ops.mkdirAll = func(string, os.FileMode) error { return boom }
+			return ops
+		}, &stubTempFile{}, "create data dir"},
+		{"createTemp", func(f *stubTempFile, r *bool) stateFileOps {
+			ops := stubStateOps(f, r)
+			ops.createTmp = func(string, string) (stateTempFile, error) { return nil, boom }
+			return ops
+		}, &stubTempFile{}, "create cli state temp file"},
+		{"write", stubStateOps, &stubTempFile{writeErr: boom}, "write cli state"},
+		{"sync", stubStateOps, &stubTempFile{syncErr: boom}, "sync cli state"},
+		{"close", stubStateOps, &stubTempFile{closeErr: boom}, "close cli state"},
+		{"rename", func(f *stubTempFile, r *bool) stateFileOps {
+			ops := stubStateOps(f, r)
+			ops.rename = func(string, string) error { return boom }
+			return ops
+		}, &stubTempFile{}, "publish cli state"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			removed := false
+			err := saveCLIStateWithOps(t.TempDir(), cliState{ActiveProject: "web"}, tc.ops(tc.file, &removed))
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !errors.Is(err, boom) {
+				t.Fatalf("err = %v, want %q wrapping boom", err, tc.want)
+			}
+			// Everything past the temp file's creation must clean it up.
+			if tc.name != "mkdir" && tc.name != "createTemp" && !removed {
+				t.Error("failed save left the temp file behind")
+			}
+		})
+	}
+	// The happy path publishes and leaves no temp file to remove.
+	removed := false
+	file := &stubTempFile{name: "tmp"}
+	if err := saveCLIStateWithOps(t.TempDir(), cliState{ActiveProject: "web"}, stubStateOps(file, &removed)); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if removed || !file.closed {
+		t.Errorf("published save removed=%v closed=%v", removed, file.closed)
+	}
+}
+
+// failingBackfiller lets the update half of the backfill fail.
+type failingBackfiller struct {
+	tasks []board.Task
+	err   error
+}
+
+func (f failingBackfiller) FilterTasks(string, store.TaskFilter) ([]board.Task, error) {
+	return f.tasks, nil
+}
+
+func (f failingBackfiller) UpdateTask(string, string, store.TaskPatch) (board.Task, error) {
+	return board.Task{}, f.err
+}
+
+func TestProjectBackfillStopsOnUpdateFailure(t *testing.T) {
+	boom := errors.New("boom")
+	stub := failingBackfiller{tasks: []board.Task{{ID: "a"}, {ID: "b"}}, err: boom}
+	changed, err := backfillProjects(stub, defaultUser)
+	if !errors.Is(err, boom) || changed != 0 {
+		t.Fatalf("backfill changed=%d err=%v, want 0 and boom", changed, err)
+	}
+}
+
+func TestProjectCommandsNeedAResolvableDataDir(t *testing.T) {
+	noProjectEnv(t)
+	// No --data, no KB_DATA, and no home directory to fall back on.
+	t.Setenv("KB_DATA", "")
+	t.Setenv("HOME", "")
+	for _, args := range [][]string{
+		{"project", "use", "web"},
+		{"project", "current"},
+		{"project", "list"},
+		{"add", "Task"},
+	} {
+		_, stderr, code := runCmd(t, args...)
+		if code == 0 || !strings.Contains(stderr, "cannot determine home directory") {
+			t.Errorf("%v: code=%d stderr=%q, want a data-directory failure", args, code, stderr)
+		}
+	}
+}
+
+func TestProjectUseReportsAnUnwritableDataDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := noProjectEnv(t)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if _, stderr, code := runCmd(t, "project", "use", "web", "--data", dir); code != 1 ||
+		!strings.Contains(stderr, "cli state") {
+		t.Fatalf("project use into a read-only dir: code=%d stderr=%q", code, stderr)
+	}
+}
+
+func TestProjectCurrentPropagatesWriterFailure(t *testing.T) {
+	dir := localEnv(t)
+	want := errors.New("output unavailable")
+	var stderr strings.Builder
+	code := Run([]string{"project", "current", "--json", "--data", dir}, coverageFailWriter{err: want}, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), want.Error()) {
+		t.Fatalf("project current writer failure: code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestProjectListPropagatesBackendFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	t.Setenv("KB_SERVER", srv.URL)
+	t.Setenv("KB_SERVER_TOKEN", "")
+	t.Setenv("KB_PROJECT", inboxProject)
+	if _, stderr, code := runCmd(t, "project", "list"); code != 1 || stderr == "" {
+		t.Fatalf("project list against a failing server: code=%d stderr=%q", code, stderr)
 	}
 }
 

@@ -109,10 +109,43 @@ func loadCLIState(dataDir string) (cliState, error) {
 	return state, nil
 }
 
+// stateTempFile is the part of a temp file saveCLIState uses, so the atomic
+// write can be exercised without a real filesystem.
+type stateTempFile interface {
+	io.Writer
+	Name() string
+	Sync() error
+	Close() error
+}
+
+// stateFileOps is the filesystem seam under saveCLIState, mirroring the one
+// the TUI's preference writer uses for the same reason: every failure of an
+// atomic write is a real path that has to be tested.
+type stateFileOps struct {
+	mkdirAll  func(string, os.FileMode) error
+	createTmp func(string, string) (stateTempFile, error)
+	rename    func(string, string) error
+	remove    func(string) error
+}
+
+var osStateFileOps = stateFileOps{
+	mkdirAll: os.MkdirAll,
+	createTmp: func(dir, pattern string) (stateTempFile, error) {
+		return os.CreateTemp(dir, pattern)
+	},
+	rename: os.Rename,
+	remove: os.Remove,
+}
+
 // saveCLIState writes state.json atomically: a temp file in the same
-// directory, then a rename, so a crash never leaves a half-written state.
+// directory, then a rename, so a crash never leaves a half-written state
+// behind to fail every later project command.
 func saveCLIState(dataDir string, state cliState) error {
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+	return saveCLIStateWithOps(dataDir, state, osStateFileOps)
+}
+
+func saveCLIStateWithOps(dataDir string, state cliState, ops stateFileOps) error {
+	if err := ops.mkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
 	data, err := json.Marshal(state)
@@ -120,20 +153,20 @@ func saveCLIState(dataDir string, state cliState) error {
 		return fmt.Errorf("encode cli state: %w", err)
 	}
 	data = append(data, '\n')
-	tmp, err := os.CreateTemp(dataDir, ".state-*.tmp")
+	tmp, err := ops.createTmp(dataDir, ".state-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create cli state temp file: %w", err)
 	}
 	published := false
 	defer func() {
 		if !published {
-			_ = os.Remove(tmp.Name())
+			_ = ops.remove(tmp.Name())
 		}
 	}()
 	if err := writeStateFile(tmp, data); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp.Name(), filepath.Join(dataDir, cliStateFile)); err != nil {
+	if err := ops.rename(tmp.Name(), filepath.Join(dataDir, cliStateFile)); err != nil {
 		return fmt.Errorf("publish cli state: %w", err)
 	}
 	published = true
@@ -143,7 +176,7 @@ func saveCLIState(dataDir string, state cliState) error {
 // writeStateFile writes, syncs, and closes the temp state file. os.File.Write
 // already reports a short write as an error, so there is nothing to check
 // beyond it.
-func writeStateFile(tmp *os.File, data []byte) error {
+func writeStateFile(tmp stateTempFile, data []byte) error {
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write cli state: %w", err)
@@ -301,6 +334,13 @@ func currentProjectOf(t board.Task) string {
 	return named[0]
 }
 
+// projectBackfiller is the slice of the store the backfill needs: *store.Store
+// satisfies it, and a stub can make either half fail.
+type projectBackfiller interface {
+	FilterTasks(user string, f store.TaskFilter) ([]board.Task, error)
+	UpdateTask(user, ref string, p store.TaskPatch) (board.Task, error)
+}
+
 // backfillProjects gives every task without exactly one project:: label the
 // invariant it is missing: none becomes project::inbox, several collapse to
 // the first. It is idempotent — a second pass finds nothing to do — and
@@ -311,7 +351,7 @@ func currentProjectOf(t board.Task) string {
 // for the tasks that predate it, and OpenLocalStore is the one startup path
 // every local surface already shares (it is where the legacy markdown import
 // lives too). Nothing is written once the board is clean.
-func backfillProjects(st *store.Store, user string) (int, error) {
+func backfillProjects(st projectBackfiller, user string) (int, error) {
 	tasks, err := st.FilterTasks(user, store.TaskFilter{})
 	if err != nil {
 		return 0, err
