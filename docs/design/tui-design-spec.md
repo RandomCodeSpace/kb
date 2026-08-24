@@ -3586,7 +3586,7 @@ Per §6.4, and additive to the per-view goldens the restyle slices already regen
 ### 10.9 Contestable calls
 
 Thirteen decisions in §10 are genuine judgement rather than derivation from the donor
-or from map #177. They should be confirmed before the section is locked. Everything
+or from map #177. All thirteen were ratified as recommended in #181 (map #177); the section is locked. Everything
 else in §10 either carries a receipt or falls out of a rule §1-§9 already fixed.
 
 **1. One clock at 20fps for the whole TUI, gated by an unmeasured benchmark.**
