@@ -1718,6 +1718,30 @@ taken on this problem and owes a test for it.
 
 ---
 
+#### 10.2.8 Ship celebration
+
+Added by ticket #191 (map #177), which found this effect specified nowhere in §10.
+The celebration is the board's acknowledgement that a card landed in DONE: the DONE
+column's meta row (§2.3) pulses `FgMuted` -> `StatusOK` twice over
+`Timing.CelebrateSteps` = 12 ticks (600ms), then settles. Both ship paths arm it —
+the card drop and the task action.
+
+The form is a flash, not a gradient sweep, because §10.1.2's four-surface gradient
+budget is closed and a fifth surface is a spec change, not a slice decision. The
+meta row is the one legal host: it is the row that just changed (`4 cards` ->
+`5 cards`) and it is column chrome, while every neighbour is spoken for — the
+header band never re-hues (§10.1.4), the card rail carries priority in every state
+(§2.4), and the scroll affordance's tint belongs to the linger (§10.3.4).
+
+Rules, all inherited and all binding: class B (§10.7.6 — below `FidelityFull` the
+effect does not run and its chain is never armed; `Graded()` read once at the arm,
+never on a render path); the determinism contract (§10.2.2 — the settled state is
+the effect's absence, so `View()` stays tick-invariant; generation-guarded,
+self-terminating); one motion per surface (§10.8.4 rule 4 — the busy predicate is
+read on every step, so a write starting mid-celebration takes the motion back on
+the same update); no-reflow parity (§10.4.4 — lit and dark differ in SGR alone).
+The widget seam is `widget.PanelOpts.MetaLit`; the zero value is the old behavior.
+
 ### 10.3 Timing tokens
 
 Timing is a token family for the same reason color is. A duration written inline at
@@ -1772,6 +1796,7 @@ difference does not reach this section.
 | `EllipsisStride` | `8` ticks (`400ms`) | Ticks per ellipsis step. crush's `ellipsisAnimSpeed = 8` |
 | `SuffixAfter` | `60` ticks (`3s`) | Ticks after settle at which the elapsed suffix appears |
 | `BrandBirthSteps` | `12` ticks (`600ms`) | Span of the launch-screen reveal (§10.6.6) |
+| `CelebrateSteps` | `12` ticks (`600ms`) | Span of the ship celebration (§10.2.8); its beat is derived, `CelebrateBeat() = span/4`, not a separate token |
 
 **One-shots.** `time.Duration`, scheduled once and awaited by message.
 
@@ -1788,7 +1813,7 @@ difference does not reach this section.
 | `AutoShipDelay` | `350ms` | Ship-check follow-up tick (migrated, value unchanged) |
 | `SimilarDelay` | `400ms` | Card editor similar-items debounce (migrated, unchanged) |
 
-Nineteen tokens. The rate/count split against the duration split is deliberate and
+Twenty tokens. The rate/count split against the duration split is deliberate and
 it drives the collapse rule of §10.3.9: zero means "do not run" to a clock and "run
 now" to a one-shot, and conflating them produces a test that spins the CPU.
 
