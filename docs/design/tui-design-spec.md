@@ -2800,7 +2800,7 @@ left, version right-aligned by computed gap — crush's `logo.go:94-105` shape.
 | Slot | Content | Style |
 |---|---|---|
 | Left | The board's resolved state string, from the existing status resolver (`board_view.go:380-394`): `loading board…`, `ready`, or an `error: …` line | The hue that resolver already returns (`FgMuted`, `StatusOK`, `StatusDanger`, `StatusWarn`) |
-| Right | The build version, rendered as `v` + the display version, or `devel` / `unknown` unprefixed | `FgSubtle` |
+| Right | The build version with a single leading `v` — the prefix is added only when the source string lacks one, since `debug.BuildInfo` already reports `v1.2.0`-form strings; `devel` / `unknown` render unprefixed | `FgSubtle` |
 
 Rules:
 
@@ -2880,7 +2880,8 @@ force-fit" applies to brand chrome as much as to components.
 rows, on `Canvas`, no chrome:
 
 - Horizontal origin `x0 = floor((frameW - markW) / 2)`.
-- Vertical origin `y0 = floor((frameH - 7) / 2)`; the odd remainder goes above.
+- Vertical origin `y0 = floor((frameH - 7) / 2)`; the odd remainder goes below
+  (the floor puts the extra row under the mark; `TestLaunchScreenGolden` pins it).
 - The meta row is centered on the same frame center, at width `BrandMetaW` capped to
   `frameW - 2*PageMarginX`.
 - If `frameW < BrandMinW` or `frameH < BrandMinH`, the full mark is dropped and only
