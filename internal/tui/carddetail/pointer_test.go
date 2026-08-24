@@ -38,7 +38,7 @@ func clickControl(t *testing.T, m *Model, label string) tea.Cmd {
 	}
 	x, y := renderedControlPoint(t, surface.Content, label)
 	press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-	if press == nil || m.Update(press()) != nil {
+	if press == nil || m.Update(busyResult(t, press)) != nil {
 		t.Fatalf("%q did not enter pressed state", label)
 	}
 	pressed := m.PointerSurface("board", pointerWidth, pointerHeight)
@@ -49,7 +49,7 @@ func clickControl(t *testing.T, m *Model, label string) tea.Cmd {
 	if command == nil {
 		t.Fatalf("%q ignored pointer release at %d,%d:\n%s", label, x, y, ansi.Strip(surface.Content))
 	}
-	activate := m.Update(command())
+	activate := m.Update(busyResult(t, command))
 	if activate == nil {
 		t.Fatalf("%q release produced no action", label)
 	}
@@ -91,7 +91,7 @@ func clickDetailText(t *testing.T, m *Model, text string) tea.Cmd {
 		t.Fatalf("detail text %q is not visible:\n%s", text, ansi.Strip(surface.Content))
 	}
 	press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-	if press == nil || m.Update(press()) != nil {
+	if press == nil || m.Update(busyResult(t, press)) != nil {
 		t.Fatalf("detail text %q did not enter pressed state", text)
 	}
 	pressed := m.PointerSurface("board", pointerWidth, pointerHeight)
@@ -109,7 +109,7 @@ func clickDetailText(t *testing.T, m *Model, text string) tea.Cmd {
 	if release == nil {
 		t.Fatalf("detail text %q ignored rerendered release", text)
 	}
-	activate := m.Update(release())
+	activate := m.Update(busyResult(t, release))
 	if activate == nil {
 		t.Fatalf("detail text %q release produced no activation", text)
 	}
@@ -136,7 +136,7 @@ func TestPointerSelectsExactCommentAndLinkRows(t *testing.T) {
 	if write == nil {
 		t.Fatal("selected comment delete did not start write")
 	}
-	m.Update(write())
+	m.Update(busyResult(t, write))
 	if st.deletedID != 9 {
 		t.Fatalf("pointer deleted comment %d, want 9", st.deletedID)
 	}
@@ -165,11 +165,11 @@ func TestPointerSurfaceAddsCommentLinksAndDeletesThroughExistingMutations(t *tes
 	if save == nil {
 		t.Fatal("visible comment save did not start the existing mutation")
 	}
-	reload := m.Update(save())
+	reload := m.Update(busyResult(t, save))
 	if st.addedBody != "pointer save" || reload == nil {
 		t.Fatalf("pointer comment save = body:%q reload:%v", st.addedBody, reload)
 	}
-	m.Update(reload())
+	m.Update(busyResult(t, reload))
 	m.Update(key('z'))
 
 	if command := clickControl(t, m, "Link"); command != nil {
@@ -182,11 +182,11 @@ func TestPointerSurfaceAddsCommentLinksAndDeletesThroughExistingMutations(t *tes
 	if link == nil {
 		t.Fatal("visible link save did not start the existing mutation")
 	}
-	reload = m.Update(link())
+	reload = m.Update(busyResult(t, link))
 	if st.blockerRef != "task-7" || st.blockedRef != "2" || reload == nil {
 		t.Fatalf("pointer link = %q -> %q reload:%v", st.blockerRef, st.blockedRef, reload)
 	}
-	m.Update(reload())
+	m.Update(busyResult(t, reload))
 	m.Update(key('z'))
 
 	if command := clickControl(t, m, "Del"); command != nil {
@@ -199,7 +199,7 @@ func TestPointerSurfaceAddsCommentLinksAndDeletesThroughExistingMutations(t *tes
 	if remove == nil {
 		t.Fatal("explicit confirmation did not start comment deletion")
 	}
-	reload = m.Update(remove())
+	reload = m.Update(busyResult(t, remove))
 	if st.deletedID != 4 || reload == nil {
 		t.Fatalf("pointer comment delete = id:%d reload:%v", st.deletedID, reload)
 	}
@@ -223,10 +223,10 @@ func TestPointerSurfaceCancelAndDestructiveBackdropHaveSafeSemantics(t *testing.
 		t.Fatal("destructive confirmation lost pointer ownership")
 	}
 	if command := surface.Pointer(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command != nil {
-		m.Update(command())
+		m.Update(busyResult(t, command))
 	}
 	if command := surface.Pointer(tea.MouseReleaseMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command != nil {
-		m.Update(command())
+		m.Update(busyResult(t, command))
 	}
 	if got := ansi.Strip(m.View(pointerWidth, pointerHeight)); !strings.Contains(got, "Confirm delete") {
 		t.Fatalf("destructive confirmation was not retained:\n%s", got)
@@ -244,7 +244,7 @@ func TestPointerSurfaceWheelAndIdleBackdropRespectPaneOwnership(t *testing.T) {
 		t.Fatal("idle detail has no pointer surface")
 	}
 	if command := surface.Pointer(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown}); command != nil {
-		m.Update(command())
+		m.Update(busyResult(t, command))
 		if m.scrollOffset() != 0 {
 			t.Fatal("wheel outside the detail pane scrolled content")
 		}
@@ -252,7 +252,7 @@ func TestPointerSurfaceWheelAndIdleBackdropRespectPaneOwnership(t *testing.T) {
 	if command := surface.Pointer(tea.MouseWheelMsg{X: 40, Y: 8, Button: tea.MouseWheelDown}); command == nil {
 		t.Fatal("wheel inside the detail pane was ignored")
 	} else {
-		followup := m.Update(command())
+		followup := m.Update(busyResult(t, command))
 		if followup == nil {
 			t.Fatal("detail wheel did not produce scroll action")
 		}
@@ -270,7 +270,7 @@ func TestPointerSurfaceWheelAndIdleBackdropRespectPaneOwnership(t *testing.T) {
 	if command == nil {
 		t.Fatal("idle backdrop did not request detail dismissal")
 	}
-	message, _ := m.ResolvePointerMessage(command())
+	message, _ := m.ResolvePointerMessage(busyResult(t, command))
 	m.Update(message)
 	if m.IsOpen() {
 		t.Fatal("idle backdrop did not close detail")
@@ -282,14 +282,14 @@ func TestPointerSurfaceRejectsReleaseFromPriorDetailSession(t *testing.T) {
 	surface := m.PointerSurface("board", pointerWidth, pointerHeight)
 	x, y := renderedControlPoint(t, surface.Content, "Comment")
 	press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-	if press == nil || m.Update(press()) != nil {
+	if press == nil || m.Update(busyResult(t, press)) != nil {
 		t.Fatal("detail control did not enter pressed state")
 	}
 	release := m.PointerSurface("board", pointerWidth, pointerHeight).Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
 	if release == nil {
 		t.Fatal("detail release produced no message")
 	}
-	stale := m.Update(release())
+	stale := m.Update(busyResult(t, release))
 	if stale == nil {
 		t.Fatal("detail release produced no guarded action")
 	}

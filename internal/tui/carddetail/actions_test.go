@@ -103,7 +103,7 @@ func openActionModel(t *testing.T, st *actionStore) *Model {
 	if load == nil {
 		t.Fatal("detail open did not load enrichment")
 	}
-	if command := m.Update(load()); command != nil {
+	if command := m.Update(busyResult(t, load)); command != nil {
 		t.Fatalf("initial load returned command %v", command)
 	}
 	return &m
@@ -131,7 +131,7 @@ func TestCommentAddPreservesRefusedInputAndReloadsAcknowledgedWrite(t *testing.T
 	if m.action == actionNone || !m.saving {
 		t.Fatal("Escape dismissed an in-flight comment write")
 	}
-	if reload := m.Update(save()); reload != nil || m.action == actionNone || m.saving || !m.statusIsError {
+	if reload := m.Update(busyResult(t, save)); reload != nil || m.action == actionNone || m.saving || !m.statusIsError {
 		t.Fatalf("refused write = reload:%v action:%v busy:%v error:%v", reload, m.action, m.saving, m.statusIsError)
 	}
 	if got := m.commentInput.Value(); got != preserved {
@@ -143,14 +143,14 @@ func TestCommentAddPreservesRefusedInputAndReloadsAcknowledgedWrite(t *testing.T
 
 	st.addErr = nil
 	save = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
-	reload := m.Update(save())
+	reload := m.Update(busyResult(t, save))
 	if reload == nil || m.action != actionNone || m.saving || !m.ConsumeChanged() || m.ConsumeChanged() {
 		t.Fatalf("acknowledged write = reload:%v action:%v busy:%v", reload, m.action, m.saving)
 	}
 	if st.addedTask != "task-7" || st.addedAuthor != "alice" || st.addedBody != "hello[31m red\nnext" {
 		t.Fatalf("AddComment args = task:%q author:%q body:%q", st.addedTask, st.addedAuthor, st.addedBody)
 	}
-	if command := m.Update(reload()); command != nil || len(m.comments) != 1 || m.comments[0].Body != "hello[31m red\nnext" {
+	if command := m.Update(busyResult(t, reload)); command != nil || len(m.comments) != 1 || m.comments[0].Body != "hello[31m red\nnext" {
 		t.Fatalf("post-write reload = command:%v comments:%+v", command, m.comments)
 	}
 }
@@ -173,11 +173,11 @@ func TestCommentDeleteRequiresConfirmationAndEscapeDisarms(t *testing.T) {
 	if remove == nil || st.deletedID != 0 {
 		t.Fatalf("delete command = %v, store called synchronously with %d", remove, st.deletedID)
 	}
-	reload := m.Update(remove())
+	reload := m.Update(busyResult(t, remove))
 	if reload == nil || st.deletedID != 9 || m.action != actionNone {
 		t.Fatalf("delete result = reload:%v id:%d action:%v", reload, st.deletedID, m.action)
 	}
-	m.Update(reload())
+	m.Update(busyResult(t, reload))
 	if len(m.comments) != 1 || m.comments[0].ID != 4 {
 		t.Fatalf("comments after delete = %+v", m.comments)
 	}
@@ -273,7 +273,7 @@ func TestDirectionalLinkAddAndConfirmedUnlink(t *testing.T) {
 	if link == nil {
 		t.Fatal("link input did not start a write")
 	}
-	if reload := m.Update(link()); reload != nil || m.action == actionNone || m.linkInput.Value() != "2" || !m.statusIsError {
+	if reload := m.Update(busyResult(t, link)); reload != nil || m.action == actionNone || m.linkInput.Value() != "2" || !m.statusIsError {
 		t.Fatalf("refused link = reload:%v action:%v target:%q error:%v", reload, m.action, m.linkInput.Value(), m.statusIsError)
 	}
 	if st.blockerRef != "2" || st.blockedRef != "task-7" {
@@ -282,11 +282,11 @@ func TestDirectionalLinkAddAndConfirmedUnlink(t *testing.T) {
 
 	st.linkErr = nil
 	link = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	reload := m.Update(link())
+	reload := m.Update(busyResult(t, link))
 	if reload == nil || m.action != actionNone || !strings.Contains(m.statusMessage, "#2 now blocks #7") {
 		t.Fatalf("link success = reload:%v action:%v status:%q", reload, m.action, m.statusMessage)
 	}
-	m.Update(reload())
+	m.Update(busyResult(t, reload))
 
 	st.links = store.TaskLinks{
 		Blocks:    []board.Task{{ID: "task-8", Seq: 8, Status: board.StatusTodo}},
@@ -300,7 +300,7 @@ func TestDirectionalLinkAddAndConfirmedUnlink(t *testing.T) {
 	if unlink == nil {
 		t.Fatal("unlink confirmation did not start write")
 	}
-	reload = m.Update(unlink())
+	reload = m.Update(busyResult(t, unlink))
 	if reload == nil || st.unlinkA != "task-7" || st.unlinkB != "task-2" {
 		t.Fatalf("Unlink args = %q, %q reload:%v", st.unlinkA, st.unlinkB, reload)
 	}
@@ -316,10 +316,10 @@ func TestStaleMutationCannotCrossDetailSession(t *testing.T) {
 		t.Fatal("old session save was nil")
 	}
 	newLoad := m.Open(board.Task{ID: "task-8", Seq: 8, Title: "Eight", Status: board.StatusDoing})
-	if command := m.Update(save()); command != nil || m.TaskID() != "task-8" || m.ConsumeChanged() {
+	if command := m.Update(busyResult(t, save)); command != nil || m.TaskID() != "task-8" || m.ConsumeChanged() {
 		t.Fatalf("stale mutation changed new session: command:%v task:%q", command, m.TaskID())
 	}
-	m.Update(newLoad())
+	m.Update(busyResult(t, newLoad))
 	if len(m.comments) != 0 {
 		t.Fatalf("new session adopted old task comments: %+v", m.comments)
 	}
@@ -338,7 +338,7 @@ func TestMutationDuringEnrichmentQueuesFreshSuccessor(t *testing.T) {
 	if save == nil {
 		t.Fatal("comment write did not start")
 	}
-	if command := m.Update(save()); command != nil || !m.reloadPending || !m.loading {
+	if command := m.Update(busyResult(t, save)); command != nil || !m.reloadPending || !m.loading {
 		t.Fatalf("write during load = command:%v pending:%v loading:%v", command, m.reloadPending, m.loading)
 	}
 	successor := m.Update(detailLoadedMsg{
@@ -348,7 +348,7 @@ func TestMutationDuringEnrichmentQueuesFreshSuccessor(t *testing.T) {
 	if successor == nil || len(m.comments) != 0 || m.reloadPending || !m.loading {
 		t.Fatalf("stale load adoption = successor:%v comments:%+v pending:%v loading:%v", successor, m.comments, m.reloadPending, m.loading)
 	}
-	if command := m.Update(successor()); command != nil || len(m.comments) != 1 || m.comments[0].Body != "new comment" {
+	if command := m.Update(busyResult(t, successor)); command != nil || len(m.comments) != 1 || m.comments[0].Body != "new comment" {
 		t.Fatalf("fresh successor = command:%v comments:%+v", command, m.comments)
 	}
 }
@@ -437,7 +437,7 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 	if m.action != actionNone || m.statusMessage != "blocker links are still loading" {
 		t.Fatalf("loading links action = action:%v status:%q", m.action, m.statusMessage)
 	}
-	m.Update(load())
+	m.Update(busyResult(t, load))
 	m.commentsErr = errors.New("comments failed")
 	m.beginAction(actionDeleteComment)
 	if !m.statusIsError || !strings.Contains(m.statusMessage, "unavailable") {
@@ -493,7 +493,7 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 	if link == nil {
 		t.Fatal("outgoing link command was nil")
 	}
-	result := link().(mutationCompletedMsg)
+	result := busyResult(t, link).(mutationCompletedMsg)
 	if st.blockerRef != "task" || st.blockedRef != "2" || result.err != nil {
 		t.Fatalf("outgoing link = %q -> %q, %v", st.blockerRef, st.blockedRef, result.err)
 	}
@@ -540,7 +540,10 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 		t.Fatalf("confirm footer = %q", got)
 	}
 	footerModel.saving = true
-	if got := footerModel.actionFooter(80); !strings.Contains(got, "progress") {
+	// Spec section 10.8.7: the write's busy line is the plain tier's label in
+	// the footer band, and the hint that is still live survives as the tail.
+	if got := ansi.Strip(footerModel.actionFooter(80)); !strings.Contains(got, "saving") ||
+		!strings.Contains(got, "esc stays here") {
 		t.Fatalf("saving footer = %q", got)
 	}
 	footerModel.saving = false
@@ -551,7 +554,9 @@ func TestActionEdgeStatesAndKeyboardEditing(t *testing.T) {
 		t.Fatalf("idle controls disappeared after status = %q", got)
 	}
 	footerModel.statusIsError = true
-	if got := footerModel.renderBody(80); !strings.Contains(got, "error: visible result") {
+	// A failure leaves the scrolling body for the pinned block of spec section
+	// 10.8.5, directly above the action row that will retry it.
+	if got := ansi.Strip(strings.Join(footerModel.pinnedErrorRows(80), "\n")); !strings.Contains(got, "▲ visible result") {
 		t.Fatalf("error status disappeared = %q", got)
 	}
 	footerModel.open = true
@@ -579,7 +584,7 @@ func TestDeleteFailuresKeepSelectorsAndInputs(t *testing.T) {
 	if remove == nil {
 		t.Fatal("comment delete command was nil")
 	}
-	if reload := m.Update(remove()); reload != nil || m.action != actionDeleteComment || !m.statusIsError {
+	if reload := m.Update(busyResult(t, remove)); reload != nil || m.action != actionDeleteComment || !m.statusIsError {
 		t.Fatalf("failed comment delete = reload:%v action:%v error:%v", reload, m.action, m.statusIsError)
 	}
 	m.cancelAction() // disarm confirmation retained across the refused write.
@@ -592,7 +597,7 @@ func TestDeleteFailuresKeepSelectorsAndInputs(t *testing.T) {
 	if remove == nil {
 		t.Fatal("link delete command was nil")
 	}
-	if reload := m.Update(remove()); reload != nil || m.action != actionDeleteLink || !m.statusIsError {
+	if reload := m.Update(busyResult(t, remove)); reload != nil || m.action != actionDeleteLink || !m.statusIsError {
 		t.Fatalf("failed unlink = reload:%v action:%v error:%v", reload, m.action, m.statusIsError)
 	}
 	m.saving = true

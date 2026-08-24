@@ -852,7 +852,9 @@ func TestRootRoutesSettingsWithoutStoppingBoardPolling(t *testing.T) {
 		t.Fatal("s did not open and load settings")
 	}
 	updateTestModel(t, &root, command())
-	if !strings.Contains(root.View().Content, "AI SETTINGS") {
+	// The section label carries the ramp of spec section 10.1.2, so its runs are
+	// per-cluster and the assertion reads the stripped frame.
+	if !strings.Contains(ansi.Strip(root.View().Content), "AI SETTINGS") {
 		t.Fatalf("root did not render settings:\n%s", root.View().Content)
 	}
 	if poll := updateTestModel(t, &root, pollTickMsg{}); poll == nil {

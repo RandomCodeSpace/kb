@@ -26,6 +26,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/issueimport"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
 
 type stubBoardReader struct {
@@ -152,13 +153,17 @@ func collapseInteractionTiming(m Model) Model {
 
 // isInputFeelMsg reports whether a message is one of the section 10.3 timers
 // the root now batches onto a domain command: the destructive-prompt grace, the
-// double-click window and the footer-notice TTL. A test that asserts what one
-// keystroke did asserts about the domain message, not about the timers riding
-// along beside it.
+// double-click window and the footer-notice TTL. The two motion tiers of section
+// 10.2.4 ride along the same way and are equally not domain messages. A test
+// that asserts what one keystroke did asserts about the domain message, not
+// about the timers beside it.
 func isInputFeelMsg(message tea.Msg) bool {
 	switch message.(type) {
 	case graceQuietMsg, graceMaxMsg, graceReopenMsg, noticeExpiredMsg,
 		spinner.TickMsg, scrollSettledMsg, shipCelebrationMsg:
+		return true
+	}
+	if isSpinnerTickMsg(message) {
 		return true
 	}
 	_, clickWindow := (pointer.Clicks{}).Expire(message)
@@ -295,9 +300,15 @@ func resultSkippingSpinnerTick(t *testing.T, command tea.Cmd) tea.Msg {
 	return nil
 }
 
+// isSpinnerTickMsg covers both tiers of spec section 10.2.4: bubbles' plain
+// tick and the branded engine's own step. Neither is a result.
 func isSpinnerTickMsg(message tea.Msg) bool {
-	_, tick := message.(spinner.TickMsg)
-	return tick
+	switch message.(type) {
+	case spinner.TickMsg, spin.StepMsg:
+		return true
+	default:
+		return false
+	}
 }
 
 func TestIssueImportOwnsRootInputAndCancelsLiftOnOpen(t *testing.T) {
@@ -376,12 +387,12 @@ func TestDriftReviewBlocksTaskActionsAndBoardMouse(t *testing.T) {
 	if provenance == nil {
 		t.Fatal("drift provenance command is nil")
 	}
-	updateTestModel(t, &m, provenance())
+	updateTestModel(t, &m, resultSkippingSpinnerTick(t, provenance))
 	check := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if check == nil {
 		t.Fatal("drift check command is nil")
 	}
-	updateTestModel(t, &m, check())
+	updateTestModel(t, &m, resultSkippingSpinnerTick(t, check))
 	if !m.detail.OwnsInput() {
 		t.Fatal("drift review does not own detail input")
 	}
@@ -414,10 +425,11 @@ func TestDriftReviewPreservesGlobalInterrupt(t *testing.T) {
 			drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
 			provenance := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'v', Text: "v"})
 			if stage != "busy" {
-				updateTestModel(t, &m, provenance())
+				updateTestModel(t, &m, resultSkippingSpinnerTick(t, provenance))
 			}
 			if stage == "review" {
-				updateTestModel(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})())
+				check := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
+				updateTestModel(t, &m, resultSkippingSpinnerTick(t, check))
 			}
 			quit := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 			if quit == nil || !m.stopped {
@@ -1476,11 +1488,11 @@ func TestBoardReloadReconcilesOpenDetailAndCoalescesEnrichment(t *testing.T) {
 		t.Fatalf("board refresh did not replace the open task snapshot:\n%s", view)
 	}
 
-	successor := updateTestModel(t, &m, firstDetailLoad())
+	successor := updateTestModel(t, &m, resultSkippingSpinnerTick(t, firstDetailLoad))
 	if successor == nil {
 		t.Fatal("root discarded the coalesced detail successor")
 	}
-	updateTestModel(t, &m, successor())
+	updateTestModel(t, &m, resultSkippingSpinnerTick(t, successor))
 	if reader.commentLoads != 2 || !strings.Contains(ansi.Strip(m.View().Content), "enrichment 2") {
 		t.Fatalf("coalesced enrichment = loads %d view:\n%s", reader.commentLoads, ansi.Strip(m.View().Content))
 	}
@@ -1491,7 +1503,7 @@ func TestBoardReloadReconcilesOpenDetailAndCoalescesEnrichment(t *testing.T) {
 	if refresh == nil {
 		t.Fatal("idle board refresh did not reload detail enrichment")
 	}
-	updateTestModel(t, &m, refresh())
+	updateTestModel(t, &m, resultSkippingSpinnerTick(t, refresh))
 	if reader.commentLoads != 3 || !strings.Contains(ansi.Strip(m.View().Content), "idle refresh") {
 		t.Fatalf("idle detail refresh = loads %d view:\n%s", reader.commentLoads, ansi.Strip(m.View().Content))
 	}

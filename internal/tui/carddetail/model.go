@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
@@ -25,6 +26,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 	"github.com/RandomCodeSpace/kb/internal/tui/widget"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
 
 const (
@@ -116,6 +118,16 @@ type Model struct {
 	driftChoices    []store.ImportLink
 	driftSelection  int
 	driftResult     forge.Drift
+
+	// The two busy tiers of spec section 10.2.4. brand is the drift check's
+	// branded engine; plain is the local write's dots. now is the injected wall
+	// clock the branded elapsed suffix reads through, and nothing else in this
+	// package reads one.
+	brand        spin.Engine
+	brandStarted time.Time
+	frontMost    bool
+	now          func() time.Time
+	plain        spinner.Model
 }
 
 // New creates a closed detail pane. A nil reader still shows board-resident
@@ -129,6 +141,7 @@ func New(reader Reader, user string, styles *theme.Styles) Model {
 	return Model{
 		reader: reader, writer: writer, user: user, width: defaultWidth, height: defaultHeight,
 		styles: styles, renderMarkdown: markdownWith(styles), body: newBodyViewport(),
+		plain: newPlainSpinner(styles),
 	}
 }
 
@@ -158,7 +171,16 @@ func (m *Model) SetStyles(styles *theme.Styles) {
 	}
 	m.styles = styles
 	m.renderMarkdown = markdownWith(styles)
+	m.plain.Spinner = styles.Spinner
+	m.plain.Style = styles.Work.Label
+	if m.brandBusy() {
+		m.configureBrand()
+	}
 }
+
+// SetClock injects the wall clock the branded engine's elapsed suffix reads
+// through, so a test can pin the suffix without pinning the frame.
+func (m *Model) SetClock(now func() time.Time) { m.now = now }
 
 // IsOpen reports whether the overlay currently owns input and rendering.
 func (m Model) IsOpen() bool { return m.open }
@@ -270,6 +292,22 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return command
 	}
 	switch msg := message.(type) {
+	case spin.StepMsg:
+		return m.brandStep(msg)
+	case spinner.TickMsg:
+		// The plain chain terminates the moment its gate settles, so an idle
+		// pane costs no wake-ups (spec section 10.2.2).
+		if !m.plainBusy() {
+			return nil
+		}
+		next, command := m.plain.Update(msg)
+		m.plain = next
+		// Only the section's own busy row lives in the cached body; the footer
+		// band is composed on every layout pass and needs no rebuild.
+		if m.loading {
+			m.rebuildBody()
+		}
+		return command
 	case actionChoicePointerMsg:
 		m.updateActionChoice(msg.index)
 		return nil
@@ -452,7 +490,7 @@ func (m *Model) startLoad() tea.Cmd {
 	m.linksErr = nil
 	m.tombstoneErr = nil
 	m.rebuildBody()
-	return m.load(m.task.ID, m.generation)
+	return tea.Batch(m.load(m.task.ID, m.generation), m.startPlain())
 }
 
 // View renders the centered overlay panel sized for the current terminal. The
@@ -489,13 +527,6 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 	paneWidth, paneHeight := layout.opts.Width, layout.opts.Height
 	x := max((width-paneWidth)/2, 0)
 	y := max((height-paneHeight)/2, 0)
-	layers := []*lipgloss.Layer{lipgloss.NewLayer(background)}
-	if layout.elevated {
-		layers = append(layers, widget.OverlayLayers(m.styles, layout.opts, x, y)...)
-	} else {
-		layers = append(layers, lipgloss.NewLayer(widget.Overlay(m.styles, layout.opts)).X(x).Y(y).Z(1))
-	}
-	content := fitTerminal(lipgloss.NewCompositor(layers...).Render(), width, height)
 
 	bounds := pointer.Rect{X0: 0, Y0: 0, X1: width, Y1: height}
 	pane := pointer.Rect{X0: x, Y0: y, X1: x + paneWidth, Y1: y + paneHeight}
@@ -516,9 +547,11 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 	displayWidth := layout.contentWidth
 	footerY := y + paneHeight - 1
 	// The action row is pinned directly above the footer band, so the buttons
-	// land on the row the scroll window stops short of.
-	actionY := y + 1 + layout.bodyRows
-	bodyBottom := actionY
+	// land on the row the scroll window stops short of. The error block of spec
+	// section 10.8.5 sits between the two and moves the row down by its own
+	// height, which is why both come off the same subtraction.
+	actionY := y + 1 + layout.bodyRows + layout.pinnedRows
+	bodyBottom := y + 1 + layout.bodyRows
 	if len(layout.controls) == 0 {
 		bodyBottom = footerY
 	}
@@ -566,6 +599,25 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 			}
 		}
 	}
+	// Rows 6 and 9 of the machine of spec section 10.5.2: the pointer can stand
+	// still while the content moves under it, so hover is re-derived from the
+	// retained point against this frame's map. The map is byte-for-byte
+	// identical between the hovered and unhovered render of the same content
+	// (section 10.5.3), so re-laying the body after a change moves nothing and
+	// cannot feed its own reflow back into the pointer.
+	if next := m.pointerState.Reresolve(hitMap); next.Hovered() != m.pointerState.Hovered() {
+		m.pointerState = next
+		m.rebuildBody()
+		layout = m.layout(width, height)
+	}
+
+	layers := []*lipgloss.Layer{lipgloss.NewLayer(background)}
+	if layout.elevated {
+		layers = append(layers, widget.OverlayLayers(m.styles, layout.opts, x, y)...)
+	} else {
+		layers = append(layers, lipgloss.NewLayer(widget.Overlay(m.styles, layout.opts)).X(x).Y(y).Z(1))
+	}
+	content := fitTerminal(lipgloss.NewCompositor(layers...).Render(), width, height)
 	return pointer.Surface{Content: content, Pointer: hitMap.Handler()}
 }
 
@@ -579,6 +631,7 @@ type paneLayout struct {
 	footerWidth  int
 	controls     []detailPointerControl
 	bodyRows     int
+	pinnedRows   int
 }
 
 func (m *Model) layout(width, height int) paneLayout {
@@ -589,6 +642,7 @@ func (m *Model) layout(width, height int) paneLayout {
 	contentWidth := m.contentWidth(paneWidth)
 
 	controls := m.pointerFooterControls(m.actionRowWidth(paneWidth))
+	pinned := m.pinnedErrorRows(paneWidth)
 	bodyRows := m.bodyRowCount(paneWidth, paneHeight)
 	maxScroll := max(0, len(m.bodyLines)-bodyRows)
 	// The viewport owns the offset and has already clamped it against this
@@ -597,10 +651,13 @@ func (m *Model) layout(width, height int) paneLayout {
 	start := min(m.scrollOffset(), maxScroll)
 	end := min(start+bodyRows, len(m.bodyLines))
 	body := append([]string(nil), m.bodyLines[start:end]...)
-	if len(controls) > 0 {
+	if len(controls) > 0 || len(pinned) > 0 {
 		for len(body) < bodyRows {
 			body = append(body, "")
 		}
+		body = append(body, pinned...)
+	}
+	if len(controls) > 0 {
 		body = append(body, widget.OverlayRow(m.styles, m.actionButtonRow(controls), paneWidth))
 	}
 	hint := ""
@@ -620,12 +677,14 @@ func (m *Model) layout(width, height int) paneLayout {
 			Hint:   hint,
 			Width:  paneWidth,
 			Height: paneHeight,
+			Armed:  m.Armed(),
 		},
 		elevated:     elevated,
 		contentWidth: contentWidth,
 		footerWidth:  footerWidth,
 		controls:     controls,
 		bodyRows:     bodyRows,
+		pinnedRows:   len(pinned),
 	}
 }
 
@@ -636,14 +695,15 @@ func (m Model) actionRowWidth(paneWidth int) int {
 }
 
 // bodyRowCount is the scrollable body height. The pinned action row spends one
-// of the panel's body rows whenever the pane's state offers any action, so the
-// scroll window and the pointer viewports resolve it from one place.
+// of the panel's body rows whenever the pane's state offers any action, and the
+// pinned error block of spec section 10.8.5 spends one per wrapped line, so the
+// scroll window and the pointer viewports resolve both from one place.
 func (m Model) bodyRowCount(paneWidth, paneHeight int) int {
 	rows := max(paneHeight-2, 0)
 	if len(m.pointerFooterControls(m.actionRowWidth(paneWidth))) > 0 {
 		rows = max(rows-1, 0)
 	}
-	return rows
+	return max(rows-len(m.pinnedErrorRows(paneWidth)), 0)
 }
 
 // headerTitle is the header band's bold title: the emoji and the card title.
@@ -792,11 +852,48 @@ func (m Model) renderBody(width int) string {
 // heading and becomes the section break, the rest are body rows.
 func (m Model) paneRows(body string, width int) []string {
 	heading, rest, _ := strings.Cut(body, "\n")
-	rows := []string{widget.Section(m.styles, heading, "", width)}
-	for _, line := range strings.Split(rest, "\n") {
-		rows = append(rows, m.row(line, width))
+	rows := []string{m.section(heading, "", width)}
+	for index, line := range strings.Split(rest, "\n") {
+		// Spec section 10.5.1: hover raises a choice row panel edge to panel
+		// edge, so the row's padding carries the same slot as its content. A row
+		// that is not activatable is not hoverable and keeps the panel surface.
+		on := m.styles.RowSurface(m.hoveredChoiceRow(index + 1))
+		rows = append(rows, widget.OverlayRowOn(m.styles, m.styles.On(theme.FgBase, on).Render(line), width, on))
 	}
 	return rows
+}
+
+// hoveredChoiceRow reports whether the logical body row at this index carries
+// the hovered choice. The indices are the ones the pointer viewports of
+// PointerSurface register their regions at, resolved here from the same
+// arithmetic so a lit row and a clickable row can never disagree.
+func (m Model) hoveredChoiceRow(row int) bool {
+	if m.driftMode == driftSelect && m.driftBusy == "" {
+		for index := range m.driftChoices {
+			if row == 4+index && m.pointerState.IsHovered(detailDriftControlID(index)) {
+				return true
+			}
+		}
+		return false
+	}
+	if (m.action != actionDeleteComment && m.action != actionDeleteLink) || m.saving {
+		return false
+	}
+	count := len(m.comments)
+	if m.action == actionDeleteLink {
+		count = len(m.linkChoices())
+	}
+	start, end := selectionWindow(count, m.selection, max(m.height-10, 3))
+	logicalRow := 2
+	if start > 0 {
+		logicalRow++
+	}
+	for index := start; index < end; index++ {
+		if row == logicalRow+index-start && m.pointerState.IsHovered(detailActionChoiceControlID(m.action, index)) {
+			return true
+		}
+	}
+	return false
 }
 
 // row renders one body row of plain text on the panel surface.
@@ -804,12 +901,64 @@ func (m Model) row(text string, width int) string {
 	return widget.OverlayRow(m.styles, m.styles.Overlay.Surf.Render(text), width)
 }
 
+// section renders one section break carrying the pane's current mode. Spec
+// section 10.1.4: the mode is a property of the overlay and is passed to the
+// widget structurally, never recovered by matching a rendered label.
+func (m Model) section(label, count string, width int) string {
+	return widget.SectionRamp(m.styles, label, count, width, m.sectionRamp())
+}
+
+// sectionRamp is the state-dependent chrome recolor of spec section 10.1.4. The
+// lead is the same tint in both destructive states, so arming does not re-tint
+// the label; it deepens the tail into the alarm hue, which reads as an
+// escalation of a state the user is already in rather than a new one.
+func (m Model) sectionRamp() theme.Ramp {
+	switch {
+	case m.Armed():
+		return theme.GradSectionArmed
+	case m.IsDestructivePrompt():
+		return theme.GradSectionDanger
+	default:
+		return theme.GradSection
+	}
+}
+
+// Armed reports whether the pane's destructive prompt has taken its second
+// step. Spec section 1.9 Armed, which is the one state in the TUI that recolors
+// an overlay header band (section 10.1.4, ratified call 6).
+func (m Model) Armed() bool { return m.confirm && m.IsDestructivePrompt() }
+
+// errorRows is the failure block of spec section 10.8.5 as panel rows: TintDanger
+// on OverlaySurf, wrapped to ErrorMaxLines with a hanging indent, and a tail
+// naming the control that will run the operation again.
+func (m Model) errorRows(err error, key string, width int) []string {
+	if err == nil {
+		return nil
+	}
+	return m.errorTextRows(err.Error(), key, width)
+}
+
+func (m Model) errorTextRows(message, key string, width int) []string {
+	lines := widget.Error(m.styles, widget.ErrorOpts{
+		Message:  message,
+		Key:      key,
+		On:       theme.OverlaySurf,
+		Width:    m.contentWidth(width),
+		MaxLines: m.styles.Metrics.ErrorMaxLines,
+	})
+	rows := make([]string, 0, len(lines))
+	for _, line := range lines {
+		rows = append(rows, widget.OverlayRow(m.styles, line, width))
+	}
+	return rows
+}
+
 // blank is one empty body row: a section separator that is not a break.
 func (m Model) blank(width int) string { return m.row("", width) }
 
 func (m Model) detailRows(width int) []string {
 	content := m.contentWidth(width)
-	rows := []string{widget.Section(m.styles, "DETAIL", "", width)}
+	rows := []string{m.section("DETAIL", "", width)}
 	rows = append(rows, m.fieldRows(width)...)
 	if strings.TrimSpace(m.task.Desc) != "" {
 		rows = append(rows, m.blank(width))
@@ -820,14 +969,42 @@ func (m Model) detailRows(width int) []string {
 	}
 	rows = append(rows, m.contextRows(width)...)
 	rows = append(rows, m.commentRows(content, width)...)
-	if m.statusMessage != "" {
-		prefix := "status: "
-		if m.statusIsError {
-			prefix = "error: "
-		}
-		rows = append(rows, m.blank(width), m.row(prefix+m.statusMessage, width))
+	// A failure is not a body row: spec section 10.8.5 pins it directly above
+	// the action row so the error and the control that will retry it are
+	// adjacent. A non-failure notice is ordinary body text and stays here.
+	if m.statusMessage != "" && !m.statusIsError {
+		rows = append(rows, m.blank(width), m.row("status: "+m.statusMessage, width))
 	}
 	return rows
+}
+
+// pinnedErrorRows is the panel-level failure block of spec section 10.8.5,
+// pinned directly above the action row. The tail names the control that started
+// the operation rather than growing a Retry button for an action that already
+// carries its own variant.
+func (m Model) pinnedErrorRows(width int) []string {
+	if !m.statusIsError || m.statusMessage == "" {
+		return nil
+	}
+	return m.errorTextRows(m.statusMessage, m.retryLabel(), width)
+}
+
+// retryLabel is the button the failed operation belongs to. A pane with no
+// action mode has no retryable trigger and so carries no tail.
+func (m Model) retryLabel() string {
+	if m.driftMode != driftNone {
+		return "Check selected"
+	}
+	switch m.action {
+	case actionAddComment:
+		return "Save comment"
+	case actionAddLink:
+		return "Add link"
+	case actionDeleteComment, actionDeleteLink:
+		return "Delete"
+	default:
+		return ""
+	}
 }
 
 // fieldRows are the card's own attributes as the key/value rows of spec
@@ -882,7 +1059,7 @@ func (m Model) checklistRows(width int) []string {
 			done++
 		}
 	}
-	rows := []string{widget.Section(m.styles, "CHECKLIST",
+	rows := []string{m.section("CHECKLIST",
 		fmt.Sprintf("%d/%d", done, len(m.task.Checks)), width)}
 	for _, check := range m.task.Checks {
 		state := widget.CheckOpen
@@ -907,30 +1084,45 @@ func (m Model) contextRows(width int) []string {
 	}
 	gate, state := renderCompletionGate(m.task, m.links, m.loading, m.linksErr)
 	rows = append(rows, widget.OverlayRow(m.styles, m.styles.On(state, theme.OverlaySurf).Render(gate), width))
+	// The gate is a tri-state indicator rather than a busy state, so it keeps
+	// its FgSubtle "unknown" form and takes no spinner (spec section 10.8.7).
 	if m.linksErr != nil {
-		rows = append(rows, m.row("blocker links error: "+safeText(m.linksErr.Error(), false), width))
+		rows = append(rows, m.errorRows(m.linksErr, "Link", width)...)
 	}
 	return rows
 }
 
 func (m Model) commentRows(content, width int) []string {
 	if m.loading {
+		// Loading beats empty: a section waiting on its first content says so
+		// rather than reporting that it holds nothing (spec section 10.8.4).
 		return []string{
-			widget.Section(m.styles, "COMMENTS", "", width),
-			m.row("loading comments and context...", width),
+			m.section("COMMENTS", "", width),
+			widget.OverlayRow(m.styles, m.sectionBusy(commentsLabel, m.contentWidth(width)), width),
 		}
 	}
 	if m.commentsErr != nil {
-		return []string{
-			widget.Section(m.styles, "COMMENTS", "", width),
-			m.row("comments error: "+safeText(m.commentsErr.Error(), false), width),
-		}
+		// The pane cannot re-fetch, so the tail names the dismissal rather than
+		// a retry that does not exist (spec section 10.8.7).
+		return append(
+			[]string{m.section("COMMENTS", "", width)},
+			m.errorRows(m.commentsErr, "Close", width)...,
+		)
 	}
 	count := "none"
 	if len(m.comments) > 0 {
 		count = strconv.Itoa(len(m.comments))
 	}
-	rows := []string{widget.Section(m.styles, "COMMENTS", count, width)}
+	rows := []string{m.section("COMMENTS", count, width)}
+	if len(m.comments) == 0 {
+		return append(rows, widget.OverlayRow(m.styles, widget.Empty(m.styles, widget.EmptyOpts{
+			Headline: "no comments",
+			Key:      "c",
+			Verb:     "comment",
+			On:       theme.OverlaySurf,
+			Width:    m.contentWidth(width),
+		}), width))
+	}
 	for _, comment := range m.comments {
 		date := comment.CreatedAt.UTC().Format("2 Jan 2006")
 		rows = append(rows, m.row(fmt.Sprintf("c%d  %s  %s",

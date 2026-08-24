@@ -161,23 +161,32 @@ type StatusStyles struct {
 // Band names one overlay band row, for the re-arming run of BandRun.
 type Band uint8
 
-// The three bands of spec section 4.
+// The bands of spec section 4, plus the armed header of section 10.1.4.
 const (
 	BandHeader Band = iota
+	BandHeaderArmed
 	BandSection
 	BandFooter
 	numBands
 )
 
 // OverlayStyles are the elevation surfaces of spec section 4.
+//
+// HeaderBandArmed is the one state in the TUI that recolors a header band
+// (spec section 10.1.4, ratified call 6): an armed two-step re-fills the band
+// to StatusAlarm with FgBase bold, the same pair section 1.9 gives the armed
+// button, so the frame and the button say the same thing in the same color. A
+// destructive prompt that is merely pending does not reach it - it re-ramps the
+// section label and leaves the frame alone.
 type OverlayStyles struct {
-	Surf        lipgloss.Style
-	HeaderBand  lipgloss.Style
-	SectionBand lipgloss.Style
-	FooterBand  lipgloss.Style
-	Shadow      lipgloss.Style
-	FieldLabel  lipgloss.Style
-	FieldValue  lipgloss.Style
+	Surf            lipgloss.Style
+	HeaderBand      lipgloss.Style
+	HeaderBandArmed lipgloss.Style
+	SectionBand     lipgloss.Style
+	FooterBand      lipgloss.Style
+	Shadow          lipgloss.Style
+	FieldLabel      lipgloss.Style
+	FieldValue      lipgloss.Style
 }
 
 // ButtonStyles are the states of one button variant. Armed is kb's addition
@@ -496,18 +505,20 @@ func build(table paletteRGB, isDark bool, timing Timing, fidelity Fidelity) *Sty
 		Dot:    on(StatusOK, Surface),
 	}
 	built.Overlay = OverlayStyles{
-		Surf:        on(FgBase, OverlaySurf),
-		HeaderBand:  onBold(FgOnAccent, Brand),
-		SectionBand: onBold(FgSubtle, OverlayBand),
-		FooterBand:  on(FgSubtle, OverlayBand),
-		Shadow:      on(Shadow, Shadow),
-		FieldLabel:  on(FgMuted, OverlaySurf),
-		FieldValue:  on(FgBase, OverlaySurf),
+		Surf:            on(FgBase, OverlaySurf),
+		HeaderBand:      onBold(FgOnAccent, Brand),
+		HeaderBandArmed: onBold(FgBase, StatusAlarm),
+		SectionBand:     onBold(FgSubtle, OverlayBand),
+		FooterBand:      on(FgSubtle, OverlayBand),
+		Shadow:          on(Shadow, Shadow),
+		FieldLabel:      on(FgMuted, OverlaySurf),
+		FieldValue:      on(FgBase, OverlaySurf),
 	}
 	built.bandOn = [numBands]string{
-		BandHeader:  rearmSequence(built.Overlay.HeaderBand),
-		BandSection: rearmSequence(built.Overlay.SectionBand),
-		BandFooter:  rearmSequence(built.Overlay.FooterBand),
+		BandHeader:      rearmSequence(built.Overlay.HeaderBand),
+		BandHeaderArmed: rearmSequence(built.Overlay.HeaderBandArmed),
+		BandSection:     rearmSequence(built.Overlay.SectionBand),
+		BandFooter:      rearmSequence(built.Overlay.FooterBand),
 	}
 	built.Pressed = blank.Reverse(true)
 	token := func(token buttonToken) lipgloss.Style {

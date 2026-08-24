@@ -10,6 +10,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget"
 )
 
 const upstreamConflictCopy = "Upstream changed again. Check upstream before updating the card."
@@ -65,6 +66,7 @@ func (m *Model) cancelDrift() {
 	if m.driftCancel != nil {
 		m.driftCancel()
 	}
+	m.stopBrand()
 	m.driftCancel = nil
 	m.driftGeneration++
 	m.driftMode, m.driftBusy = driftNone, ""
@@ -88,6 +90,7 @@ func (m *Model) beginDrift() tea.Cmd {
 	ctx, cancel := context.WithCancel(m.driftContext)
 	m.driftCancel = cancel
 	backend, user := m.driftBackend, m.user
+	m.armBrand()
 	return func() tea.Msg {
 		var choices []store.ImportLink
 		for _, link := range links {
@@ -204,6 +207,7 @@ func (m *Model) finishDriftOperation() {
 		m.driftCancel()
 	}
 	m.driftCancel, m.driftBusy = nil, ""
+	m.stopBrand()
 }
 
 func (m *Model) startDriftCheck() tea.Cmd {
@@ -216,6 +220,7 @@ func (m *Model) startDriftCheck() tea.Cmd {
 	m.driftCancel, m.driftBusy = cancel, "check"
 	backend, user := m.driftBackend, m.user
 	taskID, session, generation := m.task.ID, m.driftSession, m.driftGeneration
+	m.armBrand()
 	return func() tea.Msg {
 		result, err := backend.CheckDrift(ctx, user, choice.Source, choice.ExternalKey)
 		return driftCheckedMsg{taskID: taskID, session: session, generation: generation, result: result, err: err}
@@ -230,6 +235,7 @@ func (m *Model) startDriftAccept() tea.Cmd {
 	m.driftCancel, m.driftBusy = cancel, "accept"
 	backend, user := m.driftBackend, m.user
 	taskID, session, generation := m.task.ID, m.driftSession, m.driftGeneration
+	m.armBrand()
 	return func() tea.Msg {
 		at, err := backend.AcceptDrift(ctx, user, choice.Source, choice.ExternalKey, revision)
 		return driftAcceptedMsg{taskID: taskID, session: session, generation: generation, baselineAt: at, err: err}
@@ -239,7 +245,11 @@ func (m *Model) startDriftAccept() tea.Cmd {
 func (m Model) driftBody(width int) string {
 	lines := []string{"Upstream drift review", "kb does not sync upstream changes into the card."}
 	if m.driftBusy != "" {
-		return strings.Join(append(lines, "", m.driftBusy+" in progress..."), "\n")
+		// Spec section 10.8.4 rule 1 moves the busy state into the footer band
+		// and deletes the body's own "<op> in progress..." line: the band is the
+		// only row whose content changes, so the body does not reflow when the
+		// check lands.
+		return strings.Join(lines, "\n")
 	}
 	if m.driftMode == driftSelect {
 		lines = append(lines, "", "Choose provenance:")
@@ -264,24 +274,25 @@ func (m Model) driftBody(width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) driftFooter() string {
-	if m.driftBusy != "" {
-		return "check in progress | input locked"
-	}
-	if m.statusMessage != "" {
-		prefix := "status: "
-		if m.statusIsError {
-			prefix = "error: "
-		}
-		return prefix + m.statusMessage
+// driftLadder is the drift view's hint ladder. A failure never appears here:
+// spec section 10.8.5 bars an error message from a band row, because neither
+// danger slot clears the AA floor on OverlayBand, and the pane pins the error
+// above its action row instead. A non-failure notice is still band-worthy.
+func (m Model) driftLadder() widget.Ladder {
+	if m.statusMessage != "" && !m.statusIsError {
+		return widget.Ladder{Head: []string{"status: " + m.statusMessage}, Tail: []string{"esc back"}}
 	}
 	if m.driftMode == driftSelect {
-		return "up/down choose | enter check | esc back"
+		return widget.Ladder{
+			Head:   []string{"up/down choose"},
+			Middle: []string{"enter check"},
+			Tail:   []string{"esc back"},
+		}
 	}
 	if m.driftResult.State == "drifted" {
-		return "u update baseline | esc back"
+		return widget.Ladder{Middle: []string{"u update baseline"}, Tail: []string{"esc back"}}
 	}
-	return "esc back"
+	return widget.Ladder{Tail: []string{"esc back"}}
 }
 
 func rawImportLinks(tags []string) []string {

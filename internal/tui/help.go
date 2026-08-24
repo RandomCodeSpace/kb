@@ -160,23 +160,23 @@ func helpBodyRows(styles *theme.Styles, rendered string, width int) []string {
 // same registry's short help itself rather than pulling the component's own
 // surface token into a band row.
 //
-// The ladder is responsive and the control is the rung it never drops: clicking
-// it is a frozen v1.0.1 dismissal, so it has to stay reachable on a frame too
-// narrow to spell the keys out.
+// Spec section 10.4.6 names this pane's own hand-rolled ladder as the shape the
+// packer generalizes: the control is the pinned head, because clicking it is a
+// frozen v1.0.1 dismissal and it has to stay reachable on a frame too narrow to
+// spell the keys out, and the dismissal keys are the droppable middle. The
+// packer now owns the arithmetic, so a narrow band drops whole rungs with their
+// separators rather than cutting one mid-word.
 func (m Model) helpFooter(styles *theme.Styles, keys helpKeys, width int) string {
-	control := m.pointerState.Render(styles, helpCloseID, helpCloseLabel)
 	hints := make([]string, 0, len(keys.ShortHelp()))
 	for _, dismissal := range keys.ShortHelp() {
 		hints = append(hints, dismissal.Help().Key+" "+dismissal.Help().Desc)
 	}
-	for ; len(hints) > 0; hints = hints[:len(hints)-1] {
-		ladder := strings.Join(hints, helpHintGap)
-		if ansi.StringWidth(helpCloseLabel+helpHintGap+ladder) <= width {
-			return control + helpHintGap + ladder
-		}
-	}
-	return control
+	line, _ := widget.Hints(styles, widget.Ladder{
+		Head:   []string{helpCloseLabel},
+		Middle: hints,
+	}, width)
+	// The control is styled after packing: a rendered run carries its own SGR
+	// sequences and is not a safe key for the packer's width arithmetic.
+	return strings.Replace(line, helpCloseLabel,
+		m.pointerState.Render(styles, helpCloseID, helpCloseLabel), 1)
 }
-
-// helpHintGap separates the footer band's hints.
-const helpHintGap = " | "
