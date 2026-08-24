@@ -1232,7 +1232,7 @@ Built once in `New`, on `Styles.Progress progress.Model`:
 |---|---|---|
 | `WithColors(pal[StatusInfo], pal[StatusOK])` | the `GradMeter` endpoints | Informational at the start, the completion hue at the end — both slots already mean that (§1.5). Below `FidelityFull` the component is configured with `StatusInfo` alone (§10.7.5) |
 | `WithScaled(false)` | default | The whole point: the ramp spans the bar, the fill cuts it |
-| `WithFillCharacters(Glyph.RailFull, Glyph.Track)` | `▌` / `░` | Fill is the rail glyph the language already owns (§3.6); track is §10.4.1's addition |
+| `WithFillCharacters(Glyph.Rail, Glyph.Track)` | `▌` / `░` | Fill is the rail glyph the language already owns (§3.6); track is §10.4.1's addition |
 | `WithoutPercentage()` | — | The caller already renders `i/N` |
 | `EmptyColor = pal[FgMuted]` | — | 1.98:1 on `OverlaySurf` — dim is what a track wants |
 
@@ -2121,8 +2121,8 @@ slice that adopts the rule that needs them.
 
 | Token | Glyph | Code point | Cells | Role | Status |
 |---|---|---|---|---|---|
-| `Rail` | `▌` | U+258C | 1 | Card rail resting (§2.4); unfocused band rail (§2.2); focus gutter bar (§10.4.3) | present |
-| `RailFull` | `█` | U+2588 | 1 | Selected card rail (§2.4); progress meter fill (§10.1.3) | present |
+| `Rail` | `▌` | U+258C | 1 | Card rail resting (§2.4); unfocused band rail (§2.2); focus gutter bar (§10.4.3); progress meter fill (§10.1.3) | present |
+| `RailFull` | `█` | U+2588 | 1 | Selected card rail (§2.4) | present |
 | `CapL` | `▐` | U+2590 | 1 | Pill left end cap (§3.6) | present |
 | `CapR` | `▌` | U+258C | 1 | Pill right end cap (§3.6) | present |
 | `Dot` | `●` | U+25CF | 1 | Column status dot (§2.2) | present |
