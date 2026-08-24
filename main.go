@@ -131,7 +131,7 @@ const rootUsageText = `usage: kb                    open the local board in the 
 
 commands:
   add, list, view, update, move, done, cancel, restore, rm, users,
-  comment, link, unlink
+  project, comment, link, unlink
              the task CLI - run "kb help" for the full reference
   serve      run the optional HTTP API server
   mcp        serve the board to AI agents over MCP stdio

@@ -10,6 +10,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+
+	"github.com/RandomCodeSpace/kb/internal/cliapp"
 )
 
 func TestDispatchArgs(t *testing.T) {
@@ -50,6 +52,50 @@ func TestDispatchArgs(t *testing.T) {
 	if !handled || code != 2 || !strings.Contains(stderr.String(), `unknown command "missing"`) ||
 		!strings.Contains(stderr.String(), "known: alpha, zeta") {
 		t.Fatalf("unknown command = handled %v code %d stderr %q", handled, code, stderr.String())
+	}
+}
+
+// The task CLI's own reference (`kb help`) is the contract a user reads. A
+// verb documented there but missing from the dispatch table is unreachable
+// from the binary: `kb project use web` was answered with "unknown command"
+// while cliapp implemented it and the reference advertised it. This walks the
+// reference's commands section and requires every verb in it to be dispatched.
+func TestEveryCLIVerbIsDispatched(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := cliapp.Run([]string{"help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cliapp help = %d stderr %q", code, stderr.String())
+	}
+
+	documented := make(map[string]bool)
+	inCommands := false
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		if !strings.HasPrefix(line, " ") {
+			if inCommands && strings.TrimSpace(line) != "" {
+				break
+			}
+			inCommands = strings.TrimSpace(line) == "commands:"
+			continue
+		}
+		if !inCommands || strings.HasPrefix(line, "   ") {
+			continue // continuation of the previous entry's description
+		}
+		if verb := strings.Fields(line)[0]; verb != "" {
+			documented[verb] = true
+		}
+	}
+	if len(documented) == 0 {
+		t.Fatal("could not read any verb from the CLI reference")
+	}
+
+	for verb := range documented {
+		if _, ok := subcommands[verb]; !ok {
+			t.Errorf("kb help documents the %q verb but the dispatch table does not register it", verb)
+		}
+	}
+	for _, verb := range cliVerbs {
+		if !documented[verb] {
+			t.Errorf("the dispatch table registers the %q verb but kb help does not document it", verb)
+		}
 	}
 }
 
