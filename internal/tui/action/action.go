@@ -155,6 +155,19 @@ func All() []Action {
 	return append([]Action(nil), registry...)
 }
 
+// Lookup is one row by id, and reports false for an id the table does not
+// carry. A surface that names an action - the empty state's tail of spec
+// section 10.8.3 is the first one that is not a keymap surface - reads its key
+// and its words from here rather than spelling either of them.
+func Lookup(id ID) (Action, bool) {
+	for _, entry := range registry {
+		if entry.ID == id {
+			return entry, true
+		}
+	}
+	return Action{}, false
+}
+
 // InGroup is every row of one group, enabled or not, in declaration order. The
 // help pane wants the disabled rows too, so it can render them dimmed rather
 // than silently shrink a column.

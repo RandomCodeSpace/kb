@@ -1,6 +1,7 @@
 package theme
 
 import (
+	"image/color"
 	"strings"
 
 	"charm.land/bubbles/v2/progress"
@@ -147,6 +148,11 @@ func clampRamp(ramp Ramp) Ramp {
 // GradMeter ramp spans the whole bar and the fill cuts it, so the bar's color
 // position, not just its length, encodes how far along the work is.
 //
+// Below FidelityFull the component is configured with the ramp's lead slot
+// alone, which is rule 2 of spec section 10.7.5 applied to the one ramp kb does
+// not paint itself. The bar keeps its position because position is carried by
+// the fill and track glyphs, not by the hue (degradation class C).
+//
 // The fill glyph is the half block rather than the full one because the
 // component doubles the ramp for it - each cell takes blend[i] as foreground
 // and blend[i+1] as background - so a 24-cell meter resolves a 48-step ramp.
@@ -157,10 +163,9 @@ func clampRamp(ramp Ramp) Ramp {
 // The percentage is off because the caller already renders i/N, and the spring
 // is never engaged: Meter calls ViewAs, never SetPercent, so the component
 // contributes no tick chain at all (spec section 10.2.2).
-func meterModel(pal Palette) progress.Model {
-	lead, tail := RampStops(GradMeter)
+func meterModel(pal Palette, fidelity Fidelity) progress.Model {
 	built := progress.New(
-		progress.WithColors(pal[lead], pal[tail]),
+		progress.WithColors(rampColors(pal, GradMeter, fidelity)...),
 		progress.WithScaled(false),
 		progress.WithFillCharacters(glyphRune(defaultGlyphs.Rail), glyphRune(defaultGlyphs.Track)),
 		progress.WithoutPercentage(),
@@ -182,13 +187,44 @@ func glyphRune(glyph string) rune {
 // buildRamps blends every ramp once and caches its steps as styles. Spec
 // section 6.2 is non-negotiable: every lipgloss.Style is constructed inside
 // New, so 5 ramps x 24 steps x 2 weights are built here and never per frame.
-func (s *Styles) buildRamps(pal Palette) {
+//
+// This is also where rule 2 of spec section 10.7.5 is decided, once, for the
+// whole TUI: below FidelityFull every step of a ramp is its lead color, so a
+// graded run renders flat rather than as a quantized band. No view branches on
+// the profile and no view picks between two colors; Grad and GradCell keep
+// their exact signatures and simply resample a ramp that is one color deep.
+func (s *Styles) buildRamps(pal Palette, fidelity Fidelity) {
 	for ramp := Ramp(0); ramp < numRamps; ramp++ {
-		stops := rampStops[ramp]
-		blend := lipgloss.Blend1D(GradSteps, pal[stops[0]], pal[stops[1]])
+		blend := rampSteps(pal, ramp, fidelity)
 		for step := range blend {
 			s.grad[ramp][step] = s.blank.Foreground(blend[step])
 			s.gradBold[ramp][step] = s.blankBold.Foreground(blend[step])
 		}
 	}
+}
+
+// rampSteps is one ramp's GradSteps colors at this terminal floor: the blend at
+// full fidelity, the lead slot repeated below it.
+func rampSteps(pal Palette, ramp Ramp, fidelity Fidelity) []color.Color {
+	stops := rampColors(pal, ramp, fidelity)
+	if len(stops) == 1 {
+		flat := make([]color.Color, GradSteps)
+		for step := range flat {
+			flat[step] = stops[0]
+		}
+		return flat
+	}
+	return lipgloss.Blend1D(GradSteps, stops...)
+}
+
+// rampColors is a ramp's stops at this terminal floor: both endpoints at full
+// fidelity, the lead alone below it. Every caller that hands a ramp to a charm
+// component that blends for itself goes through here, so the flattening rule
+// has exactly one implementation.
+func rampColors(pal Palette, ramp Ramp, fidelity Fidelity) []color.Color {
+	lead, tail := RampStops(ramp)
+	if fidelity != FidelityFull {
+		return []color.Color{pal[lead]}
+	}
+	return []color.Color{pal[lead], pal[tail]}
 }

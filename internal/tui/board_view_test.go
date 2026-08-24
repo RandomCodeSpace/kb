@@ -14,6 +14,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest/v2"
 
@@ -383,6 +384,68 @@ func TestBoardCardsColorGolden(t *testing.T) {
 	tm.WaitFinished(t, teatest.WithFinalTimeout(5*time.Second))
 }
 
+// TestBoardCardsIndexedGolden is the one indexed golden of spec section 10.7.7,
+// ratified as contestable call 5: the standing proof that the degradation below
+// the truecolor floor is what section 1.7 says it is - flat base hues, no
+// bespoke 256 design, and every class-B effect suppressed rather than
+// approximated.
+//
+// The styles and the render profile are pinned from the same constant, which is
+// the rule the section exists for: tea.WithColorProfile makes bubbletea send
+// ColorProfileMsg on start, so the theme is rebuilt at FidelityIndexed through
+// the same trigger production uses and the golden asserts a combination a real
+// terminal can actually reach.
+func TestBoardCardsIndexedGolden(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	fixture := boardViewFixture(now)
+	fixture.Tasks[0].Desc = "Pointer capture leaks when the column scrolls under the drag ghost"
+	m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
+	m.loading = false
+	m.board = fixture
+	m.now = func() time.Time { return now }
+	m.renderedAt = now
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = sized.(Model)
+	tm := teatest.NewTestModel(t, m,
+		teatest.WithInitialTermSize(120, 40),
+		teatest.WithProgramOptions(theme.PinProfile(colorprofile.ANSI256)),
+	)
+	t.Cleanup(func() { _ = tm.Quit() })
+	var captured bytes.Buffer
+	teatest.WaitFor(t, io.TeeReader(tm.Output(), &captured), func(output []byte) bool {
+		return bytes.Contains(output, []byte("Ship terminal board"))
+	}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	frame, ok := finalFullScreenFrame(captured.Bytes())
+	if !ok {
+		t.Fatal("teatest output did not contain a full-screen frame")
+	}
+	grid, err := renderedCellGrid(frame, 120, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	teatest.RequireEqualOutput(t, grid)
+	tm.Send(tea.KeyPressMsg{Code: 'q'})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(5*time.Second))
+}
+
+// TestIndexedGoldenRunsAtTheIndexedFloor is what keeps the golden above honest:
+// a profile pin that stopped rebuilding the theme would leave it asserting a
+// truecolor palette quantized after the fact, which is exactly the banded
+// artifact rule 2 of spec section 10.7.5 forbids kb from shipping.
+func TestIndexedGoldenRunsAtTheIndexedFloor(t *testing.T) {
+	m := newTestRootModel(stubBoardReader{}, nil, "alice")
+	if !m.themeStyles().Graded() {
+		t.Fatal("a fresh model did not start at the reference target")
+	}
+	updateTestModel(t, &m, tea.ColorProfileMsg{Profile: colorprofile.ANSI256})
+	if m.themeStyles().Graded() {
+		t.Fatal("the indexed profile did not rebuild the theme below full fidelity")
+	}
+	if m.themeStyles().Fidelity != theme.FidelityIndexed {
+		t.Fatalf("fidelity = %v", m.themeStyles().Fidelity)
+	}
+}
+
 // TestNarrowTallBoardGolden is the 60x50 capture ticket #141 asked for to tune
 // the compaction width axis. Below the wide-frame threshold kb shows a single
 // column, and ticket #151 gave that column the whole frame, so it spans 60 and
@@ -629,12 +692,17 @@ func TestBoardStateCarriesSemanticHue(t *testing.T) {
 		}, "shipped one card", theme.StatusOK},
 		{"action error", func(m *Model) {
 			m.actionNotice, m.actionStatus, m.actionStatusError = true, "ship failed", true
-		}, "ship failed", theme.StatusDanger},
-		{"load error", func(m *Model) { m.loadErr = errors.New("gone") }, "error: gone", theme.StatusDanger},
-		{"poll error", func(m *Model) { m.pollErr = errors.New("stale") }, "error: stale", theme.StatusDanger},
-		{"preference error", func(m *Model) { m.preferenceErr = errors.New("disk") }, "error: disk", theme.StatusDanger},
+		}, "\u25b2 ship failed", theme.StatusDanger},
+		{"load error", func(m *Model) { m.loadErr = errors.New("gone") }, "\u25b2 gone", theme.StatusDanger},
+		{"poll error", func(m *Model) { m.pollErr = errors.New("stale") }, "\u25b2 stale", theme.StatusDanger},
+		{"preference error", func(m *Model) { m.preferenceErr = errors.New("disk") }, "\u25b2 disk", theme.StatusDanger},
 		{"move status", func(m *Model) { m.move.status = "moved" }, "moved", theme.StatusWarn},
-		{"loading", func(m *Model) { m.loading, m.haveBoardSnapshot = true, false }, "loading board...", theme.FgMuted},
+		// The plain tier of spec section 10.8.7 owns the segment while the board
+		// is busy: a frame, BusyGap, and a lowercase label with no ellipsis,
+		// because the animation is the ellipsis.
+		{"loading", func(m *Model) { m.watcher = stubVersionReader{} }, "\u28fe loading board", theme.FgSubtle},
+		{"saving move", func(m *Model) { m.move.saving = true }, "\u28fe saving move", theme.FgSubtle},
+		{"saving action", func(m *Model) { m.action.busy = true }, "\u28fe saving", theme.FgSubtle},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m := base

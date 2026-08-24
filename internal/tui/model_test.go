@@ -157,7 +157,8 @@ func collapseInteractionTiming(m Model) Model {
 // along beside it.
 func isInputFeelMsg(message tea.Msg) bool {
 	switch message.(type) {
-	case graceQuietMsg, graceMaxMsg, graceReopenMsg, noticeExpiredMsg:
+	case graceQuietMsg, graceMaxMsg, graceReopenMsg, noticeExpiredMsg,
+		spinner.TickMsg, scrollSettledMsg:
 		return true
 	}
 	_, clickWindow := (pointer.Clicks{}).Expire(message)
@@ -481,8 +482,8 @@ func runPoll(t *testing.T, model *Model) tea.Cmd {
 func TestModelLoadsRoutesAndRenders(t *testing.T) {
 	loaded := board.Board{Title: "Work", Tasks: []board.Task{{Title: "one", Status: board.StatusTodo}}}
 	m := newTestRootModel(stubBoardReader{board: loaded}, nil, "alice")
-	initial := m.Init()
-	updated, command := m.Update(initial())
+	initial := singleCommandMessage(t, m.Init())
+	updated, command := m.Update(initial)
 	m = updated.(Model)
 	if command != nil || m.loading || m.board.Title != "Work" {
 		t.Fatalf("loaded model = %#v, command=%v", m, command)
@@ -630,7 +631,11 @@ func pointerCommandForLabel(t *testing.T, model *Model, label string) tea.Cmd {
 	t.Helper()
 	view := model.View()
 	handler := requireMouseHandler(t, view.OnMouse, label)
-	for row, line := range strings.Split(ansi.Strip(view.Content), "\n") {
+	lines := strings.Split(ansi.Strip(view.Content), "\n")
+	// Bottom-up: these are footer controls, and the empty-state action tails of
+	// spec section 10.8.3 name the same keys inside the board body.
+	for row := len(lines) - 1; row >= 0; row-- {
+		line := lines[row]
 		if index := strings.Index(line, label); index >= 0 {
 			x := ansi.StringWidth(line[:index])
 			press := requireMouseCommand(t,
@@ -984,9 +989,9 @@ func TestBoardMouseWheelScrollsHoveredColumn(t *testing.T) {
 		boardMouse(tea.MouseWheelMsg{X: 40, Y: 4, Button: tea.MouseWheelDown}),
 		"board wheel down",
 	)
-	if command := updateTestModel(t, &m, scrollDown()); command != nil {
-		t.Fatalf("board wheel started command %v", command)
-	}
+	// The wheel arms the scroll-activity linger of spec section 10.3.4, which
+	// is a timer and not a domain command.
+	assertNoDomainMessage(t, "board wheel", updateTestModel(t, &m, scrollDown()))
 	if !m.boardView.manualScroll[0] || m.boardView.scrolls[0] == 0 {
 		t.Fatalf("board scroll state = manual %v offset %d", m.boardView.manualScroll[0], m.boardView.scrolls[0])
 	}
@@ -1636,11 +1641,11 @@ func TestWatcherRefreshDoesNotFlashLoadingFooter(t *testing.T) {
 	}}
 	m := newTestRootModel(reader, stubVersionReader{}, "u")
 
-	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "loading board...") {
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "loading board") {
 		t.Fatalf("first load footer = %q", view)
 	}
 	initial := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 1}))
-	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "loading board...") {
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "loading board") {
 		t.Fatalf("active first load footer = %q", view)
 	}
 	completeBoardLoad(t, &m, initial)
@@ -1652,7 +1657,7 @@ func TestWatcherRefreshDoesNotFlashLoadingFooter(t *testing.T) {
 	if !m.loading {
 		t.Fatal("watcher change did not start a board refresh")
 	}
-	if view := ansi.Strip(m.View().Content); strings.Contains(view, "loading board...") || !strings.Contains(view, "ready") {
+	if view := ansi.Strip(m.View().Content); strings.Contains(view, "loading board") || !strings.Contains(view, "ready") {
 		t.Fatalf("watcher refresh footer = %q", view)
 	}
 	completeBoardLoad(t, &m, refresh)

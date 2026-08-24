@@ -12,6 +12,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/project"
+	"github.com/RandomCodeSpace/kb/internal/tui/action"
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
@@ -342,15 +343,15 @@ func (m Model) renderBoard() (string, []boardHit) {
 	footer := ""
 	switch {
 	case m.noticeOwnsFooter():
-		footer = fitLine(state, width)
+		footer = widget.Truncate(styles, state, width)
 	case m.settingsNew != nil:
-		footer = settingsBoardFooter(state, cancelled, m.editor.Enabled(), m.adr.Enabled(), width)
+		footer = settingsBoardFooter(styles, state, cancelled, m.editor.Enabled(), m.adr.Enabled(), width)
 		if m.issueImport.Enabled() && width >= 24 {
 			footer = fitLine("i import | "+footer, width)
 		}
 		hits = append(hits, boardFooterHits(footer, height-1, width)...)
 	default:
-		footer = fitLine(state+" | "+help, width)
+		footer = fitLine(boardStateLadder(styles, state, help, width), width)
 		hits = append(hits, boardFooterHits(footer, height-1, width)...)
 	}
 	rows = append(rows, m.renderFooter(styles, footer, stateSlot, width))
@@ -371,30 +372,66 @@ func (m Model) noticeOwnsFooter() bool {
 }
 
 // boardState resolves the footer's state segment and the semantic hue it
-// carries (spec section 1.5).
+// carries (spec section 1.5), across the three first-class states of section
+// 10.8: busy, failed, and settled.
+//
+// The busy rows come first because the operation in flight is what the segment
+// is describing; the move notice it displaces is the summary of the operation
+// that just finished. Failure takes the alert mark of section 10.8.5 and the
+// board tiers keep StatusDanger, which is the pair section 10.9 call 12
+// measured at 5.75 against Surface.
 func (m Model) boardState() (string, theme.Slot) {
 	moveActive := m.move.lifted != nil || m.move.saving
 	switch {
+	case m.move.saving:
+		return m.busyState()
 	case (moveActive || m.move.notice) && m.move.status != "":
+		// move.statusError is written in five places and was read in none, so a
+		// failed write was indistinguishable from a successful drop. It is read
+		// here (spec section 10.8.1, finding under "Board, card move").
+		if m.move.statusError {
+			return m.alertState(m.move.status)
+		}
 		return sanitizeTerminal(m.move.status), theme.StatusWarn
+	case m.action.busy:
+		return m.busyState()
 	case m.actionNotice && m.actionStatus != "":
 		if m.actionStatusError {
-			return sanitizeTerminal(m.actionStatus), theme.StatusDanger
+			return m.alertState(m.actionStatus)
 		}
 		return sanitizeTerminal(m.actionStatus), theme.StatusOK
 	case m.loadErr != nil:
-		return "error: " + m.loadErr.Error(), theme.StatusDanger
+		return m.alertState(m.loadErr.Error())
 	case m.pollErr != nil:
-		return "error: " + m.pollErr.Error(), theme.StatusDanger
+		return m.alertState(m.pollErr.Error())
 	case m.preferenceErr != nil:
-		return "error: " + m.preferenceErr.Error(), theme.StatusDanger
+		return m.alertState(m.preferenceErr.Error())
 	case m.move.status != "":
 		return sanitizeTerminal(m.move.status), theme.StatusWarn
-	case (m.loading && !m.haveBoardSnapshot) || (m.watcher != nil && !m.haveVersion):
-		return "loading board...", theme.FgMuted
+	case m.boardLoading():
+		return m.busyState()
 	default:
 		return "ready", theme.StatusOK
 	}
+}
+
+// busyState is the plain tier in the state segment: frame, BusyGap, label. The
+// frame is plain text because the segment is rendered as one styled run and a
+// frame with a color of its own would drop the segment for every cell after it.
+func (m Model) busyState() (string, theme.Slot) {
+	label := m.boardBusyLabel()
+	frame := m.busyFrameText()
+	if frame == "" {
+		return label, theme.FgSubtle
+	}
+	return frame + strings.Repeat(" ", m.themeStyles().Metrics.BusyGap) + label, theme.FgSubtle
+}
+
+// alertState is the error row of spec section 10.8.5 at board scope: the alert
+// mark, then the sanitized message. The mark is what tells an ASCII terminal
+// that the row failed, where the hue does not survive.
+func (m Model) alertState(message string) (string, theme.Slot) {
+	return m.themeStyles().Glyph.Alert + " " + sanitizeTerminal(message), theme.StatusDanger
 }
 
 // renderTopBar is the Canvas row of spec section 2.1: the accent rail and
@@ -635,7 +672,22 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 	}, "\n"), hits
 }
 
-func settingsBoardFooter(state, cancelled string, editorEnabled, adrEnabled bool, width int) string {
+// boardStateLadder joins the state segment to the hint ladder. The state is cut
+// with the section 3.3 primitive rather than by the row's own bare truncation,
+// which is spec section 10.8.5 rule 5: the board footer is one row and stays one
+// row, and the message it carries is ellipsized rather than wrapped.
+//
+// The state is measured against the whole frame, not against what the ladder
+// leaves: the ladder is what gets cut when the two do not both fit, because a
+// user reading a failure needs the failure and already knows the keys.
+func boardStateLadder(styles *theme.Styles, state, help string, width int) string {
+	return widget.Truncate(styles, state, width) + footerSeparator + help
+}
+
+// footerSeparator is the rung separator the footer's segments are split on.
+const footerSeparator = " | "
+
+func settingsBoardFooter(styles *theme.Styles, state, cancelled string, editorEnabled, adrEnabled bool, width int) string {
 	candidates := [][]string{
 		{"s settings", "t/x/r/D actions", "j/k cards", "h/l/tab columns", "c cancelled:" + cancelled, "q quit"},
 		{"s settings", "j/k cards", "h/l/tab columns", "1-4 jump", "c cancelled:" + cancelled, "q quit"},
@@ -682,7 +734,7 @@ func settingsBoardFooter(state, cancelled string, editorEnabled, adrEnabled bool
 		if stateWidth < minimumStateWidth {
 			continue
 		}
-		return fitLine(state, stateWidth) + " | " + help
+		return widget.Truncate(styles, state, stateWidth) + footerSeparator + help
 	}
 	for _, candidate := range candidates {
 		help := strings.Join(candidate, " | ")
@@ -744,12 +796,23 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 		}
 	}
 	inset := metrics.ColumnPad(density)
-	cardLines, owners, spans := m.renderTaskLines(tasks, status, max(width-2*inset, 0), density)
-
+	// The affordance column is decided before the cards are rendered, because
+	// reserving it narrows them. Spec sections 10.3.4 and 10.4.4: kb composes
+	// strings, so a column that appeared and disappeared with activity would
+	// reflow the body measure of every row under it, twice, for a cue - it is
+	// reserved for the whole time the body overflows and the tint is what moves.
+	stack := m.columnStackHeight(len(tasks), density)
 	contentHeight := max(height-1-metaRows, 0)
-	if len(cardLines) > contentHeight && contentHeight > 0 {
+	if stack > contentHeight && contentHeight > 0 {
 		contentHeight-- // the overflow cue of spec section 3.7 owns the last row
 	}
+	bodyWidth := max(width-2*inset, 0)
+	railed := widget.ScrollbarShown(stack, contentHeight) && bodyWidth > widget.ScrollbarW
+	if railed {
+		bodyWidth -= widget.ScrollbarW
+	}
+	cardLines, owners, spans := m.renderTaskLines(tasks, status, bodyWidth, density)
+
 	maxScroll := max(len(cardLines)-contentHeight, 0)
 	start := visibleCardStart(cardLines, owners, m.boardView.rows[index], contentHeight)
 	if m.boardView.manualScroll[index] {
@@ -758,12 +821,20 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 	hits[0].scroll = start
 	hits[0].maxScroll = maxScroll
 
+	rail := m.columnScrollbar(styles, railed, index, stack, contentHeight, start)
 	body := make([]string, 0, contentHeight)
 	for row := 0; row < contentHeight; row++ {
 		source := start + row
 		line := ""
 		if source < len(cardLines) {
 			line = cardLines[source]
+		}
+		if railed {
+			cell := ""
+			if row < len(rail) {
+				cell = rail[row]
+			}
+			line = fillRow(styles.Column.Panel, line, bodyWidth) + cell
 		}
 		body = append(body, line)
 		y := 1 + metaRows + row
@@ -788,6 +859,7 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 			Count:   len(tasks),
 			Hue:     columnHue(status),
 			Focused: m.boardView.column == index,
+			Hovered: m.pointerState.IsHovered(boardColumnControlID(status)),
 		},
 		Meta:    meta,
 		Body:    body,
@@ -798,8 +870,56 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 	})
 	// The band is the column's click target, so the pressed state wraps the row
 	// the panel drew rather than the panel wrapping the pointer.
-	lines[0] = m.pointerState.Render(styles, pointer.ControlID("board-column:"+string(status)), lines[0])
+	lines[0] = m.pointerState.Render(styles, boardColumnControlID(status), lines[0])
 	return renderedColumn{lines: lines, hits: hits}
+}
+
+// columnStackHeight is the number of body rows the card stack will occupy,
+// resolved before the cards are rendered so the scroll affordance can claim its
+// column first. It is width-independent by construction: spec section 3.1 fixes
+// the row grid by density, not by content, so a short description does not pull
+// the chip rows up and a narrow column does not add a row.
+func (m Model) columnStackHeight(count int, density theme.Density) int {
+	metrics := m.themeStyles().Metrics
+	if count <= 0 {
+		return 1 // the empty or busy row of spec section 10.8
+	}
+	rows := 2
+	if !density.Compact() {
+		rows = 3 + metrics.DescLines(max(m.height, 8), density)
+	}
+	return count*rows + metrics.CardGapRows(density)*(count-1)
+}
+
+// columnScrollbar is the affordance of spec section 10.3.4 at column scope. It
+// is measured against the same stack height the reserve was decided from, so
+// the column and the bar can never disagree about whether the body overflows.
+func (m Model) columnScrollbar(styles *theme.Styles, railed bool, index, total, visible, offset int) []string {
+	if !railed {
+		return nil
+	}
+	return widget.Scrollbar(styles, widget.ScrollbarOpts{
+		Total:   total,
+		Visible: visible,
+		Offset:  offset,
+		Height:  visible,
+		Active:  m.scroll.lingering(index),
+		On:      theme.Surface,
+	})
+}
+
+// boardColumnControlID keys one column band across renders, so both its pressed
+// and its hovered feedback survive a redraw.
+func boardColumnControlID(status board.Status) pointer.ControlID {
+	return pointer.ControlID("board-column:" + string(status))
+}
+
+// boardCardControlID keys one card for hover. Spec section 10.9 call 9 scopes
+// the board's pointer response to an affordance cue: the card is hoverable, the
+// board cursor still never follows the pointer, and the card's click is the
+// drag source it has always been rather than a control press.
+func boardCardControlID(taskID string) pointer.ControlID {
+	return pointer.ControlID("board-card:" + taskID)
 }
 
 // columnMetaLine is the row under the band (spec section 2.3). The blocked
@@ -836,20 +956,25 @@ func hiddenCards(owners []string, from int) int {
 func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width int, density theme.Density) ([]string, []string, [][]labelSpan) {
 	styles := m.themeStyles()
 	if len(tasks) == 0 {
-		return []string{styles.Column.Meta.Render("(empty)")}, []string{""}, [][]labelSpan{nil}
+		return []string{m.columnPlaceholder(styles, width)}, []string{""}, [][]labelSpan{nil}
 	}
 	index := statusIndex(status)
 	focused := m.boardView.column == index
 	selected := m.boardView.rows[index]
 	descLines := styles.Metrics.DescLines(max(m.height, 8), density)
 	gap := styles.Metrics.CardGapRows(density)
+	metas := make([][]string, len(tasks))
+	for i, task := range tasks {
+		metas[i] = m.cardMeta(styles, task,
+			styles.Surface(focused && i == selected, density.Compact() && i%2 == 1), density)
+	}
+	depth := metaDepth(metas, styles.Metrics.CardInner(width, density))
 	lines := make([]string, 0, len(tasks)*5)
 	owners := make([]string, 0, len(tasks)*5)
 	spans := make([][]labelSpan, 0, len(tasks)*5)
 	for i, task := range tasks {
 		isSelected := focused && i == selected
 		alternate := density.Compact() && i%2 == 1
-		surface := styles.Surface(isSelected, alternate)
 		// The project pill leads the label row: the row is rendered in survival
 		// order, so the card's mandatory scope is the label that stays on it
 		// when the row runs out of width (spec section 3.5).
@@ -863,7 +988,7 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 			Emoji:     sanitizeTerminal(task.Emoji),
 			Seq:       seqLabel(task),
 			Desc:      sanitizeTerminal(task.Desc),
-			Meta:      m.cardMeta(styles, task, surface, density),
+			Meta:      metas[i][:depth],
 			Labels:    tags,
 			Priority:  task.Prio,
 			Selected:  isSelected,
@@ -871,6 +996,8 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 			Width:     width,
 			DescLines: descLines,
 			Density:   density,
+			Hovered:   m.pointerState.IsHovered(boardCardControlID(task.ID)),
+			HoverTag:  m.hoveredCardTag(task.ID, ordered),
 		})
 		rowSpans := make([][]labelSpan, len(rows))
 		for _, span := range cardSpans {
@@ -901,6 +1028,114 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 	return lines, owners, spans
 }
 
+// columnPlaceholder is the empty and loading anatomy of spec section 10.8 at
+// column scope. Loading beats empty (section 10.8.4): until the first snapshot
+// lands every column says it is loading, instead of the most-looked-at surface
+// in the app telling the user the board is empty every time it starts. There is
+// no error state at column scope - a load failure is the footer's row.
+func (m Model) columnPlaceholder(styles *theme.Styles, width int) string {
+	if m.boardLoading() {
+		return widget.Busy(styles, widget.BusyOpts{
+			Frame: m.busyFrame(styles, theme.Surface),
+			Label: "loading",
+			On:    theme.Surface,
+			Width: width,
+		})
+	}
+	headline, key, verb := m.columnEmptyRow()
+	return widget.Empty(styles, widget.EmptyOpts{
+		Headline: headline,
+		Key:      key,
+		Verb:     verb,
+		On:       theme.Surface,
+		Width:    width,
+	})
+}
+
+// columnEmptyRow is the copy of spec section 10.8.7's two board-column rows.
+// The tail is taken from the action registry and never from a literal, so a
+// binding this board was built without is not offered: n falls through to i,
+// and a board with neither renders the headline alone.
+func (m Model) columnEmptyRow() (headline, key, verb string) {
+	features := m.actionFeatures()
+	if m.filter.active() {
+		key, verb = actionTail(action.FilterClear, features)
+		return "no matches", key, verb
+	}
+	for _, candidate := range []action.ID{action.NewCard, action.ImportIssue} {
+		if key, verb = actionTail(candidate, features); key != "" {
+			return "no cards", key, verb
+		}
+	}
+	return "no cards", "", ""
+}
+
+// actionTail is one registry row as an empty state's action tail, or a pair of
+// empty strings when this board cannot offer it.
+func actionTail(id action.ID, features action.Features) (string, string) {
+	entry, found := action.Lookup(id)
+	if !found || !entry.Enabled(features) {
+		return "", ""
+	}
+	return entry.Hint, entry.Name
+}
+
+// hoveredCardTag is the label pill under the pointer on one card, in the form
+// the card rendered it, or the empty string for none.
+func (m Model) hoveredCardTag(taskID string, tags []string) string {
+	for _, tag := range tags {
+		if m.pointerState.IsHovered(boardCardLabelControlID(taskID, tag)) {
+			return sanitizeTerminal(tag)
+		}
+	}
+	return ""
+}
+
+// cardMetaSlots is the number of chip categories in spec section 3.4's row.
+const cardMetaSlots = 5
+
+// metaDepth is how many of section 3.4's chip categories every card in one
+// column renders. The drop is a property of the column rather than of a card:
+// a category that does not fit on the widest card in the column is dropped from
+// all of them, so a narrow board loses the same information everywhere instead
+// of showing a due chip on one card and not on the card below it.
+//
+// The categories are dropped in reverse survival order, which is the order
+// section 3.4 already fixes. Priority is never dropped: it is two cells, it is
+// never a pill, and it is the chip the section says survives longest.
+func metaDepth(metas [][]string, inner int) int {
+	depth := cardMetaSlots
+	for depth > 1 && !metaRowsFit(metas, depth, inner) {
+		depth--
+	}
+	return depth
+}
+
+func metaRowsFit(metas [][]string, depth, inner int) bool {
+	for _, meta := range metas {
+		if metaRowWidth(meta[:min(depth, len(meta))]) > inner {
+			return false
+		}
+	}
+	return true
+}
+
+// metaRowWidth is what the chip row costs, one space between neighbours, with
+// an absent category costing nothing at all.
+func metaRowWidth(entries []string) int {
+	width := 0
+	for _, entry := range entries {
+		if entry == "" {
+			continue
+		}
+		if width > 0 {
+			width++
+		}
+		width += ansi.StringWidth(entry)
+	}
+	return width
+}
+
 // seqLabel is the right-aligned card sequence of spec section 3.2.
 func seqLabel(task board.Task) string {
 	if task.Seq <= 0 {
@@ -911,17 +1146,20 @@ func seqLabel(task board.Task) string {
 
 // cardMeta is the chip row of spec section 3.4, in survival order: priority,
 // age, blocked, due, effort. Compact degrades the pills to flat marks.
+//
+// The row is a fixed cardMetaSlots-long slice with an empty string for a
+// category the card does not carry, so the column-wide drop of metaDepth cuts
+// the same categories off every card rather than the same count of chips.
 func (m Model) cardMeta(styles *theme.Styles, task board.Task, surface theme.Slot, density theme.Density) []string {
 	flat := density.Compact()
-	meta := []string{
-		widget.Priority(styles, task.Prio, surface),
-		styles.On(theme.FgMuted, surface).Render(ageChip(task, m.renderedAt)),
-	}
+	meta := make([]string, cardMetaSlots)
+	meta[0] = widget.Priority(styles, task.Prio, surface)
+	meta[1] = styles.On(theme.FgMuted, surface).Render(ageChip(task, m.renderedAt))
 	if task.Blocked {
 		if flat {
-			meta = append(meta, styles.OnBold(theme.StatusWarn, surface).Render(styles.Glyph.Blocked))
+			meta[2] = styles.OnBold(theme.StatusWarn, surface).Render(styles.Glyph.Blocked)
 		} else {
-			meta = append(meta, widget.Chip(styles, widget.ChipOpts{Text: "blocked", Fill: theme.StatusWarn, On: surface}))
+			meta[2] = widget.Chip(styles, widget.ChipOpts{Text: "blocked", Fill: theme.StatusWarn, On: surface})
 		}
 	}
 	if task.Due != "" {
@@ -931,13 +1169,13 @@ func (m Model) cardMeta(styles *theme.Styles, task board.Task, surface theme.Slo
 			fill = theme.StatusDanger
 		}
 		if flat {
-			meta = append(meta, styles.OnBold(fill, surface).Render("!"+compactDue(label)))
+			meta[3] = styles.OnBold(fill, surface).Render(styles.Glyph.MarkDue + compactDue(label))
 		} else {
-			meta = append(meta, widget.Chip(styles, widget.ChipOpts{Text: label, Fill: fill, On: surface}))
+			meta[3] = widget.Chip(styles, widget.ChipOpts{Text: label, Fill: fill, On: surface})
 		}
 	}
 	if task.Effort != "" {
-		meta = append(meta, styles.On(theme.FgSubtle, surface).Render(styles.Glyph.Diamond+sanitizeTerminal(task.Effort)))
+		meta[4] = styles.On(theme.FgSubtle, surface).Render(styles.Glyph.Diamond + sanitizeTerminal(task.Effort))
 	}
 	return meta
 }
@@ -1092,9 +1330,18 @@ func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.C
 
 func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.State) func(tea.MouseMsg) tea.Cmd {
 	base := boardMouseHandler(hits, active)
-	var controls pointer.Map
+	var controls, hovers pointer.Map
 	gesture := state.Active()
 	for _, hit := range hits {
+		rect := pointer.Rect{X0: hit.x0, Y0: hit.y0, X1: hit.x1, Y1: hit.y1}
+		if id := boardCardHoverID(hit); id != "" {
+			// A card opts into hover and into nothing else. Its press stays on
+			// the drag path of boardMouseHandler, because the card is the board's
+			// drag source and the anchor every board keybinding resolves against
+			// (spec section 10.9 call 9); routing it as a control would turn a
+			// lift into a button press.
+			hovers.AddControl(id, rect, hoverOnly)
+		}
 		id := boardHitControlID(hit)
 		if id == "" {
 			continue
@@ -1103,11 +1350,12 @@ func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.S
 			gesture = true
 		}
 		message := boardControlMessage(hit)
-		controls.AddControl(id, pointer.Rect{X0: hit.x0, Y0: hit.y0, X1: hit.x1, Y1: hit.y1}, func(pointer.Point) tea.Msg {
-			return message
-		})
+		deliver := func(pointer.Point) tea.Msg { return message }
+		controls.AddControl(id, rect, deliver)
+		hovers.AddControl(id, rect, deliver)
 	}
 	controlHandler := controls.Handler()
+	hoverHandler := hovers.Handler()
 	controlHit := func(mouse tea.Mouse) bool {
 		for index := len(hits) - 1; index >= 0; index-- {
 			hit := hits[index]
@@ -1129,6 +1377,13 @@ func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.S
 			if gesture {
 				return controlHandler(message)
 			}
+			// Bare motion is the hover step of spec section 10.5.1. It resolves
+			// against the hover list, which is the control list plus the cards,
+			// and it produces a hover message or a clear and nothing else - the
+			// board cursor never follows the pointer.
+			if mouse.Button != tea.MouseLeft {
+				return hoverHandler(message)
+			}
 		case tea.MouseReleaseMsg:
 			if gesture {
 				gesture = false
@@ -1141,6 +1396,22 @@ func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.S
 		return base(message)
 	}
 }
+
+// boardCardHoverID is the hover identity of one card body row, empty for a hit
+// that is not one. The label spans inside a card carry their own control ids and
+// are added after the row they sit on, so the topmost-wins scan of the hover
+// list resolves a pill before the card under it.
+func boardCardHoverID(hit boardHit) pointer.ControlID {
+	if hit.kind != boardHitDefault || hit.taskID == "" {
+		return ""
+	}
+	return boardCardControlID(hit.taskID)
+}
+
+// hoverOnly is the action of a region that exists to be hovered. The hover list
+// is only ever handed motion messages, so it is never called; it is not nil
+// because the region scan skips a region without one.
+func hoverOnly(pointer.Point) tea.Msg { return nil }
 
 func boardControlMessage(hit boardHit) tea.Msg {
 	switch hit.kind {
