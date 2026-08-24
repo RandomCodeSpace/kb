@@ -488,7 +488,7 @@ func (a *app) cmdAdd(args []string) int {
 	}
 	// A new task has no project yet, so the resolution order alone decides:
 	// no project anywhere means the add is refused rather than filed blind.
-	if t.Tags, err = projectTags(t.Tags, *projectF, *data, ""); err != nil {
+	if t.Tags, err = ProjectTags(t.Tags, *projectF, *data, ""); err != nil {
 		return a.usageErr(err)
 	}
 	return a.withBackend(*data, func(be backend) error {

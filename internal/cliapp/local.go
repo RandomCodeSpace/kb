@@ -79,7 +79,7 @@ func OpenLocalStore(dataDir string, stderr io.Writer) (*store.Store, error) {
 	// startup path every local surface shares, so the invariant is already
 	// true by the time any command can observe it. Idempotent and silent once
 	// the board is clean.
-	if _, err := backfillProjects(st, defaultUser); err != nil {
+	if _, err := BackfillProjects(st, defaultUser); err != nil {
 		fmt.Fprintf(stderr, "kb: warning: project backfill: %v\n", err)
 	}
 	warnOrphanedNamespaces(st, stderr)

@@ -17,12 +17,18 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/cliapp"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
 var serveMCP = func(srv *mcp.Server) error {
 	return srv.Run(context.Background(), &mcp.StdioTransport{})
 }
+
+// backfillProjects is the mandatory-project pass every local surface runs when
+// it opens the board. It is a variable for the same reason serveMCP is: the
+// failure has to be reachable from a test without a corrupt database.
+var backfillProjects = cliapp.BackfillProjects
 
 // Run opens (creating if needed) the store at <dataDir>/kb.db, imports any
 // legacy markdown boards in dataDir, and serves the MCP tools for user over
@@ -47,7 +53,14 @@ func Run(dataDir, user string) error {
 	if _, err := st.ImportMarkdownDir(dataDir); err != nil {
 		return err
 	}
-	err = serveMCP(newServer(st, user))
+	// Tasks that predate mandatory projects are labelled on whichever local
+	// surface opens the board first; kb mcp opens its own store rather than
+	// going through cliapp.OpenLocalStore, so it runs the same idempotent
+	// pass here instead of serving a board the invariant is not yet true of.
+	if _, err := backfillProjects(st, user); err != nil {
+		return err
+	}
+	err = serveMCP(newServer(st, user, dataDir))
 	if isClientDisconnect(err) {
 		return nil
 	}
@@ -82,28 +95,30 @@ func isClientDisconnect(err error) bool {
 	return errors.As(err, &wire) && wire.Code == -32004
 }
 
-// kb holds the per-process tool state: one store, one fixed user.
+// kb holds the per-process tool state: one store, one fixed user, and the
+// data directory the active project is resolved from.
 type kb struct {
 	st              *store.Store
 	user            string
+	dataDir         string
 	beforeDoneGuard func()
 }
 
 // newServer builds the MCP server with all twelve board tools registered.
-func newServer(st *store.Store, user string) *mcp.Server {
+func newServer(st *store.Store, user, dataDir string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "kb", Title: "kb kanban board", Version: "1.0.0"}, nil)
-	k := &kb{st: st, user: user}
+	k := &kb{st: st, user: user, dataDir: dataDir}
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_tasks",
 		Description: "List kanban tasks on the board, ordered by column (todo, doing, done, cancelled) then position. Optional filters: a single column (status), free text over title/description/tags (search), and exact labels that must all be present (tags). Cancelled tasks are soft-deleted ones; they are included unless a status filter excludes them. Returns each task's id, title, status, blocked, prio, due, effort, tags, checks, and desc.",
 	}, k.listTasks)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "add_task",
-		Description: "Add a new task to the kanban board. Only title is required; status defaults to \"todo\", prio to 3, and blocked to false. Returns the created task including its id.",
+		Description: "Add a new task to the kanban board. Only title is required; status defaults to \"todo\", prio to 3, and blocked to false. Every task belongs to exactly one project: pass project to choose it, or omit it to use the active project (kb project use / KB_PROJECT); the call fails when neither names one. Returns the created task including its id.",
 	}, k.addTask)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "update_task",
-		Description: "Update fields of an existing task identified by its id (a unique id prefix is accepted). Only the provided fields change; tags and checks replace the whole list when given. Setting status to done fails, changing nothing at all, when checklist items are open or the task is blocked after this update is applied, unless force is true. Returns the updated task.",
+		Description: "Update fields of an existing task identified by its id (a unique id prefix is accepted). Only the provided fields change; tags and checks replace the whole list when given. The task keeps its project unless project moves it to another one; replacing tags never drops the project. Setting status to done fails, changing nothing at all, when checklist items are open or the task is blocked after this update is applied, unless force is true. Returns the updated task.",
 	}, k.updateTask)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "move_task",
@@ -229,6 +244,7 @@ type addTaskInput struct {
 	Tags    []string `json:"tags,omitempty" jsonschema:"labels, plain (backend) or scoped (type::bug)"`
 	Checks  []check  `json:"checks,omitempty" jsonschema:"checklist items"`
 	Emoji   string   `json:"emoji,omitempty" jsonschema:"single emoji shown on the card"`
+	Project string   `json:"project,omitempty" jsonschema:"project this task belongs to; defaults to the active project set by kb project use or KB_PROJECT"`
 }
 
 type updateTaskInput struct {
@@ -243,6 +259,7 @@ type updateTaskInput struct {
 	Tags    *[]string `json:"tags,omitempty" jsonschema:"replacement label list"`
 	Checks  *[]check  `json:"checks,omitempty" jsonschema:"replacement checklist"`
 	Emoji   *string   `json:"emoji,omitempty" jsonschema:"new emoji (empty string clears it)"`
+	Project string    `json:"project,omitempty" jsonschema:"move the task to this project; omit to leave it in the one it already has"`
 	Force   bool      `json:"force,omitempty" jsonschema:"set true to move to done even when checklist items are open or the task is blocked"`
 }
 
@@ -400,6 +417,15 @@ func (k *kb) addTask(_ context.Context, _ *mcp.CallToolRequest, in addTaskInput)
 	if in.Prio != 0 && (in.Prio < 1 || in.Prio > 4) {
 		return nil, taskJSON{}, fmt.Errorf("invalid prio %d: must be 1 (highest) to 4 (lowest)", in.Prio)
 	}
+	// Every task carries exactly one project:: label, resolved the way the
+	// CLI resolves it: the project argument beats KB_PROJECT, which beats the
+	// project stored by kb project use. Nothing is written when none of them
+	// names a project.
+	tags, err := cliapp.ProjectTags(t.Tags, in.Project, k.dataDir, "")
+	if err != nil {
+		return nil, taskJSON{}, err
+	}
+	t.Tags = tags
 	created, err := k.st.AddTask(k.user, t)
 	if err != nil {
 		return nil, taskJSON{}, err
@@ -424,6 +450,9 @@ func (k *kb) updateTask(_ context.Context, _ *mcp.CallToolRequest, in updateTask
 	if in.Checks != nil {
 		bc := toBoardChecks(*in.Checks)
 		patch.Checks = &bc
+	}
+	if err := k.applyProjectPatch(in.ID, &patch, in.Project); err != nil {
+		return nil, taskJSON{}, err
 	}
 	// Status is parsed before anything is written: a bad status now rejects
 	// the whole call instead of persisting the field patch and then failing.
@@ -497,6 +526,34 @@ func (k *kb) deleteTask(_ context.Context, _ *mcp.CallToolRequest, in deleteTask
 }
 
 // --- helpers ---
+
+// applyProjectPatch holds the one-project invariant across an update. It reads
+// the task only when the call actually rewrites labels — tags replaced the
+// whole list, or project moves the task — so an update that touches neither
+// leaves the project alone instead of dragging the task into whatever happens
+// to be active. move_task and delete_task write no labels at all, which is
+// why they need nothing here.
+func (k *kb) applyProjectPatch(id string, patch *store.TaskPatch, project string) error {
+	if patch.Tags == nil && strings.TrimSpace(project) == "" {
+		return nil
+	}
+	t, err := k.findTask(id)
+	if err != nil {
+		return err
+	}
+	var base []string
+	if patch.Tags != nil {
+		base = *patch.Tags
+	} else {
+		_, base = cliapp.SplitProjectTags(t.Tags)
+	}
+	tags, err := cliapp.ProjectTags(base, project, k.dataDir, cliapp.CurrentProjectOf(t))
+	if err != nil {
+		return err
+	}
+	patch.Tags = &tags
+	return nil
+}
 
 // parseStatus validates a wire status string.
 func parseStatus(s string) (board.Status, error) {
