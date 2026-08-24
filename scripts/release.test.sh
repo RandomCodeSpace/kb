@@ -87,8 +87,9 @@ case \${1:-} in
   version) printf 'kb %s (%s)\\n' '$version' '$revision_short' ;;
   --help) printf 'usage: kb\\n  serve      run the optional HTTP API server\\n' ;;
   help) printf 'usage: kb <command>\\n  add "title"\\n' ;;
+  project) printf 'active project: release-smoke\\n' ;;
   add) printf 'added Release smoke\\n' ;;
-  list) printf '[{"title":"Release smoke"}]\\n' ;;
+  list) printf '[{"title":"Release smoke","tags":["project::release-smoke"]}]\\n' ;;
   tui) exit 0 ;;
   serve)
     trap 'exit 0' TERM INT
