@@ -95,7 +95,16 @@ func runProgram(
 	if settingsNew != nil {
 		model.settingsNew = func() *settingsModel { return settingsNew(ctx) }
 	}
-	if _, err := tea.NewProgram(model, options...).Run(); err != nil {
+	// Spec section 10.3.6: motion and wheel are coalesced at the program level,
+	// where the whole input stream is visible, rather than inside any one
+	// surface. The filter is built from the model's own Timing token, so a
+	// program running collapsed timing is not throttled at all.
+	coalescer := newInputCoalescer(model.themeStyles().Timing.InputCoalesce, nil, nil)
+	program := tea.NewProgram(model, append(options, tea.WithFilter(coalescer.Filter))...)
+	// A coalesced flush leaves as one message per notch, re-injected from off
+	// the loop the filter runs on.
+	coalescer.send = asyncSender(program.Send)
+	if _, err := program.Run(); err != nil {
 		return fmt.Errorf("tui: run: %w", err)
 	}
 	return nil

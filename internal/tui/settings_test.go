@@ -815,7 +815,7 @@ func TestRootRoutesSettingsWithoutStoppingBoardPolling(t *testing.T) {
 		t.Fatal("production settings constructor did not wire direct backends")
 	}
 	settings := newSettingsModelWithBackends(st, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background())
-	root := NewModel(st, stubVersionReader{version: 2}, "alice")
+	root := newTestRootModel(st, stubVersionReader{version: 2}, "alice")
 	root.settingsNew = func() *settingsModel { return settings }
 	command := updateTestModel(t, &root, tea.KeyPressMsg{Code: 's'})
 	if root.settings == nil || command == nil {
@@ -841,7 +841,7 @@ func TestRootSettingsQuitAndClosedMessageRouting(t *testing.T) {
 	if command := settings.startAITest(); command == nil || settings.testCancel == nil {
 		t.Fatal("settings test did not retain cancellable work")
 	}
-	root := NewModel(st, stubVersionReader{version: 1}, "alice")
+	root := newTestRootModel(st, stubVersionReader{version: 1}, "alice")
 	root.settings = settings
 	root.reloadPending = true
 	quit := updateTestModel(t, &root, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
@@ -852,7 +852,7 @@ func TestRootSettingsQuitAndClosedMessageRouting(t *testing.T) {
 
 	closed := newSettingsModelWithBackends(st, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background())
 	closed.closed = true
-	root = NewModel(st, stubVersionReader{version: 1}, "alice")
+	root = newTestRootModel(st, stubVersionReader{version: 1}, "alice")
 	root.settings = closed
 	if command := updateTestModel(t, &root, settingsLoadedMsg{}); command != nil || root.settings != nil {
 		t.Fatalf("closed settings message = command:%v settings:%v", command, root.settings)

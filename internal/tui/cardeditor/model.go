@@ -27,7 +27,6 @@ import (
 )
 
 const (
-	similarDelay   = 400 * time.Millisecond
 	similarLimit   = 10
 	draftMaxTokens = 4096
 )
@@ -1243,9 +1242,8 @@ func (m *Model) scheduleSimilar() tea.Cmd {
 		m.dismissed, m.dismissedAll = make(map[string]struct{}), false
 		return nil
 	}
-	return tea.Tick(similarDelay, func(time.Time) tea.Msg {
-		return similarDebounceMsg{generation: generation, query: query, exclusions: exclusions}
-	})
+	return theme.Tick(m.themeStyles().Timing.SimilarDelay,
+		similarDebounceMsg{generation: generation, query: query, exclusions: exclusions})
 }
 
 func (m *Model) searchSimilar(generation uint64, query, exclusions string) tea.Cmd {

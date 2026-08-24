@@ -18,8 +18,6 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/widget"
 )
 
-const autoShipDelay = 350 * time.Millisecond
-
 type taskActionStore interface {
 	boardReader
 	UpdateAndMoveTask(string, string, store.TaskPatch, *board.Status, *int, func(board.Task) error) (board.Task, error)
@@ -567,7 +565,7 @@ type autoShipReadyMsg struct {
 }
 
 func (m Model) scheduleAutoShip(taskID string) tea.Cmd {
-	return tea.Tick(autoShipDelay, func(time.Time) tea.Msg { return autoShipCheckMsg{taskID: taskID} })
+	return theme.Tick(m.themeStyles().Timing.AutoShipDelay, autoShipCheckMsg{taskID: taskID})
 }
 
 func (m Model) readAutoShipCandidate(taskID string) tea.Cmd {

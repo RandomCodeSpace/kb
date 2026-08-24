@@ -60,7 +60,7 @@ func assertSelectAllContract(t *testing.T, send func(tea.KeyPressMsg), value fun
 }
 
 func TestFilterInputSelectAll(t *testing.T) {
-	model := NewModel(stubBoardReader{board: filterFixture()}, nil, "alice")
+	model := newTestRootModel(stubBoardReader{board: filterFixture()}, nil, "alice")
 	completeBoardLoad(t, &model, model.Init())
 	updateTestModel(t, &model, tea.KeyPressMsg{Code: '/', Text: "/"})
 	send := func(msg tea.KeyPressMsg) { updateTestModel(t, &model, msg) }
@@ -88,7 +88,7 @@ func TestFilterInputSelectAll(t *testing.T) {
 // Clearing a marked filter is a filter change like any other, so the board is
 // re-projected rather than left showing the old projection.
 func TestFilterSelectAllClearReprojectsTheBoard(t *testing.T) {
-	model := NewModel(stubBoardReader{board: filterFixture()}, nil, "alice")
+	model := newTestRootModel(stubBoardReader{board: filterFixture()}, nil, "alice")
 	completeBoardLoad(t, &model, model.Init())
 	updateTestModel(t, &model, tea.KeyPressMsg{Code: '/', Text: "/"})
 	typeRunes(t, &model, "zzzz")

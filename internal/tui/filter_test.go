@@ -83,7 +83,7 @@ func TestWebLowerMatchesFrozenJavaScriptVectors(t *testing.T) {
 }
 
 func TestFilterKeyboardRoutingPersistenceAndClear(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	m.loading = false
 	m.board = filterFixture()
 	var saved []tuiPreferences
@@ -132,7 +132,7 @@ func TestFilterKeyboardRoutingPersistenceAndClear(t *testing.T) {
 }
 
 func TestFilterClearDoesNotShadowCancelCard(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	m.loading = false
 	m.board = filterFixture()
 	m.filter.restore(boardFilter{Text: "login"})
@@ -152,7 +152,7 @@ func TestFilterClearDoesNotShadowCancelCard(t *testing.T) {
 }
 
 func TestFilterLabelFocusUsesDistinctCancelAndClearKeys(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	m.loading = false
 	m.board = filterFixture()
 	m.filter.restore(boardFilter{Tags: []string{"bug"}})
@@ -191,7 +191,7 @@ func finishPreferenceCommand(t *testing.T, model *Model, command tea.Cmd) {
 }
 
 func TestFilteredNavigationMouseAndDetailUseVisibleTasks(t *testing.T) {
-	m := NewModel(stubDetailBoardReader{stubBoardReader{board: filterFixture()}}, nil, "alice")
+	m := newTestRootModel(stubDetailBoardReader{stubBoardReader{board: filterFixture()}}, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	m.width, m.height = 160, 22
 	m.filter.restore(boardFilter{Text: "fix", Tags: []string{"bug"}})
@@ -233,7 +233,7 @@ func TestFilteredNavigationMouseAndDetailUseVisibleTasks(t *testing.T) {
 }
 
 func TestFilterMouseMessagesDoNotLeakBehindSettings(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	m.board = filterFixture()
 	m.filter.restore(boardFilter{Text: "fix", Tags: []string{"bug"}})
 	m.settings = &settingsModel{}
@@ -246,7 +246,7 @@ func TestFilterMouseMessagesDoNotLeakBehindSettings(t *testing.T) {
 }
 
 func TestFilterCountAndNarrowLayout(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	m.loading = false
 	m.board = filterFixture()
 	m.filter.restore(boardFilter{Text: "login"})
@@ -287,7 +287,7 @@ func TestFilterCountAndNarrowLayout(t *testing.T) {
 func TestFilterBarSanitizesTerminalControlsWithoutChangingState(t *testing.T) {
 	hostileText := "safe\x1b[31m-red\x1b[0m\x1b]2;owned\x07\x00\x9b31m"
 	hostileTag := "tag\x1bPpayload\x1b\\\x1b]52;c;stolen\x07\x1f"
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	m.board = board.Board{Tasks: []board.Task{{ID: "x", Status: board.StatusTodo, Tags: []string{hostileTag}}}}
 	m.filter.restore(boardFilter{Text: hostileText, Tags: []string{hostileTag}})
 	storedText := m.filter.input.Value()
@@ -322,7 +322,7 @@ func TestFilterBarSanitizesTerminalControlsWithoutChangingState(t *testing.T) {
 }
 
 func TestBoardMouseFocusLeavesTheFilter(t *testing.T) {
-	m := NewModel(stubDetailBoardReader{stubBoardReader{board: filterFixture()}}, nil, "u")
+	m := newTestRootModel(stubDetailBoardReader{stubBoardReader{board: filterFixture()}}, nil, "u")
 	completeBoardLoad(t, &m, m.Init())
 	m.filter.focusText()
 	updateTestModel(t, &m, boardColumnClickedMsg{status: board.StatusDoing})
@@ -353,7 +353,7 @@ func TestPreferenceLegacyDecodeAndReadFailures(t *testing.T) {
 		t.Fatal("unreadable preference loaded")
 	}
 
-	root := NewModel(stubBoardReader{}, nil, "u")
+	root := newTestRootModel(stubBoardReader{}, nil, "u")
 	root.board = filterFixture()
 	root.savePreferences = func(tuiPreferences) error { return errors.New("disk full") }
 	command := root.mutateFilter(func(filter *boardFilterState) { filter.toggleTag("bug") })
@@ -373,7 +373,7 @@ func TestPreferenceRestoreAndSetupFailures(t *testing.T) {
 	if err := saveTUIPreferences(path, want); err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(stubBoardReader{}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	m.restorePreferences(path)
 	if m.preferenceErr != nil || !m.boardView.showCancelled || m.filter.input.Value() != "login" || !reflect.DeepEqual(m.filter.tags, []string{"bug", "auth"}) {
 		t.Fatalf("restored model = cancelled:%v filter:%+v err:%v", m.boardView.showCancelled, m.filter.value(), m.preferenceErr)
@@ -402,7 +402,7 @@ func TestPreferenceRestoreAndSetupFailures(t *testing.T) {
 }
 
 func TestFilterInteractionBranches(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	if changed := m.filter.clear(); changed {
 		t.Fatal("empty filter reported a clear")
 	}
@@ -512,7 +512,7 @@ func TestFilterMouseControlsAndPreferenceEquality(t *testing.T) {
 		t.Fatal("preference equality branches changed")
 	}
 
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	m.savePreferences = func(tuiPreferences) error { return nil }
 	m.prefSaving = true
 	pending := base
@@ -524,7 +524,7 @@ func TestFilterMouseControlsAndPreferenceEquality(t *testing.T) {
 
 func TestMixedPreferenceWritesSerializeLatestSnapshot(t *testing.T) {
 	var saved []tuiPreferences
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	m.board = filterFixture()
 	m.savePreferences = func(preferences tuiPreferences) error {
 		saved = append(saved, preferences)
@@ -558,7 +558,7 @@ func TestMixedPreferenceWritesSerializeLatestSnapshot(t *testing.T) {
 func TestFailedPreferenceWriteRetriesEqualPendingSnapshot(t *testing.T) {
 	want := tuiPreferences{ShowCancelled: true, Filter: boardFilter{Text: "same", Tags: []string{"bug"}}}
 	writes := 0
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	m.savePreferences = func(got tuiPreferences) error {
 		writes++
 		if !preferencesEqual(got, want) {
