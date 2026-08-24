@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
@@ -88,6 +89,8 @@ type Model struct {
 	haveVersion       bool
 	stopped           bool
 	helpOpen          bool
+	isDark            bool
+	profile           colorprofile.Profile
 	readContext       context.Context
 	now               func() time.Time
 	renderedAt        time.Time
@@ -171,12 +174,16 @@ func newModel(
 	moveStore, _ := store.(taskMoveStore)
 	actionStore, _ := store.(taskActionStore)
 	now := time.Now
-	// Spec section 6.3: the palette is resolved once for a dark terminal and
-	// rebuilt only when tea.BackgroundColorMsg says otherwise.
-	styles := theme.New(true)
+	// Spec sections 6.3 and 10.7.5: the palette is resolved once for a dark
+	// truecolor terminal and rebuilt only when tea.BackgroundColorMsg or
+	// tea.ColorProfileMsg says otherwise. Both defaults are the reference
+	// target, which is the correct assumption until the terminal answers.
+	styles := theme.NewFor(true, colorprofile.TrueColor)
 	return Model{
 		store:       store,
 		styles:      styles,
+		isDark:      true,
+		profile:     colorprofile.TrueColor,
 		moveStore:   moveStore,
 		actionStore: actionStore,
 		watcher:     watcher,
@@ -237,7 +244,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	grace := m.graceIdentity()
 	notice := m.noticeKey()
 	next, command := m.route(message)
-	return next, batchCommands(command, next.trackGrace(grace), next.trackNotice(notice))
+	handoff := next.syncEngines()
+	return next, batchCommands(command, handoff, next.trackGrace(grace), next.trackNotice(notice))
 }
 
 // route handles global messages before any future pane-specific routing.
@@ -693,10 +701,22 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 	case preferenceSavedMsg:
 		return m, m.finishPreferences(msg)
 	case tea.BackgroundColorMsg:
-		// Spec section 6.2: New is called on program start and here, nowhere
-		// else. Every style in the tree is rebuilt exactly once per answer, and
-		// every pane the root owns adopts the same instance.
-		m.applyStyles(theme.New(msg.IsDark()))
+		// Spec section 6.2: New is called on program start, here, and on the
+		// profile message below, nowhere else. Every style in the tree is
+		// rebuilt exactly once per answer, and every pane the root owns adopts
+		// the same instance.
+		m.isDark = msg.IsDark()
+		m.applyStyles(theme.NewFor(m.isDark, m.profile))
+	case tea.ColorProfileMsg:
+		// Spec section 10.7.5: the terminal floor is resolved once from the
+		// detected profile and no view ever sees the profile itself. bubbletea
+		// sends this at startup and again if the terminal upgrades to truecolor
+		// through a capability report.
+		if msg.Profile == m.profile {
+			return m, detailCmd
+		}
+		m.profile = msg.Profile
+		m.applyStyles(theme.NewFor(m.isDark, m.profile))
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 {
 			m.width = msg.Width

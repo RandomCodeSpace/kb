@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"charm.land/bubbles/v2/progress"
-	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
@@ -22,6 +22,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
 
 const (
@@ -105,7 +106,10 @@ type Model struct {
 	manualScroll bool
 	pointerState pointer.State
 	styles       *theme.Styles
-	spin         spinner.Model
+	brand        spin.Engine
+	brandStarted time.Time
+	frontMost    bool
+	now          func() time.Time
 }
 
 // fallbackStyles is the palette a Model rendered without SetStyles draws with.
@@ -125,7 +129,10 @@ func (m *Model) SetStyles(styles *theme.Styles) {
 		return
 	}
 	m.styles = styles
-	m.spin.Spinner = styles.Spinner
+	if m.brandBusy() {
+		// Spec section 10.2.5: a theme rebuild invalidates the frame cache.
+		m.configureBrand()
+	}
 }
 
 // themeStyles is the resolved design system, defaulting to the dark reference
@@ -163,7 +170,7 @@ func New(st Store, backend Backend, user string, ctx context.Context) Model {
 	input.SetWidth(56)
 	return Model{
 		store: st, backend: backend, user: user, ctx: ctx, ref: input, max: defaultMax,
-		spin: spinner.New(spinner.WithSpinner(fallbackStyles().Spinner)),
+		frontMost: true, now: time.Now,
 	}
 }
 
@@ -175,24 +182,94 @@ func IsMessage(message tea.Msg) bool {
 		return true
 	}
 	switch message.(type) {
-	case sourcesLoadedMsg, previewCompletedMsg, cardCreatedMsg, pointerActionMsg, spinner.TickMsg:
+	case sourcesLoadedMsg, previewCompletedMsg, cardCreatedMsg, pointerActionMsg, spin.StepMsg:
 		return true
 	default:
 		return false
 	}
 }
 
-// spinTick advances the busy indicator. Spec section 5.2 adopts the bubbles
-// spinner for the fetch state that used to be static text; the tick loop stops
-// as soon as the fetch ends, so an idle overlay costs no timers.
-func (m *Model) spinTick(msg spinner.TickMsg) tea.Cmd {
-	if m.operation != "preview" {
+// opPreview is the forge fetch and draft. Spec section 10.2.4 puts it on the
+// branded tier: it is a network round trip and a model inference, which is
+// exactly the wait a branded frame is spent announcing.
+//
+// The overlay carries no plain tier at all. Its only other busy state is the
+// determinate batch write, which takes the meter of spec section 10.1.3 rather
+// than a spinner, so there are no bubbles dots here to keep.
+const opPreview = "preview"
+
+// previewLabel is the branded engine's label. Spec section 10.8.4: lowercase,
+// present continuous, and no ellipsis of its own.
+const previewLabel = "fetching configured forge data and drafting"
+
+// brandBusy is the branded tier's gate.
+func (m Model) brandBusy() bool { return m.operation == opPreview }
+
+// brandStep advances the branded engine, dropping a tick whose generation or
+// seed does not match and terminating the chain when the gate settles.
+func (m *Model) brandStep(msg spin.StepMsg) tea.Cmd {
+	return m.brand.Step(msg, m.brandBusy())
+}
+
+// brandRowWidth is the row the engine is fitted to: the whole branded row at
+// its full label, so the frame cache is built once per mount rather than once
+// per resize.
+const brandRowWidth = spin.MaxLabelW + spin.EllipsisField + spin.SuffixField
+
+// clock is the injected wall clock the elapsed suffix reads through. The engine
+// itself reads none (spec section 10.2.5).
+func (m Model) clock() func() time.Time {
+	if m.now != nil {
+		return m.now
+	}
+	return time.Now
+}
+
+// configureBrand resolves the engine's settings for the running fetch. It is
+// idempotent: a repeated settings hash reuses the frame cache.
+func (m *Model) configureBrand() {
+	styles := m.themeStyles()
+	started := m.brandStarted
+	clock := m.clock()
+	m.brand.Configure(styles, spin.Settings{
+		Label:    previewLabel,
+		Seed:     spin.SeedImportFetch,
+		Scramble: true,
+		Suffix:   func() string { return spin.Elapsed(clock().Sub(started)) },
+	}.Fit(styles, brandRowWidth))
+}
+
+// startBrand mounts the branded engine for a new fetch and opens its chain. A
+// surface that is not front-most starts nothing: the fetch runs, the animation
+// does not.
+func (m *Model) startBrand() tea.Cmd {
+	m.brandStarted = m.clock()()
+	m.configureBrand()
+	if !m.frontMost {
 		return nil
 	}
-	var command tea.Cmd
-	m.spin, command = m.spin.Update(msg)
-	return command
+	return m.brand.Start()
 }
+
+// SetFrontMost is the background handoff of spec section 10.2.6: a surface that
+// is not front-most stops its engine and remounts at step 0 on return.
+func (m *Model) SetFrontMost(front bool) tea.Cmd {
+	if m.frontMost == front {
+		return nil
+	}
+	m.frontMost = front
+	if !front {
+		m.brand.Stop()
+		return nil
+	}
+	if !m.brandBusy() {
+		return nil
+	}
+	return m.brand.Start()
+}
+
+// BrandMounted reports whether this overlay's branded engine is ticking.
+func (m Model) BrandMounted() bool { return m.brand.Mounted() }
 
 func (m *Model) Open() tea.Cmd {
 	if !m.Enabled() {
@@ -243,8 +320,8 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return command
 	}
 	switch msg := message.(type) {
-	case spinner.TickMsg:
-		return m.spinTick(msg)
+	case spin.StepMsg:
+		return m.brandStep(msg)
 	case sourcesLoadedMsg:
 		if msg.session != m.session {
 			return nil
@@ -258,10 +335,11 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 			m.setStatus("no forge integrations configured", true)
 		}
 	case previewCompletedMsg:
-		if msg.session != m.session || msg.generation != m.generation || m.operation != "preview" {
+		if msg.session != m.session || msg.generation != m.generation || m.operation != opPreview {
 			return nil
 		}
 		m.cancel, m.operation = nil, ""
+		m.brand.Stop()
 		if msg.err != nil {
 			m.setStatus(safeError(msg.err), true)
 			return nil
@@ -280,7 +358,7 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return m.updatePointer(msg)
 	case tea.KeyPressMsg:
 		if m.operation != "" {
-			if msg.String() == "esc" && m.operation == "preview" {
+			if msg.String() == "esc" && m.operation == opPreview {
 				m.cancelOperation("preview cancelled")
 			}
 			return nil
@@ -424,13 +502,16 @@ func (m *Model) startPreview() tea.Cmd {
 	m.generation++
 	generation, session := m.generation, m.session
 	ctx, cancel := context.WithCancel(m.ctx)
-	m.cancel, m.operation = cancel, "preview"
+	m.cancel, m.operation = cancel, opPreview
 	m.setStatus("fetching and drafting...", false)
 	request := forge.PreviewRequest{Source: m.sources[m.source].Name, Ref: raw, Max: m.max}
-	return tea.Batch(m.spin.Tick, func() tea.Msg {
+	// The operation leads the batch and the animation follows it: a branded
+	// tick is scheduled against the one clock, and a caller draining the batch
+	// in order should reach the work without waiting a frame for it.
+	return tea.Batch(func() tea.Msg {
 		preview, err := m.backend.Preview(ctx, m.user, request)
 		return previewCompletedMsg{session: session, generation: generation, preview: preview, err: err}
-	})
+	}, m.startBrand())
 }
 
 func (m *Model) updateReview(msg tea.KeyPressMsg) tea.Cmd {
@@ -532,6 +613,7 @@ func (m *Model) cancelOperation(status string) {
 	m.cancel = nil
 	m.generation++
 	m.operation = ""
+	m.brand.Stop()
 	m.setStatus(status, false)
 }
 

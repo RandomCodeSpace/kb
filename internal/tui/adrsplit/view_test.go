@@ -3,6 +3,7 @@ package adrsplit
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
@@ -14,6 +15,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
 
 // normalizedView is the structure golden form: layout, truncation and drop
@@ -196,30 +198,131 @@ func TestThemeSeamRowKindsAndChoiceEdges(t *testing.T) {
 	}
 }
 
-// TestSpinnerAdvancesOnlyWhileBusy is spec section 5.2: the busy states carry
-// the bubbles spinner, and the tick loop stops as soon as nothing is in flight.
+// TestSpinnerAdvancesOnlyWhileBusy is the tier split of spec section 10.2.4:
+// the file read and the card writes are plumbing and keep the bubbles dots,
+// and the tick loop stops as soon as nothing is in flight.
 func TestSpinnerAdvancesOnlyWhileBusy(t *testing.T) {
 	m, _, _ := newTestModel()
-	if m.busy() || m.spinTick(spinner.TickMsg{}) != nil {
+	if m.busy() || m.plainBusy() || m.spinTick(spinner.TickMsg{}) != nil {
 		t.Fatal("idle overlay kept a spinner tick alive")
 	}
-	m.operation = "splitting ADR"
-	if !m.busy() || m.spinTick(spinner.TickMsg{ID: m.spin.ID()}) == nil {
+	m.operation = opReadFile
+	if !m.busy() || !m.plainBusy() || m.spinTick(spinner.TickMsg{ID: m.spin.ID()}) == nil {
 		t.Fatal("busy overlay dropped the spinner tick")
 	}
 	if m.busyPrefix() == "" {
 		t.Fatal("busy footer carried no spinner frame")
 	}
-	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, "splitting ADR") {
+	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, opReadFile) {
 		t.Fatalf("busy footer = %q", got)
 	}
+	m.operation = opSplitADR
+	if m.plainBusy() || m.spinTick(spinner.TickMsg{ID: m.spin.ID()}) != nil {
+		t.Fatal("the branded split drove the plain tier as well")
+	}
 	m.operation, m.adding = "", true
-	if !m.busy() {
-		t.Fatal("batch write is a busy state")
+	if !m.busy() || !m.plainBusy() {
+		t.Fatal("batch write is a plain busy state")
 	}
 	m.adding = false
 	if command := m.Update(spinner.TickMsg{ID: m.spin.ID()}); command != nil {
 		t.Fatal("settled overlay re-armed the spinner")
+	}
+}
+
+// TestBrandedEngineDrivesTheSplitFooter is the overlay's share of the test
+// obligations of spec section 10.2.7.
+func TestBrandedEngineDrivesTheSplitFooter(t *testing.T) {
+	m, _, _ := newTestModel()
+	if !IsMessage(spin.StepMsg{}) {
+		t.Fatal("the root does not route the overlay's branded step")
+	}
+	if m.brandBusy() || m.BrandMounted() || m.brandStep(spin.StepMsg{Seed: spin.SeedAdrPropose}) != nil {
+		t.Fatal("an idle overlay kept the branded chain alive")
+	}
+
+	m.operation = opSplitADR
+	if m.startBrand() == nil || !m.BrandMounted() {
+		t.Fatal("a splitting overlay did not mount the branded engine")
+	}
+	timing := m.themeStyles().Timing
+	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, opSplitADR+"... | esc cancel") {
+		t.Fatalf("pre-birth footer = %q", got)
+	}
+	step := spin.StepMsg{Seed: spin.SeedAdrPropose, Gen: m.brand.Gen()}
+	if m.brandStep(spin.StepMsg{Seed: spin.SeedImportFetch, Gen: step.Gen}) != nil {
+		t.Fatal("a foreign seed kept the branded chain alive")
+	}
+	for range timing.BirthDelay + timing.BirthSteps + timing.ScrambleSteps - 1 {
+		if m.Update(step) == nil {
+			t.Fatal("a splitting overlay dropped the branded step")
+		}
+	}
+	settled := m.View(60, 16)
+	for range timing.EllipsisStride - 1 {
+		m.Update(step)
+		if m.View(60, 16) != settled {
+			t.Fatal("the settled branded frame moved under tick")
+		}
+	}
+
+	m.operation = ""
+	if m.Update(step) != nil || m.BrandMounted() {
+		t.Fatal("a settled overlay re-armed the branded chain")
+	}
+}
+
+// TestBrandedSuffixCountsTheSplit is the dynamic suffix of spec section
+// 10.2.5, read through the overlay's own injected clock.
+func TestBrandedSuffixCountsTheSplit(t *testing.T) {
+	m, _, _ := newTestModel()
+	if (Model{}).clock() == nil {
+		t.Fatal("a zero-value overlay resolved no clock")
+	}
+	base := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	elapsed := time.Duration(0)
+	m.now = func() time.Time { return base.Add(elapsed) }
+
+	m.operation = opSplitADR
+	m.startBrand()
+	timing := m.themeStyles().Timing
+	step := spin.StepMsg{Seed: spin.SeedAdrPropose, Gen: m.brand.Gen()}
+	elapsed = 12 * time.Second
+	for range timing.BirthDelay + timing.BirthSteps + timing.ScrambleSteps + timing.SuffixAfter {
+		m.Update(step)
+	}
+	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, "12s") {
+		t.Fatalf("the split footer carried no elapsed counter: %q", got)
+	}
+	m.brand.Stop()
+	m.frontMost = false
+	if m.startBrand() != nil || m.BrandMounted() {
+		t.Fatal("a backgrounded overlay armed a chain")
+	}
+}
+
+// TestBrandedEngineFollowsTheZOrder is the background handoff of spec section
+// 10.2.6.
+func TestBrandedEngineFollowsTheZOrder(t *testing.T) {
+	m, _, _ := newTestModel()
+	m.operation = opSplitADR
+	m.startBrand()
+	if m.SetFrontMost(true) != nil {
+		t.Fatal("an unchanged z-order rearmed the branded chain")
+	}
+	if m.SetFrontMost(false) != nil || m.BrandMounted() {
+		t.Fatal("a backgrounded overlay kept its engine")
+	}
+	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, opSplitADR+"...") {
+		t.Fatalf("a backgrounded overlay dropped its static busy label: %q", got)
+	}
+	if m.SetFrontMost(true) == nil || !m.BrandMounted() {
+		t.Fatal("a refronted overlay did not remount its engine")
+	}
+	m.operation = ""
+	m.SetFrontMost(false)
+	if m.SetFrontMost(true) != nil {
+		t.Fatal("a settled overlay mounted an engine on refront")
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"charm.land/glamour/v2/styles"
 	huh "charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -45,15 +46,19 @@ type Styles struct {
 	Markdown glamour.StyleConfig
 	Huh      *huh.Styles
 
-	Metrics Metrics
-	Glyph   Glyphs
-	Timing  Timing
+	Work WorkStyles
+
+	Metrics  Metrics
+	Glyph    Glyphs
+	Timing   Timing
+	Fidelity Fidelity
 
 	blank      lipgloss.Style
 	blankBold  lipgloss.Style
 	pressedOn  string
 	pressedOff string
 	surfaceOn  [numSlots]string
+	bandOn     [numBands]string
 	grad       [numRamps][GradSteps]lipgloss.Style
 	gradBold   [numRamps][GradSteps]lipgloss.Style
 }
@@ -134,6 +139,16 @@ type ChipStyles struct {
 	FlatHover lipgloss.Style
 }
 
+// WorkStyles are the busy-state text roles of spec section 10.2. They are
+// foreground only: the branded engine composes a run of them and the caller
+// lays that run onto its own shade tier with SurfaceRun, so a style that
+// carried a background would fight the surface behind the row.
+type WorkStyles struct {
+	Label  lipgloss.Style // plain-tier spinner and static busy text
+	Birth  lipgloss.Style // the branded engine's pre-birth cells
+	Suffix lipgloss.Style // the elapsed-time field right of the label
+}
+
 // StatusStyles are the semantic status roles of spec section 1.5.
 type StatusStyles struct {
 	OK     lipgloss.Style
@@ -142,6 +157,17 @@ type StatusStyles struct {
 	Info   lipgloss.Style
 	Dot    lipgloss.Style
 }
+
+// Band names one overlay band row, for the re-arming run of BandRun.
+type Band uint8
+
+// The three bands of spec section 4.
+const (
+	BandHeader Band = iota
+	BandSection
+	BandFooter
+	numBands
+)
 
 // OverlayStyles are the elevation surfaces of spec section 4.
 type OverlayStyles struct {
@@ -257,6 +283,13 @@ var buttonTokens = [numButtonVariants]buttonVariantTokens{
 // the message lands, then rebuild once.
 func New(isDark bool) *Styles { return NewWith(isDark, DefaultTiming) }
 
+// NewFor is New with the terminal floor of spec section 10.7.5 resolved from a
+// detected color profile. New is NewFor at the truecolor reference target, so
+// the huh ThemeFunc seam of spec section 6.3 keeps its exact signature.
+func NewFor(isDark bool, profile colorprofile.Profile) *Styles {
+	return newStyles(isDark, DefaultTiming, FidelityFor(profile))
+}
+
 // NewWith is New with the timing set of spec section 10.3 injected. Injection
 // follows the cached factory of spec section 6.2 rather than mutating a built
 // *Styles: the same Timing lands on the base instance and on Dimmed, so an
@@ -265,9 +298,15 @@ func New(isDark bool) *Styles { return NewWith(isDark, DefaultTiming) }
 // Production calls New. Tests that must collapse timing call NewWith with
 // TimingCollapsed, which is the only configuration a golden can assert against.
 func NewWith(isDark bool, timing Timing) *Styles {
+	return newStyles(isDark, timing, FidelityFull)
+}
+
+// newStyles is the one constructor every exported form funnels through: a
+// palette, a clock and a terminal floor, resolved once.
+func newStyles(isDark bool, timing Timing, fidelity Fidelity) *Styles {
 	base := resolve(isDark)
-	built := build(base, isDark, timing)
-	built.Dimmed = build(base.dim(), isDark, timing)
+	built := build(base, isDark, timing, fidelity)
+	built.Dimmed = build(base.dim(), isDark, timing, fidelity)
 	return built
 }
 
@@ -292,6 +331,37 @@ func (s *Styles) PressedRun(content string) string {
 	rearmed := strings.ReplaceAll(content, shortReset, shortReset+s.pressedOn)
 	rearmed = strings.ReplaceAll(rearmed, explicitReset, explicitReset+s.pressedOn)
 	return s.pressedOn + rearmed + s.pressedOff
+}
+
+// BandRun lays an already-composed run into an overlay band row. An overlay
+// band is rendered as one styled run over the whole row, so a colored fragment
+// inside it - the branded spinner frame of spec section 10.2.5, which is the
+// one part of a busy row that is supposed to carry a color - would close with a
+// reset and drop the band's own foreground and background for every cell after
+// it. Each reset in the run is followed by the band's own sequence instead.
+//
+// Content with no reset in it is returned untouched, so a band row of plain
+// text renders exactly the bytes it always did.
+func (s *Styles) BandRun(band Band, content string) string {
+	if band >= numBands {
+		return content
+	}
+	on := s.bandOn[band]
+	if on == "" || (!strings.Contains(content, shortReset) && !strings.Contains(content, explicitReset)) {
+		return content
+	}
+	rearmed := strings.ReplaceAll(content, shortReset, shortReset+on)
+	return strings.ReplaceAll(rearmed, explicitReset, explicitReset+on)
+}
+
+// rearmSequence is the SGR prefix a style opens with, recovered once at build
+// time so BandRun re-arms exactly the bytes lipgloss would have written. A
+// style always renders the argument it was handed, so the sentinel is always
+// found and what precedes it is always the opening sequence.
+func rearmSequence(style lipgloss.Style) string {
+	const sentinel = "\x00"
+	opening, _, _ := strings.Cut(style.Render(sentinel), sentinel)
+	return opening
 }
 
 // SurfaceRun lays an already-composed run onto a surface slot. An adopted charm
@@ -361,7 +431,7 @@ func (s *Styles) RowSurface(hovered bool) Slot {
 	return OverlaySurf
 }
 
-func build(table paletteRGB, isDark bool, timing Timing) *Styles {
+func build(table paletteRGB, isDark bool, timing Timing, fidelity Fidelity) *Styles {
 	pal := table.colors()
 	blank := lipgloss.NewStyle()
 	built := &Styles{
@@ -369,6 +439,7 @@ func build(table paletteRGB, isDark bool, timing Timing) *Styles {
 		Metrics:    defaultMetrics,
 		Glyph:      defaultGlyphs,
 		Timing:     timing,
+		Fidelity:   fidelity,
 		blank:      blank,
 		blankBold:  blank.Bold(true),
 		pressedOn:  ansi.Style{}.Reverse(true).String(),
@@ -433,6 +504,11 @@ func build(table paletteRGB, isDark bool, timing Timing) *Styles {
 		FieldLabel:  on(FgMuted, OverlaySurf),
 		FieldValue:  on(FgBase, OverlaySurf),
 	}
+	built.bandOn = [numBands]string{
+		BandHeader:  rearmSequence(built.Overlay.HeaderBand),
+		BandSection: rearmSequence(built.Overlay.SectionBand),
+		BandFooter:  rearmSequence(built.Overlay.FooterBand),
+	}
 	built.Pressed = blank.Reverse(true)
 	token := func(token buttonToken) lipgloss.Style {
 		if token.bold {
@@ -459,7 +535,16 @@ func build(table paletteRGB, isDark bool, timing Timing) *Styles {
 	built.Input = inputStyles(pal, on, isDark)
 	built.Area = areaStyles(pal, on, isDark)
 	built.Help = helpStyles(on)
+	built.Work = WorkStyles{
+		Label:  blank.Foreground(pal[FgSubtle]),
+		Birth:  blank.Foreground(pal[FgMuted]),
+		Suffix: blank.Foreground(pal[FgSubtle]),
+	}
+	// Spec section 10.2.1: the plain tier keeps spinner.Dot's glyphs and takes
+	// its cadence from the one clock. Leaving FPS at the bubbles default would
+	// be a second authored interval by another name.
 	built.Spinner = spinner.Dot
+	built.Spinner.FPS = timing.PlainFrame()
 	built.Progress = meterModel(pal)
 	built.Markdown = markdownStyles(table)
 	built.Huh = huhStyles(pal, on, onBold, isDark)

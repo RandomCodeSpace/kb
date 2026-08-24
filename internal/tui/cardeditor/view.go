@@ -316,21 +316,32 @@ func (m *Model) footerLine(width int) string {
 		return line
 	}
 	if m.drafting {
-		footer = m.busyPrefix() + "drafting card... | esc cancel"
+		footer = m.brandRow() + " | esc cancel"
 	} else if m.saving {
 		footer = m.busyPrefix() + "saving card..."
 	}
 	return fit(footer, width)
 }
 
-// busyPrefix is the spinner frame of spec section 5.2: the drafting and saving
-// states that were static text carry the bubbles spinner instead. The frame is
-// plain text so the footer band renders it in the band's own tier.
+// busyPrefix is the plain tier's frame (spec section 10.2.4): bubbles dots,
+// plain text, so the footer band renders it in the band's own FgSubtle rather
+// than a hue of its own. A local store write is plumbing however important it
+// is, and a branded frame spent on it would stop meaning anything.
 func (m Model) busyPrefix() string {
 	if len(m.spin.Spinner.Frames) == 0 {
 		return ""
 	}
 	return ansi.Strip(m.spin.View())
+}
+
+// brandRow is the branded tier's busy row (spec section 10.2.5). It renders the
+// ordinary static label while the engine is unmounted or still inside the birth
+// delay, which is also what a backgrounded editor shows.
+func (m Model) brandRow() string {
+	if row := m.brand.View(); row != "" {
+		return row
+	}
+	return draftLabel + "..."
 }
 
 func (m Model) pressedLabel(target, label string) string {

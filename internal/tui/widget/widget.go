@@ -28,6 +28,13 @@ const (
 	DensityCompact = theme.DensityCompact
 )
 
+// Truncate is the width-aware shortening primitive of spec section 3.3,
+// exported for the spin subpackage, which composes rows the same way the
+// widgets in this package do and must not carry a second copy of the rule.
+func Truncate(styles *theme.Styles, content string, width int) string {
+	return truncate(styles, content, width)
+}
+
 // truncate shortens content to width using the width-aware primitive of spec
 // section 3.3: ansi.Truncate to one cell short, then the ellipsis glyph.
 func truncate(styles *theme.Styles, content string, width int) string {

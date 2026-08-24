@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
-	"charm.land/bubbles/v2/spinner"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/golden"
 
@@ -13,7 +13,108 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
+
+// TestBrandedEngineDrivesTheFetchRow is the overlay's share of the test
+// obligations of spec section 10.2.7. The fetch is a forge round trip and a
+// model inference, which is the branded tier of spec section 10.2.4.
+func TestBrandedEngineDrivesTheFetchRow(t *testing.T) {
+	m := openModel(t, &fakeBackend{sources: []store.ForgeSource{{Name: "primary"}}}, &fakeStore{})
+	if !IsMessage(spin.StepMsg{}) {
+		t.Fatal("the root does not route the overlay's branded step")
+	}
+	if m.brandBusy() || m.BrandMounted() || m.brandStep(spin.StepMsg{Seed: spin.SeedImportFetch}) != nil {
+		t.Fatal("an idle overlay kept the branded chain alive")
+	}
+
+	m.operation = opPreview
+	if m.startBrand() == nil || !m.BrandMounted() {
+		t.Fatal("a fetching overlay did not mount the branded engine")
+	}
+	timing := m.themeStyles().Timing
+	if got := ansi.Strip(m.View(90, 22)); !strings.Contains(got, previewLabel+"...") {
+		t.Fatalf("pre-birth body row = %s", got)
+	}
+	step := spin.StepMsg{Seed: spin.SeedImportFetch, Gen: m.brand.Gen()}
+	if m.brandStep(spin.StepMsg{Seed: spin.SeedAdrPropose, Gen: step.Gen}) != nil {
+		t.Fatal("a foreign seed kept the branded chain alive")
+	}
+	for range timing.BirthDelay + timing.BirthSteps + timing.ScrambleSteps - 1 {
+		if m.Update(step) == nil {
+			t.Fatal("a fetching overlay dropped the branded step")
+		}
+	}
+	settled := m.View(90, 22)
+	if !strings.Contains(settled, "\x1b[") {
+		t.Fatal("the branded body row carried no color")
+	}
+	for range timing.EllipsisStride - 1 {
+		m.Update(step)
+		if m.View(90, 22) != settled {
+			t.Fatal("the settled branded frame moved under tick")
+		}
+	}
+
+	m.operation = ""
+	if m.Update(step) != nil || m.BrandMounted() {
+		t.Fatal("a settled overlay re-armed the branded chain")
+	}
+}
+
+// TestBrandedSuffixCountsTheFetch is the dynamic suffix of spec section
+// 10.2.5, read through the overlay's own injected clock.
+func TestBrandedSuffixCountsTheFetch(t *testing.T) {
+	m := openModel(t, &fakeBackend{sources: []store.ForgeSource{{Name: "primary"}}}, &fakeStore{})
+	if (Model{}).clock() == nil {
+		t.Fatal("a zero-value overlay resolved no clock")
+	}
+	base := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	elapsed := time.Duration(0)
+	m.now = func() time.Time { return base.Add(elapsed) }
+
+	m.operation = opPreview
+	m.startBrand()
+	timing := m.themeStyles().Timing
+	step := spin.StepMsg{Seed: spin.SeedImportFetch, Gen: m.brand.Gen()}
+	elapsed = time.Hour
+	for range timing.BirthDelay + timing.BirthSteps + timing.ScrambleSteps + timing.SuffixAfter {
+		m.Update(step)
+	}
+	if got := ansi.Strip(m.View(90, 22)); !strings.Contains(got, "59m+") {
+		t.Fatalf("the fetch row carried no elapsed counter:\n%s", got)
+	}
+	m.brand.Stop()
+	m.frontMost = false
+	if m.startBrand() != nil || m.BrandMounted() {
+		t.Fatal("a backgrounded overlay armed a chain")
+	}
+}
+
+// TestBrandedEngineFollowsTheZOrder is the background handoff of spec section
+// 10.2.6.
+func TestBrandedEngineFollowsTheZOrder(t *testing.T) {
+	m := openModel(t, &fakeBackend{sources: []store.ForgeSource{{Name: "primary"}}}, &fakeStore{})
+	m.operation = opPreview
+	m.startBrand()
+	if m.SetFrontMost(true) != nil {
+		t.Fatal("an unchanged z-order rearmed the branded chain")
+	}
+	if m.SetFrontMost(false) != nil || m.BrandMounted() {
+		t.Fatal("a backgrounded overlay kept its engine")
+	}
+	if got := ansi.Strip(m.View(90, 22)); !strings.Contains(got, previewLabel+"...") {
+		t.Fatalf("a backgrounded overlay dropped its static busy label: %s", got)
+	}
+	if m.SetFrontMost(true) == nil || !m.BrandMounted() {
+		t.Fatal("a refronted overlay did not remount its engine")
+	}
+	m.operation = ""
+	m.SetFrontMost(false)
+	if m.SetFrontMost(true) != nil {
+		t.Fatal("a settled overlay mounted an engine on refront")
+	}
+}
 
 func reviewModel(t *testing.T) Model {
 	t.Helper()
@@ -65,7 +166,7 @@ func TestThemeSeamAndRowKinds(t *testing.T) {
 	}
 	styles := theme.New(true)
 	m.SetStyles(styles)
-	if m.themeStyles() != styles || m.spin.Spinner.FPS != styles.Spinner.FPS {
+	if m.themeStyles() != styles {
 		t.Fatal("SetStyles did not adopt the design system")
 	}
 
@@ -107,25 +208,11 @@ func TestThemeSeamAndRowKinds(t *testing.T) {
 	}
 }
 
-// TestSpinnerAndProgressTrackTheFetchAndWrite is spec section 5.2: the fetch
-// state carries the bubbles spinner and the batch write the progress bar.
-func TestSpinnerAndProgressTrackTheFetchAndWrite(t *testing.T) {
-	m := New(&fakeStore{}, &fakeBackend{}, "alice", context.Background())
-	if m.busyPrefix() == "" {
-		t.Fatal("a constructed overlay has no spinner frames")
-	}
-	bare := Model{}
-	if bare.busyPrefix() != "" {
-		t.Fatal("zero-value overlay rendered a spinner frame")
-	}
-	if m.spinTick(spinner.TickMsg{}) != nil {
-		t.Fatal("idle overlay kept a spinner tick alive")
-	}
-	m.operation = "preview"
-	if m.spinTick(spinner.TickMsg{ID: m.spin.ID()}) == nil {
-		t.Fatal("fetching overlay dropped the spinner tick")
-	}
-
+// TestProgressTracksTheBatchWrite is spec section 10.8.4 rule 3: an operation
+// that knows its denominator takes the determinate meter, never a spinner. It
+// is why this overlay carries no plain tier at all - the fetch is branded and
+// the write is a meter, so there are no bubbles dots left here.
+func TestProgressTracksTheBatchWrite(t *testing.T) {
 	review := reviewModel(t)
 	review.operation, review.queue, review.queuePos = "create", []int{0, 1}, 1
 	if review.progressRatio() != 1 {

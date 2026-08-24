@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	"github.com/charmbracelet/x/ansi"
@@ -13,6 +14,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
 
 // rowText joins the unstyled text of body rows, the form the control-safety
@@ -142,13 +144,13 @@ func TestAIDraftControlsRenderProgressAndControlSafePrompt(t *testing.T) {
 	}
 }
 
-// TestSpinnerAdvancesOnlyWhileDraftingOrSaving is spec section 5.2: the
-// editor's drafting and saving states carry the bubbles spinner instead of
-// static text, and the tick loop stops as soon as nothing is in flight.
-func TestSpinnerAdvancesOnlyWhileDraftingOrSaving(t *testing.T) {
+// TestPlainSpinnerAdvancesOnlyWhileSaving is the plain half of the tier split
+// of spec section 10.2.4: a local store write is plumbing, so saving keeps the
+// bubbles dots and the tick loop stops as soon as the write lands.
+func TestPlainSpinnerAdvancesOnlyWhileSaving(t *testing.T) {
 	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
-	if model.busy() || model.spinTick(spinner.TickMsg{}) != nil {
+	if model.busy() || model.plainBusy() || model.spinTick(spinner.TickMsg{}) != nil {
 		t.Fatal("idle editor kept a spinner tick alive")
 	}
 	if model.busyPrefix() == "" {
@@ -165,28 +167,142 @@ func TestSpinnerAdvancesOnlyWhileDraftingOrSaving(t *testing.T) {
 		t.Fatal("SetStyles did not adopt the design system's spinner")
 	}
 
-	model.drafting = true
-	if !model.busy() || model.spinTick(spinner.TickMsg{ID: model.spin.ID()}) == nil {
-		t.Fatal("drafting editor dropped the spinner tick")
-	}
-	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, model.busyPrefix()+"drafting card...") {
-		t.Fatalf("drafting footer carried no spinner frame:\n%s", got)
-	}
-
-	model.drafting, model.saving = false, true
-	if !model.busy() {
-		t.Fatal("saving is a busy state")
+	model.saving = true
+	if !model.busy() || !model.plainBusy() || model.spinTick(spinner.TickMsg{ID: model.spin.ID()}) == nil {
+		t.Fatal("saving editor dropped the spinner tick")
 	}
 	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, model.busyPrefix()+"saving card...") {
 		t.Fatalf("saving footer carried no spinner frame:\n%s", got)
 	}
 
-	model.saving = false
+	// The draft is the branded tier, so it must not also drive the dots.
+	model.saving, model.drafting = false, true
+	if !model.busy() || model.plainBusy() || model.spinTick(spinner.TickMsg{ID: model.spin.ID()}) != nil {
+		t.Fatal("the branded draft drove the plain tier as well")
+	}
+
+	model.drafting = false
 	if command := model.Update(spinner.TickMsg{ID: model.spin.ID()}); command != nil {
 		t.Fatal("settled editor re-armed the spinner")
 	}
 	if !IsMessage(spinner.TickMsg{}) {
 		t.Fatal("the root does not route the editor's spinner tick")
+	}
+}
+
+// TestBrandedEngineDrivesTheDraftFooter is the branded half of the tier split
+// and the editor's share of the test obligations of spec section 10.2.7: the
+// gate owns the chain, the root routes the step, a settled surface does not
+// re-arm, and the settled frame is byte stable under tick.
+func TestBrandedEngineDrivesTheDraftFooter(t *testing.T) {
+	model := newTestEditor(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	if !IsMessage(spin.StepMsg{}) {
+		t.Fatal("the root does not route the editor's branded step")
+	}
+	if model.brandBusy() || model.BrandMounted() {
+		t.Fatal("an idle editor mounted the branded engine")
+	}
+	if model.brandStep(spin.StepMsg{Seed: spin.SeedEditorDraft}) != nil {
+		t.Fatal("an idle editor kept the branded chain alive")
+	}
+
+	model.drafting = true
+	if model.startBrand(draftLabel) == nil || !model.BrandMounted() {
+		t.Fatal("a drafting editor did not mount the branded engine")
+	}
+	timing := model.themeStyles().Timing
+
+	// The static label carries the birth delay, then the engine takes over.
+	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, draftLabel+"... | esc cancel") {
+		t.Fatalf("pre-birth footer = %s", got)
+	}
+	stale := spin.StepMsg{Seed: spin.SeedEditorDraft, Gen: model.brand.Gen() - 1}
+	if model.brandStep(stale) != nil {
+		t.Fatal("a stale generation kept the branded chain alive")
+	}
+	step := spin.StepMsg{Seed: spin.SeedEditorDraft, Gen: model.brand.Gen()}
+	for range timing.BirthDelay {
+		if model.Update(step) == nil {
+			t.Fatal("a drafting editor dropped the branded step")
+		}
+	}
+	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, "| esc cancel") || strings.Contains(got, draftLabel+"...") {
+		t.Fatalf("born footer still carried the static label: %s", got)
+	}
+
+	// Contract point 7: the settled frame is invariant across a full ellipsis
+	// window, so a golden of it does not depend on when it was taken.
+	for range timing.BirthSteps + timing.ScrambleSteps - 1 {
+		model.Update(step)
+	}
+	settled := model.View(72, 18)
+	for range timing.EllipsisStride - 1 {
+		model.Update(step)
+		if model.View(72, 18) != settled {
+			t.Fatal("the settled branded frame moved under tick")
+		}
+	}
+
+	model.drafting = false
+	if model.Update(step) != nil || model.BrandMounted() {
+		t.Fatal("a settled editor re-armed the branded chain")
+	}
+}
+
+// TestBrandedSuffixCountsTheDraft is the dynamic suffix of spec section
+// 10.2.5: the elapsed counter is the surface's own injected clock read through
+// a closure, and the engine reads no clock of its own.
+func TestBrandedSuffixCountsTheDraft(t *testing.T) {
+	model := newTestEditor(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	base := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	elapsed := time.Duration(0)
+	model.now = func() time.Time { return base.Add(elapsed) }
+
+	model.drafting = true
+	model.startBrand(draftLabel)
+	timing := model.themeStyles().Timing
+	step := spin.StepMsg{Seed: spin.SeedEditorDraft, Gen: model.brand.Gen()}
+	elapsed = 62 * time.Second
+	for range timing.BirthDelay + timing.BirthSteps + timing.ScrambleSteps + timing.SuffixAfter {
+		model.Update(step)
+	}
+	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, "1m02s") {
+		t.Fatalf("the draft footer carried no elapsed counter:\n%s", got)
+	}
+	// A backgrounded surface arms nothing at all (spec section 10.2.6).
+	model.brand.Stop()
+	model.frontMost = false
+	if model.startBrand(draftLabel) != nil || model.BrandMounted() {
+		t.Fatal("a backgrounded editor armed a chain")
+	}
+}
+
+// TestBrandedEngineStopsBehindAnotherSurface is the background handoff of spec
+// section 10.2.6: a backgrounded editor stops its engine and remounts at step 0
+// when it comes back to front.
+func TestBrandedEngineStopsBehindAnotherSurface(t *testing.T) {
+	model := newTestEditor(newTestStore(t), "u")
+	model.OpenAdd(board.StatusTodo)
+	model.drafting = true
+	model.startBrand(draftLabel)
+	if model.SetFrontMost(true) != nil {
+		t.Fatal("an unchanged z-order rearmed the branded chain")
+	}
+	if model.SetFrontMost(false) != nil || model.BrandMounted() {
+		t.Fatal("a backgrounded editor kept its engine")
+	}
+	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, draftLabel+"...") {
+		t.Fatalf("a backgrounded editor dropped its static busy label: %s", got)
+	}
+	if model.SetFrontMost(true) == nil || !model.BrandMounted() {
+		t.Fatal("a refronted editor did not remount its engine")
+	}
+	model.drafting = false
+	model.SetFrontMost(false)
+	if model.SetFrontMost(true) != nil {
+		t.Fatal("a settled editor mounted an engine on refront")
 	}
 }
 
