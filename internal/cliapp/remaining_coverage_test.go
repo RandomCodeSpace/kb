@@ -30,7 +30,7 @@ func TestRemainingCommandValidationAndUpdateFields(t *testing.T) {
 		t.Fatalf("update: code=%d stderr=%q", code, stderr)
 	}
 	updated := listJSON(t, "--data", dir)
-	if len(updated) != 1 || updated[0].Emoji != "\U0001F680" || updated[0].Due != "2026-08-02" || updated[0].Effort != "L" || len(updated[0].Tags) != 1 || updated[0].Tags[0] != "coverage" {
+	if len(updated) != 1 || updated[0].Emoji != "\U0001F680" || updated[0].Due != "2026-08-02" || updated[0].Effort != "L" || len(updated[0].Tags) != 2 || updated[0].Tags[0] != "coverage" || updated[0].Tags[1] != projectLabel(inboxProject) {
 		t.Fatalf("updated task = %+v", updated)
 	}
 }

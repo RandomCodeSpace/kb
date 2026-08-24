@@ -60,7 +60,7 @@ func TestRemoteFullFieldWritesEndToEnd(t *testing.T) {
 	if got.Title != "Renamed" || got.Desc != "new body" || got.Emoji != "🎯" ||
 		got.Prio != 3 || got.Due != "2026-10-01" || got.Effort != "L" ||
 		got.Blocked || got.Status != "doing" ||
-		len(got.Tags) != 1 || got.Tags[0] != "c" ||
+		len(got.Tags) != 2 || got.Tags[0] != "c" || got.Tags[1] != projectLabel(inboxProject) ||
 		len(got.Checks) != 1 || got.Checks[0].Text != "three" {
 		t.Fatalf("round-tripped task = %+v", got)
 	}

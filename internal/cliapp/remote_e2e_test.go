@@ -25,6 +25,7 @@ func remoteEnv(t *testing.T) {
 	t.Setenv("KB_SERVER", srv.URL)
 	t.Setenv("KB_SERVER_TOKEN", "sekrit")
 	t.Setenv("KB_USER", "")
+	t.Setenv("KB_PROJECT", inboxProject)
 }
 
 func TestRemoteLifecycleEndToEnd(t *testing.T) {
