@@ -123,6 +123,34 @@ func column(row, needle string) int {
 	return ansi.StringWidth(row[:index])
 }
 
+// TestFocusableRowWidthAndContentColumnAreStateInvariant is section 10.4.4's
+// focusable overlay row: two cells of surface blurred against a Rail plus a gap
+// focused, so the row's prose starts in the same column in both states and the
+// row costs the same width.
+func TestFocusableRowWidthAndContentColumnAreStateInvariant(t *testing.T) {
+	styles := theme.New(true)
+	const content = "select card"
+	for _, width := range []int{60, 40, 24, 16} {
+		var blurred, focused string
+		for _, state := range []bool{false, true} {
+			row := OverlayRow(styles, Gutter(styles, state, theme.Brand, theme.OverlaySurf)+
+				styles.On(theme.FgBase, theme.OverlaySurf).Render(content), width)
+			if got := ansi.StringWidth(row); got != width {
+				t.Errorf("width %d focused=%v row is %d cells", width, state, got)
+			}
+			if state {
+				focused = ansi.Strip(row)
+				continue
+			}
+			blurred = ansi.Strip(row)
+		}
+		if column(blurred, content) != column(focused, content) {
+			t.Errorf("width %d: content column moved from %d to %d on focus",
+				width, column(blurred, content), column(focused, content))
+		}
+	}
+}
+
 // TestScrollAffordanceGeometryIsStateInvariant is section 10.4.4's scroll row:
 // the tint changes with the linger, the geometry does not.
 func TestScrollAffordanceGeometryIsStateInvariant(t *testing.T) {

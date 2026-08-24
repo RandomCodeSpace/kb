@@ -294,6 +294,10 @@ func TestCraftMetricsAreTheSpecValues(t *testing.T) {
 		"MeterCells":     {metrics.MeterCells, 24},
 		"MeterMinCells":  {metrics.MeterMinCells, 6},
 		"GradSteps":      {GradSteps, 24},
+
+		"EmptyHeadlineMin": {metrics.EmptyHeadlineMin, 24},
+		"EmptyActionMin":   {metrics.EmptyActionMin, 10},
+		"ActionGap":        {metrics.ActionGap, 2},
 	}
 	for name, pair := range cases {
 		if pair[0] != pair[1] {

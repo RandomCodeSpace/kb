@@ -12,9 +12,11 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/action"
 	"github.com/RandomCodeSpace/kb/internal/tui/adrsplit"
 	"github.com/RandomCodeSpace/kb/internal/tui/carddetail"
 	"github.com/RandomCodeSpace/kb/internal/tui/cardeditor"
+	"github.com/RandomCodeSpace/kb/internal/tui/cmdpalette"
 	"github.com/RandomCodeSpace/kb/internal/tui/issueimport"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
@@ -73,6 +75,7 @@ type Model struct {
 	editor            cardeditor.Model
 	adr               adrsplit.Model
 	issueImport       issueimport.Model
+	palette           cmdpalette.Model
 	selectAfterLoad   string
 	width             int
 	height            int
@@ -115,6 +118,7 @@ func (m *Model) applyStyles(styles *theme.Styles) {
 	m.editor.SetStyles(styles)
 	m.adr.SetStyles(styles)
 	m.issueImport.SetStyles(styles)
+	m.palette.SetStyles(styles)
 	if m.settings != nil {
 		m.settings.SetStyles(styles)
 	}
@@ -182,6 +186,7 @@ func newModel(
 		projects:    projectSwitcher{all: true},
 		detail:      carddetail.New(detailReader, user, styles),
 		editor:      cardeditor.New(editorStore, user),
+		palette:     cmdpalette.New(),
 		width:       defaultWidth,
 		height:      defaultHeight,
 		loading:     watcher == nil,
@@ -260,8 +265,27 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 		}
 	}
 	if isBoardPointerMessage(message) && (m.helpOpen || m.action.open() || m.action.busy ||
-		m.issueImport.IsOpen() || m.settings != nil || m.editor.IsOpen() || m.adr.IsOpen() || m.detail.IsOpen()) {
+		m.issueImport.IsOpen() || m.palette.IsOpen() || m.settings != nil || m.editor.IsOpen() ||
+		m.adr.IsOpen() || m.detail.IsOpen()) {
 		return m, nil
+	}
+	if m.palette.IsOpen() {
+		switch msg := message.(type) {
+		case tea.KeyPressMsg:
+			if msg.String() == ctrlCKey {
+				break
+			}
+			command := m.palette.Update(msg)
+			if choice, ok := m.palette.ConsumeChoice(); ok {
+				return m.runPaletteAction(choice, command)
+			}
+			return m, command
+		case boardCardClickedMsg, boardColumnClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg, filterProjectClickedMsg,
+			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg,
+			boardFooterClickedMsg:
+			return m, nil
+		}
 	}
 	if m.helpOpen {
 		switch msg := message.(type) {
@@ -434,6 +458,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			m.editor.CancelAsync()
 			m.adr.Close()
 			m.issueImport.Close()
+			m.palette.Close()
 			m.stopped = true
 			m.reloadPending = false
 			return m, tea.Quit
@@ -484,6 +509,8 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 		case "?":
 			m.helpOpen = true
 			return m, nil
+		case action.PaletteKey:
+			return m, m.openPalette()
 		case "s":
 			if m.settingsNew != nil {
 				m.settings = m.settingsNew()
@@ -864,7 +891,34 @@ func batchCommands(commands ...tea.Cmd) tea.Cmd {
 // overlayOpen reports whether anything is elevated over the board this frame.
 func (m Model) overlayOpen() bool {
 	return m.helpOpen || m.detail.IsOpen() || m.settings != nil ||
-		m.adr.IsOpen() || m.editor.IsOpen() || m.action.open() || m.issueImport.IsOpen()
+		m.adr.IsOpen() || m.editor.IsOpen() || m.action.open() || m.issueImport.IsOpen() ||
+		m.palette.IsOpen()
+}
+
+// openPalette hands the palette this board's theme and the features the help
+// pane reports, then shows it. The features are resolved here rather than at
+// construction because the forge and AI backends are wired after newModel runs.
+func (m *Model) openPalette() tea.Cmd {
+	m.palette.SetStyles(m.styles)
+	m.palette.SetFeatures(m.actionFeatures())
+	return m.palette.Open()
+}
+
+// runPaletteAction replays the key press the chosen registry row stands for, so
+// the board's own handler runs the action. The palette therefore carries no
+// dispatch of its own and cannot drift from the keymap: a rebind in the registry
+// moves the key the board matches and the key the palette replays together.
+// The replay goes through route rather than Update, for two reasons. It is what
+// the caller is already inside, so the model stays concrete; and the section
+// 10.3 gates Update wraps around route are about raw input arriving from a
+// terminal, which a choice the user already committed in a panel is not.
+func (m Model) runPaletteAction(choice action.Action, command tea.Cmd) (Model, tea.Cmd) {
+	press, ok := choice.KeyPress()
+	if !ok {
+		return m, command
+	}
+	next, replayed := m.route(press)
+	return next, batchCommands(command, replayed)
 }
 
 // backdrop is the model the board renders through this frame. Spec section 4
@@ -925,6 +979,14 @@ func (m Model) View() tea.View {
 		overlayMouse = m.issueImport.MouseHandler(m.width, m.height)
 		hits = nil
 	}
+	if m.palette.IsOpen() {
+		// The palette is keyboard-only in this slice: it installs no pointer
+		// handler and clears the board's, so a click lands on nothing rather
+		// than on a board it is covering. Mouse wiring is the hover slice's.
+		content = m.palette.Overlay(content, m.width, m.height)
+		overlayMouse = nil
+		hits = nil
+	}
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
@@ -932,7 +994,8 @@ func (m Model) View() tea.View {
 		view.OnMouse = overlayMouse
 		return view
 	}
-	if !m.helpOpen && m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() && !m.issueImport.IsOpen() && !m.detail.OwnsInput() {
+	if !m.helpOpen && m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() &&
+		!m.issueImport.IsOpen() && !m.palette.IsOpen() && !m.detail.OwnsInput() {
 		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
 		view.OnMouse = boardMouseHandlerWithFeedback(hits, pointerActive, m.pointerState)
 	}
