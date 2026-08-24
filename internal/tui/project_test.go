@@ -243,8 +243,8 @@ func TestProjectSwitcherRendersAndClicks(t *testing.T) {
 	}
 }
 
-// TestProjectSwitcherIgnoresAnEmptyBoard: with no projects anywhere and no
-// selection, there is nothing to cycle through and nothing to persist.
+// TestProjectSwitcherIgnoresAnEmptyBoard: with no projects anywhere there is
+// nothing to cycle to, so no scope change and no preference write.
 func TestProjectSwitcherIgnoresAnEmptyBoard(t *testing.T) {
 	m := NewModel(stubBoardReader{}, nil, "u")
 	m.projects = projectSwitcher{}
@@ -253,6 +253,64 @@ func TestProjectSwitcherIgnoresAnEmptyBoard(t *testing.T) {
 	}
 	if m.projects.chosen() {
 		t.Fatalf("cycling invented a selection: %+v", m.projects)
+	}
+	m.projects = projectSwitcher{all: true}
+	if command := m.cycleProject(1); command != nil || !m.projects.all {
+		t.Fatalf("cycling from all with nothing to cycle to = %v, %+v", command, m.projects)
+	}
+}
+
+// TestProjectClickIsInertBehindAnOverlayOrALiveMove mirrors the other toolbar
+// controls: a scope change is user input, so it waits behind settings, is
+// dropped while a move is being written, and cancels a lifted card.
+func TestProjectClickIsInertBehindAnOverlayOrALiveMove(t *testing.T) {
+	m := projectModel()
+	m.projects = projectSwitcher{all: true}
+	m.settings = &settingsModel{}
+	if command := updateTestModel(t, &m, filterProjectClickedMsg{}); command != nil || !m.projects.all {
+		t.Fatalf("project click leaked behind settings: %v %+v", command, m.projects)
+	}
+	m.settings = nil
+
+	m.move.saving = true
+	if command := updateTestModel(t, &m, filterProjectClickedMsg{}); command != nil || !m.projects.all {
+		t.Fatalf("project click ran during a move write: %v %+v", command, m.projects)
+	}
+	m.move.saving = false
+
+	task, ok := m.selectedTask()
+	if !ok {
+		t.Fatal("fixture has no selectable card")
+	}
+	m.move.beginVisible(m.board, m.filteredBoard(), task, m.boardView.visibleStatuses(), false)
+	updateTestModel(t, &m, filterProjectClickedMsg{})
+	if m.move.lifted != nil || m.projects.label() != "kb" {
+		t.Fatalf("project click did not cancel the lift: lifted:%v scope:%q", m.move.lifted != nil, m.projects.label())
+	}
+}
+
+// TestProjectSegmentClickRoutesThroughTheBoardMouseHandler covers the pointer
+// path the toolbar segment shares with the filter chips.
+func TestProjectSegmentClickRoutesThroughTheBoardMouseHandler(t *testing.T) {
+	m := projectModel()
+	m.width, m.height = 120, 40
+	_, hits := m.renderBoard()
+	var segment boardHit
+	for _, hit := range hits {
+		if hit.kind == boardHitProject {
+			segment = hit
+			break
+		}
+	}
+	if segment.x1 <= segment.x0 {
+		t.Fatalf("project segment hit missing: %+v", hits)
+	}
+	command := boardMouseHandler(hits)(tea.MouseClickMsg{X: segment.x0, Y: segment.y0, Button: tea.MouseLeft})
+	if command == nil {
+		t.Fatal("project segment click was not hit")
+	}
+	if got := command(); got != (filterProjectClickedMsg{}) {
+		t.Fatalf("project segment click message = %#v", got)
 	}
 }
 

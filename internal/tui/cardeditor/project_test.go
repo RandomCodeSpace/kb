@@ -124,7 +124,7 @@ func TestTypedProjectLabelMovesTheCardInsteadOfStacking(t *testing.T) {
 	model.SetProjectDefault("kb")
 	model.OpenAdd(board.StatusTodo)
 	model.title.SetValue("Card")
-	model.addLabels("tui project::web #area")
+	model.addLabels("tui project::web #area tui")
 	if model.project.Value() != "web" {
 		t.Fatalf("typed project label did not move the card: %q", model.project.Value())
 	}

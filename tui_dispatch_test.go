@@ -106,6 +106,28 @@ func TestRunTUIPropagatesProgramFailureAndDefaultsBlankUser(t *testing.T) {
 	}
 }
 
+// TestRunTUIProgramDefaultStartsTheBoard exercises the production seam itself
+// — the one line that hands the resolved project to the TUI — rather than only
+// the stub the other dispatch tests install over it.
+func TestRunTUIProgramDefaultStartsTheBoard(t *testing.T) {
+	restoreTUISeams(t)
+	data := t.TempDir()
+	path := filepath.Join(data, "kb.db")
+	st, err := store.Open(path, []byte("tui-dispatch-test-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := runTUIProgram(st, path, "default", "kb",
+		tea.WithInput(strings.NewReader("q")),
+		tea.WithOutput(io.Discard),
+		tea.WithoutSignals(),
+		tea.WithWindowSize(80, 24),
+	); err != nil {
+		t.Fatalf("runTUIProgram: %v", err)
+	}
+}
+
 // TestRunTUIPropagatesActiveProjectFailure pins that an unreadable active
 // project stops the board instead of silently opening it unscoped: an unscoped
 // board would let a card be created outside every project.

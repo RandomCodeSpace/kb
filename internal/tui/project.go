@@ -35,17 +35,9 @@ func (s projectSwitcher) label() string {
 	return s.name
 }
 
-// matches reports whether a task is in scope. A task carrying no project (or
-// two, which only a foreign writer can produce) is out of scope of every named
-// project and visible only under "all".
-func (s projectSwitcher) matches(task board.Task) bool {
-	if s.all || s.name == "" {
-		return true
-	}
-	return project.Of(task.Tags) == s.name
-}
-
-// scope narrows a board to the selected project.
+// scope narrows a board to the selected project. A task carrying no project
+// (or two, which only a foreign writer can produce) belongs to no named
+// project and is visible only under "all".
 func (s projectSwitcher) scope(current board.Board) board.Board {
 	if s.all || s.name == "" {
 		return current
@@ -53,7 +45,7 @@ func (s projectSwitcher) scope(current board.Board) board.Board {
 	scoped := current
 	scoped.Tasks = make([]board.Task, 0, len(current.Tasks))
 	for _, task := range current.Tasks {
-		if s.matches(task) {
+		if project.Of(task.Tags) == s.name {
 			scoped.Tasks = append(scoped.Tasks, task)
 		}
 	}
