@@ -224,14 +224,17 @@ func (m *settingsModel) renderSettingsRow(row settingsRenderRow, width int) stri
 	if row.kind == settingsRowButton {
 		if padded := settingsFit(settingsButtonPad+row.button+settingsButtonPad, width); strings.HasSuffix(line, padded) {
 			marker := strings.TrimSuffix(line, padded)
+			// A settings row is driven by focus and Enter, so the resolver of
+			// spec section 10.4.2 marks no hotkey on it.
+			text, underline := widget.Hotkey(row.button, nil)
 			return styles.Overlay.Surf.Render(marker) + widget.Button(styles, widget.ButtonOpts{
-				Text:           row.button,
+				Text:           text,
 				Variant:        row.variant,
 				Selected:       m.focus == row.target,
 				Armed:          row.armed,
 				Pressed:        m.pointerState.IsPressed(settingsControlID(row.target)),
-				UnderlineIndex: -1,
-				Padding:        [2]int{1, 1},
+				UnderlineIndex: underline,
+				Padding:        [2]int{styles.Metrics.ButtonPadX, styles.Metrics.ButtonPadX},
 			})
 		}
 	}

@@ -255,7 +255,7 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	content, hits := m.renderBoard()
 	text := plain(content)
 	for _, want := range []string{
-		"▸ 1 TO DO", "● 2 DOING", "● 3 DONE", "● 4 CANCELLED", "2 cards · 1 blocked",
+		"▸● 1 TO DO", "▌● 2 DOING", "● 3 DONE", "● 4 CANCELLED", "2 cards · 1 blocked",
 		"🚀 Ship terminal board", "#7", "new", "P1", "▐blocked▌", "▐today▌", "◇M", "▐#backend▌", "▐type:feature▌",
 		"3h here", "shipped", "1d old", "c cancelled:on",
 	} {
@@ -304,7 +304,7 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	m.width = 99
 	m.boardView.column = 2
 	narrow := plain(m.render())
-	if !strings.Contains(narrow, "▸ 3 DONE") || strings.Contains(narrow, "TO DO") || strings.Contains(narrow, "CANCELLED") {
+	if !strings.Contains(narrow, "▸● 3 DONE") || strings.Contains(narrow, "TO DO") || strings.Contains(narrow, "CANCELLED") {
 		t.Fatalf("narrow focused column:\n%s", narrow)
 	}
 	for _, line := range strings.Split(m.render(), "\n") {
@@ -604,7 +604,7 @@ func TestBoardViewSmallHelpers(t *testing.T) {
 	// A Model assembled field by field still renders: the board falls back to
 	// the default dark palette when no theme was resolved for it.
 	column := Model{board: board.Board{Tasks: []board.Task{{ID: "x", Title: "x", Status: board.StatusTodo}}}, boardView: boardViewState{}, renderedAt: time.Now()}.renderBoardColumn(board.StatusTodo, 2, 4)
-	if len(column.lines) != 4 || plain(column.lines[0]) != "▸ " {
+	if len(column.lines) != 4 || plain(column.lines[0]) != "▸●" {
 		t.Fatalf("tiny column = %+v", column)
 	}
 	if empty := (Model{}).renderBoardColumnAt(board.StatusTodo, 0, 0, theme.DensityCompact); len(empty.lines) != 0 || len(empty.hits) != 2 {

@@ -524,14 +524,14 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 	}
 	xCursor := x + inset
 	for _, control := range layout.controls {
-		buttonWidth := detailButtonWidth(control)
+		buttonWidth := detailButtonWidth(m.styles, control)
 		if xCursor+buttonWidth > x+paneWidth-inset || actionY < y+1 || actionY >= footerY {
 			break
 		}
 		rect := pointer.Rect{X0: xCursor, Y0: actionY, X1: xCursor + buttonWidth, Y1: actionY + 1}
 		message := wrap(control.message)
 		hitMap.AddControl(detailFooterControlID(control), rect, func(pointer.Point) tea.Msg { return message })
-		xCursor += buttonWidth + detailButtonGap
+		xCursor += buttonWidth + m.styles.Metrics.ButtonGap
 	}
 	if m.driftMode == driftSelect && m.driftBusy == "" {
 		viewport := pointer.Viewport{

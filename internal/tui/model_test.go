@@ -369,7 +369,7 @@ func TestModelLoadsRoutesAndRenders(t *testing.T) {
 	if !wide.AltScreen || wide.MouseMode != tea.MouseModeCellMotion {
 		t.Fatalf("view terminal modes = alt:%v mouse:%v", wide.AltScreen, wide.MouseMode)
 	}
-	for _, want := range []string{"kb / Work / alice", "▸ 1 TO DO", "one", "DOING", "DONE", "ready"} {
+	for _, want := range []string{"kb / Work / alice", "▸● 1 TO DO", "one", "DOING", "DONE", "ready"} {
 		if !strings.Contains(ansi.Strip(wide.Content), want) {
 			t.Errorf("wide view missing %q:\n%s", want, wide.Content)
 		}
@@ -380,7 +380,7 @@ func TestModelLoadsRoutesAndRenders(t *testing.T) {
 	updated, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 0})
 	m = updated.(Model)
 	narrow := ansi.Strip(m.View().Content)
-	if !strings.Contains(narrow, "▸ 2 DOING") || strings.Contains(narrow, "TO DO") {
+	if !strings.Contains(narrow, "▸● 2 DOING") || strings.Contains(narrow, "TO DO") {
 		t.Fatalf("narrow focused view:\n%s", narrow)
 	}
 

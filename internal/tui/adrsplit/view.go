@@ -182,12 +182,15 @@ func (m *Model) renderRow(row splitRow, width int) string {
 	case rowButton:
 		if label := fit(row.button, width); strings.HasSuffix(line, label) {
 			marker := strings.TrimSuffix(line, label)
+			// A split row is driven by focus and Enter, so the resolver of
+			// spec section 10.4.2 marks no hotkey on it.
+			text, underline := widget.Hotkey(label, nil)
 			return styles.Overlay.Surf.Render(marker) + widget.Button(styles, widget.ButtonOpts{
-				Text:           label,
+				Text:           text,
 				Variant:        row.variant,
 				Selected:       m.focus == row.target,
 				Pressed:        m.pressed(row.target),
-				UnderlineIndex: -1,
+				UnderlineIndex: underline,
 			})
 		}
 		return styles.Overlay.Surf.Render(line)
