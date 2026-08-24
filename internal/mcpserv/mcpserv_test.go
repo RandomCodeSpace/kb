@@ -15,6 +15,12 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
+// testProject is the project the shared harness makes active, and the label
+// every card an MCP test creates is expected to carry.
+const testProject = "mcp"
+
+const testProjectLabel = "project::" + testProject
+
 func TestMCPDoneGuardReevaluatesAfterConcurrentUpdate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kb.db")
 	a, err := store.Open(path, []byte("test-secret"))
@@ -70,9 +76,15 @@ func connect(t *testing.T) *mcp.ClientSession {
 
 // connectWithStore also returns the real SQLite store so MCP tests can seed
 // fixtures through the same write paths used by the other application surfaces.
+//
+// Every write path now demands a project, so the harness sets KB_PROJECT the
+// way the CLI test env does: tests about something else need not spell one
+// out, and the ones about projects override it per call.
 func connectWithStore(t *testing.T) (*mcp.ClientSession, *store.Store) {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "kb.db"), []byte("test-secret"))
+	dataDir := t.TempDir()
+	t.Setenv("KB_PROJECT", testProject)
+	st, err := store.Open(filepath.Join(dataDir, "kb.db"), []byte("test-secret"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -80,7 +92,7 @@ func connectWithStore(t *testing.T) (*mcp.ClientSession, *store.Store) {
 
 	serverT, clientT := mcp.NewInMemoryTransports()
 	ctx := context.Background()
-	ss, err := newServer(st, "tester").Connect(ctx, serverT, nil)
+	ss, err := newServer(st, "tester", dataDir).Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -458,7 +470,7 @@ func TestAddListRoundTrip(t *testing.T) {
 	if got.ID != created.ID || got.Title != created.Title || got.Status != "doing" ||
 		got.Prio != 2 || got.Due != "2026-08-01" || got.Effort != "M" ||
 		got.Desc != "cover all five tools" || got.Emoji != "📝" ||
-		len(got.Tags) != 2 || got.Tags[0] != "docs" || got.Tags[1] != "mcp" ||
+		len(got.Tags) != 3 || got.Tags[0] != "docs" || got.Tags[1] != "mcp" || got.Tags[2] != testProjectLabel ||
 		len(got.Checks) != 2 || !got.Checks[0].Done || got.Checks[1].Done {
 		t.Errorf("round-trip mismatch:\n got %+v\nwant %+v", got, created)
 	}
@@ -478,13 +490,13 @@ func TestUpdateMoveDelete(t *testing.T) {
 
 	var updated taskJSON
 	callOK(t, cs, "update_task", map[string]any{"id": created.ID[:9], "prio": 1, "tags": []string{"release"}}, &updated)
-	if updated.Prio != 1 || len(updated.Tags) != 1 || updated.Tags[0] != "release" {
+	if updated.Prio != 1 || len(updated.Tags) != 2 || updated.Tags[0] != "release" || updated.Tags[1] != testProjectLabel {
 		t.Errorf("update mismatch: %+v", updated)
 	}
 
 	var moved taskJSON
 	callOK(t, cs, "move_task", map[string]any{"id": created.ID[:9], "status": "done"}, &moved)
-	if moved.Status != "done" {
+	if moved.Status != "done" || len(moved.Tags) != 2 || moved.Tags[1] != testProjectLabel {
 		t.Errorf("move mismatch: %+v", moved)
 	}
 
