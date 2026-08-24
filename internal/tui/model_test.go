@@ -143,6 +143,10 @@ func collapseInteractionTiming(m Model) Model {
 	timing.DoubleClickWindow = 0
 	timing.NoticeTTL = 0
 	m.applyStyles(theme.NewWith(true, timing))
+	// Spec section 10.6.10, point 4: the launch reveal mounts settled, so no
+	// root test arms its tick chain and every intermediate frame is asserted
+	// synchronously against widget.Brand instead. The brand tests reset this.
+	m.brandFrame = timing.BrandBirthSteps
 	return m
 }
 

@@ -22,10 +22,17 @@ type watcherOpener func(context.Context, string) (versionWatcher, error)
 // Run opens the data-version watcher and runs the full-screen program.
 // activeProject is the project local commands default to, resolved by the
 // caller that owns the data directory; it opens the switcher and defaults the
-// editor's mandatory project field, and may be empty. Program options are
-// accepted for deterministic tests; production passes none.
-func Run(st *store.Store, databasePath, user, activeProject string, options ...tea.ProgramOption) (err error) {
-	return runWithSettings(st, databasePath, user, activeProject, func(ctx context.Context, path string) (versionWatcher, error) {
+// editor's mandatory project field, and may be empty. version is the build
+// identifier the launch screen's meta row prints (spec section 10.6.5); the
+// TUI cannot reach package main's build info, so the caller passes it in and an
+// empty string renders the meta row with its left slot only. Program options
+// are accepted for deterministic tests; production passes none.
+func Run(
+	st *store.Store,
+	databasePath, user, activeProject, version string,
+	options ...tea.ProgramOption,
+) (err error) {
+	return runWithSettings(st, databasePath, user, activeProject, version, func(ctx context.Context, path string) (versionWatcher, error) {
 		return OpenDataVersionWatcher(ctx, path)
 	}, options...)
 }
@@ -35,11 +42,12 @@ func runWithSettings(
 	databasePath string,
 	user string,
 	activeProject string,
+	version string,
 	openWatcher watcherOpener,
 	options ...tea.ProgramOption,
 ) (err error) {
 	runner := ai.NewRunner(st, filepath.Join(filepath.Dir(databasePath), "skills"), nil, nil)
-	return runProgram(st, databasePath, user, activeProject, openWatcher, func(ctx context.Context) *settingsModel {
+	return runProgram(st, databasePath, user, activeProject, version, openWatcher, func(ctx context.Context) *settingsModel {
 		return newSettingsModel(st, user, ctx)
 	}, runner, options...)
 }
@@ -51,7 +59,7 @@ func run(
 	openWatcher watcherOpener,
 	options ...tea.ProgramOption,
 ) (err error) {
-	return runProgram(st, databasePath, user, "", openWatcher, nil, nil, options...)
+	return runProgram(st, databasePath, user, "", "", openWatcher, nil, nil, options...)
 }
 
 func runProgram(
@@ -59,6 +67,7 @@ func runProgram(
 	databasePath string,
 	user string,
 	activeProject string,
+	version string,
 	openWatcher watcherOpener,
 	settingsNew func(context.Context) *settingsModel,
 	aiRunner *ai.Runner,
@@ -78,6 +87,7 @@ func runProgram(
 	// The board file sits in the data directory, beside the state.json the
 	// active project lives in.
 	model.dataDir = filepath.Dir(databasePath)
+	model.SetVersion(version)
 	model.configureAI(aiRunner, ctx)
 	model.SetActiveProject(activeProject)
 	preferencePath, preferencePathErr := tuiPreferencesPath(databasePath, user)

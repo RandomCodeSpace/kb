@@ -397,14 +397,24 @@ func (m Model) boardState() (string, theme.Slot) {
 	}
 }
 
-// renderTopBar is the Canvas row of spec section 2.1: the wordmark in the brand
-// hue, the board identity, and the shipped counter in the success hue.
+// renderTopBar is the Canvas row of spec section 2.1: the accent rail and
+// wordmark, the board identity, and the shipped counter in the success hue.
+//
+// The leading three columns are the per-project accent of spec sections 10.6.4
+// and 10.7.3: a rail names the thing to its right, so the rail and the bold
+// wordmark read as one mark. Neither a ramp nor a filled pill is used here. A
+// two-cell text run cannot carry a legible gradient, and a fixed brand ramp
+// would overwrite the one hue on the row that identifies which board this is.
+// The launch screen is the place the mark gets to be a mark; the top bar is the
+// place identity gets to be a color.
 func (m Model) renderTopBar(styles *theme.Styles, width int) string {
 	title := strings.TrimSpace(sanitizeTerminal(m.board.Title))
 	if title == "" {
 		title = "Board"
 	}
-	line := styles.OnBold(theme.Brand, theme.Canvas).Render("kb") +
+	accent := theme.AccentSlot(title)
+	line := styles.On(accent, theme.Canvas).Render(styles.Glyph.Rail) +
+		styles.OnBold(accent, theme.Canvas).Render("kb") +
 		styles.Board.TopBar.Render(" / "+title+" / "+sanitizeTerminal(m.user))
 	if shipped := m.shippedCount(); shipped > 0 {
 		line += styles.On(theme.StatusOK, theme.Canvas).Render(fmt.Sprintf(" / ×%d shipped today", shipped))

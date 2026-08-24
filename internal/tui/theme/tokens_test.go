@@ -228,6 +228,10 @@ func TestGlyphsCarryTheAccentVocabulary(t *testing.T) {
 		"Track":    {glyphs.Track, "░"},
 		"Empty":    {glyphs.Empty, "○"},
 		"Alert":    {glyphs.Alert, "▲"},
+
+		"HalfTop":    {glyphs.HalfTop, "▀"},
+		"HalfBottom": {glyphs.HalfBottom, "▄"},
+
 		"MarkPrio": {glyphs.MarkPrio, "P"},
 		"MarkSeq":  {glyphs.MarkSeq, "#"},
 		"MarkTag":  {glyphs.MarkTag, "#"},
@@ -264,6 +268,10 @@ func TestGlyphWidthsMatchTheSpecTable(t *testing.T) {
 		"Track":    {ansi.StringWidth(glyphs.Track), 1},
 		"Empty":    {ansi.StringWidth(glyphs.Empty), 1},
 		"Alert":    {ansi.StringWidth(glyphs.Alert), 1},
+
+		"HalfTop":    {ansi.StringWidth(glyphs.HalfTop), 1},
+		"HalfBottom": {ansi.StringWidth(glyphs.HalfBottom), 1},
+
 		"MarkPrio": {ansi.StringWidth(glyphs.MarkPrio), 1},
 		"MarkSeq":  {ansi.StringWidth(glyphs.MarkSeq), 1},
 		"MarkTag":  {ansi.StringWidth(glyphs.MarkTag), 1},
@@ -302,6 +310,79 @@ func TestCraftMetricsAreTheSpecValues(t *testing.T) {
 	for name, pair := range cases {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, spec says %d", name, pair[0], pair[1])
+		}
+	}
+}
+
+// TestBrandMetricsAreTheSpecValues is the token table of spec section 10.6.8.
+// None of these may be a literal at a call site, and the mark width identity is
+// asserted here rather than in the widget so a re-spelled kern fails the token
+// that owns it.
+func TestBrandMetricsAreTheSpecValues(t *testing.T) {
+	metrics := defaultMetrics
+	cases := map[string][2]int{
+		"BrandMarkW":       {metrics.BrandMarkW, 10},
+		"BrandMarkH":       {metrics.BrandMarkH, 5},
+		"BrandKern":        {metrics.BrandKern, 1},
+		"BrandStretchMax":  {metrics.BrandStretchMax, 2},
+		"BrandMetaW":       {metrics.BrandMetaW, 48},
+		"BrandMetaGap":     {metrics.BrandMetaGap, 2},
+		"BrandMetaGapRows": {metrics.BrandMetaGapRows, 1},
+		"BrandMinW":        {metrics.BrandMinW, 16},
+		"BrandMinH":        {metrics.BrandMinH, 9},
+		"BrandBirthSteps":  {DefaultTiming.BrandBirthSteps, 12},
+		"BrandBlockH":      {metrics.BrandBlockH(), 7},
+	}
+	for name, pair := range cases {
+		if pair[0] != pair[1] {
+			t.Errorf("%s = %d, spec says %d", name, pair[0], pair[1])
+		}
+	}
+	// k(4) + kern(1) + b(5) is the unstretched width, and the stretch adds to
+	// it, so the mark is 10 to 12 columns and never anything else.
+	if metrics.BrandMarkW != 4+metrics.BrandKern+5 {
+		t.Errorf("BrandMarkW %d is not k + kern + b", metrics.BrandMarkW)
+	}
+}
+
+// TestBrandMetaWidthTakesTheFrameCap is the width ladder of spec section
+// 10.6.5: the meta row is BrandMetaW until the frame cannot hold it, then the
+// frame less a page margin either side, and never negative.
+func TestBrandMetaWidthTakesTheFrameCap(t *testing.T) {
+	metrics := defaultMetrics
+	cases := map[int]int{
+		200: metrics.BrandMetaW,
+		50:  metrics.BrandMetaW,
+		40:  38,
+		16:  14,
+		2:   0,
+		0:   0,
+		-8:  0,
+	}
+	for frame, want := range cases {
+		if got := metrics.BrandMetaWidth(frame); got != want {
+			t.Errorf("BrandMetaWidth(%d) = %d, want %d", frame, got, want)
+		}
+	}
+}
+
+// TestBrandFitsGuardsBothAxes is the drop rule of spec section 10.6.7: below
+// either floor the full mark is dropped and the meta row renders alone.
+func TestBrandFitsGuardsBothAxes(t *testing.T) {
+	metrics := defaultMetrics
+	cases := []struct {
+		width, height int
+		want          bool
+	}{
+		{80, 24, true},
+		{metrics.BrandMinW, metrics.BrandMinH, true},
+		{metrics.BrandMinW - 1, metrics.BrandMinH, false},
+		{metrics.BrandMinW, metrics.BrandMinH - 1, false},
+		{0, 0, false},
+	}
+	for _, test := range cases {
+		if got := metrics.BrandFits(test.width, test.height); got != test.want {
+			t.Errorf("BrandFits(%d, %d) = %v, want %v", test.width, test.height, got, test.want)
 		}
 	}
 }
