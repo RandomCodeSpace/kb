@@ -51,7 +51,7 @@ func TestLaunchScreenOwnsTheFrameUntilTheFirstSnapshot(t *testing.T) {
 		t.Fatal("a loading model with no snapshot is not launching")
 	}
 	launch := ansi.Strip(m.View().Content)
-	if !strings.Contains(launch, "loading board...") || !strings.Contains(launch, "v1.2.0") {
+	if !strings.Contains(launch, "loading board") || !strings.Contains(launch, "v1.2.0") {
 		t.Fatalf("launch screen missing its meta row:\n%s", launch)
 	}
 	if strings.Contains(launch, "TO DO") || strings.Contains(launch, "j/k cards") {
@@ -315,7 +315,7 @@ func TestSetVersionReachesTheMetaRow(t *testing.T) {
 	if strings.Contains(launch, "v") && strings.Contains(launch, "unknown") {
 		t.Fatalf("an empty version rendered a version slot:\n%s", launch)
 	}
-	if !strings.Contains(launch, "loading board...") {
+	if !strings.Contains(launch, "loading board") {
 		t.Fatal("an empty version dropped the left slot too")
 	}
 }

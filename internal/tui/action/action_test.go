@@ -198,6 +198,22 @@ func TestGroupLabelsAreTheSectionBands(t *testing.T) {
 	}
 }
 
+// TestLookupIsTheOneWayToNameAnAction covers the accessor the empty-state tails
+// of spec section 10.8.3 read: a surface names an action by id and takes both
+// the key and the words from the table, so a rebind or a reword moves every
+// surface at once.
+func TestLookupIsTheOneWayToNameAnAction(t *testing.T) {
+	for _, entry := range All() {
+		found, ok := Lookup(entry.ID)
+		if !ok || found != entry {
+			t.Fatalf("Lookup(%d) = %+v, %v", entry.ID, found, ok)
+		}
+	}
+	if found, ok := Lookup(ID(200)); ok || found != (Action{}) {
+		t.Fatalf("an id the table does not carry returned %+v, %v", found, ok)
+	}
+}
+
 // TestPaletteKeyIsAChord pins the one binding the registry names for itself.
 func TestPaletteKeyIsAChord(t *testing.T) {
 	if PaletteKey != "ctrl+k" {

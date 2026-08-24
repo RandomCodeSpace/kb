@@ -531,7 +531,7 @@ func build(table paletteRGB, isDark bool, timing Timing, fidelity Fidelity) *Sty
 		Cell: blank.PaddingRight(defaultMetrics.TableGutter),
 		Last: blank,
 	}
-	built.buildRamps(pal)
+	built.buildRamps(pal, fidelity)
 	built.Input = inputStyles(pal, on, isDark)
 	built.Area = areaStyles(pal, on, isDark)
 	built.Help = helpStyles(on)
@@ -545,7 +545,7 @@ func build(table paletteRGB, isDark bool, timing Timing, fidelity Fidelity) *Sty
 	// be a second authored interval by another name.
 	built.Spinner = spinner.Dot
 	built.Spinner.FPS = timing.PlainFrame()
-	built.Progress = meterModel(pal)
+	built.Progress = meterModel(pal, fidelity)
 	built.Markdown = markdownStyles(table)
 	built.Huh = huhStyles(pal, on, onBold, isDark)
 	return built

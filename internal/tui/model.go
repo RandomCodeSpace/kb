@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 
@@ -106,6 +107,8 @@ type Model struct {
 	taskActionSession uint64
 	pointerState      pointer.State
 	clicks            pointer.Clicks
+	spin              spinner.Model
+	scroll            boardScrollState
 	grace             graceState
 	actionStatus      string
 	actionStatusError bool
@@ -132,6 +135,9 @@ func (m *Model) SetVersion(version string) { m.version = version }
 // the root owns.
 func (m *Model) applyStyles(styles *theme.Styles) {
 	m.styles = styles
+	// Spec section 10.2.1: the plain tier takes its cadence from the one clock,
+	// which is a property of the rebuilt theme rather than of the component.
+	m.spin.Spinner = styles.Spinner
 	m.detail.SetStyles(styles)
 	m.editor.SetStyles(styles)
 	m.adr.SetStyles(styles)
@@ -218,6 +224,7 @@ func newModel(
 		now:         now,
 		renderedAt:  now(),
 		action:      newTaskActionState(),
+		spin:        spinner.New(spinner.WithSpinner(styles.Spinner)),
 
 		brandStretch: brandStretch,
 		brandSeed:    brandSeed,
@@ -237,7 +244,10 @@ func (m Model) Init() tea.Cmd {
 		// could be absorbed into that baseline and never trigger a refresh.
 		start = m.readDataVersion()
 	}
-	return batchCommands(start, m.brandReveal())
+	// The first snapshot is a plain-tier wait (spec section 10.8.7), so the tick
+	// chain opens with the load rather than waiting for a message to notice the
+	// board is already busy.
+	return batchCommands(start, m.brandReveal(), m.trackBoardBusy(false))
 }
 
 // Update is the input-feel gate of spec section 10.3 wrapped around the root's
@@ -260,14 +270,24 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.expireNotice(message) {
 		return m, nil
 	}
+	if m.settleScroll(message) {
+		return m, nil
+	}
+	// The board's own plain tier, matched by spinner id so an overlay's tick
+	// still reaches the overlay that owns it.
+	if msg, ok := message.(spinner.TickMsg); ok && msg.ID == m.spin.ID() {
+		return m, m.boardSpinTick(msg)
+	}
 	if m.grace.swallows(message) {
 		return m, m.grace.absorb(m.themeStyles().Timing)
 	}
 	grace := m.graceIdentity()
 	notice := m.noticeKey()
+	busy := m.boardBusy()
 	next, command := m.route(message)
 	handoff := next.syncEngines()
-	return next, batchCommands(command, handoff, next.trackGrace(grace), next.trackNotice(notice))
+	return next, batchCommands(command, handoff, next.trackGrace(grace), next.trackNotice(notice),
+		next.trackBoardBusy(busy))
 }
 
 // route handles global messages before any future pane-specific routing.
@@ -674,6 +694,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 		column := statusIndex(msg.status)
 		m.boardView.scrolls[column] = max(msg.offset, 0)
 		m.boardView.manualScroll[column] = true
+		return m, batchCommands(detailCmd, m.armScrollLinger(column))
 	case cardMoveStoredMsg:
 		return m, m.finishCardDrop(msg)
 	case filterTextClickedMsg:

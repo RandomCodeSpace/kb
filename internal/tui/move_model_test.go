@@ -292,7 +292,7 @@ func TestModelKeyboardDropWritesExplicitMoveAndAnnouncesCanonicalPosition(t *tes
 	if drop == nil || !m.move.saving {
 		t.Fatalf("drop did not start: %#v command=%v", m.move, drop)
 	}
-	updateTestModel(t, &m, drop())
+	updateTestModel(t, &m, singleCommandMessage(t, drop))
 	if s.writes != 1 || s.target != board.StatusDoing || s.index != 2 {
 		t.Fatalf("store write = count %d target %s index %d", s.writes, s.target, s.index)
 	}
@@ -319,7 +319,7 @@ func TestFailedMoveRestoresCanonicalBoardFocusAndError(t *testing.T) {
 		t.Fatalf("local preview = %q", got)
 	}
 	drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
-	updateTestModel(t, &m, drop())
+	updateTestModel(t, &m, singleCommandMessage(t, drop))
 	if got := columnNames(m.board, board.StatusTodo); got != "A,B,C" {
 		t.Fatalf("failed write board = %q", got)
 	}
@@ -347,7 +347,7 @@ func TestMoveFailurePathsStayTruthful(t *testing.T) {
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyDown})
 		drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
-		reload := updateTestModel(t, &m, drop())
+		reload := updateTestModel(t, &m, singleCommandMessage(t, drop))
 		if reload == nil || !m.loading || columnNames(m.board, board.StatusTodo) != "A,B,C" {
 			t.Fatalf("double failure = loading %v board %q command %v", m.loading, columnNames(m.board, board.StatusTodo), reload)
 		}
@@ -368,7 +368,7 @@ func TestMoveFailurePathsStayTruthful(t *testing.T) {
 			t.Fatalf("preview ordinals = %s, want %s", preview, wantPreview)
 		}
 		drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
-		reload := updateTestModel(t, &m, drop())
+		reload := updateTestModel(t, &m, singleCommandMessage(t, drop))
 		if reload == nil || !m.loading {
 			t.Fatalf("reload failure = loading %v command %v", m.loading, reload)
 		}
@@ -424,7 +424,7 @@ func TestMoveSerializesWatcherRefreshBehindStoreWrite(t *testing.T) {
 	if !m.reloadPending || m.loading {
 		t.Fatalf("watcher raced write: loading=%v pending=%v", m.loading, m.reloadPending)
 	}
-	reload := updateTestModel(t, &m, drop())
+	reload := updateTestModel(t, &m, singleCommandMessage(t, drop))
 	if reload == nil || !m.loading || m.reloadPending {
 		t.Fatalf("write did not start serialized reload: loading=%v pending=%v command=%v", m.loading, m.reloadPending, reload)
 	}
@@ -458,7 +458,7 @@ func TestMouseDragPreviewsAndDropsBetweenColumns(t *testing.T) {
 	}
 	up := handler(tea.MouseReleaseMsg{X: destination.x0 + 1, Y: destination.y0, Button: tea.MouseLeft})
 	drop := updateTestModel(t, &m, up())
-	updateTestModel(t, &m, drop())
+	updateTestModel(t, &m, singleCommandMessage(t, drop))
 	if s.target != board.StatusDoing || s.index != 1 || columnNames(m.board, board.StatusDoing) != "X,A,Y" {
 		t.Fatalf("mouse drop = target %s index %d board %q", s.target, s.index, columnNames(m.board, board.StatusDoing))
 	}
@@ -482,7 +482,7 @@ func TestSameColumnDropPreservesStoredCardAge(t *testing.T) {
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyDown})
 	drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	updateTestModel(t, &m, drop())
+	updateTestModel(t, &m, singleCommandMessage(t, drop))
 	after := taskNamed(t, m.board, "First")
 	if !after.MovedAt.Equal(first.MovedAt) || after.Position != 1 {
 		t.Fatalf("same-column age/position = %v/%d, want %v/1", after.MovedAt, after.Position, first.MovedAt)
@@ -673,10 +673,10 @@ func TestMoveBoardViewCoverageEdges(t *testing.T) {
 	if body, hits := joinColumns(theme.New(true), nil, boardLayout{}, 10); body != nil || hits != nil {
 		t.Fatalf("empty columns = %q,%v", body, hits)
 	}
-	if got := settingsBoardFooter("ready", "off", false, false, 1); got != "q" {
+	if got := settingsBoardFooter(theme.New(true), "ready", "off", false, false, 1); got != "q" {
 		t.Fatalf("tiny footer = %q", got)
 	}
-	if got := settingsBoardFooter("ready", "off", false, false, 20); got != "s | ? help | q quit" {
+	if got := settingsBoardFooter(theme.New(true), "ready", "off", false, false, 20); got != "s | ? help | q quit" {
 		t.Fatalf("help-only footer = %q", got)
 	}
 	hits := []boardHit{{x1: 5, y1: 5, status: board.StatusDoing}}
@@ -744,7 +744,7 @@ func TestMouseReleaseProtocolsClickAndDrag(t *testing.T) {
 					if command == nil {
 						t.Fatal("drag release did not start drop")
 					}
-					updateTestModel(t, &m, command())
+					updateTestModel(t, &m, singleCommandMessage(t, command))
 					if s.writes != 1 || s.target != board.StatusDoing {
 						t.Fatalf("drag write = %d/%s", s.writes, s.target)
 					}
@@ -795,7 +795,7 @@ func TestMoveFooterSanitizesTitlesStatusesAndStoreErrors(t *testing.T) {
 		m := loadedMoveModel(s)
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 		drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
-		updateTestModel(t, &m, drop())
+		updateTestModel(t, &m, singleCommandMessage(t, drop))
 		assertSafeFooter(t, m, "Move failed for A", "pwnred")
 	})
 }
@@ -933,7 +933,7 @@ func TestCompletedDropAndFailurePrecedeLingeringErrors(t *testing.T) {
 		m.pollErr = errors.New("old poll error")
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 		drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
-		updateTestModel(t, &m, drop())
+		updateTestModel(t, &m, singleCommandMessage(t, drop))
 		if footer := lastRenderLine(m); !strings.Contains(footer, "Dropped A") || strings.Contains(footer, "old poll") {
 			t.Fatalf("drop footer = %q", footer)
 		}
@@ -949,7 +949,7 @@ func TestCompletedDropAndFailurePrecedeLingeringErrors(t *testing.T) {
 		m.preferenceErr = errors.New("old preference error")
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 		drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
-		updateTestModel(t, &m, drop())
+		updateTestModel(t, &m, singleCommandMessage(t, drop))
 		if footer := lastRenderLine(m); !strings.Contains(footer, "Move failed for A: write failed") || strings.Contains(footer, "old preference") {
 			t.Fatalf("failure footer = %q", footer)
 		}
