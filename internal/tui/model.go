@@ -63,6 +63,7 @@ type Model struct {
 	actionStore       taskActionStore
 	watcher           dataVersionReader
 	user              string
+	dataDir           string
 	board             board.Board
 	styles            *theme.Styles
 	boardView         boardViewState
@@ -134,10 +135,15 @@ func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
 	m.editor.SetAIRunner(runner, ctx)
 	adrStore, _ := m.store.(adrsplit.Store)
 	m.adr = adrsplit.New(adrStore, runner, m.user, ctx)
+	// Both overlays create cards, so both need the project every card must
+	// carry; they resolve it from the data directory at write time, which is
+	// what makes a kb project use mid-session take effect on the next batch.
+	m.adr.SetDataDir(m.dataDir)
 	m.adr.SetStyles(m.styles)
 	if direct, ok := m.store.(*store.Store); ok {
 		backend := forge.New(direct, runner, nil)
 		m.issueImport = issueimport.New(direct, backend, m.user, ctx)
+		m.issueImport.SetDataDir(m.dataDir)
 		m.issueImport.SetStyles(m.styles)
 		m.detail.SetDriftBackend(backend, ctx)
 	}

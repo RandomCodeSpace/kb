@@ -201,6 +201,11 @@ inside the data directory — it is client state, so it resolves the same way in
 `KB_SERVER` mode, where no local database is opened, and never travels to the
 board's readers.
 
+Every surface that writes a task holds the same invariant. The MCP tools take
+a `project` argument and fall back to the active project; the TUI's ADR split
+and forge import stamp the active project on each card they create, and report
+the same refusal on a board where none resolves.
+
 No task-mutating command leaves a task with zero or two project labels:
 `--tag` replaces the plain labels but keeps the project, `-p` moves the task,
 and spelling `--tag project::<name>` does the same. Contradicting `-p` with a
@@ -251,7 +256,11 @@ args = ["mcp"]
 ```
 
 The server exposes task operations plus board and workflow context resources.
-Writes use the same store invariants as the TUI and CLI.
+Writes use the same store invariants as the TUI and CLI, mandatory projects
+included: `add_task` and `update_task` take an optional `project` argument and
+otherwise use the active project, and refuse the call when neither resolves.
+Tasks that predate mandatory projects are labelled when the server opens the
+board.
 
 ## Optional HTTP API
 
@@ -380,7 +389,7 @@ returned in settings responses.
 | --- | --- | --- |
 | `KB_DATA` | all local modes, serve | Data directory |
 | `KB_SECRET` | all store users | Encryption secret override |
-| `KB_PROJECT` | task CLI | Active project, overriding `kb project use` |
+| `KB_PROJECT` | task CLI, TUI, mcp | Active project, overriding `kb project use` |
 | `KB_SERVER` | task CLI | Optional remote API base URL |
 | `KB_SERVER_TOKEN` | task CLI | Bearer token for remote mode |
 | `KB_PORT` | serve | Listen port, default `8080` |

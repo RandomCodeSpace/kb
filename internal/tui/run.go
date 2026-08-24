@@ -75,6 +75,9 @@ func runProgram(
 		err = errors.Join(err, watcher.Close())
 	}()
 	model := newModel(st, watcher, user, ctx)
+	// The board file sits in the data directory, beside the state.json the
+	// active project lives in.
+	model.dataDir = filepath.Dir(databasePath)
 	model.configureAI(aiRunner, ctx)
 	model.SetActiveProject(activeProject)
 	preferencePath, preferencePathErr := tuiPreferencesPath(databasePath, user)

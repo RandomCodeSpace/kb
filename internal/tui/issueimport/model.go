@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/cliapp"
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
@@ -75,6 +77,7 @@ type Model struct {
 	store   Store
 	backend Backend
 	user    string
+	dataDir string
 	ctx     context.Context
 
 	open       bool
@@ -109,6 +112,11 @@ type Model struct {
 // It is built once and never mutated; the root resolves its own on construction
 // and again on tea.BackgroundColorMsg (spec section 6.3).
 var fallbackStyles = sync.OnceValue(func() *theme.Styles { return theme.New(true) })
+
+// SetDataDir names the directory the active project is resolved from — the
+// one holding the board and its state.json. Empty falls back to $KB_DATA and
+// the default data directory, the same as every other surface.
+func (m *Model) SetDataDir(dir string) { m.dataDir = dir }
 
 // SetStyles hands the overlay the resolved design system. Spec section 6.2:
 // styles are built once by the root and threaded down, never constructed here.
@@ -481,8 +489,22 @@ func (m *Model) nextWrite() tea.Cmd {
 	session, generation := m.session, m.generation
 	source := m.sources[m.source].Name
 	item := forge.LinkInput{ExternalKey: draft.ExternalKey, Link: draft.Link, URL: draft.URL, Title: draft.Title}
+	dataDir := m.dataDir
 	return func() tea.Msg {
-		_, err := m.backend.CreateTask(m.user, source, task, item)
+		// An imported card is a card: it carries the one project every task
+		// carries. The import flow is what picks it — the forge service
+		// writes the card it is handed — and it resolves per card, so a kb
+		// project use during a long import is picked up by the rest of it.
+		tags, err := cliapp.ProjectTags(task.Tags, "", dataDir, "")
+		if err != nil {
+			// safeError hides anything that is not a categorized forge
+			// error, because upstream text is not ours to render. This
+			// refusal is ours and names the fix, so it is categorized.
+			refusal := &forge.Error{Code: http.StatusBadRequest, Message: err.Error(), Cause: err}
+			return cardCreatedMsg{session: session, generation: generation, row: index, err: refusal}
+		}
+		task.Tags = tags
+		_, err = m.backend.CreateTask(m.user, source, task, item)
 		return cardCreatedMsg{session: session, generation: generation, row: index, err: err}
 	}
 }

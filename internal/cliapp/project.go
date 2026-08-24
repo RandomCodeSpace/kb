@@ -50,9 +50,9 @@ type cliState struct {
 	ActiveProject string `json:"active_project,omitempty"`
 }
 
-// errNoProject is the refusal every mandatory-project path shares. It names
+// ErrNoProject is the refusal every mandatory-project path shares. It names
 // both fixes because the command that hits it is the one being written.
-var errNoProject = errors.New(`no project set: run "kb project use <name>" to pick one, or pass -p <name> (KB_PROJECT also works)`)
+var ErrNoProject = errors.New(`no project set: run "kb project use <name>" to pick one, or pass -p <name> (KB_PROJECT also works)`)
 
 // resolveDataDir applies the --data flag, falling back to $KB_DATA and then
 // ~/.local/share/kb.
@@ -63,17 +63,17 @@ func resolveDataDir(dataDir string) (string, error) {
 	return defaultDataDir()
 }
 
-// validateProjectName checks a project name by the rule already applied to
+// ValidateProjectName checks a project name by the rule already applied to
 // label values: non-empty, no whitespace, no leading '#'. It additionally
 // rejects "::" so a name can never smuggle a second scope into the label.
-func validateProjectName(name string) (string, error) { return project.ValidateName(name) }
+func ValidateProjectName(name string) (string, error) { return project.ValidateName(name) }
 
 // projectLabel renders the scoped label for a project name.
 func projectLabel(name string) string { return project.Label(name) }
 
-// splitProjectTags separates the project names a tag list carries from the
+// SplitProjectTags separates the project names a tag list carries from the
 // tags that are not project labels, both in their original order.
-func splitProjectTags(tags []string) (projects, rest []string) { return project.SplitTags(tags) }
+func SplitProjectTags(tags []string) (projects, rest []string) { return project.SplitTags(tags) }
 
 // loadCLIState reads state.json; a missing file is the zero state.
 func loadCLIState(dataDir string) (cliState, error) {
@@ -189,14 +189,14 @@ const (
 // when none of the three names a project.
 func resolveActiveProject(flagValue, dataDir string) (name string, source projectSource, ok bool, err error) {
 	if strings.TrimSpace(flagValue) != "" {
-		name, err := validateProjectName(flagValue)
+		name, err := ValidateProjectName(flagValue)
 		if err != nil {
 			return "", "", false, err
 		}
 		return name, sourceFlag, true, nil
 	}
 	if raw := strings.TrimSpace(os.Getenv("KB_PROJECT")); raw != "" {
-		name, err := validateProjectName(raw)
+		name, err := ValidateProjectName(raw)
 		if err != nil {
 			return "", "", false, fmt.Errorf("KB_PROJECT: %w", err)
 		}
@@ -216,8 +216,11 @@ func resolveActiveProject(flagValue, dataDir string) (name string, source projec
 	return state.ActiveProject, sourceStored, true, nil
 }
 
-// projectTags returns tags carrying exactly one project:: label — the CLI
-// invariant every task-mutating path funnels through.
+// ProjectTags returns tags carrying exactly one project:: label — the
+// invariant every task-mutating path funnels through, on every surface. The
+// CLI passes its -p value as flagValue; surfaces with their own project
+// argument (the MCP tools) pass that, and surfaces with none (the TUI
+// overlays) pass "" and take the active project.
 //
 // A project:: label spelled directly in --tag is as explicit as -p, so it
 // beats KB_PROJECT and the stored active project; contradicting an explicit
@@ -225,10 +228,10 @@ func resolveActiveProject(flagValue, dataDir string) (name string, source projec
 // already has ("" when it has none or when the task is new): editing labels
 // on an existing task keeps it in its project instead of dragging it into
 // whatever happens to be active.
-func projectTags(tags []string, flagValue, dataDir, current string) ([]string, error) {
-	named, rest := splitProjectTags(tags)
+func ProjectTags(tags []string, flagValue, dataDir, current string) ([]string, error) {
+	named, rest := SplitProjectTags(tags)
 	for _, name := range named {
-		if _, err := validateProjectName(name); err != nil {
+		if _, err := ValidateProjectName(name); err != nil {
 			return nil, err
 		}
 	}
@@ -264,7 +267,7 @@ func chooseProject(named []string, flagValue, dataDir, current string) (string, 
 		return current, nil
 	}
 	if !ok {
-		return "", errNoProject
+		return "", ErrNoProject
 	}
 	return resolved, nil
 }
@@ -296,9 +299,9 @@ func applyProjectPatch(be backend, ref string, p *store.TaskPatch, flagValue, da
 	if p.Tags != nil {
 		base = *p.Tags
 	} else {
-		_, base = splitProjectTags(it.task.Tags)
+		_, base = SplitProjectTags(it.task.Tags)
 	}
-	tags, err := projectTags(base, flagValue, dataDir, currentProjectOf(it.task))
+	tags, err := ProjectTags(base, flagValue, dataDir, CurrentProjectOf(it.task))
 	if err != nil {
 		return err
 	}
@@ -306,27 +309,27 @@ func applyProjectPatch(be backend, ref string, p *store.TaskPatch, flagValue, da
 	return nil
 }
 
-// currentProjectOf returns the single project a task carries, or "" when it
+// CurrentProjectOf returns the single project a task carries, or "" when it
 // carries none or more than one (both of which the caller then replaces).
-func currentProjectOf(t board.Task) string { return project.Of(t.Tags) }
+func CurrentProjectOf(t board.Task) string { return project.Of(t.Tags) }
 
 // ActiveProject resolves the project local surfaces default to when no flag
 // names one: KB_PROJECT, else the project stored by kb project use. The TUI
-// takes its switcher and editor default from it, which is why the resolution
-// is exported rather than copied.
+// takes its opening scope and its editor default from it, which is why the
+// resolution is exported rather than copied.
 func ActiveProject(dataDir string) (string, bool, error) {
 	name, _, ok, err := resolveActiveProject("", dataDir)
 	return name, ok, err
 }
 
-// projectBackfiller is the slice of the store the backfill needs: *store.Store
+// ProjectBackfiller is the slice of the store the backfill needs: *store.Store
 // satisfies it, and a stub can make either half fail.
-type projectBackfiller interface {
+type ProjectBackfiller interface {
 	FilterTasks(user string, f store.TaskFilter) ([]board.Task, error)
 	UpdateTask(user, ref string, p store.TaskPatch) (board.Task, error)
 }
 
-// backfillProjects gives every task without exactly one project:: label the
+// BackfillProjects gives every task without exactly one project:: label the
 // invariant it is missing: none becomes project::inbox, several collapse to
 // the first. It is idempotent — a second pass finds nothing to do — and
 // returns the number of tasks it rewrote.
@@ -336,14 +339,14 @@ type projectBackfiller interface {
 // for the tasks that predate it, and OpenLocalStore is the one startup path
 // every local surface already shares (it is where the legacy markdown import
 // lives too). Nothing is written once the board is clean.
-func backfillProjects(st projectBackfiller, user string) (int, error) {
+func BackfillProjects(st ProjectBackfiller, user string) (int, error) {
 	tasks, err := st.FilterTasks(user, store.TaskFilter{})
 	if err != nil {
 		return 0, err
 	}
 	changed := 0
 	for _, t := range tasks {
-		named, rest := splitProjectTags(t.Tags)
+		named, rest := SplitProjectTags(t.Tags)
 		if len(named) == 1 {
 			continue
 		}
@@ -399,7 +402,7 @@ func (a *app) cmdProjectUse(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("project use needs exactly one <name> argument"))
 	}
-	name, err := validateProjectName(pos[0])
+	name, err := ValidateProjectName(pos[0])
 	if err != nil {
 		return a.usageErr(err)
 	}
@@ -441,7 +444,7 @@ func (a *app) cmdProjectCurrent(args []string) int {
 		return a.fail(err)
 	}
 	if !ok {
-		return a.fail(errNoProject)
+		return a.fail(ErrNoProject)
 	}
 	if *jsonF {
 		if err := writeSingleJSON(a.stdout, projectCurrentJSON{Project: name, Source: string(source)}); err != nil {
@@ -494,7 +497,7 @@ func (a *app) cmdProjectList(args []string) int {
 func projectCounts(items []item, active string) []projectCountJSON {
 	counts := map[string]int{}
 	for _, it := range items {
-		named, _ := splitProjectTags(it.task.Tags)
+		named, _ := SplitProjectTags(it.task.Tags)
 		for _, name := range named {
 			counts[name]++
 		}

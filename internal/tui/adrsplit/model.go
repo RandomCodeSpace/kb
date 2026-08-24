@@ -20,6 +20,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/cliapp"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
@@ -96,10 +97,11 @@ type cardAddedMsg struct {
 // batch write. Every result is scoped to both the overlay session and its
 // operation generation so a cancelled or reopened dialog cannot be mutated.
 type Model struct {
-	store  Store
-	runner Runner
-	user   string
-	ctx    context.Context
+	store   Store
+	runner  Runner
+	user    string
+	dataDir string
+	ctx     context.Context
 
 	open       bool
 	stage      stage
@@ -134,6 +136,11 @@ type Model struct {
 	styles        *theme.Styles
 	spin          spinner.Model
 }
+
+// SetDataDir names the directory the active project is resolved from — the
+// one holding the board and its state.json. Empty falls back to $KB_DATA and
+// the default data directory, the same as every other surface.
+func (m *Model) SetDataDir(dir string) { m.dataDir = dir }
 
 // SetStyles hands the overlay the resolved design system. Spec section 6.2:
 // styles are built once by the root and threaded down, never constructed here.
@@ -618,8 +625,18 @@ func (m *Model) startAdd() tea.Cmd {
 func (m *Model) addNext() tea.Cmd {
 	rowIndex := m.addQueue[m.addPosition]
 	task := taskFromRow(m.rows[rowIndex], m.dest)
+	dataDir := m.dataDir
 	session, generation := m.session, m.addGeneration
 	return func() tea.Msg {
+		// A split card is a card: it carries the one project every task
+		// carries, resolved now so the batch follows the active project
+		// rather than whatever it was when the overlay opened. A board with
+		// no project resolved fails the row instead of writing without one.
+		tags, err := cliapp.ProjectTags(task.Tags, "", dataDir, "")
+		if err != nil {
+			return cardAddedMsg{session: session, generation: generation, row: rowIndex, err: err}
+		}
+		task.Tags = tags
 		created, err := m.store.AddTask(m.user, task)
 		return cardAddedMsg{session: session, generation: generation, row: rowIndex, task: created, err: err}
 	}

@@ -150,11 +150,13 @@ func TestFindTaskResolution(t *testing.T) {
 }
 
 func TestHandlerValidationAndStoreFailures(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "kb.db"), []byte("test-secret"))
+	dataDir := t.TempDir()
+	t.Setenv("KB_PROJECT", testProject)
+	st, err := store.Open(filepath.Join(dataDir, "kb.db"), []byte("test-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	k := &kb{st: st, user: "tester"}
+	k := &kb{st: st, user: "tester", dataDir: dataDir}
 	ctx := context.Background()
 
 	if _, _, err := k.listTasks(ctx, nil, listTasksInput{Status: "bogus"}); err == nil {

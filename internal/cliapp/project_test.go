@@ -19,7 +19,7 @@ import (
 // assert the invariant instead of eyeballing a tag slice.
 func projectsOf(t *testing.T, task jsonTask) []string {
 	t.Helper()
-	names, _ := splitProjectTags(task.Tags)
+	names, _ := SplitProjectTags(task.Tags)
 	return names
 }
 
@@ -252,7 +252,7 @@ func TestProjectBackfillIsIdempotent(t *testing.T) {
 			t.Fatalf("seed: %v", err)
 		}
 	}
-	changed, err := backfillProjects(st, defaultUser)
+	changed, err := BackfillProjects(st, defaultUser)
 	if err != nil || changed != 3 {
 		t.Fatalf("backfill changed=%d err=%v, want 3", changed, err)
 	}
@@ -262,7 +262,7 @@ func TestProjectBackfillIsIdempotent(t *testing.T) {
 	}
 	want := []string{inboxProject, inboxProject, "web", "a"}
 	for i, task := range tasks {
-		names, _ := splitProjectTags(task.Tags)
+		names, _ := SplitProjectTags(task.Tags)
 		if len(names) != 1 || names[0] != want[i] {
 			t.Errorf("task %d projects = %v, want [%s]", i, names, want[i])
 		}
@@ -271,7 +271,7 @@ func TestProjectBackfillIsIdempotent(t *testing.T) {
 		t.Errorf("backfill dropped plain tags: %+v", tasks[1].Tags)
 	}
 	// Second pass has nothing to do.
-	if changed, err := backfillProjects(st, defaultUser); err != nil || changed != 0 {
+	if changed, err := BackfillProjects(st, defaultUser); err != nil || changed != 0 {
 		t.Fatalf("second backfill changed=%d err=%v, want 0", changed, err)
 	}
 }
@@ -352,12 +352,12 @@ func TestProjectNameValidation(t *testing.T) {
 		{"#hash", "must not start with '#'"},
 		{"a::b", `must not contain "::"`},
 	} {
-		if _, err := validateProjectName(tc.name); err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("validateProjectName(%q) = %v, want %q", tc.name, err, tc.want)
+		if _, err := ValidateProjectName(tc.name); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("ValidateProjectName(%q) = %v, want %q", tc.name, err, tc.want)
 		}
 	}
-	if got, err := validateProjectName("  web-ui  "); err != nil || got != "web-ui" {
-		t.Errorf("validateProjectName = %q, %v", got, err)
+	if got, err := ValidateProjectName("  web-ui  "); err != nil || got != "web-ui" {
+		t.Errorf("ValidateProjectName = %q, %v", got, err)
 	}
 }
 
@@ -506,8 +506,8 @@ func TestCurrentProjectOfWantsExactlyOne(t *testing.T) {
 		{[]string{"plain", "project::web"}, "web"},
 		{[]string{"project::a", "project::b"}, ""},
 	} {
-		if got := currentProjectOf(board.Task{Tags: tc.tags}); got != tc.want {
-			t.Errorf("currentProjectOf(%v) = %q, want %q", tc.tags, got, tc.want)
+		if got := CurrentProjectOf(board.Task{Tags: tc.tags}); got != tc.want {
+			t.Errorf("CurrentProjectOf(%v) = %q, want %q", tc.tags, got, tc.want)
 		}
 	}
 }
@@ -561,7 +561,7 @@ func TestProjectBackfillReportsStoreFailures(t *testing.T) {
 	if err := st.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if _, err := backfillProjects(st, defaultUser); err == nil {
+	if _, err := BackfillProjects(st, defaultUser); err == nil {
 		t.Error("backfill over a closed store succeeded")
 	}
 }
@@ -663,7 +663,7 @@ func (f failingBackfiller) UpdateTask(string, string, store.TaskPatch) (board.Ta
 func TestProjectBackfillStopsOnUpdateFailure(t *testing.T) {
 	boom := errors.New("boom")
 	stub := failingBackfiller{tasks: []board.Task{{ID: "a"}, {ID: "b"}}, err: boom}
-	changed, err := backfillProjects(stub, defaultUser)
+	changed, err := BackfillProjects(stub, defaultUser)
 	if !errors.Is(err, boom) || changed != 0 {
 		t.Fatalf("backfill changed=%d err=%v, want 0 and boom", changed, err)
 	}
