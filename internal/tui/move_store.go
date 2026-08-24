@@ -125,11 +125,13 @@ func (m *Model) finishCardDrop(msg cardMoveStoredMsg) tea.Cmd {
 			statusLabelTitle(canonicalTask.Status), position+1, count)
 	}
 	preference := tea.Cmd(nil)
+	celebrate := tea.Cmd(nil)
 	if msg.writeErr == nil {
 		switch {
 		case msg.from != board.StatusDone && msg.to == board.StatusDone:
 			m.recordShipped(msg.taskID)
 			m.move.status = "Shipped " + msg.title
+			celebrate = m.celebrateShip()
 			preference = m.queuePreferences()
 		case msg.from == board.StatusDone && msg.to != board.StatusDone:
 			m.unrecordShipped(msg.taskID)
@@ -139,9 +141,9 @@ func (m *Model) finishCardDrop(msg cardMoveStoredMsg) tea.Cmd {
 
 	if m.reloadPending || msg.reloadErr != nil {
 		m.reloadPending = false
-		return batchCommands(preference, m.startBoardLoad())
+		return batchCommands(preference, celebrate, m.startBoardLoad())
 	}
-	return preference
+	return batchCommands(preference, celebrate)
 }
 
 func boardTaskByID(current board.Board, taskID string) (board.Task, bool) {

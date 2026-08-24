@@ -695,9 +695,11 @@ func (m *Model) finishTaskAction(msg taskActionStoredMsg) tea.Cmd {
 	if msg.reloadErr == nil {
 		adopt = m.adoptActionBoard(msg.board, msg.taskID)
 	}
+	celebrate := tea.Cmd(nil)
 	if msg.kind == actionShip && msg.from != board.StatusDone && msg.to == board.StatusDone {
 		m.recordShipped(msg.taskID)
 		m.setActionStatus("Shipped "+msg.title, false)
+		celebrate = m.celebrateShip()
 	} else if msg.from == board.StatusDone && msg.to != board.StatusDone {
 		m.unrecordShipped(msg.taskID)
 		m.setActionStatus(actionSuccess(msg.kind, msg.title), false)
@@ -711,7 +713,7 @@ func (m *Model) finishTaskAction(msg taskActionStoredMsg) tea.Cmd {
 	} else if m.reloadPending {
 		reload = m.reloadAfterActionFailure(nil)
 	}
-	return batchCommands(adopt, m.queuePreferences(), reload)
+	return batchCommands(adopt, m.queuePreferences(), reload, celebrate)
 }
 
 func actionVerb(kind taskActionKind) string {

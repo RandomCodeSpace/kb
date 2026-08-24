@@ -25,6 +25,12 @@ type Timing struct {
 	EllipsisStride  int
 	SuffixAfter     int
 	BrandBirthSteps int
+	// CelebrateSteps is the span of the ship celebration (issue #191). Spec
+	// section 10.3.1 names no such token, so this is the twentieth and the one
+	// the section's own rule sends back here rather than to a call site. It is
+	// a tick count for the same reason BrandBirthSteps is: both index a
+	// class-B effect that collapses to nothing at zero.
+	CelebrateSteps int
 
 	DialogGraceQuiet   time.Duration
 	DialogGraceMax     time.Duration
@@ -56,6 +62,7 @@ var DefaultTiming = Timing{
 	EllipsisStride:  8,
 	SuffixAfter:     60,
 	BrandBirthSteps: 12,
+	CelebrateSteps:  12,
 
 	DialogGraceQuiet:   425 * time.Millisecond,
 	DialogGraceMax:     1500 * time.Millisecond,
@@ -85,6 +92,22 @@ func (t Timing) Interval() time.Duration { return framePeriod(t.FPS) }
 // PlainFrame is the tick period of a plain-tier spinner.
 func (t Timing) PlainFrame() time.Duration {
 	return time.Duration(t.PlainStride) * t.Interval()
+}
+
+// celebrateBeats is the number of phases the ship celebration divides its span
+// into: lit, dark, lit, dark. Two pulses read as a flourish; one reads as a
+// repaint, and a third is a surface asking for attention it has already had.
+const celebrateBeats = 4
+
+// CelebrateBeat is the tick length of one phase of the ship celebration, or 0
+// when the effect is collapsed. The beat is derived rather than named so the
+// span stays the one reviewable number: shortening the flourish shortens every
+// phase of it by construction.
+func (t Timing) CelebrateBeat() int {
+	if t.CelebrateSteps <= 0 {
+		return 0
+	}
+	return max(t.CelebrateSteps/celebrateBeats, 1)
 }
 
 func framePeriod(fps int) time.Duration {

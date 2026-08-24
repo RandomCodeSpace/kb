@@ -862,6 +862,7 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 			Hovered: m.pointerState.IsHovered(boardColumnControlID(status)),
 		},
 		Meta:    meta,
+		MetaLit: m.celebrateLit(status),
 		Body:    body,
 		More:    hiddenCards(owners, start+contentHeight),
 		Width:   width,

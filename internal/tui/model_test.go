@@ -158,7 +158,7 @@ func collapseInteractionTiming(m Model) Model {
 func isInputFeelMsg(message tea.Msg) bool {
 	switch message.(type) {
 	case graceQuietMsg, graceMaxMsg, graceReopenMsg, noticeExpiredMsg,
-		spinner.TickMsg, scrollSettledMsg:
+		spinner.TickMsg, scrollSettledMsg, shipCelebrationMsg:
 		return true
 	}
 	_, clickWindow := (pointer.Clicks{}).Expire(message)
