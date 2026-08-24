@@ -395,6 +395,8 @@ func (m *Model) footerLine(width int) string {
 	switch {
 	case m.guardClose:
 		return m.confirmFooter()
+	case m.brandBusy():
+		footer = m.brandRow() + " | esc cancel"
 	case m.operation != "":
 		footer = m.busyPrefix() + m.operation + " | esc cancel"
 	case m.adding:
@@ -409,11 +411,21 @@ func (m *Model) footerLine(width int) string {
 	return fit(footer, width)
 }
 
-// busyPrefix is the spinner frame of spec section 5.2: every busy state that
-// was static text carries the bubbles spinner instead. The frame is plain text
-// so the footer band renders it in the band's own tier.
+// busyPrefix is the plain tier's frame (spec section 10.2.4): bubbles dots,
+// plain text, so the footer band renders it in the band's own FgSubtle. The
+// file read and the card writes are plumbing and keep it.
 func (m Model) busyPrefix() string {
 	return ansi.Strip(m.spin.View())
+}
+
+// brandRow is the branded tier's busy row (spec section 10.2.5). It renders the
+// ordinary static label while the engine is unmounted or still inside the birth
+// delay, which is also what a backgrounded overlay shows.
+func (m Model) brandRow() string {
+	if row := m.brand.View(); row != "" {
+		return row
+	}
+	return opSplitADR + "..."
 }
 
 func (m Model) selectedCount() int {

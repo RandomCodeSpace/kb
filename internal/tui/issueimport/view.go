@@ -166,11 +166,8 @@ func (m Model) inputRows(width int) []importRow {
 		m.refRow(width),
 		m.fieldRow("max", fmt.Sprintf("max     %d", m.max)),
 	}
-	if m.operation == "preview" {
-		rows = append(rows, importRow{}, importRow{
-			text: m.busyPrefix() + "fetching configured forge data and drafting...",
-			kind: rowHint,
-		})
+	if m.brandBusy() {
+		rows = append(rows, importRow{}, m.brandRow(styles))
 	}
 	return append(rows, importRow{}, m.actionsRow(styles,
 		importAction{target: "import", label: "Import", variant: theme.ButtonPrimary},
@@ -390,13 +387,20 @@ func (m Model) footerLine(width int) string {
 	return fit(hints, width)
 }
 
-// busyPrefix is the spinner frame of spec section 5.2: the fetch state that was
-// static text carries the bubbles spinner instead.
-func (m Model) busyPrefix() string {
-	if len(m.spin.Spinner.Frames) == 0 {
-		return ""
+// brandRow is the branded tier's busy row (spec section 10.2.5). It is a body
+// row rather than a band row because the panel's own footer is describing
+// something else, per spec section 10.8.4 rule 2.
+//
+// The engine's run carries no background of its own, so it is laid onto the
+// panel surface with SurfaceRun and handed over already rendered. While the
+// engine is unmounted or inside the birth delay the row is the ordinary static
+// label, which is also what a backgrounded overlay shows.
+func (m Model) brandRow(styles *theme.Styles) importRow {
+	row := m.brand.View()
+	if row == "" {
+		return importRow{text: previewLabel + "...", kind: rowHint}
 	}
-	return ansi.Strip(m.spin.View())
+	return importRow{rendered: styles.SurfaceRun(theme.OverlaySurf, row), kind: rowHint}
 }
 
 // checkGlyph is the plain form of a checklist mark, for a row's text.

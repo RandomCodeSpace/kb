@@ -24,11 +24,17 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
 
 const (
 	similarLimit   = 10
 	draftMaxTokens = 4096
+
+	// draftLabel is the branded engine's label for the AI draft. Spec section
+	// 10.8.4: lowercase, present continuous, and no ellipsis of its own,
+	// because the animation is the ellipsis.
+	draftLabel = "drafting card"
 )
 
 // SkillRunner is the shared direct-store AI runner used by the editor. The
@@ -176,12 +182,15 @@ type Model struct {
 	pointerState      pointer.State
 	styles            *theme.Styles
 	spin              spinner.Model
+	brand             spin.Engine
+	draftStarted      time.Time
+	frontMost         bool
 }
 
 // New creates a closed editor. A nil store keeps the feature unavailable in
 // lightweight root-model tests.
 func New(st Store, user string) Model {
-	m := Model{store: st, user: user, now: time.Now, ctx: context.Background(), styles: theme.New(true)}
+	m := Model{store: st, user: user, now: time.Now, ctx: context.Background(), styles: theme.New(true), frontMost: true}
 	m.spin = spinner.New(spinner.WithSpinner(m.styles.Spinner))
 	m.resetInputs()
 	return m
@@ -194,6 +203,11 @@ func (m *Model) SetStyles(styles *theme.Styles) {
 	if styles != nil {
 		m.styles = styles
 		m.spin.Spinner = styles.Spinner
+		if m.brandBusy() {
+			// Spec section 10.2.5: a theme rebuild is one of the three things
+			// that invalidates the frame cache.
+			m.configureBrand(draftLabel)
+		}
 	}
 }
 
@@ -262,21 +276,28 @@ func IsMessage(message tea.Msg) bool {
 	}
 	switch message.(type) {
 	case labelsLoadedMsg, similarDebounceMsg, similarLoadedMsg, saveCompletedMsg, draftCompletedMsg,
-		pointerClickMsg, pointerWheelMsg, spinner.TickMsg:
+		pointerClickMsg, pointerWheelMsg, spinner.TickMsg, spin.StepMsg:
 		return true
 	default:
 		return false
 	}
 }
 
-// busy reports whether a spinner-worthy operation is in flight. Spec section
-// 5.2 names the editor's drafting and saving states for the bubbles spinner.
+// busy reports whether a spinner-worthy operation is in flight, either tier.
 func (m Model) busy() bool { return m.drafting || m.saving }
 
-// spinTick advances the busy indicator. The tick loop stops as soon as nothing
-// is in flight, so an idle editor costs no timers.
+// plainBusy is the plain tier's gate. Spec section 10.2.4: a local store write
+// is plumbing however important it is, so saving keeps the bubbles dots.
+func (m Model) plainBusy() bool { return m.saving }
+
+// brandBusy is the branded tier's gate: the AI draft is a model inference, and
+// latency is the axis the tier split is made on.
+func (m Model) brandBusy() bool { return m.drafting }
+
+// spinTick advances the plain busy indicator. The tick loop stops as soon as
+// nothing is in flight, so an idle editor costs no timers.
 func (m *Model) spinTick(msg spinner.TickMsg) tea.Cmd {
-	if !m.busy() {
+	if !m.plainBusy() {
 		return nil
 	}
 	var command tea.Cmd
@@ -284,8 +305,73 @@ func (m *Model) spinTick(msg spinner.TickMsg) tea.Cmd {
 	return command
 }
 
-// startSpinner is the command that begins the tick loop for a new operation.
+// brandStep advances the branded engine. The gate is read on every tick rather
+// than mirrored into a flag, and the engine drops a tick whose generation or
+// seed does not match (spec section 10.2.3).
+func (m *Model) brandStep(msg spin.StepMsg) tea.Cmd {
+	return m.brand.Step(msg, m.brandBusy())
+}
+
+// startSpinner is the command that begins the plain tick loop.
 func (m Model) startSpinner() tea.Cmd { return m.spin.Tick }
+
+// startBrand mounts the branded engine for a new AI draft and opens its chain.
+// A backgrounded editor starts nothing: the draft runs, the animation does not
+// (spec section 10.2.6).
+func (m *Model) startBrand(label string) tea.Cmd {
+	m.draftStarted = m.now()
+	m.configureBrand(label)
+	if !m.frontMost {
+		return nil
+	}
+	return m.brand.Start()
+}
+
+// brandRowWidth is the row the engine is fitted to: the whole branded row at
+// its full spec.MaxLabelW label, so the frame cache is built once per mount
+// rather than once per resize. A panel too narrow for the row truncates it in
+// the band with the section 3.3 primitive, which is where every other overlong
+// band row is already cut.
+const brandRowWidth = spin.MaxLabelW + spin.EllipsisField + spin.SuffixField
+
+// configureBrand resolves the engine's settings for the current label. It is
+// idempotent: a repeated settings hash reuses the frame cache rather than
+// rebuilding it.
+func (m *Model) configureBrand(label string) {
+	styles := m.themeStyles()
+	started := m.draftStarted
+	now := m.now
+	avail := brandRowWidth
+	m.brand.Configure(styles, spin.Settings{
+		Label:    label,
+		Seed:     spin.SeedEditorDraft,
+		Scramble: true,
+		Suffix:   func() string { return spin.Elapsed(now().Sub(started)) },
+	}.Fit(styles, avail))
+}
+
+// SetFrontMost is the background handoff of spec section 10.2.6. At most
+// spin.MaxEngines branded engines tick at once and the one that does belongs to
+// the front-most open surface, so a backgrounded editor stops its engine - the
+// draft keeps running, only the animation stops - and remounts at step 0 when
+// it comes back to front.
+func (m *Model) SetFrontMost(front bool) tea.Cmd {
+	if m.frontMost == front {
+		return nil
+	}
+	m.frontMost = front
+	if !front {
+		m.brand.Stop()
+		return nil
+	}
+	if !m.brandBusy() {
+		return nil
+	}
+	return m.brand.Start()
+}
+
+// BrandMounted reports whether the editor's branded engine is ticking.
+func (m Model) BrandMounted() bool { return m.brand.Mounted() }
 
 // OpenAdd resets the form for a card appended to status.
 func (m *Model) OpenAdd(status board.Status) tea.Cmd {
@@ -439,6 +525,8 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	switch msg := message.(type) {
 	case spinner.TickMsg:
 		return m.spinTick(msg)
+	case spin.StepMsg:
+		return m.brandStep(msg)
 	case labelsLoadedMsg:
 		if msg.session != m.session {
 			return nil
@@ -493,6 +581,7 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 			m.draftCancel()
 		}
 		m.drafting, m.draftCancel = false, nil
+		m.brand.Stop()
 		if msg.err != nil {
 			m.statusMessage = "AI draft failed: " + safeError(msg.err)
 			m.statusIsError = true
@@ -671,7 +760,10 @@ func (m *Model) startDraft() tea.Cmd {
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.draftCancel, m.drafting = cancel, true
 	m.statusMessage, m.statusIsError = "drafting card...", false
-	return tea.Batch(m.startSpinner(), func() tea.Msg {
+	// The operation leads the batch and the animation follows it: a branded
+	// tick is scheduled against the one clock, and a caller draining the batch
+	// in order should reach the work without waiting a frame for it.
+	return tea.Batch(func() tea.Msg {
 		run, err := m.runner.RunSkill(ctx, m.user, ai.ScopeReadOnly, "story-draft", input, 1, draftMaxTokens)
 		if err == nil && len(run.Cards) == 0 {
 			err = errors.New("the model returned no usable card")
@@ -681,7 +773,7 @@ func (m *Model) startDraft() tea.Cmd {
 			draft = run.Cards[0]
 		}
 		return draftCompletedMsg{session: session, generation: generation, draft: draft, err: err}
-	})
+	}, m.startBrand(draftLabel))
 }
 
 func (m *Model) currentCardJSON() ([]byte, error) {
@@ -740,6 +832,7 @@ func (m *Model) cancelDraft() {
 		m.draftGen++
 	}
 	m.drafting = false
+	m.brand.Stop()
 }
 
 func (m *Model) requestClose() {

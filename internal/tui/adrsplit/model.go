@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
 
 const (
@@ -135,6 +137,10 @@ type Model struct {
 	pointerState  pointer.State
 	styles        *theme.Styles
 	spin          spinner.Model
+	brand         spin.Engine
+	brandStarted  time.Time
+	frontMost     bool
+	now           func() time.Time
 }
 
 // SetDataDir names the directory the active project is resolved from — the
@@ -150,6 +156,10 @@ func (m *Model) SetStyles(styles *theme.Styles) {
 	}
 	m.styles = styles
 	m.spin.Spinner = styles.Spinner
+	if m.brandBusy() {
+		// Spec section 10.2.5: a theme rebuild invalidates the frame cache.
+		m.configureBrand()
+	}
 }
 
 // fallbackStyles is the palette a Model rendered without SetStyles draws with.
@@ -172,7 +182,7 @@ func New(st Store, runner Runner, user string, ctx context.Context) Model {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	m := Model{store: st, runner: runner, user: user, ctx: ctx}
+	m := Model{store: st, runner: runner, user: user, ctx: ctx, frontMost: true, now: time.Now}
 	m.spin = spinner.New(spinner.WithSpinner(fallbackStyles().Spinner))
 	m.resetInputs()
 	return m
@@ -232,21 +242,103 @@ func IsMessage(message tea.Msg) bool {
 		return true
 	}
 	switch message.(type) {
-	case fileLoadedMsg, splitCompletedMsg, cardAddedMsg, pointerActionMsg, spinner.TickMsg:
+	case fileLoadedMsg, splitCompletedMsg, cardAddedMsg, pointerActionMsg, spinner.TickMsg, spin.StepMsg:
 		return true
 	default:
 		return false
 	}
 }
 
-// busy reports whether a spinner-worthy operation is in flight.
+// busy reports whether a spinner-worthy operation is in flight, either tier.
 func (m Model) busy() bool { return m.operation != "" || m.adding }
+
+// The two operation names, so the tier rule of spec section 10.2.4 reads as a
+// comparison against a token rather than a literal repeated at five sites.
+const (
+	opReadFile = "reading file"
+	opSplitADR = "splitting ADR"
+)
+
+// plainBusy is the plain tier's gate: reading a local file and writing cards
+// are plumbing, so they keep the bubbles dots.
+func (m Model) plainBusy() bool {
+	return m.adding || (m.operation != "" && m.operation != opSplitADR)
+}
+
+// brandBusy is the branded tier's gate: the split is a model inference.
+func (m Model) brandBusy() bool { return m.operation == opSplitADR }
+
+// brandStep advances the branded engine, dropping a tick whose generation or
+// seed does not match and terminating the chain when the gate settles.
+func (m *Model) brandStep(msg spin.StepMsg) tea.Cmd {
+	return m.brand.Step(msg, m.brandBusy())
+}
+
+// brandRowWidth is the row the engine is fitted to: the whole branded row at
+// its full label, so the frame cache is built once per mount rather than once
+// per resize. A panel too narrow truncates the row in the band.
+const brandRowWidth = spin.MaxLabelW + spin.EllipsisField + spin.SuffixField
+
+// configureBrand resolves the engine's settings for the running operation. It
+// is idempotent: a repeated settings hash reuses the frame cache.
+func (m *Model) configureBrand() {
+	styles := m.themeStyles()
+	started := m.brandStarted
+	clock := m.clock()
+	m.brand.Configure(styles, spin.Settings{
+		Label:    opSplitADR,
+		Seed:     spin.SeedAdrPropose,
+		Scramble: true,
+		Suffix:   func() string { return spin.Elapsed(clock().Sub(started)) },
+	}.Fit(styles, brandRowWidth))
+}
+
+// clock is the injected wall clock the elapsed suffix reads through. The engine
+// itself reads none (spec section 10.2.5).
+func (m Model) clock() func() time.Time {
+	if m.now != nil {
+		return m.now
+	}
+	return time.Now
+}
+
+// startBrand mounts the branded engine for a new split and opens its chain. A
+// surface that is not front-most starts nothing: the split runs, the animation
+// does not.
+func (m *Model) startBrand() tea.Cmd {
+	m.brandStarted = m.clock()()
+	m.configureBrand()
+	if !m.frontMost {
+		return nil
+	}
+	return m.brand.Start()
+}
+
+// SetFrontMost is the background handoff of spec section 10.2.6: a surface that
+// is not front-most stops its engine and remounts at step 0 on return.
+func (m *Model) SetFrontMost(front bool) tea.Cmd {
+	if m.frontMost == front {
+		return nil
+	}
+	m.frontMost = front
+	if !front {
+		m.brand.Stop()
+		return nil
+	}
+	if !m.brandBusy() {
+		return nil
+	}
+	return m.brand.Start()
+}
+
+// BrandMounted reports whether this overlay's branded engine is ticking.
+func (m Model) BrandMounted() bool { return m.brand.Mounted() }
 
 // spinTick advances the busy indicator. Spec section 5.2 adopts the bubbles
 // spinner for every busy state that used to be static text; the tick loop stops
 // as soon as nothing is in flight, so an idle overlay costs no timers.
 func (m *Model) spinTick(msg spinner.TickMsg) tea.Cmd {
-	if !m.busy() {
+	if !m.plainBusy() {
 		return nil
 	}
 	var command tea.Cmd
@@ -270,8 +362,10 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	switch msg := message.(type) {
 	case spinner.TickMsg:
 		return m.spinTick(msg)
+	case spin.StepMsg:
+		return m.brandStep(msg)
 	case fileLoadedMsg:
-		if msg.session != m.session || msg.generation != m.generation || m.operation != "reading file" {
+		if msg.session != m.session || msg.generation != m.generation || m.operation != opReadFile {
 			return nil
 		}
 		m.completeOperation()
@@ -281,7 +375,7 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		}
 		return m.startRun(msg.text)
 	case splitCompletedMsg:
-		if msg.session != m.session || msg.generation != m.generation || m.operation != "splitting ADR" {
+		if msg.session != m.session || msg.generation != m.generation || m.operation != opSplitADR {
 			return nil
 		}
 		m.completeOperation()
@@ -553,7 +647,7 @@ func (m *Model) startSplit() tea.Cmd {
 	m.generation++
 	generation, session := m.generation, m.session
 	ctx, cancel := context.WithCancel(m.ctx)
-	m.cancel, m.operation = cancel, "reading file"
+	m.cancel, m.operation = cancel, opReadFile
 	m.status, m.statusIsError = "reading ADR file...", false
 	return tea.Batch(m.startSpinner(), func() tea.Msg {
 		text, err := readADRFile(ctx, path)
@@ -565,12 +659,15 @@ func (m *Model) startRun(text string) tea.Cmd {
 	m.generation++
 	generation, session, maximum := m.generation, m.session, m.max
 	ctx, cancel := context.WithCancel(m.ctx)
-	m.cancel, m.operation = cancel, "splitting ADR"
+	m.cancel, m.operation = cancel, opSplitADR
 	m.status, m.statusIsError = "splitting ADR...", false
-	return tea.Batch(m.startSpinner(), func() tea.Msg {
+	// The operation leads the batch and the animation follows it: a branded
+	// tick is scheduled against the one clock, and a caller draining the batch
+	// in order should reach the work without waiting a frame for it.
+	return tea.Batch(func() tea.Msg {
 		run, err := m.runner.RunSkill(ctx, m.user, ai.ScopeReadOnly, "adr-split", text, maximum, splitMaxTokens)
 		return splitCompletedMsg{session: session, generation: generation, run: run, err: err}
-	})
+	}, m.startBrand())
 }
 
 func (m *Model) cancelOperation() {
@@ -582,6 +679,7 @@ func (m *Model) cancelOperation() {
 		m.generation++
 	}
 	m.operation = ""
+	m.brand.Stop()
 }
 
 func (m *Model) completeOperation() {
@@ -590,6 +688,7 @@ func (m *Model) completeOperation() {
 	}
 	m.cancel = nil
 	m.operation = ""
+	m.brand.Stop()
 }
 
 func (m *Model) startAdd() tea.Cmd {

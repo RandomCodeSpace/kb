@@ -55,6 +55,11 @@ func TestTruncateUsesTheEllipsisPrimitive(t *testing.T) {
 	if got := truncate(styles, "abcdef", 4); got != "abc…" {
 		t.Errorf("truncate = %q, want abc…", got)
 	}
+	// The exported form is the same primitive, for the spin subpackage, which
+	// composes rows the same way the widgets here do.
+	if Truncate(styles, "abcdef", 4) != truncate(styles, "abcdef", 4) {
+		t.Error("the exported truncate diverged from the internal one")
+	}
 }
 
 func TestPadAndFillCarryTheSurface(t *testing.T) {

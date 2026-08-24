@@ -63,7 +63,7 @@ func OverlayLayers(styles *theme.Styles, opts OverlayOpts, x, y int) []*lipgloss
 // right-aligned when it is not empty, which is how a section says how much it
 // holds without spending a body row on it.
 func Section(styles *theme.Styles, label, count string, width int) string {
-	return bandRow(styles, styles.Overlay.SectionBand, label, count, width)
+	return bandRow(styles, theme.BandSection, styles.Overlay.SectionBand, label, count, width)
 }
 
 // OverlayRow renders one body row: already-styled content inset OverlayInsetX,
@@ -141,7 +141,7 @@ func overlayRows(styles *theme.Styles, opts OverlayOpts) []string {
 		return nil
 	}
 	rows := make([]string, 0, opts.Height)
-	rows = append(rows, bandRow(styles, styles.Overlay.HeaderBand, opts.Title, opts.Seq, opts.Width))
+	rows = append(rows, bandRow(styles, theme.BandHeader, styles.Overlay.HeaderBand, opts.Title, opts.Seq, opts.Width))
 	body := max(opts.Height-2, 0)
 	for index := 0; index < body; index++ {
 		if index < len(opts.Body) {
@@ -151,7 +151,7 @@ func overlayRows(styles *theme.Styles, opts OverlayOpts) []string {
 		rows = append(rows, pad(styles.Overlay.Surf, opts.Width))
 	}
 	if opts.Height > 1 {
-		rows = append(rows, bandRow(styles, styles.Overlay.FooterBand, opts.Footer, opts.Hint, opts.Width))
+		rows = append(rows, bandRow(styles, theme.BandFooter, styles.Overlay.FooterBand, opts.Footer, opts.Hint, opts.Width))
 	}
 	return rows[:opts.Height]
 }
@@ -160,7 +160,12 @@ func overlayRows(styles *theme.Styles, opts OverlayOpts) []string {
 // left with the tail right-aligned at the band's own edge. The tail wins when
 // the two cannot both fit, because it is the count or the scroll position and
 // it must not be overwritten.
-func bandRow(styles *theme.Styles, style lipgloss.Style, content, tail string, width int) string {
+//
+// A band is one styled run over the whole row, so content that carries its own
+// color - the branded spinner frame of spec section 10.2.5 - is passed through
+// BandRun, which re-arms the band after every reset inside it. Plain content is
+// returned untouched and renders the bytes it always did.
+func bandRow(styles *theme.Styles, band theme.Band, style lipgloss.Style, content, tail string, width int) string {
 	if width <= 0 {
 		return ""
 	}
@@ -175,5 +180,6 @@ func bandRow(styles *theme.Styles, style lipgloss.Style, content, tail string, w
 	}
 	head := truncate(styles, content, max(field-ansi.StringWidth(tail)-separator, 0))
 	gap := max(field-ansi.StringWidth(head)-ansi.StringWidth(tail), 0)
-	return style.Render(exact(spaces(inset)+head+spaces(gap)+tail, width))
+	row := spaces(inset) + styles.BandRun(band, head) + spaces(gap) + tail
+	return style.Render(exact(row, width))
 }

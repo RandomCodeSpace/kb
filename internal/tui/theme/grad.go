@@ -70,6 +70,34 @@ func (s *Styles) GradBold(ramp Ramp, text string) string {
 	return gradRun(s.gradBold[clampRamp(ramp)][:], text)
 }
 
+// GradCell renders one already-split cluster at the ramp index column takes in
+// a run of width columns. Spec section 10.2.5: the branded engine rebuilds one
+// cell of one frame at a time rather than a whole run, so it needs the ramp
+// resampled by position instead of Grad's whole-run walk.
+//
+// The indexing is the section's own: column * (GradSteps-1) / max(width-1, 1),
+// which shares a ramp style across neighbouring columns on a run longer than
+// the ramp rather than blending a new one per cell.
+func (s *Styles) GradCell(ramp Ramp, column, width int, cluster string) string {
+	return s.grad[clampRamp(ramp)][cellIndex(column, width)].Render(cluster)
+}
+
+// cellIndex is the ramp index of one column, clamped onto the ramp.
+func cellIndex(column, width int) int {
+	if column <= 0 {
+		return 0
+	}
+	span := width - 1
+	if span < 1 {
+		span = 1
+	}
+	index := column * (GradSteps - 1) / span
+	if index >= GradSteps {
+		return GradSteps - 1
+	}
+	return index
+}
+
 // gradRun renders one run against an already-built ramp.
 func gradRun(steps []lipgloss.Style, text string) string {
 	clusters := graphemes(text)
