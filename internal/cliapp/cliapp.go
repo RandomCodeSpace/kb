@@ -47,6 +47,9 @@ commands:
   restore <id>           move a cancelled task back to todo
   rm <id>                hard delete: erase a task for good, no undo
                          (requires --yes)
+  project use <name>     set the active project for later commands
+  project current        print the project commands default to
+  project list           list every project with its task count
   users                  list board owners and their task counts (local
                          database only; --json for machine output)
   link <a> blocks <b>    record that task a blocks task b (also accepts
@@ -73,7 +76,18 @@ common flags (every command):
   --json         machine output: list prints an array of full tasks, every
                  other command prints the affected task as one JSON object
 
+projects:
+  Every task carries exactly one project, stored as the scoped label
+  project::<name>. kb add refuses to invent one: pick the project with
+  -p <name> (or --project), with KB_PROJECT, or once with kb project use
+  <name> — in that order of precedence. update -p moves a task to another
+  project, and editing labels with --tag never drops or duplicates the
+  project label. Tasks that predate projects are given project::inbox the
+  first time kb opens the local database. Filter by project the way you
+  filter by any label: kb list --tag project::<name>.
+
 card flags (add and update):
+  -p, --project  project for this task (see "projects" above)
   --desc text    description
   --status s     todo, doing, done, or cancelled
   --prio n       priority 1-4 (default 3)
@@ -161,6 +175,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return a.cmdRm(rest)
 	case "users":
 		return a.cmdUsers(rest)
+	case "project":
+		return a.cmdProject(rest)
 	case "comment":
 		return a.cmdComment(rest)
 	case "view":
@@ -453,6 +469,7 @@ func (a *app) cmdAdd(args []string) int {
 	fs, data := a.newFlagSet("add")
 	var cf cardFlags
 	registerCardFlags(fs, &cf, false)
+	projectF := registerProjectFlag(fs)
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
@@ -467,6 +484,11 @@ func (a *app) cmdAdd(args []string) int {
 	}
 	t, err := taskFromAddFlags(title, cf, setFlags(fs))
 	if err != nil {
+		return a.usageErr(err)
+	}
+	// A new task has no project yet, so the resolution order alone decides:
+	// no project anywhere means the add is refused rather than filed blind.
+	if t.Tags, err = projectTags(t.Tags, *projectF, *data, ""); err != nil {
 		return a.usageErr(err)
 	}
 	return a.withBackend(*data, func(be backend) error {
@@ -648,7 +670,10 @@ func updateMoveTo(cf *cardFlags, set map[string]bool) (*board.Status, error) {
 	return &st, nil
 }
 
-func updatePatch(cf *cardFlags, set map[string]bool) (store.TaskPatch, *board.Status, error) {
+// updatePatch folds the update flags into a patch. hasProject reports whether
+// -p/--project was given: it is a field like any other, so it alone is enough
+// to make the update meaningful even though it writes through Tags.
+func updatePatch(cf *cardFlags, set map[string]bool, hasProject bool) (store.TaskPatch, *board.Status, error) {
 	var p store.TaskPatch
 	if err := setUpdateTextFields(&p, cf, set); err != nil {
 		return store.TaskPatch{}, nil, err
@@ -660,7 +685,7 @@ func updatePatch(cf *cardFlags, set map[string]bool) (store.TaskPatch, *board.St
 	if err != nil {
 		return store.TaskPatch{}, nil, err
 	}
-	if p == (store.TaskPatch{}) && moveTo == nil {
+	if p == (store.TaskPatch{}) && moveTo == nil && !hasProject {
 		return store.TaskPatch{}, nil, errors.New("update needs at least one field flag")
 	}
 	return p, moveTo, nil
@@ -670,6 +695,7 @@ func (a *app) cmdUpdate(args []string) int {
 	fs, data := a.newFlagSet("update")
 	var cf cardFlags
 	registerCardFlags(fs, &cf, true)
+	projectF := registerProjectFlag(fs)
 	force := fs.Bool("force", false, forceFlagUsage)
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
@@ -679,11 +705,15 @@ func (a *app) cmdUpdate(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("update needs exactly one <id-prefix> argument"))
 	}
-	p, moveTo, err := updatePatch(&cf, setFlags(fs))
+	hasProject := strings.TrimSpace(*projectF) != ""
+	p, moveTo, err := updatePatch(&cf, setFlags(fs), hasProject)
 	if err != nil {
 		return a.usageErr(err)
 	}
 	return a.withBackend(*data, func(be backend) error {
+		if err := applyProjectPatch(be, pos[0], &p, *projectF, *data, hasProject); err != nil {
+			return err
+		}
 		it, err := be.update(pos[0], p, moveTo, *force)
 		if err != nil {
 			return err

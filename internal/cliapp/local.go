@@ -57,12 +57,9 @@ func openLocalStore(dataDir string, stderr io.Writer) (*store.Store, error) {
 // secret, and legacy-import behavior used by the task CLI. Other local human
 // interfaces use this rather than quietly inventing a second startup path.
 func OpenLocalStore(dataDir string, stderr io.Writer) (*store.Store, error) {
-	if dataDir == "" {
-		d, err := defaultDataDir()
-		if err != nil {
-			return nil, err
-		}
-		dataDir = d
+	dataDir, err := resolveDataDir(dataDir)
+	if err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
@@ -77,6 +74,13 @@ func OpenLocalStore(dataDir string, stderr io.Writer) (*store.Store, error) {
 	}
 	if _, err := st.ImportMarkdownDir(dataDir); err != nil {
 		fmt.Fprintf(stderr, "kb: warning: legacy markdown import: %v\n", err)
+	}
+	// Tasks that predate mandatory projects are labelled here, on the one
+	// startup path every local surface shares, so the invariant is already
+	// true by the time any command can observe it. Idempotent and silent once
+	// the board is clean.
+	if _, err := backfillProjects(st, defaultUser); err != nil {
+		fmt.Fprintf(stderr, "kb: warning: project backfill: %v\n", err)
 	}
 	warnOrphanedNamespaces(st, stderr)
 	return st, nil

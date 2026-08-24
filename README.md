@@ -105,6 +105,7 @@ The data directory contains:
 - `kb.db`, the SQLite database;
 - `secret`, the generated encryption secret when `KB_SECRET` is unset;
 - `skills/`, optional user skill overrides;
+- `state.json`, the task CLI's active project;
 - TUI preference state scoped by database path.
 
 The TUI, task CLI, and MCP server all operate on the single `default` board.
@@ -123,7 +124,9 @@ SQLite WAL mode may create `kb.db-wal` and `kb.db-shm`. Stop writers and back
 up all three database files plus `secret` together.
 
 Legacy Markdown boards in the data directory are imported on first store open.
-The import is idempotent; imported Markdown files are not deleted.
+The import is idempotent; imported Markdown files are not deleted. The same
+open backfills any task without a `project::` label to `project::inbox`, also
+idempotently.
 
 ## Upgrade from the web UI release
 
@@ -168,8 +171,41 @@ kb rm 1 --yes
 ```
 
 Run `kb help` for the full flag reference. Supported verbs are `add`, `list`,
-`view`, `update`, `move`, `done`, `cancel`, `restore`, `rm`, `users`, `comment`,
-`link`, and `unlink`.
+`view`, `update`, `move`, `done`, `cancel`, `restore`, `rm`, `project`, `users`,
+`comment`, `link`, and `unlink`.
+
+### Projects
+
+Every task belongs to exactly one project, stored as the scoped label
+`project::<name>`. Projects slice one board rather than splitting it into
+several: nothing about the schema, the wire format, or the server changes, and
+a project is filtered like any other label.
+
+```sh
+kb project use web          # set the active project
+kb project current          # print the project commands default to
+kb project list             # every project with its task count
+kb add "Ship the docs"      # filed under project::web
+kb add "Hotfix" -p api      # this one command goes to project::api
+kb update 1 -p api          # move an existing task to another project
+kb list --tag project::api  # filter by project
+```
+
+`kb add` refuses to invent a project: if none resolves it errors and names the
+two fixes. Resolution order is `-p/--project`, then `KB_PROJECT`, then the
+project stored by `kb project use`. The stored choice lives in `state.json`
+inside the data directory — it is client state, so it resolves the same way in
+`KB_SERVER` mode, where no local database is opened, and never travels to the
+board's readers.
+
+No task-mutating command leaves a task with zero or two project labels:
+`--tag` replaces the plain labels but keeps the project, `-p` moves the task,
+and spelling `--tag project::<name>` does the same. Contradicting `-p` with a
+`project::` label, or passing two of them, is refused.
+
+Tasks created before projects existed are given `project::inbox` the first
+time kb opens the local database — automatically, once, and idempotently, so
+the rule is already true for them by the time any command can see it.
 
 Tasks have stable per-board sequence numbers such as `#12`; bare `12` and a
 unique UUID prefix also work. `cancel` is reversible. `rm --yes` permanently
@@ -334,6 +370,7 @@ returned in settings responses.
 | --- | --- | --- |
 | `KB_DATA` | all local modes, serve | Data directory |
 | `KB_SECRET` | all store users | Encryption secret override |
+| `KB_PROJECT` | task CLI | Active project, overriding `kb project use` |
 | `KB_SERVER` | task CLI | Optional remote API base URL |
 | `KB_SERVER_TOKEN` | task CLI | Bearer token for remote mode |
 | `KB_PORT` | serve | Listen port, default `8080` |

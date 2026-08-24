@@ -76,6 +76,9 @@ func localEnv(t *testing.T) string {
 	t.Setenv("KB_SERVER_TOKEN", "")
 	t.Setenv("KB_USER", "")
 	t.Setenv("KB_SECRET", "test-secret")
+	// Projects are mandatory: give the seeded tasks one so tests that are
+	// about something else do not have to spell it out.
+	t.Setenv("KB_PROJECT", inboxProject)
 	return t.TempDir()
 }
 
@@ -143,7 +146,7 @@ func TestLocalLifecycle(t *testing.T) {
 		t1.Desc != "Cover the CLI" {
 		t.Errorf("task 1 fields wrong: %+v", t1)
 	}
-	if strings.Join(t1.Tags, ",") != "docs,cli" || len(t1.Checks) != 1 || t1.Checks[0].Text != "outline" || t1.Checks[0].Done {
+	if strings.Join(t1.Tags, ",") != "docs,cli,project::inbox" || len(t1.Checks) != 1 || t1.Checks[0].Text != "outline" || t1.Checks[0].Done {
 		t.Errorf("task 1 tags/checks wrong: %+v", t1)
 	}
 	if t2.Title != "Fix login bug" || t2.Status != "doing" || t2.Prio != 3 {
@@ -157,8 +160,8 @@ func TestLocalLifecycle(t *testing.T) {
 		t.Fatalf("list failed: code %d", code)
 	}
 	want := "ID  STATUS  PRIO  BLOCKED  TITLE           TAGS\n" +
-		"#1  todo    2     -        Write the docs  docs,cli\n" +
-		"#2  doing   3     -        Fix login bug   bug\n"
+		"#1  todo    2     -        Write the docs  docs,cli,project::inbox\n" +
+		"#2  doing   3     -        Fix login bug   bug,project::inbox\n"
 	if out != want {
 		t.Errorf("list table:\n%q\nwant:\n%q", out, want)
 	}
@@ -517,7 +520,7 @@ func TestBlockedFlag(t *testing.T) {
 		t.Fatalf("list failed: code %d", code)
 	}
 	want := "ID  STATUS  PRIO  BLOCKED  TITLE             TAGS\n" +
-		"#1  todo    3     yes      Waiting on legal  \n"
+		"#1  todo    3     yes      Waiting on legal  project::inbox\n"
 	if out != want {
 		t.Errorf("blocked list table:\n%q\nwant:\n%q", out, want)
 	}
