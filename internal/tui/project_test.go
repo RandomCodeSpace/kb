@@ -28,7 +28,7 @@ func projectFixture() board.Board {
 }
 
 func projectModel() Model {
-	m := NewModel(stubBoardReader{board: projectFixture()}, nil, "u")
+	m := newTestRootModel(stubBoardReader{board: projectFixture()}, nil, "u")
 	m.loading = false
 	m.board = projectFixture()
 	return m
@@ -246,7 +246,7 @@ func TestProjectSwitcherRendersAndClicks(t *testing.T) {
 // TestProjectSwitcherIgnoresAnEmptyBoard: with no projects anywhere there is
 // nothing to cycle to, so no scope change and no preference write.
 func TestProjectSwitcherIgnoresAnEmptyBoard(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	m.projects = projectSwitcher{}
 	if command := m.cycleProject(1); command != nil {
 		t.Fatalf("cycling an unprojected board queued %v", command)

@@ -90,6 +90,18 @@ func (m Model) OwnsInput() bool {
 	return m.action != actionNone || m.saving || m.driftMode != driftNone
 }
 
+// IsDestructivePrompt reports whether the overlay is showing a prompt whose
+// affirmative carries the ButtonDanger variant of spec section 5.4. Both steps
+// of the comment and link delete - the Delete arm and the Confirm delete - are
+// the same prompt, so the transition between them does not re-arm the root's
+// destructive-prompt grace (spec section 10.3.3).
+func (m Model) IsDestructivePrompt() bool {
+	if m.saving || m.driftMode != driftNone {
+		return false
+	}
+	return m.action == actionDeleteComment || m.action == actionDeleteLink
+}
+
 // ConsumeChanged reports one acknowledged mutation exactly once.
 func (m *Model) ConsumeChanged() bool {
 	changed := m.changed

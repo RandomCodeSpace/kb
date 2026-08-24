@@ -24,6 +24,8 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/issueimport"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 type stubBoardReader struct {
@@ -106,7 +108,118 @@ func updateTestModel(t *testing.T, model *Model, message tea.Msg) tea.Cmd {
 	t.Helper()
 	updated, command := model.Update(message)
 	*model = updated.(Model)
+	releaseGrace(t, model)
 	return command
+}
+
+// newTestRootModel is NewModel with the interaction gates of spec section 10.3
+// collapsed: the destructive-prompt grace, the double-click window and the
+// footer-notice TTL dispatch immediately instead of scheduling, so no assertion
+// in this package waits on a runtime timer (spec section 10.3.9 rules 3 to 5).
+// Their state machines are driven by their own expiry messages in grace_test.go,
+// notice_test.go and pointer/clicks_test.go.
+//
+// The domain schedulers - poll, auto-ship, similar - keep their shipped values.
+// Collapsing a repeating chain turns it into a spin, which is the exact hazard
+// the rate/count split of spec section 10.3.1 exists to keep apart.
+func newTestRootModel(store boardReader, watcher dataVersionReader, user string) Model {
+	return collapseInteractionTiming(NewModel(store, watcher, user))
+}
+
+func newTestRootModelCtx(
+	store boardReader,
+	watcher dataVersionReader,
+	user string,
+	ctx context.Context,
+) Model {
+	return collapseInteractionTiming(newModel(store, watcher, user, ctx))
+}
+
+func collapseInteractionTiming(m Model) Model {
+	timing := m.themeStyles().Timing
+	timing.DialogGraceQuiet = 0
+	timing.DialogGraceMax = 0
+	timing.DialogGraceReopen = 0
+	timing.DoubleClickWindow = 0
+	timing.NoticeTTL = 0
+	m.applyStyles(theme.NewWith(true, timing))
+	return m
+}
+
+// isInputFeelMsg reports whether a message is one of the section 10.3 timers
+// the root now batches onto a domain command: the destructive-prompt grace, the
+// double-click window and the footer-notice TTL. A test that asserts what one
+// keystroke did asserts about the domain message, not about the timers riding
+// along beside it.
+func isInputFeelMsg(message tea.Msg) bool {
+	switch message.(type) {
+	case graceQuietMsg, graceMaxMsg, graceReopenMsg, noticeExpiredMsg:
+		return true
+	}
+	_, clickWindow := (pointer.Clicks{}).Expire(message)
+	return clickWindow
+}
+
+// runCommand executes command and returns the domain messages it produced,
+// flattening batches and dropping the input-feel timers.
+func runCommand(t *testing.T, command tea.Cmd) []tea.Msg {
+	t.Helper()
+	var out []tea.Msg
+	var walk func(tea.Cmd, int)
+	walk = func(current tea.Cmd, depth int) {
+		if current == nil {
+			return
+		}
+		if depth > 5 {
+			t.Fatal("command nesting did not settle")
+		}
+		switch message := current().(type) {
+		case nil:
+		case tea.BatchMsg:
+			for _, next := range message {
+				walk(next, depth+1)
+			}
+		default:
+			if !isInputFeelMsg(message) {
+				out = append(out, message)
+			}
+		}
+	}
+	walk(command, 0)
+	return out
+}
+
+// singleCommandMessage requires command to carry exactly one domain message.
+func singleCommandMessage(t *testing.T, command tea.Cmd) tea.Msg {
+	t.Helper()
+	messages := runCommand(t, command)
+	if len(messages) != 1 {
+		t.Fatalf("command produced %d domain messages, want 1: %v", len(messages), messages)
+	}
+	return messages[0]
+}
+
+// assertNoDomainMessage fails when command carries anything but section 10.3
+// timers. It is what a test means when it asserts a keystroke did not write.
+func assertNoDomainMessage(t *testing.T, what string, command tea.Cmd) {
+	t.Helper()
+	if messages := runCommand(t, command); len(messages) > 0 {
+		t.Fatalf("%s produced domain messages %v", what, messages)
+	}
+}
+
+// releaseGrace steps the destructive-prompt grace of spec section 10.3.3 to its
+// quiet expiry. Spec section 10.3.9 rule 3: a test drives the timer with the
+// message it schedules rather than waiting on a clock, so every test that
+// predates the grace drives its prompt the way a user does once the window has
+// passed. grace_test.go drives the window itself.
+func releaseGrace(t *testing.T, model *Model) {
+	t.Helper()
+	if !model.grace.active {
+		return
+	}
+	updated, _ := model.Update(graceQuietMsg{tag: model.grace.quietTag})
+	*model = updated.(Model)
 }
 
 type rootImportStore struct{ added int }
@@ -184,7 +297,7 @@ func isSpinnerTickMsg(message tea.Msg) bool {
 
 func TestIssueImportOwnsRootInputAndCancelsLiftOnOpen(t *testing.T) {
 	task := board.Task{ID: "one", Title: "One", Status: board.StatusTodo, Prio: 3}
-	m := newModel(stubBoardReader{board: board.Board{Title: "Board", Tasks: []board.Task{task}}}, nil, "alice", context.Background())
+	m := newTestRootModelCtx(stubBoardReader{board: board.Board{Title: "Board", Tasks: []board.Task{task}}}, nil, "alice", context.Background())
 	m.board = board.Board{Title: "Board", Tasks: []board.Task{task}}
 	m.loading = false
 	importStore := &rootImportStore{}
@@ -226,7 +339,7 @@ func TestIssueImportCannotOpenDuringMoveWrite(t *testing.T) {
 		func(m *Model) { m.move.saving = true },
 		func(m *Model) { m.action.busy = true },
 	} {
-		m := newModel(stubBoardReader{}, nil, "alice", context.Background())
+		m := newTestRootModelCtx(stubBoardReader{}, nil, "alice", context.Background())
 		m.issueImport = issueimport.New(&rootImportStore{}, rootImportBackend{}, "alice", context.Background())
 		busy(&m)
 		if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'i'}); command != nil || m.issueImport.IsOpen() {
@@ -236,7 +349,7 @@ func TestIssueImportCannotOpenDuringMoveWrite(t *testing.T) {
 }
 
 func TestIssueImportPreservesGlobalInterrupt(t *testing.T) {
-	m := newModel(stubBoardReader{}, nil, "alice", context.Background())
+	m := newTestRootModelCtx(stubBoardReader{}, nil, "alice", context.Background())
 	m.issueImport = issueimport.New(&rootImportStore{}, rootImportBackend{}, "alice", context.Background())
 	if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'i'}); command == nil || !m.issueImport.IsOpen() {
 		t.Fatal("import did not open")
@@ -249,7 +362,7 @@ func TestIssueImportPreservesGlobalInterrupt(t *testing.T) {
 
 func TestDriftReviewBlocksTaskActionsAndBoardMouse(t *testing.T) {
 	task := board.Task{ID: "one", Title: "One", Status: board.StatusTodo, Prio: 3, Tags: []string{"link::github#1"}}
-	m := newModel(stubBoardReader{board: board.Board{Title: "Board", Tasks: []board.Task{task}}}, nil, "alice", context.Background())
+	m := newTestRootModelCtx(stubBoardReader{board: board.Board{Title: "Board", Tasks: []board.Task{task}}}, nil, "alice", context.Background())
 	m.board = board.Board{Title: "Board", Tasks: []board.Task{task}}
 	m.loading = false
 	m.detail.SetDriftBackend(rootDriftBackend{}, context.Background())
@@ -290,7 +403,7 @@ func TestDriftReviewPreservesGlobalInterrupt(t *testing.T) {
 	for _, stage := range []string{"selection", "busy", "review"} {
 		t.Run(stage, func(t *testing.T) {
 			task := board.Task{ID: "one", Title: "One", Status: board.StatusTodo, Tags: []string{"link::github#1"}}
-			m := newModel(stubBoardReader{board: board.Board{Title: "Board", Tasks: []board.Task{task}}}, nil, "alice", context.Background())
+			m := newTestRootModelCtx(stubBoardReader{board: board.Board{Title: "Board", Tasks: []board.Task{task}}}, nil, "alice", context.Background())
 			m.board, m.loading = board.Board{Title: "Board", Tasks: []board.Task{task}}, false
 			m.detail.SetDriftBackend(rootDriftBackend{}, context.Background())
 			drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
@@ -314,11 +427,19 @@ func completeBoardLoad(t *testing.T, model *Model, command tea.Cmd) tea.Cmd {
 	if command == nil {
 		t.Fatal("board load command is nil")
 	}
-	message := command()
-	if _, ok := message.(boardLoadedMsg); !ok {
-		t.Fatalf("board load command returned %T", message)
+	var followup tea.Cmd
+	loaded := false
+	for _, message := range runCommand(t, command) {
+		next := updateTestModel(t, model, message)
+		if _, ok := message.(boardLoadedMsg); ok {
+			loaded = true
+			followup = next
+		}
 	}
-	return updateTestModel(t, model, message)
+	if !loaded {
+		t.Fatal("board load command carried no board snapshot")
+	}
+	return followup
 }
 
 func drainModelCommands(t *testing.T, model *Model, commands ...tea.Cmd) {
@@ -355,7 +476,7 @@ func runPoll(t *testing.T, model *Model) tea.Cmd {
 
 func TestModelLoadsRoutesAndRenders(t *testing.T) {
 	loaded := board.Board{Title: "Work", Tasks: []board.Task{{Title: "one", Status: board.StatusTodo}}}
-	m := NewModel(stubBoardReader{board: loaded}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{board: loaded}, nil, "alice")
 	initial := m.Init()
 	updated, command := m.Update(initial())
 	m = updated.(Model)
@@ -419,7 +540,7 @@ func TestCardDetailOpensFromKeyboardAndClick(t *testing.T) {
 		{ID: "first", Seq: 1, Title: "First card", Desc: "detail-only description", Status: board.StatusTodo},
 		{ID: "second", Seq: 2, Title: "Second card", Status: board.StatusTodo},
 	}
-	m := NewModel(stubDetailBoardReader{stubBoardReader{board: board.Board{Title: "Work", Tasks: tasks}}}, nil, "alice")
+	m := newTestRootModel(stubDetailBoardReader{stubBoardReader{board: board.Board{Title: "Work", Tasks: tasks}}}, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 
 	load := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -470,7 +591,7 @@ func mouseRoutingTestModel(t *testing.T) Model {
 			Status: board.StatusTodo,
 		})
 	}
-	m := NewModel(stubDetailBoardReader{stubBoardReader{board: board.Board{Title: "Work", Tasks: tasks}}}, nil, "alice")
+	m := newTestRootModel(stubDetailBoardReader{stubBoardReader{board: board.Board{Title: "Work", Tasks: tasks}}}, nil, "alice")
 	m.width, m.height = 80, 10
 	completeBoardLoad(t, &m, m.Init())
 	return m
@@ -554,7 +675,7 @@ func TestPointerBoardFooterOpensPrimarySurfaces(t *testing.T) {
 	} {
 		t.Run(tc.label, func(t *testing.T) {
 			st := newSettingsTestStore(t)
-			m := NewModel(st, nil, "alice")
+			m := newTestRootModel(st, nil, "alice")
 			m.width, m.height = 427, 73
 			m.settingsNew = func() *settingsModel { return newSettingsModel(st, "alice", context.Background()) }
 			m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
@@ -584,7 +705,7 @@ func TestPointerBoardFooterRoutesRemainingActions(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			m := NewModel(st, nil, "alice")
+			m := newTestRootModel(st, nil, "alice")
 			m.width, m.height = 427, 73
 			m.settingsNew = func() *settingsModel { return newSettingsModel(st, "alice", context.Background()) }
 			m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
@@ -600,7 +721,7 @@ func TestPointerBoardFooterRoutesRemainingActions(t *testing.T) {
 func TestRootRoutesPointerPressFeedbackToEveryTopmostOwner(t *testing.T) {
 	st := newSettingsTestStore(t)
 	newRoot := func() Model {
-		m := NewModel(st, nil, "alice")
+		m := newTestRootModel(st, nil, "alice")
 		m.width, m.height = 120, 30
 		completeBoardLoad(t, &m, m.Init())
 		return m
@@ -689,7 +810,7 @@ func TestQueuedBoardFooterCannotEscapeTopmostOwner(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			m := NewModel(st, nil, "alice")
+			m := newTestRootModel(st, nil, "alice")
 			m.width, m.height = 120, 30
 			completeBoardLoad(t, &m, m.Init())
 			test.open(&m)
@@ -966,7 +1087,7 @@ func TestDetailOverlayMouseWheelAndOutsideClick(t *testing.T) {
 }
 
 func TestCardDetailOpenWithoutASelectedTaskIsNoop(t *testing.T) {
-	m := NewModel(stubBoardReader{board: board.Board{Title: "Empty"}}, nil, "u")
+	m := newTestRootModel(stubBoardReader{board: board.Board{Title: "Empty"}}, nil, "u")
 	completeBoardLoad(t, &m, m.Init())
 	if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}); command != nil || m.detail.IsOpen() {
 		t.Fatalf("empty-board enter = command %v open %v", command, m.detail.IsOpen())
@@ -978,7 +1099,7 @@ func TestCardDetailOpenWithoutASelectedTaskIsNoop(t *testing.T) {
 }
 
 func TestBoardHelpOverlayDocumentsCoreMutationKeys(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	m.loading = false
 	m.board = boardViewFixture(time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC))
 	m.width, m.height = 80, 24
@@ -1005,7 +1126,7 @@ func TestBoardHelpOverlayDocumentsCoreMutationKeys(t *testing.T) {
 
 func TestBoardHelpRoutingAndAvailableFeatureHints(t *testing.T) {
 	st := newSettingsTestStore(t)
-	m := NewModel(st, nil, "alice")
+	m := newTestRootModel(st, nil, "alice")
 	m.loading = false
 	m.settingsNew = func() *settingsModel { return newSettingsModel(st, "alice", context.Background()) }
 	m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
@@ -1030,7 +1151,7 @@ func TestBoardHelpRoutingAndAvailableFeatureHints(t *testing.T) {
 		t.Fatal("help did not preserve root quit")
 	}
 
-	tiny := NewModel(stubBoardReader{}, nil, "alice")
+	tiny := newTestRootModel(stubBoardReader{}, nil, "alice")
 	tiny.width, tiny.height = 3, 2
 	if got := tiny.keyboardHelpOverlay("board"); got != "board" {
 		t.Fatalf("tiny help changed background: %q", got)
@@ -1057,7 +1178,7 @@ func TestRootDetailCommentAndLinkActionsOwnInputAndRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(st, nil, "alice")
+	m := newTestRootModel(st, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
 
@@ -1138,7 +1259,7 @@ func TestPointerDetailCommentSavePersistsWithoutCtrlS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(st, nil, "alice")
+	m := newTestRootModel(st, nil, "alice")
 	m.width, m.height = 120, 30
 	completeBoardLoad(t, &m, m.Init())
 	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
@@ -1167,7 +1288,7 @@ func TestPointerDetailLinkLifecyclePersistsThroughVisibleControls(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(st, nil, "alice")
+	m := newTestRootModel(st, nil, "alice")
 	m.width, m.height = 120, 30
 	completeBoardLoad(t, &m, m.Init())
 	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
@@ -1204,7 +1325,7 @@ func TestPurgedDetailIgnoresLateMutationResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(st, nil, "alice")
+	m := newTestRootModel(st, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'c', Text: "c"})
@@ -1236,7 +1357,7 @@ func TestRootRoutesCreateEditorAndRefreshesAcknowledgedSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(st, nil, "alice")
+	m := newTestRootModel(st, nil, "alice")
 	m.SetActiveProject("kb")
 	completeBoardLoad(t, &m, m.Init())
 	loadLabels := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'n'})
@@ -1278,7 +1399,7 @@ func TestRootEditRoutingAndDirtyWatcherRefreshPreservesInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(st, nil, "alice")
+	m := newTestRootModel(st, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'e'})
 	if !m.editor.IsOpen() || m.editor.TaskID() != task.ID {
@@ -1322,7 +1443,7 @@ func TestBoardReloadReconcilesOpenDetailAndCoalescesEnrichment(t *testing.T) {
 	reader := &mutableDetailReader{board: board.Board{Title: "Work", Tasks: []board.Task{{
 		ID: "same", Title: "Old", Desc: "old description", Status: board.StatusTodo,
 	}}}}
-	m := NewModel(reader, nil, "u")
+	m := newTestRootModel(reader, nil, "u")
 	completeBoardLoad(t, &m, m.Init())
 	firstDetailLoad := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
@@ -1377,7 +1498,7 @@ func TestBoardReloadReconcilesOpenDetailAndCoalescesEnrichment(t *testing.T) {
 }
 
 func TestRenderFitsNarrowTerminal(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, strings.Repeat("owner", 20))
+	m := newTestRootModel(stubBoardReader{}, nil, strings.Repeat("owner", 20))
 	m.loading = false
 	m.board = board.Board{
 		Title: strings.Repeat("wide 界🙂 ", 10),
@@ -1404,7 +1525,7 @@ func TestRenderFitsNarrowTerminal(t *testing.T) {
 
 func TestModelLoadAndPollFailures(t *testing.T) {
 	want := errors.New("database unavailable")
-	m := NewModel(stubBoardReader{err: want}, stubVersionReader{version: 7}, "u")
+	m := newTestRootModel(stubBoardReader{err: want}, stubVersionReader{version: 7}, "u")
 	if message := m.readDataVersion()(); message.(dataVersionMsg).version != 7 {
 		t.Fatalf("data-version message = %#v", message)
 	}
@@ -1448,7 +1569,7 @@ func TestModelLoadAndPollFailures(t *testing.T) {
 
 func TestCanceledVersionReadDoesNotRestartPolling(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	m := newModel(stubBoardReader{}, stubVersionReader{}, "u", ctx)
+	m := newTestRootModelCtx(stubBoardReader{}, stubVersionReader{}, "u", ctx)
 	cancel()
 
 	command := updateTestModel(t, &m, dataVersionMsg{err: fmt.Errorf("read: %w", context.Canceled)})
@@ -1462,7 +1583,7 @@ func TestVersionBaselineDuringFallbackQueuesSerializedReload(t *testing.T) {
 		{board: board.Board{Title: "Fallback"}},
 		{board: board.Board{Title: "Current"}},
 	}}
-	m := NewModel(reader, stubVersionReader{}, "u")
+	m := newTestRootModel(reader, stubVersionReader{}, "u")
 
 	fallback := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{err: errors.New("version unavailable")}))
 	if !m.loading || m.reloadPending || m.haveVersion || reader.calls != 0 {
@@ -1489,7 +1610,7 @@ func TestVersionBaselineDuringFallbackQueuesSerializedReload(t *testing.T) {
 
 func TestInitialVersionSuccessLoadsBoard(t *testing.T) {
 	reader := &sequenceBoardReader{results: []boardResult{{board: board.Board{Title: "Initial"}}}}
-	m := NewModel(reader, stubVersionReader{}, "u")
+	m := newTestRootModel(reader, stubVersionReader{}, "u")
 
 	load := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 7}))
 	if !m.haveVersion || m.dataVersion != 7 || !m.loading || m.reloadPending {
@@ -1508,7 +1629,7 @@ func TestWatcherRefreshDoesNotFlashLoadingFooter(t *testing.T) {
 		{board: board.Board{Title: "Initial"}},
 		{board: board.Board{Title: "Changed"}},
 	}}
-	m := NewModel(reader, stubVersionReader{}, "u")
+	m := newTestRootModel(reader, stubVersionReader{}, "u")
 
 	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "loading board...") {
 		t.Fatalf("first load footer = %q", view)
@@ -1542,7 +1663,7 @@ func TestInitialLoadFailureRetriesAfterUnchangedPoll(t *testing.T) {
 		{board: board.Board{Title: "Recovered"}},
 	}}
 	watcher := &countingVersionReader{version: 9}
-	m := NewModel(reader, watcher, "u")
+	m := newTestRootModel(reader, watcher, "u")
 	m.board = board.Board{Title: "Last good"}
 
 	first := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 9}))
@@ -1572,7 +1693,7 @@ func TestRepeatedPollsDoNotOverlapHeldRetry(t *testing.T) {
 		{board: board.Board{Title: "Recovered"}},
 	}}
 	watcher := &countingVersionReader{version: 3}
-	m := NewModel(reader, watcher, "u")
+	m := newTestRootModel(reader, watcher, "u")
 
 	first := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 3}))
 	completeBoardLoad(t, &m, first)
@@ -1599,7 +1720,7 @@ func TestVersionChangesDuringLoadCoalesceOneSuccessor(t *testing.T) {
 		{board: board.Board{Title: "V2"}},
 		{board: board.Board{Title: "V3"}},
 	}}
-	m := NewModel(reader, stubVersionReader{}, "u")
+	m := newTestRootModel(reader, stubVersionReader{}, "u")
 	initial := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 1}))
 	completeBoardLoad(t, &m, initial)
 
@@ -1632,7 +1753,7 @@ func TestFailedLoadWithPendingChangeStartsSerializedSuccessor(t *testing.T) {
 		{err: want},
 		{board: board.Board{Title: "V3"}},
 	}}
-	m := NewModel(reader, stubVersionReader{}, "u")
+	m := newTestRootModel(reader, stubVersionReader{}, "u")
 	initial := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 1}))
 	completeBoardLoad(t, &m, initial)
 
@@ -1652,7 +1773,7 @@ func TestFailedLoadWithPendingChangeStartsSerializedSuccessor(t *testing.T) {
 
 func TestShutdownIgnoresLateResults(t *testing.T) {
 	reader := &sequenceBoardReader{results: []boardResult{{board: board.Board{Title: "Late"}}}}
-	m := NewModel(reader, stubVersionReader{}, "u")
+	m := newTestRootModel(reader, stubVersionReader{}, "u")
 	load := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 1}))
 	if quit := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'q'}); quit == nil || !m.stopped {
 		t.Fatalf("shutdown = model:%#v command:%v", m, quit)
@@ -1675,7 +1796,7 @@ func TestADRSplitRootRoutingMoveCancellationAndShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(st, nil, "u")
+	m := newTestRootModel(st, nil, "u")
 	m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
 	m.board = board.Board{Title: "Work", Tasks: []board.Task{task}}
 	m.boardView.adoptBoard(m.board, m.board)
@@ -1733,7 +1854,7 @@ func TestTaskActionsRespectDetailEditorAndADRInputOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(st, nil, "u")
+	m := newTestRootModel(st, nil, "u")
 	m.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
 	completeBoardLoad(t, &m, m.Init())
 
@@ -1750,7 +1871,7 @@ func TestTaskActionsRespectDetailEditorAndADRInputOwnership(t *testing.T) {
 		t.Fatalf("editor input leaked to task action: action=%#v editor=%v", m.action, m.editor.IsOpen())
 	}
 
-	adrModel := NewModel(st, nil, "u")
+	adrModel := newTestRootModel(st, nil, "u")
 	adrModel.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
 	completeBoardLoad(t, &adrModel, adrModel.Init())
 	updateTestModel(t, &adrModel, tea.KeyPressMsg{Code: 'a'})
@@ -1766,7 +1887,7 @@ func TestTaskActionsRespectDetailEditorAndADRInputOwnership(t *testing.T) {
 		t.Fatalf("ADR input leaked to task action: action=%#v adr=%v", adrModel.action, adrModel.adr.IsOpen())
 	}
 
-	actionModel := NewModel(st, nil, "u")
+	actionModel := newTestRootModel(st, nil, "u")
 	actionModel.configureAI(ai.NewRunner(st, "", nil, nil), context.Background())
 	completeBoardLoad(t, &actionModel, actionModel.Init())
 	drainModelCommands(t, &actionModel, updateTestModel(t, &actionModel, tea.KeyPressMsg{Code: tea.KeyEnter}))
@@ -1795,7 +1916,7 @@ func TestDelayedAutoShipDoesNotStealNestedDetailInput(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		m := NewModel(st, nil, "u")
+		m := newTestRootModel(st, nil, "u")
 		completeBoardLoad(t, &m, m.Init())
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: 't', Text: "t"})
 		write := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
@@ -1814,9 +1935,8 @@ func TestDelayedAutoShipDoesNotStealNestedDetailInput(t *testing.T) {
 		if !m.detail.OwnsInput() {
 			t.Fatal("comment input did not own focus")
 		}
-		if command := updateTestModel(t, &m, timer()); command != nil {
-			t.Fatalf("auto-ship read started behind detail input: %v", command)
-		}
+		assertNoDomainMessage(t, "auto-ship read behind detail input",
+			updateTestModel(t, &m, singleCommandMessage(t, timer)))
 		current, err := st.Task("u", task.ID)
 		if err != nil || current.Status != board.StatusTodo || m.action.open() || !m.detail.OwnsInput() {
 			t.Fatalf("timer stole nested input: task=%+v err=%v action=%#v owned=%v", current, err, m.action, m.detail.OwnsInput())
@@ -1825,16 +1945,15 @@ func TestDelayedAutoShipDoesNotStealNestedDetailInput(t *testing.T) {
 
 	t.Run("ready result", func(t *testing.T) {
 		m, st, task, timer := setup(t)
-		read := updateTestModel(t, &m, timer())
+		read := updateTestModel(t, &m, singleCommandMessage(t, timer))
 		if read == nil {
 			t.Fatal("eligible timer did not start canonical read")
 		}
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
 		drainModelCommands(t, &m, updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: 'c', Text: "c"})
-		if command := updateTestModel(t, &m, read()); command != nil {
-			t.Fatalf("auto-ship write started behind detail input: %v", command)
-		}
+		assertNoDomainMessage(t, "auto-ship write behind detail input",
+			updateTestModel(t, &m, singleCommandMessage(t, read)))
 		current, err := st.Task("u", task.ID)
 		if err != nil || current.Status != board.StatusTodo || m.action.open() || !m.detail.OwnsInput() {
 			t.Fatalf("ready result stole nested input: task=%+v err=%v action=%#v owned=%v", current, err, m.action, m.detail.OwnsInput())
@@ -1849,7 +1968,7 @@ func TestAutoShipInputOwnershipMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	newRoot := func() Model {
-		m := NewModel(st, nil, "u")
+		m := newTestRootModel(st, nil, "u")
 		completeBoardLoad(t, &m, m.Init())
 		return m
 	}
@@ -2370,7 +2489,7 @@ func TestWideDetailPanelRemainsInsideTerminalGrid(t *testing.T) {
 		Status: board.StatusTodo,
 	}
 	reader := stubDetailBoardReader{stubBoardReader{board: board.Board{Title: "Work", Tasks: []board.Task{task}}}}
-	m := NewModel(reader, nil, "alice")
+	m := newTestRootModel(reader, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 427, Height: 73})
 	load := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -2418,7 +2537,7 @@ func TestWideDetailPTYRendersCompletePanelInsideCellGrid(t *testing.T) {
 		Status: board.StatusTodo,
 	}
 	reader := stubDetailBoardReader{stubBoardReader{board: board.Board{Title: "Work", Tasks: []board.Task{task}}}}
-	m := NewModel(reader, nil, "alice")
+	m := newTestRootModel(reader, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 427, Height: 73})
 	load := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -2497,7 +2616,7 @@ func TestWideDetailPTYRendersCompletePanelInsideCellGrid(t *testing.T) {
 }
 
 func TestEmptyBoardGolden(t *testing.T) {
-	m := NewModel(stubBoardReader{board: board.Board{Title: "Board"}}, nil, "default")
+	m := newTestRootModel(stubBoardReader{board: board.Board{Title: "Board"}}, nil, "default")
 	// Start from a loaded snapshot so the golden records the frame, not a
 	// renderer-timing-dependent diff from "loading" to "ready".
 	m.loading = false

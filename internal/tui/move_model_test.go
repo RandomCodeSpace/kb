@@ -202,10 +202,8 @@ func TestDropToDoneOpensShipPromptForBlockedCard(t *testing.T) {
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyRight})
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyRight})
-	drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if drop != nil {
-		t.Fatalf("blocked Done drop wrote before confirmation: %v", drop)
-	}
+	assertNoDomainMessage(t, "blocked Done drop",
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
 	if m.action.mode != taskActionShip || !m.action.warning.blocked {
 		t.Fatalf("blocked Done drop action = %#v", m.action)
 	}
@@ -273,7 +271,7 @@ func oracleMoveBoard(current board.Board, taskID string, target board.Status, in
 }
 
 func loadedMoveModel(s *moveTestStore) Model {
-	m := NewModel(s, nil, "u")
+	m := newTestRootModel(s, nil, "u")
 	m.loading = false
 	m.board = cloneBoard(s.board)
 	return m
@@ -333,12 +331,11 @@ func TestFailedMoveRestoresCanonicalBoardFocusAndError(t *testing.T) {
 
 func TestMoveFailurePathsStayTruthful(t *testing.T) {
 	t.Run("unsupported store", func(t *testing.T) {
-		m := NewModel(stubBoardReader{board: moveFixture()}, nil, "u")
+		m := newTestRootModel(stubBoardReader{board: moveFixture()}, nil, "u")
 		completeBoardLoad(t, &m, m.Init())
 		updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
-		if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}); command != nil {
-			t.Fatalf("unsupported store returned command %v", command)
-		}
+		assertNoDomainMessage(t, "unsupported store drop",
+			updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter}))
 		if !m.move.statusError || !strings.Contains(m.move.status, "does not support") || columnNames(m.board, board.StatusTodo) != "A,B,C" {
 			t.Fatalf("unsupported store = error %v status %q board %q", m.move.statusError, m.move.status, columnNames(m.board, board.StatusTodo))
 		}
@@ -480,7 +477,7 @@ func TestSameColumnDropPreservesStoredCardAge(t *testing.T) {
 	if _, err := st.AddTask("u", board.Task{Title: "Second"}); err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(st, nil, "u")
+	m := newTestRootModel(st, nil, "u")
 	completeBoardLoad(t, &m, m.Init())
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyDown})
@@ -662,8 +659,9 @@ func TestMoveRootRoutingCoverageEdges(t *testing.T) {
 		}
 		updateTestModel(t, &m, boardPointerUpMsg{})
 		updateTestModel(t, &m, boardPointerDownMsg{taskID: "a"})
-		if command := updateTestModel(t, &m, boardPointerUpMsg{}); command != nil || !m.detail.IsOpen() {
-			t.Fatalf("click release = command %v detail %v", command, m.detail.IsOpen())
+		assertNoDomainMessage(t, "click release", updateTestModel(t, &m, boardPointerUpMsg{}))
+		if !m.detail.IsOpen() {
+			t.Fatal("click release did not open the detail overlay")
 		}
 	})
 }

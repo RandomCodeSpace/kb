@@ -41,7 +41,7 @@ func assertLineEditing(t *testing.T, model *Model, value func() string, typed st
 }
 
 func TestFilterInputReceivesLineEditingKeys(t *testing.T) {
-	model := NewModel(stubBoardReader{board: filterFixture()}, nil, "alice")
+	model := newTestRootModel(stubBoardReader{board: filterFixture()}, nil, "alice")
 	completeBoardLoad(t, &model, model.Init())
 	updateTestModel(t, &model, tea.KeyPressMsg{Code: '/', Text: "/"})
 	if model.filter.focus != filterText {
@@ -63,7 +63,7 @@ func TestKillReasonInputReceivesLineEditingKeys(t *testing.T) {
 
 func TestSettingsInputReceivesLineEditingKeys(t *testing.T) {
 	backend := newSettingsTestStore(t)
-	model := NewModel(backend, nil, "alice")
+	model := newTestRootModel(backend, nil, "alice")
 	completeBoardLoad(t, &model, model.Init())
 	model.settingsNew = func() *settingsModel {
 		return newSettingsModel(backend, "alice", context.Background())

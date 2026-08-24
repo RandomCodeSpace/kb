@@ -60,7 +60,7 @@ func actionTestModel(t *testing.T, tasks ...board.Task) (Model, *store.Store, []
 			t.Fatal(err)
 		}
 	}
-	m := NewModel(backend, nil, "alice")
+	m := newTestRootModel(backend, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	return m, backend, created
 }
@@ -70,7 +70,7 @@ func finishActionCommand(t *testing.T, m *Model, command tea.Cmd) tea.Cmd {
 	if command == nil {
 		t.Fatal("action command is nil")
 	}
-	return updateTestModel(t, m, command())
+	return updateTestModel(t, m, singleCommandMessage(t, command))
 }
 
 func liftToDone(t *testing.T, m *Model, taskID string) tea.Cmd {
@@ -125,9 +125,7 @@ func TestShipPromptTickAllAndShipAnywayAreExplicitForcedChoices(t *testing.T) {
 			if _, _, err := backend.Link("alice", blocker.ID, target.ID); err != nil {
 				t.Fatal(err)
 			}
-			if command := liftToDone(t, &m, target.ID); command != nil {
-				t.Fatalf("warned drop wrote before confirmation: %v", command)
-			}
+			assertNoDomainMessage(t, "warned drop", liftToDone(t, &m, target.ID))
 			if m.action.mode != taskActionShip || m.move.lifted != nil ||
 				!strings.Contains(ansi.Strip(m.View().Content), "Tick everything") {
 				t.Fatalf("ship prompt state = action %#v move %#v\n%s", m.action, m.move, m.View().Content)
@@ -190,10 +188,11 @@ func TestChecklistLastTickAutoShipsAfterCanonicalRecheck(t *testing.T) {
 	if afterWrite == nil {
 		t.Fatal("last tick did not schedule auto-ship")
 	}
-	check := afterWrite()
-	read := updateTestModel(t, &m, check)
-	ready := read()
-	ship := updateTestModel(t, &m, ready)
+	read := updateTestModel(t, &m, singleCommandMessage(t, afterWrite))
+	if read == nil {
+		t.Fatal("auto-ship check did not start the canonical read")
+	}
+	ship := updateTestModel(t, &m, singleCommandMessage(t, read))
 	finishActionCommand(t, &m, ship)
 	current, err := backend.Task("alice", task.ID)
 	if err != nil || current.Status != board.StatusDone || !checksComplete(current.Checks) {
@@ -215,10 +214,9 @@ func TestAutoShipRecheckObservesUndoBeforeTimer(t *testing.T) {
 	timer := finishActionCommand(t, &m, first)
 	undo := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 	finishActionCommand(t, &m, undo)
-	read := updateTestModel(t, &m, timer())
-	if command := updateTestModel(t, &m, read()); command != nil {
-		t.Fatalf("undone checklist still auto-shipped: %v", command)
-	}
+	read := updateTestModel(t, &m, singleCommandMessage(t, timer))
+	assertNoDomainMessage(t, "undone checklist",
+		updateTestModel(t, &m, singleCommandMessage(t, read)))
 	current, err := backend.Task("alice", task.ID)
 	if err != nil || current.Status != board.StatusTodo || current.Checks[0].Done {
 		t.Fatalf("undo recheck = %+v, %v", current, err)
@@ -443,7 +441,7 @@ func TestTaskActionRejectsPointerReleaseFromPriorPrompt(t *testing.T) {
 }
 
 func TestAutoShipStopsWhenCandidateDisappears(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	eligible := board.Task{Status: board.StatusTodo, Checks: []board.Check{{Text: "done", Done: true}}}
 	if command := m.finishAutoShipRead(autoShipReadyMsg{task: eligible, found: false}); command != nil || m.action.open() || m.action.busy {
 		t.Fatalf("missing auto-ship candidate = command:%v action:%#v", command, m.action)
@@ -500,8 +498,10 @@ func TestKillRestoreAndArmedPurgeRouting(t *testing.T) {
 	if _, found, err := backend.Tombstone("alice", task.ID); err != nil || found {
 		t.Fatalf("restore tombstone = %v, %v", found, err)
 	}
-	if command := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'D', Text: "D"}); command != nil || m.action.open() {
-		t.Fatalf("live purge opened = command %v action %#v", command, m.action)
+	assertNoDomainMessage(t, "live purge",
+		updateTestModel(t, &m, tea.KeyPressMsg{Code: 'D', Text: "D"}))
+	if m.action.open() {
+		t.Fatalf("live purge opened action %#v", m.action)
 	}
 
 	if _, err := backend.CancelTask("alice", task.ID, nil); err != nil {
@@ -526,7 +526,7 @@ func TestKillRestoreAndArmedPurgeRouting(t *testing.T) {
 
 func TestShippedRecordPersistenceRolloverAndIdentity(t *testing.T) {
 	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
-	m := NewModel(stubBoardReader{}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	m.now = func() time.Time { return now }
 	m.renderedAt = now
 	m.shipped = shippedRecord{Date: "2026-08-18", IDs: []string{"a", "a", "", "b"}}
@@ -559,7 +559,7 @@ func TestShippedRecordPersistenceRolloverAndIdentity(t *testing.T) {
 }
 
 func TestTaskActionOverlaySanitizesAndStaysBounded(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	m.width, m.height = 24, 9
 	task := board.Task{ID: "x", Title: "bad\x1b[2Jtitle", Status: board.StatusTodo,
 		Checks: []board.Check{{Text: "line\x1b]8;;https://evil.invalid\a"}}}
@@ -579,7 +579,7 @@ func TestTaskActionOverlaySanitizesAndStaysBounded(t *testing.T) {
 // issue #152: a panel too narrow for the choice row loses the layout, never a
 // choice, and every button keeps its own hit region.
 func TestDialogChoicesStackWhenTheButtonRowDoesNotFit(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	styles := m.themeStyles()
 	choices := killChoices()
 
@@ -755,7 +755,7 @@ func TestTaskActionKeyRoutingEdges(t *testing.T) {
 
 func TestUnsupportedActionStoreAndAutoShipEdges(t *testing.T) {
 	task := board.Task{ID: "task", Title: "Unsupported", Status: board.StatusTodo, Checks: []board.Check{{Text: "one"}}}
-	m := NewModel(stubBoardReader{board: board.Board{Tasks: []board.Task{task}}}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{board: board.Board{Tasks: []board.Task{task}}}, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 
 	m.openShipPrompt(task, 0)
@@ -878,7 +878,7 @@ func actionBackground(width, height int) string {
 func TestActionSuccessDetailAndDispatchEdges(t *testing.T) {
 	task := board.Task{ID: "task", Title: "Detail task", Status: board.StatusTodo, Checks: []board.Check{{Done: true}}}
 	reader := &mutableDetailReader{board: board.Board{Tasks: []board.Task{task}}}
-	m := NewModel(reader, nil, "alice")
+	m := newTestRootModel(reader, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	detailLoad := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	updateTestModel(t, &m, detailLoad())

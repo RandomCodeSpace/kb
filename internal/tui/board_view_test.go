@@ -244,7 +244,7 @@ func TestRefreshNormalizesSelectionAfterExternalHiddenMove(t *testing.T) {
 
 func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
-	m := NewModel(stubBoardReader{}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	m.loading = false
 	m.board = boardViewFixture(now)
 	m.now = func() time.Time { return now }
@@ -354,7 +354,7 @@ func TestBoardCardsColorGolden(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	fixture := boardViewFixture(now)
 	fixture.Tasks[0].Desc = "Pointer capture leaks when the column scrolls under the drag ghost"
-	m := NewModel(stubBoardReader{board: fixture}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
 	m.loading = false
 	m.board = fixture
 	m.now = func() time.Time { return now }
@@ -394,7 +394,7 @@ func TestNarrowTallBoardGolden(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	fixture := boardViewFixture(now)
 	fixture.Tasks[0].Desc = "Pointer capture leaks when the column scrolls under the drag ghost and the row grid stays fixed"
-	m := NewModel(stubBoardReader{board: fixture}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
 	m.loading = false
 	m.board = fixture
 	m.now = func() time.Time { return now }
@@ -425,7 +425,7 @@ func TestNarrowTallBoardGolden(t *testing.T) {
 
 func TestViewIsByteStableAcrossMovingWallClock(t *testing.T) {
 	stamp := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
-	m := NewModel(stubBoardReader{}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	m.loading = false
 	m.width, m.height = 100, 12
 	m.renderedAt = stamp
@@ -452,7 +452,7 @@ func TestViewIsByteStableAcrossMovingWallClock(t *testing.T) {
 func TestPollTickRefreshesRenderTimeAtRolloverBoundary(t *testing.T) {
 	before := time.Date(2026, 8, 18, 23, 59, 59, 0, time.UTC)
 	after := before.Add(time.Second)
-	m := NewModel(stubBoardReader{}, stubVersionReader{}, "alice")
+	m := newTestRootModel(stubBoardReader{}, stubVersionReader{}, "alice")
 	m.loading = false
 	m.width, m.height = 100, 12
 	m.renderedAt = before
@@ -491,7 +491,7 @@ func TestPollTickRefreshesRenderTimeAtRolloverBoundary(t *testing.T) {
 }
 
 func TestBoardFooterPrioritizesProductionSettingsActions(t *testing.T) {
-	model := NewModel(stubBoardReader{}, nil, "alice")
+	model := newTestRootModel(stubBoardReader{}, nil, "alice")
 	model.loading = false
 	model.settingsNew = func() *settingsModel { return nil }
 	for _, test := range []struct {
@@ -537,7 +537,7 @@ func TestBoardFooterPrioritizesProductionSettingsActions(t *testing.T) {
 }
 
 func TestBoardFooterWithoutSettingsKeepsBoardHints(t *testing.T) {
-	model := NewModel(stubBoardReader{}, nil, "alice")
+	model := newTestRootModel(stubBoardReader{}, nil, "alice")
 	model.loading = false
 	model.width = 80
 	content, _ := model.renderBoard()
@@ -555,7 +555,7 @@ func TestBoardFooterWithoutSettingsKeepsBoardHints(t *testing.T) {
 
 func TestBoardRenderScrollsSelectionIntoShortColumn(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	m.loading = false
 	m.now = func() time.Time { return now }
 	m.renderedAt = now
@@ -615,7 +615,7 @@ func TestBoardViewSmallHelpers(t *testing.T) {
 // TestBoardStateCarriesSemanticHue pins the footer's state segment onto the
 // status colors of spec section 1.5.
 func TestBoardStateCarriesSemanticHue(t *testing.T) {
-	base := NewModel(stubBoardReader{}, nil, "u")
+	base := newTestRootModel(stubBoardReader{}, nil, "u")
 	base.loading = false
 	for _, test := range []struct {
 		name  string
@@ -653,7 +653,7 @@ func TestBoardStateCarriesSemanticHue(t *testing.T) {
 // TestBackgroundColorRebuildsTheme is spec section 6.3: the palette defaults to
 // dark and is rebuilt exactly once, when the terminal answers.
 func TestBackgroundColorRebuildsTheme(t *testing.T) {
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	m.loading = false
 	before := m.styles
 	if before == nil {
@@ -742,7 +742,7 @@ func TestCancelledPreferencePathAndIsolation(t *testing.T) {
 
 func TestCancelledPreferenceCommandFailure(t *testing.T) {
 
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	m.boardView.showCancelled = true
 	m.savePreferences = func(preferences tuiPreferences) error {
 		if !preferences.ShowCancelled {
@@ -837,7 +837,7 @@ func TestCancelledPreferenceAtomicFailuresPreservePriorFile(t *testing.T) {
 
 func TestCancelledPreferenceWritesSerializeLatestToggle(t *testing.T) {
 	var saved []tuiPreferences
-	m := NewModel(stubBoardReader{}, nil, "u")
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
 	m.savePreferences = func(preferences tuiPreferences) error {
 		saved = append(saved, preferences)
 		return nil
@@ -872,7 +872,7 @@ func TestCancelledPreferenceWritesSerializeLatestToggle(t *testing.T) {
 // rendered string.
 func TestOverlayDimsTheBoardBackdrop(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
-	m := NewModel(stubBoardReader{board: boardViewFixture(now)}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{board: boardViewFixture(now)}, nil, "alice")
 	m.loading = false
 	m.board = boardViewFixture(now)
 	m.now = func() time.Time { return now }

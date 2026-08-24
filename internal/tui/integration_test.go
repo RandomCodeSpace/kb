@@ -26,7 +26,7 @@ func TestIntegratedFilterEditorRoutingAndRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := NewModel(st, nil, "alice")
+	m := newTestRootModel(st, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: '/'})
 	for _, key := range "ne" {
@@ -76,7 +76,7 @@ func TestIntegratedSavedSelectionRespectsFilterVisibility(t *testing.T) {
 	visible := board.Task{ID: "visible", Title: "keep existing", Status: board.StatusTodo}
 	created := board.Task{ID: "created", Title: "keep created", Status: board.StatusTodo}
 	hidden := board.Task{ID: "hidden", Title: "discarded", Status: board.StatusTodo}
-	m := NewModel(stubBoardReader{}, nil, "alice")
+	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	m.loading = false
 	m.board = board.Board{Tasks: []board.Task{visible, hidden}}
 	m.filter.input.SetValue("keep")
@@ -109,7 +109,7 @@ func TestIntegratedSavedSelectionWaitsForFreshSuccessor(t *testing.T) {
 		{name: "hidden", savedID: hidden.ID, fresh: board.Board{Tasks: []board.Task{old, hidden}}, wantID: old.ID},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			m := NewModel(stubBoardReader{board: test.fresh}, nil, "alice")
+			m := newTestRootModel(stubBoardReader{board: test.fresh}, nil, "alice")
 			m.board = board.Board{Tasks: []board.Task{old}}
 			m.filter.input.SetValue("keep")
 			m.boardView.focusTask(m.filteredBoard(), old.ID)
@@ -261,7 +261,7 @@ func TestIntegratedMoveModalAndFooterPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(st, nil, "alice")
+	m := newTestRootModel(st, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	m.filter.tags = []string{"bug"}
 	m.loadErr = errors.New("stale load error")
@@ -325,7 +325,7 @@ func integratedMultiCardModel(t *testing.T) (Model, board.Task, board.Task) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(st, nil, "alice")
+	m := newTestRootModel(st, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	if !m.boardView.focusTask(m.filteredBoard(), first.ID) {
 		t.Fatal("could not focus first card")

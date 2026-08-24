@@ -18,7 +18,7 @@ import (
 func goldenHelpModel(t *testing.T) Model {
 	t.Helper()
 	backend := newSettingsTestStore(t)
-	m := NewModel(backend, nil, "alice")
+	m := newTestRootModel(backend, nil, "alice")
 	m.settingsNew = func() *settingsModel { return newSettingsModel(backend, "alice", context.Background()) }
 	m.configureAI(ai.NewRunner(backend, "", nil, nil), context.Background())
 	completeBoardLoad(t, &m, m.Init())
@@ -49,7 +49,7 @@ func TestHelpOverlayColorGolden(t *testing.T) {
 // bubbles help contract: a feature the board was built without is a disabled
 // binding, which the component then declines to render.
 func TestHelpKeyMapDisablesUnavailableFeatures(t *testing.T) {
-	bare := NewModel(stubBoardReader{}, nil, "alice")
+	bare := newTestRootModel(stubBoardReader{}, nil, "alice")
 	for index, binding := range bare.helpKeyMap().actions {
 		if index >= 4 && binding.Enabled() {
 			t.Fatalf("optional binding %q enabled on a bare board", binding.Help().Key)

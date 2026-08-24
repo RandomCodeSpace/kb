@@ -23,7 +23,6 @@ import (
 const (
 	defaultWidth  = 80
 	defaultHeight = 24
-	pollInterval  = time.Second
 	ctrlCKey      = "ctrl+c"
 )
 
@@ -99,9 +98,12 @@ type Model struct {
 	action            taskActionState
 	taskActionSession uint64
 	pointerState      pointer.State
+	clicks            pointer.Clicks
+	grace             graceState
 	actionStatus      string
 	actionStatusError bool
 	actionNotice      bool
+	noticeSeq         uint64
 	shipped           shippedRecord
 }
 
@@ -204,11 +206,37 @@ func (m Model) Init() tea.Cmd {
 	return m.loadBoard()
 }
 
-// Update handles global messages before any future pane-specific routing.
+// Update is the input-feel gate of spec section 10.3 wrapped around the root's
+// own routing. Three machines sit here and nowhere else, because all three are
+// about which messages reach a surface rather than what a surface does with
+// them: the destructive-prompt grace, the double-click window, and the footer
+// notice TTL. Each expires because a message arrived, never because a render
+// read a clock.
 func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.stopped {
 		return m, nil
 	}
+	if m.grace.expire(message) {
+		return m, nil
+	}
+	if next, handled := m.clicks.Expire(message); handled {
+		m.clicks = next
+		return m, nil
+	}
+	if m.expireNotice(message) {
+		return m, nil
+	}
+	if m.grace.swallows(message) {
+		return m, m.grace.absorb(m.themeStyles().Timing)
+	}
+	grace := m.graceIdentity()
+	notice := m.noticeKey()
+	next, command := m.route(message)
+	return next, batchCommands(command, next.trackGrace(grace), next.trackNotice(notice))
+}
+
+// route handles global messages before any future pane-specific routing.
+func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 	if pointer.IsMessage(message) {
 		switch {
 		case m.issueImport.IsOpen():
@@ -554,15 +582,25 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if !m.move.lifted.dragged {
 			taskID := m.move.lifted.taskID
+			// Spec section 10.3.5: the classifier runs on the completed
+			// gesture, so a lift that ended on its origin is excluded by the
+			// dragged flag rather than by luck. kb's single click already opens
+			// the card detail (frozen v1.0.1), which is the same binding the
+			// double-click carries, so arming the window here keeps the two
+			// routes on one code path.
+			clicks, _, window := m.clicks.Click(pointer.ControlID(taskID), false,
+				m.themeStyles().Timing.DoubleClickWindow)
+			m.clicks = clicks
 			m.cancelCardMove("")
 			m.move.status = ""
 			m.boardView.focusTask(m.filteredBoard(), taskID)
 			if task, ok := m.selectedTask(); ok {
 				m.detail.Resize(m.width, m.height)
-				return m, m.detail.Open(task)
+				return m, batchCommands(window, m.detail.Open(task))
 			}
-			return m, nil
+			return m, window
 		}
+		m.clicks = m.clicks.Reset()
 		return m, m.startCardDrop()
 	case boardColumnScrolledMsg:
 		column := statusIndex(msg.status)
@@ -688,7 +726,7 @@ func (m *Model) observeDataVersion(msg dataVersionMsg) tea.Cmd {
 		if !m.haveVersion || m.loadErr != nil {
 			load = m.startBoardLoad()
 		}
-		return pollAfter(load)
+		return m.pollAfter(load)
 	}
 
 	m.pollErr = nil
@@ -703,7 +741,7 @@ func (m *Model) observeDataVersion(msg dataVersionMsg) tea.Cmd {
 	case m.loadErr != nil:
 		load = m.startBoardLoad()
 	}
-	return pollAfter(load)
+	return m.pollAfter(load)
 }
 
 // finishBoardLoad commits only successful snapshots. A pending freshness
@@ -800,11 +838,11 @@ func (m *Model) cancelCardMove(reason string) {
 	}
 }
 
-func pollAfter(load tea.Cmd) tea.Cmd {
+func (m Model) pollAfter(load tea.Cmd) tea.Cmd {
 	if load == nil {
-		return schedulePoll()
+		return m.schedulePoll()
 	}
-	return tea.Batch(load, schedulePoll())
+	return tea.Batch(load, m.schedulePoll())
 }
 
 func batchCommands(commands ...tea.Cmd) tea.Cmd {
@@ -972,6 +1010,6 @@ func (m Model) readDataVersion() tea.Cmd {
 	}
 }
 
-func schedulePoll() tea.Cmd {
-	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return pollTickMsg{} })
+func (m Model) schedulePoll() tea.Cmd {
+	return theme.Tick(m.themeStyles().Timing.PollInterval, pollTickMsg{})
 }

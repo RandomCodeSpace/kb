@@ -24,6 +24,80 @@ var seamAllowlist = map[string]bool{}
 // seamMarker is the construction call the seam bans.
 const seamMarker = "lipgloss.NewStyle"
 
+// timingMarkers are the scheduling calls and duration literals the timing seam
+// bans outside this package. Spec section 10.3.9 rule 6: every timing value in
+// the TUI is a named token on theme.Timing, scheduled through theme.Tick, so a
+// duration written at a call site is a design decision nobody reviewed.
+var timingMarkers = []string{
+	"tea.Tick(",
+	"tea.Every(",
+	"time.Sleep(",
+	"time.After(",
+	"time.Millisecond",
+	"time.Second",
+}
+
+// timingAllowlist is the set of production files under internal/tui that still
+// name a duration. Spec section 10.3.8: settings.go's settingsTestTimeout is
+// the deadline on a forge connection test - an I/O bound, not a feel constant,
+// and theme is not where network policy lives.
+//
+// Like the style allowlist, it may only shrink.
+var timingAllowlist = map[string]bool{"settings.go": true}
+
+// sleepMarker is the one timing call banned in tests too. Spec section 10.3.9
+// rule 5: no test under internal/tui sleeps. The other markers stay production
+// only, because a teatest harness deadline is a test's own cap on how long it
+// will wait for a content predicate, not a duration the TUI schedules against.
+const sleepMarker = "time.Sleep("
+
+// TestNoInlineTimingOutsideTheme walks internal/tui and fails on any scheduling
+// call or duration literal in production code that the allowlist does not
+// cover.
+func TestNoInlineTimingOutsideTheme(t *testing.T) {
+	root := tuiRoot(t)
+	found := map[string]bool{}
+	walkTUI(t, root, func(relative, source string) {
+		if strings.HasSuffix(relative, "_test.go") {
+			return
+		}
+		for _, marker := range timingMarkers {
+			if !strings.Contains(source, marker) {
+				continue
+			}
+			found[relative] = true
+			if !timingAllowlist[relative] {
+				t.Errorf("%s names %q; timing values are theme.Timing tokens scheduled through theme.Tick", relative, marker)
+			}
+		}
+	})
+	for _, relative := range sortedKeys(timingAllowlist) {
+		if !found[relative] {
+			t.Errorf("%s no longer names a duration; delete its timing allowlist entry", relative)
+		}
+	}
+}
+
+// TestTimingAllowlistOnlyShrinks pins the allowlist size so a slice cannot
+// quietly trade one exemption for another.
+func TestTimingAllowlistOnlyShrinks(t *testing.T) {
+	const atMost = 1
+	if len(timingAllowlist) > atMost {
+		t.Fatalf("timing allowlist has %d entries, at most %d are allowed", len(timingAllowlist), atMost)
+	}
+}
+
+// TestNoSleepsUnderTUI covers tests as well as production code: a slept test is
+// the flake generator the whole timing family exists to keep out.
+func TestNoSleepsUnderTUI(t *testing.T) {
+	root := tuiRoot(t)
+	walkTUI(t, root, func(relative, source string) {
+		if strings.Contains(source, sleepMarker) {
+			t.Errorf("%s sleeps; step the timer with an injected message instead", relative)
+		}
+	})
+}
+
 // TestNoStyleConstructionOutsideTheme walks internal/tui and fails on any style
 // construction outside this package that the allowlist does not cover.
 func TestNoStyleConstructionOutsideTheme(t *testing.T) {

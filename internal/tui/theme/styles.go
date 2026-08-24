@@ -45,6 +45,7 @@ type Styles struct {
 
 	Metrics Metrics
 	Glyph   Glyphs
+	Timing  Timing
 
 	blank      lipgloss.Style
 	blankBold  lipgloss.Style
@@ -239,10 +240,19 @@ var buttonTokens = [numButtonVariants]buttonVariantTokens{
 //
 // isDark arrives from tea.BackgroundColorMsg.IsDark(). Default to true until
 // the message lands, then rebuild once.
-func New(isDark bool) *Styles {
+func New(isDark bool) *Styles { return NewWith(isDark, DefaultTiming) }
+
+// NewWith is New with the timing set of spec section 10.3 injected. Injection
+// follows the cached factory of spec section 6.2 rather than mutating a built
+// *Styles: the same Timing lands on the base instance and on Dimmed, so an
+// overlay schedules against the same clock as the board behind it.
+//
+// Production calls New. Tests that must collapse timing call NewWith with
+// TimingCollapsed, which is the only configuration a golden can assert against.
+func NewWith(isDark bool, timing Timing) *Styles {
 	base := resolve(isDark)
-	built := build(base, isDark)
-	built.Dimmed = build(base.dim(), isDark)
+	built := build(base, isDark, timing)
+	built.Dimmed = build(base.dim(), isDark, timing)
 	return built
 }
 
@@ -319,13 +329,14 @@ func (s *Styles) Surface(selected, alternate bool) Slot {
 	}
 }
 
-func build(table paletteRGB, isDark bool) *Styles {
+func build(table paletteRGB, isDark bool, timing Timing) *Styles {
 	pal := table.colors()
 	blank := lipgloss.NewStyle()
 	built := &Styles{
 		Pal:        pal,
 		Metrics:    defaultMetrics,
 		Glyph:      defaultGlyphs,
+		Timing:     timing,
 		blank:      blank,
 		blankBold:  blank.Bold(true),
 		pressedOn:  ansi.Style{}.Reverse(true).String(),
