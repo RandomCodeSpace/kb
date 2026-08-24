@@ -66,6 +66,7 @@ func (m Model) helpKeyMap() helpKeys {
 			binding("/", "/", "text filter"),
 			binding("f", "f", "label filter"),
 			binding("X", "X", "clear filter"),
+			binding("p", "p/P", "switch project"),
 		},
 		actions: []key.Binding{
 			binding("t", "t", "ship card"),

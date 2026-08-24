@@ -87,7 +87,7 @@ func TestRunStartsAndQuits(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := Run(st, path, "default",
+	if err := Run(st, path, "default", "kb",
 		tea.WithInput(bytes.NewBufferString("q")),
 		tea.WithOutput(io.Discard),
 		tea.WithoutSignals(),

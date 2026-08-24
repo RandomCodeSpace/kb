@@ -68,7 +68,7 @@ func TestEditorFieldsSelectAll(t *testing.T) {
 		{"labels", func(m *Model) string { return m.label.Value() }},
 	} {
 		t.Run(test.focus, func(t *testing.T) {
-			model := New(newTestStore(t), "u")
+			model := newTestEditor(newTestStore(t), "u")
 			model.OpenAdd(board.StatusTodo)
 			model.focus = test.focus
 			model.applyFocus()
@@ -82,7 +82,7 @@ func TestEditorFieldsSelectAll(t *testing.T) {
 // Escape drops the mark and is consumed: the editor stays open, and only the
 // second Escape reaches the close path.
 func TestEditorSelectAllEscapeConsumesThenCloses(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.focus = "title"
 	model.applyFocus()
@@ -104,7 +104,7 @@ func TestEditorSelectAllEscapeConsumesThenCloses(t *testing.T) {
 
 // Moving focus by any route drops the mark, so a field never comes back marked.
 func TestEditorSelectAllDropsOnFocusMove(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.focus = "title"
 	model.applyFocus()
@@ -123,7 +123,7 @@ func TestEditorSelectAllDropsOnFocusMove(t *testing.T) {
 // The marked field is visually obvious: its row carries the theme's pressed
 // treatment, which the unmarked render does not.
 func TestEditorMarkedFieldRendersTheSelectionTreatment(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.focus = "title"
 	model.applyFocus()
@@ -151,7 +151,7 @@ func TestEditorMarkedFieldRendersTheSelectionTreatment(t *testing.T) {
 // TestEditorMarkedFieldColorGolden pins the marked state's cell grid: the mark
 // is an attribute, so only a truecolor golden records it.
 func TestEditorMarkedFieldColorGolden(t *testing.T) {
-	model := New(newTestStore(t), "default")
+	model := newTestEditor(newTestStore(t), "default")
 	model.OpenEdit(fullEditorTask())
 	model.focus = "title"
 	model.applyFocus()

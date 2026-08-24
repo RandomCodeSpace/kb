@@ -19,11 +19,13 @@ func restoreTUISeams(t *testing.T) {
 	originalRun := runTUIProgram
 	originalStderr := tuiStderr
 	originalHome := userHomeDir
+	originalProject := activeTUIProject
 	t.Cleanup(func() {
 		openTUIStore = originalOpen
 		runTUIProgram = originalRun
 		tuiStderr = originalStderr
 		userHomeDir = originalHome
+		activeTUIProject = originalProject
 	})
 }
 
@@ -33,9 +35,10 @@ func TestRunTUIDiscoversLocalStoreAndUser(t *testing.T) {
 	t.Setenv("KB_DATA", data)
 	// KB_USER is dead: the TUI always opens the "default" board.
 	t.Setenv("KB_USER", " Alice ")
-	var gotPath, gotUser string
-	runTUIProgram = func(st *store.Store, path, user string, _ ...tea.ProgramOption) error {
-		gotPath, gotUser = path, user
+	t.Setenv("KB_PROJECT", "kb")
+	var gotPath, gotUser, gotProject string
+	runTUIProgram = func(st *store.Store, path, user, activeProject string, _ ...tea.ProgramOption) error {
+		gotPath, gotUser, gotProject = path, user, activeProject
 		if _, err := st.Board(user); err != nil {
 			return err
 		}
@@ -46,6 +49,11 @@ func TestRunTUIDiscoversLocalStoreAndUser(t *testing.T) {
 	}
 	if gotPath != filepath.Join(data, "kb.db") || gotUser != "default" {
 		t.Fatalf("path/user = %q/%q", gotPath, gotUser)
+	}
+	// The board opens on the project the task CLI resolves, so a card created
+	// in the TUI lands where kb add would have put it.
+	if gotProject != "kb" {
+		t.Fatalf("active project = %q, want kb", gotProject)
 	}
 	for _, name := range []string{"secret", "kb.db"} {
 		if _, err := os.Stat(filepath.Join(data, name)); err != nil {
@@ -87,7 +95,7 @@ func TestRunTUIPropagatesProgramFailureAndDefaultsBlankUser(t *testing.T) {
 	data := t.TempDir()
 	t.Setenv("KB_DATA", data)
 	want := errors.New("program failed")
-	runTUIProgram = func(_ *store.Store, _ string, user string, _ ...tea.ProgramOption) error {
+	runTUIProgram = func(_ *store.Store, _ string, user string, _ string, _ ...tea.ProgramOption) error {
 		if user != "default" {
 			t.Fatalf("user = %q, want default", user)
 		}
@@ -95,5 +103,23 @@ func TestRunTUIPropagatesProgramFailureAndDefaultsBlankUser(t *testing.T) {
 	}
 	if err := runTUI([]string{"--data", data}); !errors.Is(err, want) {
 		t.Fatalf("program error = %v", err)
+	}
+}
+
+// TestRunTUIPropagatesActiveProjectFailure pins that an unreadable active
+// project stops the board instead of silently opening it unscoped: an unscoped
+// board would let a card be created outside every project.
+func TestRunTUIPropagatesActiveProjectFailure(t *testing.T) {
+	restoreTUISeams(t)
+	data := t.TempDir()
+	t.Setenv("KB_DATA", data)
+	want := errors.New("state unreadable")
+	activeTUIProject = func(string) (string, bool, error) { return "", false, want }
+	runTUIProgram = func(*store.Store, string, string, string, ...tea.ProgramOption) error {
+		t.Fatal("the program ran without a resolved project")
+		return nil
+	}
+	if err := runTUI(nil); !errors.Is(err, want) {
+		t.Fatalf("active project error = %v", err)
 	}
 }

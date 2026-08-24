@@ -67,6 +67,8 @@ type Model struct {
 	styles            *theme.Styles
 	boardView         boardViewState
 	filter            boardFilterState
+	projects          projectSwitcher
+	activeProject     string
 	detail            carddetail.Model
 	editor            cardeditor.Model
 	adr               adrsplit.Model
@@ -115,6 +117,16 @@ func (m *Model) applyStyles(styles *theme.Styles) {
 	}
 }
 
+// SetActiveProject hands the board the project local commands default to
+// (KB_PROJECT, else the project stored by kb project use). It is the switcher's
+// opening scope and the editor's default for a new card; stored preferences
+// override the scope, never the default.
+func (m *Model) SetActiveProject(name string) {
+	m.activeProject = name
+	m.projects.restore(projectSwitcher{}, name)
+	m.editor.SetProjectDefault(m.projectDefault())
+}
+
 func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
 	if runner == nil {
 		return
@@ -159,6 +171,7 @@ func newModel(
 		user:        user,
 		board:       board.Board{Title: "Board"},
 		filter:      newBoardFilterState(),
+		projects:    projectSwitcher{all: true},
 		detail:      carddetail.New(detailReader, user, styles),
 		editor:      cardeditor.New(editorStore, user),
 		width:       defaultWidth,
@@ -234,7 +247,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case boardCardClickedMsg, boardColumnClickedMsg,
-			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg, filterProjectClickedMsg,
 			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg,
 			boardFooterClickedMsg:
 			return m, nil
@@ -248,7 +261,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyPressMsg:
 			return m, m.updateTaskAction(message)
 		case boardCardClickedMsg, boardColumnClickedMsg,
-			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg, filterProjectClickedMsg,
 			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
 			return m, nil
 		}
@@ -275,7 +288,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, command
 		case boardCardClickedMsg, boardColumnClickedMsg,
-			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg, filterProjectClickedMsg,
 			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
 			return m, nil
 		}
@@ -310,7 +323,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.editor.Update(msg)
 		case boardCardClickedMsg, boardColumnClickedMsg,
-			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg, filterProjectClickedMsg,
 			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
 			return m, nil
 		}
@@ -330,7 +343,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.adr.Update(msg)
 		case boardCardClickedMsg, boardColumnClickedMsg,
-			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg, filterProjectClickedMsg,
 			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
 			return m, nil
 		}
@@ -355,6 +368,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			case "e":
 				if m.editor.Enabled() {
 					if task, ok := m.taskByID(m.detail.TaskID()); ok {
+						m.editor.SetProjectDefault(m.projectDefault())
 						return m, m.editor.OpenEdit(task)
 					}
 				}
@@ -370,7 +384,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.updateDetail(message)
 			}
 		case boardCardClickedMsg, boardColumnClickedMsg,
-			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg, filterProjectClickedMsg,
 			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
 			return m, nil
 		default:
@@ -416,7 +430,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.boardView.focusTask(m.filteredBoard(), m.move.lifted.taskID)
 				}
 				return m, nil
-			case "s", "c", "1", "2", "3", "4", "tab", "shift+tab", "n", "e", "a", "i", "/", "f", "x":
+			case "s", "c", "1", "2", "3", "4", "tab", "shift+tab", "n", "e", "a", "i", "/", "f", "x", "p", "P":
 				m.cancelCardMove("focus changed")
 			default:
 				return m, nil
@@ -458,14 +472,20 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "n":
 			if m.editor.Enabled() {
+				m.editor.SetProjectDefault(m.projectDefault())
 				return m, m.editor.OpenAdd(boardStatuses[m.boardView.column])
 			}
 		case "e":
 			if m.editor.Enabled() {
 				if task, ok := m.selectedTask(); ok {
+					m.editor.SetProjectDefault(m.projectDefault())
 					return m, m.editor.OpenEdit(task)
 				}
 			}
+		case "p":
+			return m, m.cycleProject(1)
+		case "P":
+			return m, m.cycleProject(-1)
 		case "space":
 			if !m.loading {
 				if task, ok := m.selectedTask(); ok {
@@ -577,6 +597,17 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancelCardMove("focus changed")
 		}
 		return m, m.mutateFilter(func(filter *boardFilterState) { filter.clear() })
+	case filterProjectClickedMsg:
+		if m.settings != nil {
+			return m, nil
+		}
+		if m.move.saving {
+			return m, nil
+		}
+		if m.move.lifted != nil {
+			m.cancelCardMove("focus changed")
+		}
+		return m, m.cycleProject(1)
 	case preferenceSavedMsg:
 		return m, m.finishPreferences(msg)
 	case tea.BackgroundColorMsg:
@@ -609,7 +640,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 func isBoardPointerMessage(message tea.Msg) bool {
 	switch message.(type) {
 	case boardCardClickedMsg, boardColumnClickedMsg,
-		filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+		filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg, filterProjectClickedMsg,
 		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg,
 		boardFooterClickedMsg:
 		return true
@@ -630,7 +661,8 @@ func isBoardUserInput(message tea.Msg) bool {
 	switch message.(type) {
 	case tea.KeyPressMsg, boardCardClickedMsg, boardColumnClickedMsg,
 		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg,
-		boardColumnScrolledMsg, filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg:
+		boardColumnScrolledMsg, filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
+		filterProjectClickedMsg:
 		return true
 	default:
 		return false
@@ -893,11 +925,13 @@ func (m *Model) handleBoardFooterClick(key string) tea.Cmd {
 		}
 	case "n":
 		if m.editor.Enabled() {
+			m.editor.SetProjectDefault(m.projectDefault())
 			return m.editor.OpenAdd(boardStatuses[m.boardView.column])
 		}
 	case "e":
 		if m.editor.Enabled() {
 			if task, ok := m.selectedTask(); ok {
+				m.editor.SetProjectDefault(m.projectDefault())
 				return m.editor.OpenEdit(task)
 			}
 		}

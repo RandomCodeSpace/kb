@@ -547,8 +547,8 @@ func TestMixedPreferenceWritesSerializeLatestSnapshot(t *testing.T) {
 		t.Fatalf("successor did not finish: command=%v saving=%v", command, m.prefSaving)
 	}
 	want := []tuiPreferences{
-		{ShowCancelled: true},
-		{Filter: boardFilter{Tags: []string{"bug"}}},
+		{ShowCancelled: true, ProjectAll: true},
+		{Filter: boardFilter{Tags: []string{"bug"}}, ProjectAll: true},
 	}
 	if !reflect.DeepEqual(saved, want) {
 		t.Fatalf("serialized snapshots = %+v, want %+v", saved, want)

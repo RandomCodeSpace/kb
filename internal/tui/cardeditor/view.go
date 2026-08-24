@@ -375,6 +375,7 @@ func (m *Model) bodyRows(width int) []editorRow {
 		m.inputRow("due", "Due", m.due, width, "  [/] day; ctrl+x clear"),
 		m.choiceRow("effort", "Effort", effortName(m.effort)+"  left/right; ctrl+x clear"),
 		m.choiceRow("blocked", "Blocked", boolName(m.blocked)+"  space toggle"),
+		m.inputRow("project", "Project", m.project, width, "  required"),
 		m.inputRow("labels", "Labels", m.label, width),
 		editorRow{text: "  selected: " + safeList(m.tags), kind: rowHint},
 	)

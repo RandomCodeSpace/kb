@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/project"
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 )
 
@@ -160,10 +161,14 @@ func (s boardFilterState) project(current board.Board) board.Board {
 	return filtered
 }
 
+// boardLabels is the filter's label vocabulary. Project labels are left out of
+// it: the switcher owns that axis, and offering a project:: chip beside it
+// would let the two contradict each other.
 func boardLabels(current board.Board) []string {
 	seen := make(map[string]struct{})
 	for _, task := range current.Tasks {
-		for _, tag := range task.Tags {
+		_, tags := project.SplitTags(task.Tags)
+		for _, tag := range tags {
 			if tag != "" {
 				seen[tag] = struct{}{}
 			}
@@ -177,8 +182,10 @@ func boardLabels(current board.Board) []string {
 	return labels
 }
 
+// filteredBoard is what the board renders: the project scope first, then the
+// text and label filter over what it left.
 func (m Model) filteredBoard() board.Board {
-	return m.filter.project(m.board)
+	return m.filter.project(m.projectBoard())
 }
 
 func (m *Model) mutateFilter(change func(*boardFilterState)) tea.Cmd {
@@ -284,7 +291,7 @@ func (m *Model) filterTextChanged(previous board.Board, before string, inputCmd 
 }
 
 func (m Model) filterLabels() []string {
-	labels := boardLabels(m.board)
+	labels := boardLabels(m.projectBoard())
 	seen := make(map[string]struct{}, len(labels))
 	for _, label := range labels {
 		seen[label] = struct{}{}

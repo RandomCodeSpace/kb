@@ -859,7 +859,10 @@ func TestCancelledPreferenceWritesSerializeLatestToggle(t *testing.T) {
 	if next := updateTestModel(t, &m, second()); next != nil || m.prefSaving {
 		t.Fatalf("final preference state = %+v command=%v", m, next)
 	}
-	if !reflect.DeepEqual(saved, []tuiPreferences{{ShowCancelled: true}, {ShowCancelled: false}}) {
+	if !reflect.DeepEqual(saved, []tuiPreferences{
+		{ShowCancelled: true, ProjectAll: true},
+		{ShowCancelled: false, ProjectAll: true},
+	}) {
 		t.Fatalf("saved toggles = %v", saved)
 	}
 }

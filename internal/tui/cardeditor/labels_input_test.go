@@ -8,7 +8,7 @@ import (
 )
 
 func TestTypingInLabelFieldOpensSuggestions(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.focus = "labels"
 	model.applyFocus()

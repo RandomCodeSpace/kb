@@ -48,7 +48,7 @@ func TestEditorFieldsReceiveLineEditingKeys(t *testing.T) {
 		{"ai-prompt", func(m *Model) string { return m.draftPrompt.Value() }},
 	} {
 		t.Run(test.focus, func(t *testing.T) {
-			model := New(newTestStore(t), "u")
+			model := newTestEditor(newTestStore(t), "u")
 			model.OpenAdd(board.StatusTodo)
 			model.focus = test.focus
 			model.applyFocus()
@@ -61,7 +61,7 @@ func TestEditorFieldsReceiveLineEditingKeys(t *testing.T) {
 // belong to it: alt+arrows move the cursor and leave the date alone. The date
 // stepper keeps its own [ and ] bindings.
 func TestDueFieldReceivesWordMotionKeys(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.focus = "due"
 	model.applyFocus()
@@ -89,7 +89,7 @@ func TestDueFieldReceivesWordMotionKeys(t *testing.T) {
 // Word motion on prose fields: alt+left parks the cursor at the start of the
 // word under it, alt+right at the end of the next one.
 func TestTitleFieldReceivesWordMotionKeys(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.focus = "title"
 	model.applyFocus()
@@ -108,7 +108,7 @@ func TestTitleFieldReceivesWordMotionKeys(t *testing.T) {
 }
 
 func TestDueDateStepperKeepsBracketKeys(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.focus = "due"
 	model.applyFocus()

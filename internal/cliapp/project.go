@@ -14,6 +14,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/project"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -21,11 +22,14 @@ import (
 // "project::<name>". Projects slice one board rather than splitting it into
 // several: the label is ordinary task data, so nothing about the schema, the
 // wire format, or the server changes.
+//
+// The vocabulary itself lives in internal/project because the TUI writes tasks
+// too; these names are the CLI's local spelling of it.
 const (
-	projectScope       = "project"
-	projectLabelPrefix = projectScope + "::"
+	projectScope       = project.Scope
+	projectLabelPrefix = project.LabelPrefix
 	// inboxProject is where tasks that never named a project end up.
-	inboxProject = "inbox"
+	inboxProject = project.Inbox
 )
 
 const projectFlagName = "p"
@@ -62,36 +66,14 @@ func resolveDataDir(dataDir string) (string, error) {
 // validateProjectName checks a project name by the rule already applied to
 // label values: non-empty, no whitespace, no leading '#'. It additionally
 // rejects "::" so a name can never smuggle a second scope into the label.
-func validateProjectName(name string) (string, error) {
-	name = strings.TrimSpace(name)
-	switch {
-	case name == "":
-		return "", errors.New("project name must not be empty")
-	case board.ContainsSpace(name):
-		return "", fmt.Errorf("invalid project name %q: must not contain whitespace", name)
-	case strings.HasPrefix(name, "#"):
-		return "", fmt.Errorf("invalid project name %q: must not start with '#'", name)
-	case strings.Contains(name, "::"):
-		return "", fmt.Errorf("invalid project name %q: must not contain %q", name, "::")
-	}
-	return name, nil
-}
+func validateProjectName(name string) (string, error) { return project.ValidateName(name) }
 
 // projectLabel renders the scoped label for a project name.
-func projectLabel(name string) string { return projectLabelPrefix + name }
+func projectLabel(name string) string { return project.Label(name) }
 
 // splitProjectTags separates the project names a tag list carries from the
 // tags that are not project labels, both in their original order.
-func splitProjectTags(tags []string) (projects, rest []string) {
-	for _, tag := range tags {
-		if name, ok := strings.CutPrefix(tag, projectLabelPrefix); ok {
-			projects = append(projects, name)
-			continue
-		}
-		rest = append(rest, tag)
-	}
-	return projects, rest
-}
+func splitProjectTags(tags []string) (projects, rest []string) { return project.SplitTags(tags) }
 
 // loadCLIState reads state.json; a missing file is the zero state.
 func loadCLIState(dataDir string) (cliState, error) {
@@ -326,12 +308,15 @@ func applyProjectPatch(be backend, ref string, p *store.TaskPatch, flagValue, da
 
 // currentProjectOf returns the single project a task carries, or "" when it
 // carries none or more than one (both of which the caller then replaces).
-func currentProjectOf(t board.Task) string {
-	named, _ := splitProjectTags(t.Tags)
-	if len(named) != 1 {
-		return ""
-	}
-	return named[0]
+func currentProjectOf(t board.Task) string { return project.Of(t.Tags) }
+
+// ActiveProject resolves the project local surfaces default to when no flag
+// names one: KB_PROJECT, else the project stored by kb project use. The TUI
+// takes its switcher and editor default from it, which is why the resolution
+// is exported rather than copied.
+func ActiveProject(dataDir string) (string, bool, error) {
+	name, _, ok, err := resolveActiveProject("", dataDir)
+	return name, ok, err
 }
 
 // projectBackfiller is the slice of the store the backfill needs: *store.Store

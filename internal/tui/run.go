@@ -20,9 +20,12 @@ type versionWatcher interface {
 type watcherOpener func(context.Context, string) (versionWatcher, error)
 
 // Run opens the data-version watcher and runs the full-screen program.
-// Program options are accepted for deterministic tests; production passes none.
-func Run(st *store.Store, databasePath, user string, options ...tea.ProgramOption) (err error) {
-	return runWithSettings(st, databasePath, user, func(ctx context.Context, path string) (versionWatcher, error) {
+// activeProject is the project local commands default to, resolved by the
+// caller that owns the data directory; it opens the switcher and defaults the
+// editor's mandatory project field, and may be empty. Program options are
+// accepted for deterministic tests; production passes none.
+func Run(st *store.Store, databasePath, user, activeProject string, options ...tea.ProgramOption) (err error) {
+	return runWithSettings(st, databasePath, user, activeProject, func(ctx context.Context, path string) (versionWatcher, error) {
 		return OpenDataVersionWatcher(ctx, path)
 	}, options...)
 }
@@ -31,11 +34,12 @@ func runWithSettings(
 	st *store.Store,
 	databasePath string,
 	user string,
+	activeProject string,
 	openWatcher watcherOpener,
 	options ...tea.ProgramOption,
 ) (err error) {
 	runner := ai.NewRunner(st, filepath.Join(filepath.Dir(databasePath), "skills"), nil, nil)
-	return runProgram(st, databasePath, user, openWatcher, func(ctx context.Context) *settingsModel {
+	return runProgram(st, databasePath, user, activeProject, openWatcher, func(ctx context.Context) *settingsModel {
 		return newSettingsModel(st, user, ctx)
 	}, runner, options...)
 }
@@ -47,13 +51,14 @@ func run(
 	openWatcher watcherOpener,
 	options ...tea.ProgramOption,
 ) (err error) {
-	return runProgram(st, databasePath, user, openWatcher, nil, nil, options...)
+	return runProgram(st, databasePath, user, "", openWatcher, nil, nil, options...)
 }
 
 func runProgram(
 	st boardReader,
 	databasePath string,
 	user string,
+	activeProject string,
 	openWatcher watcherOpener,
 	settingsNew func(context.Context) *settingsModel,
 	aiRunner *ai.Runner,
@@ -71,6 +76,7 @@ func runProgram(
 	}()
 	model := newModel(st, watcher, user, ctx)
 	model.configureAI(aiRunner, ctx)
+	model.SetActiveProject(activeProject)
 	preferencePath, preferencePathErr := tuiPreferencesPath(databasePath, user)
 	if preferencePathErr == nil {
 		model.restorePreferences(preferencePath)
