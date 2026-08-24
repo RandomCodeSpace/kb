@@ -42,6 +42,14 @@ type Glyphs struct {
 	Empty    string // U+25CB, empty-state mark (section 10.8.3)
 	Alert    string // U+25B2, failure mark (section 10.8.5)
 
+	// The half-block pair of spec section 10.6.1. These are the only glyphs in
+	// the vocabulary that widen the block-glyph risk section 3.6 records rather
+	// than inheriting it, and they are accepted for the launch mark alone: the
+	// mark is decoration, and every fact the launch screen carries lives in the
+	// meta row as plain text (section 10.6.1, glyph vocabulary cost).
+	HalfTop    string // U+2580, brand letterform upper half
+	HalfBottom string // U+2584, brand letterform lower half
+
 	// Markers are the ASCII prefixes of spec section 10.4.1 that are display
 	// vocabulary rather than prose. MarkSeq and MarkTag are a same-text alias,
 	// deliberate and not a collision: they answer to different sections and
@@ -73,6 +81,10 @@ var defaultGlyphs = Glyphs{
 	Track:    "░",
 	Empty:    "○",
 	Alert:    "▲",
+
+	HalfTop:    "▀",
+	HalfBottom: "▄",
+
 	MarkPrio: "P",
 	MarkSeq:  "#",
 	MarkTag:  "#",
@@ -110,6 +122,19 @@ type Metrics struct {
 	EmptyHeadlineMin int // inner width at or above which an empty row keeps its headline
 	EmptyActionMin   int // inner width at or above which an empty row keeps its action tail
 	ActionGap        int // columns before an empty row's action tail
+
+	// The brand mark of spec section 10.6.8. The reveal's span is a timing
+	// token and lives in Timing.BrandBirthSteps; the two half-block glyphs are
+	// vocabulary and live in Glyphs.
+	BrandMarkW       int // unstretched mark width, k(4) + BrandKern(1) + b(5)
+	BrandMarkH       int // mark height, both letterforms
+	BrandKern        int // blank columns between letterforms
+	BrandStretchMax  int // inclusive upper bound of the memoized stretch
+	BrandMetaW       int // meta row width before the frame cap
+	BrandMetaGap     int // minimum columns between the meta row's two slots
+	BrandMetaGapRows int // blank Canvas rows between the mark and the meta row
+	BrandMinW        int // frame width below which the full mark is dropped
+	BrandMinH        int // frame height below which it is dropped
 
 	OverlayInsetX int // overlay content inset from the panel edge
 	OverlayLabelW int // fixed label gutter of an overlay field row
@@ -168,6 +193,16 @@ var defaultMetrics = Metrics{
 	EmptyActionMin:   10,
 	ActionGap:        2,
 
+	BrandMarkW:       10,
+	BrandMarkH:       5,
+	BrandKern:        1,
+	BrandStretchMax:  2,
+	BrandMetaW:       48,
+	BrandMetaGap:     2,
+	BrandMetaGapRows: 1,
+	BrandMinW:        16,
+	BrandMinH:        9,
+
 	OverlayInsetX: 2,
 	OverlayLabelW: 12,
 	TableGutter:   1,
@@ -198,6 +233,34 @@ func (m Metrics) DensityFor(frameHeight, columnInnerWidth int) Density {
 		return DensityCompact
 	}
 	return DensityNormal
+}
+
+// BrandBlockH is the launch block height of spec section 10.6.7: the mark, the
+// blank rows under it, and the meta row.
+func (m Metrics) BrandBlockH() int {
+	return m.BrandMarkH + m.BrandMetaGapRows + 1
+}
+
+// BrandMetaWidth is the meta row's width on a frame of this width: the section
+// 10.6.5 token capped to the frame less a page margin either side. It never
+// goes below zero, so a one-column frame renders an empty row rather than a
+// negative allotment.
+func (m Metrics) BrandMetaWidth(frameWidth int) int {
+	width := m.BrandMetaW
+	if capped := frameWidth - 2*m.PageMarginX; capped < width {
+		width = capped
+	}
+	if width < 0 {
+		return 0
+	}
+	return width
+}
+
+// BrandFits reports whether a frame is large enough for the full mark. Below
+// either floor the launch screen drops the mark and renders the meta row alone
+// (spec section 10.6.7).
+func (m Metrics) BrandFits(frameWidth, frameHeight int) bool {
+	return frameWidth >= m.BrandMinW && frameHeight >= m.BrandMinH
 }
 
 // PageMargin is the left/right page margin for a frame of this width.

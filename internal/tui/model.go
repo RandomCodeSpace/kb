@@ -21,6 +21,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/issueimport"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget"
 )
 
 const (
@@ -111,7 +112,21 @@ type Model struct {
 	actionNotice      bool
 	noticeSeq         uint64
 	shipped           shippedRecord
+
+	// The brand mark of spec section 10.6. The stretch and the reveal seed are
+	// rolled once in newModel and are plain fields, so a test pins them by
+	// assignment: no sync.Once, no package-level cache, no seam exemption.
+	version      string
+	brandStretch int
+	brandSeed    int64
+	brandFrame   int
+	brandGen     uint32
 }
+
+// SetVersion records the build version the launch screen's meta row prints.
+// The TUI cannot reach package main's build info, so the string arrives on
+// tui.Run and is stored here (spec section 10.6.5).
+func (m *Model) SetVersion(version string) { m.version = version }
 
 // applyStyles adopts a rebuilt design system and hands it to every sub-model
 // the root owns.
@@ -125,6 +140,7 @@ func (m *Model) applyStyles(styles *theme.Styles) {
 	if m.settings != nil {
 		m.settings.SetStyles(styles)
 	}
+	m.settleBrand(styles)
 }
 
 // SetActiveProject hands the board the project local commands default to
@@ -179,6 +195,7 @@ func newModel(
 	// tea.ColorProfileMsg says otherwise. Both defaults are the reference
 	// target, which is the correct assumption until the terminal answers.
 	styles := theme.NewFor(true, colorprofile.TrueColor)
+	brandStretch, brandSeed := widget.RollBrand(styles.Metrics)
 	return Model{
 		store:       store,
 		styles:      styles,
@@ -201,6 +218,10 @@ func newModel(
 		now:         now,
 		renderedAt:  now(),
 		action:      newTaskActionState(),
+
+		brandStretch: brandStretch,
+		brandSeed:    brandSeed,
+		brandGen:     1,
 	}
 }
 
@@ -209,13 +230,14 @@ func (m Model) Init() tea.Cmd {
 	if m.stopped {
 		return nil
 	}
+	start := m.loadBoard()
 	if m.watcher != nil {
 		// Establish the connection-local baseline before loading. If these ran
 		// concurrently, a commit between the stale load and a later baseline
 		// could be absorbed into that baseline and never trigger a refresh.
-		return m.readDataVersion()
+		start = m.readDataVersion()
 	}
-	return m.loadBoard()
+	return batchCommands(start, m.brandReveal())
 }
 
 // Update is the input-feel gate of spec section 10.3 wrapped around the root's
@@ -725,6 +747,8 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			m.height = msg.Height
 		}
 		m.detail.Resize(m.width, m.height)
+	case brandStepMsg:
+		return m, batchCommands(detailCmd, m.stepBrand(msg))
 	case boardLoadedMsg:
 		next := m.finishBoardLoad(msg)
 		return m, batchCommands(detailCmd, next)
@@ -969,7 +993,17 @@ func (m Model) backdrop() Model {
 // View renders the responsive read-only board and wires view-derived mouse hit
 // regions back into the update loop. Editing behavior arrives in later slices.
 func (m Model) View() tea.View {
-	content, hits := m.backdrop().renderBoard()
+	backdrop := m.backdrop()
+	var content string
+	var hits []boardHit
+	if m.launching() {
+		// Spec section 10.6.7: the launch screen owns the frame until the first
+		// board snapshot lands, and it carries no hit regions because it
+		// carries no controls.
+		content = backdrop.renderLaunch()
+	} else {
+		content, hits = backdrop.renderBoard()
+	}
 	var overlayMouse func(tea.MouseMsg) tea.Cmd
 	if m.helpOpen {
 		surface := m.keyboardHelpSurface(content)

@@ -37,8 +37,11 @@ func TestRunTUIDiscoversLocalStoreAndUser(t *testing.T) {
 	t.Setenv("KB_USER", " Alice ")
 	t.Setenv("KB_PROJECT", "kb")
 	var gotPath, gotUser, gotProject string
-	runTUIProgram = func(st *store.Store, path, user, activeProject string, _ ...tea.ProgramOption) error {
+	runTUIProgram = func(st *store.Store, path, user, activeProject, version string, _ ...tea.ProgramOption) error {
 		gotPath, gotUser, gotProject = path, user, activeProject
+		if version == "" {
+			t.Fatal("runTUI passed no build version to the launch screen")
+		}
 		if _, err := st.Board(user); err != nil {
 			return err
 		}
@@ -95,7 +98,7 @@ func TestRunTUIPropagatesProgramFailureAndDefaultsBlankUser(t *testing.T) {
 	data := t.TempDir()
 	t.Setenv("KB_DATA", data)
 	want := errors.New("program failed")
-	runTUIProgram = func(_ *store.Store, _ string, user string, _ string, _ ...tea.ProgramOption) error {
+	runTUIProgram = func(_ *store.Store, _ string, user string, _, _ string, _ ...tea.ProgramOption) error {
 		if user != "default" {
 			t.Fatalf("user = %q, want default", user)
 		}
@@ -118,7 +121,7 @@ func TestRunTUIProgramDefaultStartsTheBoard(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := runTUIProgram(st, path, "default", "kb",
+	if err := runTUIProgram(st, path, "default", "kb", "1.2.0",
 		tea.WithInput(strings.NewReader("q")),
 		tea.WithOutput(io.Discard),
 		tea.WithoutSignals(),
@@ -137,7 +140,7 @@ func TestRunTUIPropagatesActiveProjectFailure(t *testing.T) {
 	t.Setenv("KB_DATA", data)
 	want := errors.New("state unreadable")
 	activeTUIProject = func(string) (string, bool, error) { return "", false, want }
-	runTUIProgram = func(*store.Store, string, string, string, ...tea.ProgramOption) error {
+	runTUIProgram = func(*store.Store, string, string, string, string, ...tea.ProgramOption) error {
 		t.Fatal("the program ran without a resolved project")
 		return nil
 	}
