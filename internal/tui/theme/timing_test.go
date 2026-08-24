@@ -26,6 +26,7 @@ func TestDefaultTimingTable(t *testing.T) {
 		{"EllipsisStride", timing.EllipsisStride, 8},
 		{"SuffixAfter", timing.SuffixAfter, 60},
 		{"BrandBirthSteps", timing.BrandBirthSteps, 12},
+		{"CelebrateSteps", timing.CelebrateSteps, 12},
 	}
 	for _, item := range counts {
 		if item.got != item.want {
@@ -76,6 +77,28 @@ func TestIntervalDerivesFromFPS(t *testing.T) {
 	}
 	if got := theme.DefaultTiming.PlainFrame(); got != 100*time.Millisecond {
 		t.Fatalf("PlainFrame() = %v, want 100ms", got)
+	}
+}
+
+// TestCelebrateBeatDividesItsSpan pins the derived half of the ship
+// celebration's timing (issue #191): the span is the one reviewable number and
+// the beat falls out of it, so shortening the flourish shortens every phase.
+func TestCelebrateBeatDividesItsSpan(t *testing.T) {
+	if got := theme.DefaultTiming.CelebrateBeat(); got != 3 {
+		t.Fatalf("CelebrateBeat() = %d, want 3", got)
+	}
+	if got := theme.TimingCollapsed.CelebrateBeat(); got != 0 {
+		t.Fatalf("collapsed CelebrateBeat() = %d, want 0", got)
+	}
+	if got := (theme.Timing{CelebrateSteps: -1}).CelebrateBeat(); got != 0 {
+		t.Fatalf("negative CelebrateBeat() = %d, want 0", got)
+	}
+	// A span too short to divide still beats once rather than never: a floor of
+	// zero would be a lit phase that never ends.
+	for span := 1; span <= 4; span++ {
+		if got := (theme.Timing{CelebrateSteps: span}).CelebrateBeat(); got != 1 {
+			t.Fatalf("span %d: CelebrateBeat() = %d, want 1", span, got)
+		}
 	}
 }
 

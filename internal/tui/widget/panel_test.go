@@ -132,3 +132,44 @@ func TestPanelMetaRowSurvivesANarrowColumn(t *testing.T) {
 		}
 	}
 }
+
+// TestPanelMetaLitMovesHueAlone is the widget half of the ship celebration
+// (issue #191): the lit phase changes the meta row's foreground and nothing
+// else, so no-reflow parity (spec section 10.4.4) holds across the flash and
+// the overflow cue beside it never joins in.
+func TestPanelMetaLitMovesHueAlone(t *testing.T) {
+	styles := theme.New(true)
+	opts := PanelOpts{
+		Header: BandOpts{Index: 3, Label: "DONE", Count: 5, Hue: theme.HueDone},
+		Meta:   "5 cards",
+		Body:   []string{"card row"},
+		More:   2,
+		Width:  30,
+		Height: 5,
+	}
+	dark := Panel(styles, opts)
+	opts.MetaLit = true
+	lit := Panel(styles, opts)
+
+	if len(lit) != len(dark) {
+		t.Fatalf("the lit panel is %d rows, want %d", len(lit), len(dark))
+	}
+	if lit[1] == dark[1] {
+		t.Fatal("the lit meta row rendered the same bytes as the settled one")
+	}
+	if ansi.Strip(lit[1]) != ansi.Strip(dark[1]) {
+		t.Fatalf("the flash changed the row's text: %q then %q", ansi.Strip(dark[1]), ansi.Strip(lit[1]))
+	}
+	if ansi.StringWidth(lit[1]) != ansi.StringWidth(dark[1]) {
+		t.Fatalf("the flash reflowed the row: %d then %d cells",
+			ansi.StringWidth(dark[1]), ansi.StringWidth(lit[1]))
+	}
+	for index := range lit {
+		if index == 1 {
+			continue
+		}
+		if lit[index] != dark[index] {
+			t.Fatalf("row %d moved for the celebration:\n%q\n%q", index, dark[index], lit[index])
+		}
+	}
+}

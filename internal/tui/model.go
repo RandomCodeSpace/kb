@@ -109,6 +109,8 @@ type Model struct {
 	clicks            pointer.Clicks
 	spin              spinner.Model
 	scroll            boardScrollState
+	celebrate         shipCelebration
+	celebrateGen      uint64
 	grace             graceState
 	actionStatus      string
 	actionStatusError bool
@@ -272,6 +274,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.settleScroll(message) {
 		return m, nil
+	}
+	if command, handled := m.stepCelebration(message); handled {
+		return m, command
 	}
 	// The board's own plain tier, matched by spinner id so an overlay's tick
 	// still reaches the overlay that owns it.
