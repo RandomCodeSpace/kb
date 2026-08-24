@@ -19,6 +19,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/tui/action"
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
@@ -43,6 +44,9 @@ type Model struct {
 	entries  []Entry
 	cursor   int
 	offset   int
+
+	pointerState pointer.State
+	generation   uint64
 
 	choice action.Action
 	chosen bool
@@ -110,6 +114,8 @@ func (m *Model) Close() {
 	m.mark.Drop()
 	m.entries = nil
 	m.cursor, m.offset = 0, 0
+	m.pointerState = pointer.State{}
+	m.generation++
 }
 
 // ConsumeChoice reports the action the user ran, exactly once. The root model
@@ -129,10 +135,24 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	if !m.open {
 		return nil
 	}
+	if pointer.IsMessage(message) {
+		next, command, _ := m.pointerState.Update(message)
+		m.pointerState = next
+		return command
+	}
+	if activation, ok := message.(pointerActionMsg); ok {
+		return m.pointerAction(activation)
+	}
 	msg, ok := message.(tea.KeyPressMsg)
 	if !ok {
 		return nil
 	}
+	// Spec section 10.5.2 rows 7 and 8, in that order: a motion key adopts the
+	// hovered anchor and then moves from it, so down on a hovered row 7 lands on
+	// row 8 rather than on cursor+1; any other key runs unadopted against the
+	// keyboard cursor, because a key typed without looking at the mouse must not
+	// be redirected by it. Both turn mouse mode off.
+	m.cursor, m.pointerState = m.machine().Adopt(m.pointerState, isMotionKey(msg.String()))
 	if m.mark.Input(queryMarkField, &m.query, msg) {
 		m.refresh()
 		return nil
@@ -183,10 +203,15 @@ func (m *Model) move(delta int) {
 	m.cursor = min(max(m.cursor+delta, 0), len(m.entries)-1)
 }
 
-// refresh reruns the search and re-seats the cursor at the best match.
+// refresh reruns the search and re-seats the cursor at the best match. It also
+// retires the pointer map: spec section 10.5.2 row 9, a re-render with a changed
+// region set re-resolves hover, and a filtered list has no point to re-resolve
+// the old rows from because the rows themselves are new actions.
 func (m *Model) refresh() {
 	m.entries = Filter(action.Listed(m.features), sanitize(m.query.Value()))
 	m.cursor, m.offset = 0, 0
+	m.pointerState = m.pointerState.ClearHover()
+	m.generation++
 }
 
 // query text is user input echoed back into a rendered frame, so control
@@ -200,9 +225,25 @@ func sanitize(value string) string {
 	}, ansi.Strip(value))
 }
 
-// IsMessage reports whether a message belongs to the palette. The palette is
-// keyboard-only for now: pointer wiring is the hover slice's, not this one's.
+// isMotionKey reports whether a key moves the palette's own cursor, which is
+// the arrow-key precondition of spec section 10.5.2 row 7.
+func isMotionKey(key string) bool {
+	switch key {
+	case "up", "down", "ctrl+p", "ctrl+n":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsMessage reports whether a non-key message belongs to the palette: pointer
+// feedback, or one of its own pointer activations. Key presses are routed by
+// the caller's own open-overlay branch, which owns the interrupt ladder, so
+// they are deliberately not claimed here.
 func IsMessage(message tea.Msg) bool {
-	_, ok := message.(tea.KeyPressMsg)
+	if pointer.IsMessage(message) {
+		return true
+	}
+	_, ok := message.(pointerActionMsg)
 	return ok
 }

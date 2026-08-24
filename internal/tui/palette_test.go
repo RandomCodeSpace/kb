@@ -122,8 +122,8 @@ func TestChordOpensAndClosesThePalette(t *testing.T) {
 	if !strings.Contains(view, "COMMAND PALETTE") {
 		t.Errorf("the frame does not carry the panel:\n%s", view)
 	}
-	if m.View().OnMouse != nil {
-		t.Error("the keyboard-only palette installed a pointer handler")
+	if m.View().OnMouse == nil {
+		t.Error("the open palette installed no pointer handler, so a click lands on the board it covers")
 	}
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m.palette.IsOpen() {

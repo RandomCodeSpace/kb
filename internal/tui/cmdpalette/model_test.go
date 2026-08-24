@@ -252,8 +252,14 @@ func TestNonKeyMessagesAreIgnored(t *testing.T) {
 	if IsMessage(tea.WindowSizeMsg{}) {
 		t.Error("IsMessage claimed a resize")
 	}
-	if !IsMessage(tea.KeyPressMsg{Code: 'j'}) {
-		t.Error("IsMessage disclaimed a key press")
+	// Key presses are routed by the caller's own open-overlay branch, which
+	// owns the interrupt ladder, so IsMessage deliberately disclaims them and
+	// claims only what the pointer produced.
+	if IsMessage(tea.KeyPressMsg{Code: 'j'}) {
+		t.Error("IsMessage claimed a key press")
+	}
+	if !IsMessage(pointerActionMsg{dismiss: true}) {
+		t.Error("IsMessage disclaimed its own pointer activation")
 	}
 }
 

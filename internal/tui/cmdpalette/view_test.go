@@ -90,7 +90,7 @@ func TestMatchHighlightIsRenderedThroughStyleRanges(t *testing.T) {
 	styles := theme.New(true)
 	panel := m.layout(84, 26)
 	entry := m.entries[0]
-	rendered := m.entryText(entry, true, panel.focus)
+	rendered := m.entryText(entry, true, panel.focus, theme.OverlaySurf)
 	// The four matched runes are contiguous, so they must arrive as one styled
 	// range rather than four abutting ones. That coalescing is the whole reason
 	// the offsets go through widget.MatchRuns.
@@ -101,7 +101,7 @@ func TestMatchHighlightIsRenderedThroughStyleRanges(t *testing.T) {
 	if got := ansi.StringWidth(rendered); got != panel.focus {
 		t.Errorf("entry row is %d cells, want the focusable measure %d", got, panel.focus)
 	}
-	plain := m.entryText(entry, false, panel.focus)
+	plain := m.entryText(entry, false, panel.focus, theme.OverlaySurf)
 	if ansi.StringWidth(plain) != ansi.StringWidth(rendered) {
 		t.Error("the focused and blurred entry rows are different widths")
 	}
@@ -148,15 +148,15 @@ func cursorAt(m *Model, focused bool) int {
 func TestEntryTextDropsTheHintOnANarrowRow(t *testing.T) {
 	m := openModel(t)
 	entry := m.entries[0]
-	wide := ansi.Strip(m.entryText(entry, false, 40))
+	wide := ansi.Strip(m.entryText(entry, false, 40, theme.OverlaySurf))
 	if !strings.Contains(wide, entry.Action.Hint) {
 		t.Errorf("a wide row dropped the hint: %q", wide)
 	}
-	narrow := ansi.Strip(m.entryText(entry, false, 6))
+	narrow := ansi.Strip(m.entryText(entry, false, 6, theme.OverlaySurf))
 	if strings.Contains(narrow, entry.Action.Hint) {
 		t.Errorf("a narrow row kept the hint: %q", narrow)
 	}
-	if got := ansi.StringWidth(m.entryText(entry, false, 6)); got != 6 {
+	if got := ansi.StringWidth(m.entryText(entry, false, 6, theme.OverlaySurf)); got != 6 {
 		t.Errorf("a narrow row is %d cells, want 6", got)
 	}
 }
