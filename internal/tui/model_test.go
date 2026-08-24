@@ -1108,8 +1108,9 @@ func TestBoardHelpOverlayDocumentsCoreMutationKeys(t *testing.T) {
 	view := m.View()
 	plainView := ansi.Strip(view.Content)
 	for _, want := range []string{
-		"Keyboard help", "enter open card", "space lift or drop card",
-		"/     text filter", "f     label filter", "x cancel card", "X     clear filter",
+		"Keyboard help", "enter  open card", "space  lift or drop card",
+		"/      text filter", "f      label filter", "x cancel card", "X      clear filter",
+		"ctrl+k command palette",
 	} {
 		if !strings.Contains(plainView, want) {
 			t.Errorf("help missing %q:\n%s", want, plainView)

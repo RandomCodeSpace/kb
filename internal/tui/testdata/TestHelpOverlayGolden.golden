@@ -2,16 +2,16 @@
 
 
           Keyboard help                                         
-          enter open card            t ship card                 
-          space lift or drop card    x cancel card               
-          j/k   select card          r restore card              
-          h/l   select column        D permanently delete        
-          1-4   jump to column       n new card                  
-          /     text filter          e edit card                 
-          f     label filter         s settings                  
-          X     clear filter         a split ADR                 
-          p/P   switch project       i import forge issue        
+          enter  open card            t ship card                
+          space  lift or drop card    x cancel card              
+          j/k    select card          r restore card             
+          h/l    select column        D permanently delete       
+          1-4    jump to column       n new card                 
+          /      text filter          e edit card                
+          f      label filter         s settings                 
+          X      clear filter         a split ADR                
+          p/P    switch project       i import forge issue       
+          ctrl+k command palette                                 
           [Close] | ? or esc close help | q quit                 
                                                                  
-
 

@@ -1,0 +1,24 @@
+  COMMAND PALETTE
+  ▌ car|
+  ▌ new card                                                                 n
+    open card                                                            enter
+    ship card                                                                t
+    edit card                                                                e
+    select card                                                            j/k
+    restore card                                                             r
+    lift or drop card                                                    space
+    cancel card                                                              x
+    clear filter                                                             X
+
+
+
+
+
+
+
+
+
+
+
+
+  enter run | up/down move | esc close                                       1/9

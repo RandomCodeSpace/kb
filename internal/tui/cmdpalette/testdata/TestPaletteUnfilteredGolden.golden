@@ -1,0 +1,24 @@
+  COMMAND PALETTE
+  ▌ |search actions
+  NAVIGATE
+  ▌ open card                                                            enter
+    lift or drop card                                                    space
+    select card                                                            j/k
+    select column                                                          h/l
+    jump to column                                                         1-4
+    text filter                                                              /
+    label filter                                                             f
+    clear filter                                                             X
+    switch project                                                         p/P
+  ACTIONS
+    ship card                                                                t
+    cancel card                                                              x
+    restore card                                                             r
+    permanently delete                                                       D
+    new card                                                                 n
+    edit card                                                                e
+    settings                                                                 s
+    split ADR                                                                a
+    import forge issue                                                       i
+
+  enter run | up/down move | esc close                                      1/18

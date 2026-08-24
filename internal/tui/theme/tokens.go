@@ -103,13 +103,21 @@ type Metrics struct {
 	FocusGutterGap  int // column between the gutter and the row's content
 	MeterCells      int // default bar width of the progress meter (section 10.1.3)
 	MeterMinCells   int // below this a meter renders its label only, no bar
-	OverlayInsetX   int // overlay content inset from the panel edge
-	OverlayLabelW   int // fixed label gutter of an overlay field row
-	TableGutter     int // columns between two cells of a lipgloss table row
-	CompactBelow    int // frame height below which density compacts
-	CompactInnerW   int // column inner width below which density compacts
-	DescTwoLines    int // frame height at or above which the snippet gets a second line
-	Overlay         OverlayMetrics
+
+	// The empty-state row of section 10.8.3. The two minimums are the rungs of
+	// its width ladder: the headline is dropped before the action tail, because
+	// the tail is the actionable half.
+	EmptyHeadlineMin int // inner width at or above which an empty row keeps its headline
+	EmptyActionMin   int // inner width at or above which an empty row keeps its action tail
+	ActionGap        int // columns before an empty row's action tail
+
+	OverlayInsetX int // overlay content inset from the panel edge
+	OverlayLabelW int // fixed label gutter of an overlay field row
+	TableGutter   int // columns between two cells of a lipgloss table row
+	CompactBelow  int // frame height below which density compacts
+	CompactInnerW int // column inner width below which density compacts
+	DescTwoLines  int // frame height at or above which the snippet gets a second line
+	Overlay       OverlayMetrics
 }
 
 // OverlayMetrics is the proportional panel geometry of spec section 4: every
@@ -155,12 +163,17 @@ var defaultMetrics = Metrics{
 	FocusGutterGap:  1,
 	MeterCells:      24,
 	MeterMinCells:   6,
-	OverlayInsetX:   2,
-	OverlayLabelW:   12,
-	TableGutter:     1,
-	CompactBelow:    30,
-	CompactInnerW:   22,
-	DescTwoLines:    45,
+
+	EmptyHeadlineMin: 24,
+	EmptyActionMin:   10,
+	ActionGap:        2,
+
+	OverlayInsetX: 2,
+	OverlayLabelW: 12,
+	TableGutter:   1,
+	CompactBelow:  30,
+	CompactInnerW: 22,
+	DescTwoLines:  45,
 	Overlay: OverlayMetrics{
 		WidthPct:     85,
 		HeightPct:    88,

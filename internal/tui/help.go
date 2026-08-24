@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/RandomCodeSpace/kb/internal/tui/action"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 	"github.com/RandomCodeSpace/kb/internal/tui/widget"
@@ -44,52 +45,46 @@ func (k helpKeys) ShortHelp() []key.Binding { return k.dismiss }
 // FullHelp is the pane body, one column per group.
 func (k helpKeys) FullHelp() [][]key.Binding { return [][]key.Binding{k.navigate, k.actions} }
 
-// binding is one help row. An empty key and description render as a blank row
-// carrying the panel surface, which is what keeps two columns of unequal length
-// from leaving unpainted cells where lipgloss joins them.
-func binding(keys, name, description string) key.Binding {
-	return key.NewBinding(key.WithKeys(keys), key.WithHelp(name, description))
+// bindings turns one group of the action registry into the bubbles bindings the
+// help pane renders. The key, its spelling and its description all come from
+// the table; nothing in this file spells one of its own, which is what keeps the
+// help pane and the ctrl+k palette from ever describing the same key
+// differently.
+//
+// A row for a feature this board was built without is disabled rather than
+// dropped, which is how bubbles/help expects a self-managing keymap to be
+// written.
+func bindings(group action.Group, features action.Features) []key.Binding {
+	entries := action.InGroup(group)
+	out := make([]key.Binding, 0, len(entries))
+	for _, entry := range entries {
+		binding := key.NewBinding(key.WithKeys(entry.Key), key.WithHelp(entry.Hint, entry.Name))
+		binding.SetEnabled(entry.Enabled(features))
+		out = append(out, binding)
+	}
+	return out
+}
+
+// actionFeatures is what this board was built with, in the form the registry
+// gates on.
+func (m Model) actionFeatures() action.Features {
+	return action.Features{
+		Editor:   m.editor.Enabled(),
+		Settings: m.settingsNew != nil,
+		ADR:      m.adr.Enabled(),
+		Issues:   m.issueImport.Enabled(),
+	}
 }
 
 // helpKeyMap resolves the registry against the features this board was built
 // with. Spec section 5.2: the keybinding registry feeds the help pane.
 func (m Model) helpKeyMap() helpKeys {
-	editor, settings := m.editor.Enabled(), m.settingsNew != nil
-	adr, issues := m.adr.Enabled(), m.issueImport.Enabled()
-	keys := helpKeys{
-		navigate: []key.Binding{
-			binding("enter", "enter", "open card"),
-			binding(" ", "space", "lift or drop card"),
-			binding("j", "j/k", "select card"),
-			binding("h", "h/l", "select column"),
-			binding("1", "1-4", "jump to column"),
-			binding("/", "/", "text filter"),
-			binding("f", "f", "label filter"),
-			binding("X", "X", "clear filter"),
-			binding("p", "p/P", "switch project"),
-		},
-		actions: []key.Binding{
-			binding("t", "t", "ship card"),
-			binding("x", "x", "cancel card"),
-			binding("r", "r", "restore card"),
-			binding("D", "D", "permanently delete"),
-			binding("n", "n", "new card"),
-			binding("e", "e", "edit card"),
-			binding("s", "s", "settings"),
-			binding("a", "a", "split ADR"),
-			binding("i", "i", "import forge issue"),
-		},
-		dismiss: []key.Binding{
-			binding("?", "? or esc", "close help"),
-			binding("q", "q", "quit"),
-		},
+	features := m.actionFeatures()
+	return helpKeys{
+		navigate: bindings(action.Navigate, features),
+		actions:  bindings(action.Act, features),
+		dismiss:  bindings(action.Dismiss, features),
 	}
-	keys.actions[4].SetEnabled(editor)
-	keys.actions[5].SetEnabled(editor)
-	keys.actions[6].SetEnabled(settings)
-	keys.actions[7].SetEnabled(adr)
-	keys.actions[8].SetEnabled(issues)
-	return keys
 }
 
 func (m Model) keyboardHelpOverlay(background string) string {

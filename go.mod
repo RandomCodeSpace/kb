@@ -19,6 +19,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/rivo/uniseg v0.4.7
+	github.com/sahilm/fuzzy v0.1.3
 	golang.org/x/text v0.41.0
 	modernc.org/sqlite v1.56.0
 )
