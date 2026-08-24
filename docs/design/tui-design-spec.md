@@ -2408,14 +2408,20 @@ with `HintSep`.
    (This is the only path that truncates a rung.)
 2. Otherwise let `k = len(middle)`. While `k > 0` and
    `total(head ++ middle[:k] ++ ellipsisRung(k) ++ tail) > w`, decrement `k`.
-3. If `k == 0` and the line still exceeds `w`, drop the ellipsis rung and emit
-   `head ++ tail`.
+3. If `k == 0`, the mark is suppressed entirely. A mark with no admitted middle
+   rung reports only that everything useful is gone, at the price of the cells
+   that could carry the most important middle rung — `[Close] | ...` where
+   `[Close] | ? or esc close help` fits is the mark working against its purpose
+   (found in #187's dogfood, amended here). Retry once without it: if
+   `total(head ++ middle[:1] ++ tail) <= w`, emit that; otherwise emit
+   `head ++ tail`, truncating the head per step 1's rule if even that exceeds `w`.
 4. Emit `strings.Join(rungs, HintSep)`.
 
-`ellipsisRung(k)` is the single token `Ellipsis` when `k < len(middle)` and nothing
-when `k == len(middle)`. Step 2 is where "ellipsis only if it fits" falls out for
-free: the mark costs 1 cell plus its 3-cell separator, and if that does not fit, the
-loop drops one more rung and frees the room.
+`ellipsisRung(k)` is the single token `Ellipsis` when `0 < k < len(middle)` and
+nothing when `k == len(middle)` or `k == 0` (step 3). Step 2 is where "ellipsis
+only if it fits" falls out for free: the mark costs 1 cell plus its 3-cell
+separator, and if that does not fit, the loop drops one more rung and frees the
+room.
 
 **Contrast with §3.4.** A dropped rung is **terminal** — rungs behind it are not
 attempted. This is the opposite of the meta chip row, which skips an oversized chip
@@ -2458,7 +2464,8 @@ its pinned head and its dismissal keys are the middle — which is what
 **Guard.** One property test packs every ladder in the TUI across widths 1 to 200
 and asserts: the line never starts or ends with `HintSep`; the rendered width never
 exceeds the frame; the ellipsis rung is present if and only if a middle rung was
-dropped; every pinned rung is present whenever the pinned set fits; and the reported
+dropped and at least one middle rung is admitted; every pinned rung is present
+whenever the pinned set fits; and the reported
 start columns match the rendered offsets.
 
 **Determinism.** Nothing in §10.4 is tick-driven. Every rule here is a property of
