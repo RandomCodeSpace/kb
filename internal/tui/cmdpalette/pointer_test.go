@@ -352,6 +352,22 @@ func TestAPanelWithNoBodyRegistersNoRows(t *testing.T) {
 	}
 }
 
+// TestIsMessageClaimsPointerFeedback keeps the root's routing whole: the
+// feedback the map produces has to reach the palette's own state, or hover
+// would resolve and then be dropped on the floor.
+func TestIsMessageClaimsPointerFeedback(t *testing.T) {
+	m := openModel(t)
+	first := firstEntryRow(m)
+	x, y := rowCell(m, first)
+	command := m.MouseHandler(paneWidth, paneHeight)(tea.MouseMotionMsg{X: x, Y: y})
+	if command == nil {
+		t.Fatal("motion over a result row produced no feedback")
+	}
+	if !IsMessage(command()) {
+		t.Error("IsMessage disclaimed the feedback its own map produced")
+	}
+}
+
 // TestControlIDsAreTheMachinesOwnRows keeps the id a row registers for its
 // click and the id the machine reads a row index out of as one string.
 func TestControlIDsAreTheMachinesOwnRows(t *testing.T) {

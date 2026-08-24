@@ -75,12 +75,12 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 		if row.kind != rowEntry {
 			continue
 		}
+		// A row clipped away by a frame too small to hold it registers nothing:
+		// Map.AddControl drops an empty rect, which is the one place that rule
+		// needs to live.
 		rect := pointer.Rect{
 			X0: max(panel.x, 0), Y0: max(panel.y+2+index, pane.Y0),
 			X1: pane.X1, Y1: min(panel.y+3+index, pane.Y1),
-		}
-		if rect.X0 >= rect.X1 || rect.Y0 >= rect.Y1 {
-			continue
 		}
 		entry := row.entry
 		hitMap.AddControl(controlID(entry), rect, func(pointer.Point) tea.Msg {

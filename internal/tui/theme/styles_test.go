@@ -3,6 +3,8 @@ package theme
 import (
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestNewBuildsBaseAndDimmedOnce(t *testing.T) {
@@ -153,8 +155,56 @@ func sameRuns(left, right ChipStyles) bool {
 	return left.CapLeft.Render(probe) == right.CapLeft.Render(probe) &&
 		left.CapRight.Render(probe) == right.CapRight.Render(probe) &&
 		left.Body.Render(probe) == right.Body.Render(probe) &&
+		left.BodyHover.Render(probe) == right.BodyHover.Render(probe) &&
 		left.ScopedKey.Render(probe) == right.ScopedKey.Render(probe) &&
-		left.Flat.Render(probe) == right.Flat.Render(probe)
+		left.Flat.Render(probe) == right.Flat.Render(probe) &&
+		left.FlatHover.Render(probe) == right.FlatHover.Render(probe)
+}
+
+// TestChipHoverRunsUnderlineAndChangeNothingElse is spec section 10.5.1: a pill
+// has no tier left to raise and no cell to spare on a bigger cap, so its hover
+// cue is an underline on the body run. It changes no color, so it cannot move
+// the pair's contrast, and it costs no cell.
+func TestChipHoverRunsUnderlineAndChangeNothingElse(t *testing.T) {
+	styles := New(true)
+	const probe = "feature"
+	for _, runs := range []ChipStyles{styles.Chip, styles.ChipRuns(StatusWarn, OverlaySurf)} {
+		pairs := [][2]string{
+			{runs.Body.Render(probe), runs.BodyHover.Render(probe)},
+			{runs.Flat.Render(probe), runs.FlatHover.Render(probe)},
+		}
+		for _, pair := range pairs {
+			rest, hovered := pair[0], pair[1]
+			if rest == hovered {
+				t.Error("the hovered chip run renders no cue")
+			}
+			if ansi.Strip(rest) != ansi.Strip(hovered) {
+				t.Error("the hovered chip run changed the text it draws")
+			}
+			// The underline parameter, whether it opens the run or follows the
+			// bold the flat form already spends.
+			if !strings.Contains(hovered, "\x1b[4;") && !strings.Contains(hovered, ";4;") {
+				t.Errorf("the hovered chip run carries no underline: %q", hovered)
+			}
+		}
+	}
+}
+
+// TestRowSurfaceIsTheOneTierRaise is the overlay choice row of section 10.5.1:
+// hover raises the whole row, and the raised slot is the pair section 1.9
+// already measured as the Neutral hovered button, so a hovered row and a hovered
+// Neutral button in the same panel read as one system.
+func TestRowSurfaceIsTheOneTierRaise(t *testing.T) {
+	styles := New(true)
+	if got := styles.RowSurface(false); got != OverlaySurf {
+		t.Errorf("resting row surface = %d, want OverlaySurf", got)
+	}
+	if got := styles.RowSurface(true); got != OverlayBand {
+		t.Errorf("hovered row surface = %d, want OverlayBand", got)
+	}
+	if buttonTokens[ButtonNeutral].hovered.bg != styles.RowSurface(true) {
+		t.Error("the hovered row and the hovered Neutral button no longer share a fill")
+	}
 }
 
 func TestEmbeddedComponentStylesAreBuilt(t *testing.T) {

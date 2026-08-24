@@ -131,6 +131,109 @@ func TestChordOpensAndClosesThePalette(t *testing.T) {
 	}
 }
 
+// TestPaletteReceivesMouseBeforeTheBoard is spec section 10.5.3's z-order at the
+// root: the palette is the topmost surface, so its map resolves the point and
+// the board never sees the motion under it.
+func TestPaletteReceivesMouseBeforeTheBoard(t *testing.T) {
+	m := openFilteredPalette(t)
+	handler := m.View().OnMouse
+	if handler == nil {
+		t.Fatal("the open palette installed no pointer handler")
+	}
+	x, y := paletteRowCell(t, &m)
+	before := m.View().Content
+	command := handler(tea.MouseMotionMsg{X: x, Y: y})
+	if command == nil {
+		t.Fatal("motion over a result row produced no feedback")
+	}
+	updateTestModel(t, &m, command())
+	after := m.View().Content
+	if before == after {
+		t.Fatal("the root routed the palette's hover somewhere else: the frame did not change")
+	}
+	if ansi.Strip(before) != ansi.Strip(after) {
+		t.Error("hover changed the text of the frame, not only its color")
+	}
+}
+
+// openFilteredPalette opens the palette and types one letter, so the result
+// list is ranked and carries no section band above its first row.
+func openFilteredPalette(t *testing.T) Model {
+	t.Helper()
+	m := paletteBoardModel(t)
+	updateTestModel(t, &m, paletteKey())
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'c', Text: "c"})
+	if !m.palette.IsOpen() {
+		t.Fatal("the palette closed while typing")
+	}
+	return m
+}
+
+// paletteRowCell is a cell inside the first result row of the open palette,
+// located from the rendered frame rather than from geometry the root does not
+// own.
+func paletteRowCell(t *testing.T, m *Model) (int, int) {
+	t.Helper()
+	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
+	header, column := -1, -1
+	for index, line := range lines {
+		if found := strings.Index(line, "COMMAND PALETTE"); found >= 0 {
+			header, column = index, found
+			break
+		}
+	}
+	if header < 0 || header+2 >= len(lines) {
+		t.Fatalf("the frame carries no palette panel:\n%s", strings.Join(lines, "\n"))
+	}
+	// The title's own column is inside the panel, and the panel does not move
+	// between rows; the header band is followed by the query row, then the list.
+	return column, header + 2
+}
+
+// TestPaletteClickRunsTheActionThroughTheRoot is the activation path: the
+// palette's own pointer message reaches it through route, and the choice it
+// commits is replayed as the key the board's own handler already matches.
+func TestPaletteClickRunsTheActionThroughTheRoot(t *testing.T) {
+	m := openFilteredPalette(t)
+	handler := m.View().OnMouse
+	x, y := paletteRowCell(t, &m)
+	if command := handler(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}); command != nil {
+		updateTestModel(t, &m, command())
+	}
+	command := handler(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if command == nil {
+		t.Fatal("releasing on a result row produced nothing")
+	}
+	activation := updateTestModel(t, &m, command())
+	if activation == nil {
+		t.Fatal("the release produced no activation")
+	}
+	updateTestModel(t, &m, activation())
+	if m.palette.IsOpen() {
+		t.Error("clicking a result row left the palette open")
+	}
+}
+
+// TestPaletteBackdropClickDismissesThroughTheRoot keeps the region outside the
+// panel the palette's own rather than a hole through to the board.
+func TestPaletteBackdropClickDismissesThroughTheRoot(t *testing.T) {
+	m := openFilteredPalette(t)
+	handler := m.View().OnMouse
+	if command := handler(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command != nil {
+		updateTestModel(t, &m, command())
+	}
+	command := handler(tea.MouseReleaseMsg{X: 0, Y: 0, Button: tea.MouseLeft})
+	if command == nil {
+		t.Fatal("releasing on the backdrop produced nothing")
+	}
+	if activation := updateTestModel(t, &m, command()); activation != nil {
+		updateTestModel(t, &m, activation())
+	}
+	if m.palette.IsOpen() {
+		t.Error("a click outside the panel did not dismiss the palette")
+	}
+}
+
 // TestPaletteRunsTheActionThroughTheBoardsOwnHandler is why the palette carries
 // no dispatch: choosing a row replays its key, and the board's existing handler
 // does the work. If this ever passes while the board handler is unchanged, the
