@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -67,6 +68,11 @@ type taskActionState struct {
 	armed      bool
 	busy       bool
 	errorText  string
+
+	// spin is the plain tier of spec section 10.2.4. Every write this dialog
+	// makes is local, and section 10.2.4 splits the tiers on latency, so the
+	// branded engine is not what a card move gets.
+	spin spinner.Model
 }
 
 // killReasonField is the kill prompt's field name in the select-all mark.
@@ -101,10 +107,20 @@ func newTaskActionState() taskActionState {
 	reason.Placeholder = "e.g. superseded by the SSO work"
 	reason.CharLimit = 500
 	reason.SetWidth(54)
-	return taskActionState{reason: reason}
+	return taskActionState{reason: reason, spin: spinner.New()}
 }
 
 func (s taskActionState) open() bool { return s.mode != taskActionClosed }
+
+// startActionBusy raises the write flag and opens the plain tier's tick chain.
+// The glyph set and the cadence come from the theme, so the dialog's spinner and
+// every other plain-tier spinner in the TUI run off the one clock of spec
+// section 10.3.1.
+func (m *Model) startActionBusy() tea.Cmd {
+	m.action.busy = true
+	m.action.spin.Spinner = m.themeStyles().Spinner
+	return m.action.spin.Tick
+}
 
 func (s *taskActionState) close() {
 	*s = newTaskActionState()
@@ -238,6 +254,15 @@ func (m *Model) updateTaskAction(message tea.Msg) tea.Cmd {
 		return m.finishAutoShipRead(msg)
 	case taskActionPointerMsg:
 		return m.updateTaskActionPointer(msg)
+	case spinner.TickMsg:
+		// The chain terminates the moment the write lands, so an idle dialog
+		// costs no wake-ups (spec section 10.2.2).
+		if !m.action.busy {
+			return nil
+		}
+		next, command := m.action.spin.Update(msg)
+		m.action.spin = next
+		return command
 	case tea.KeyPressMsg:
 		if !m.action.open() {
 			return nil
@@ -444,7 +469,7 @@ func (m *Model) startShip(tickAll bool) tea.Cmd {
 		return nil
 	}
 	action := m.action
-	m.action.busy = true
+	startBusy := m.startActionBusy()
 	checks := append([]board.Check(nil), action.task.Checks...)
 	patch := store.TaskPatch{}
 	if tickAll {
@@ -454,7 +479,7 @@ func (m *Model) startShip(tickAll bool) tea.Cmd {
 		patch.Checks = &checks
 	}
 	backend, user := m.actionStore, m.user
-	return func() tea.Msg {
+	return tea.Batch(func() tea.Msg {
 		var writeErr error
 		if tickAll {
 			_, writeErr = backend.UpdateAndMoveTaskIfFieldsMatch(user, action.task.ID,
@@ -465,7 +490,7 @@ func (m *Model) startShip(tickAll bool) tea.Cmd {
 		canonical, reloadErr := backend.Board(user)
 		return taskActionStoredMsg{kind: actionShip, taskID: action.task.ID, title: action.task.Title,
 			from: action.task.Status, to: action.target, board: canonical, writeErr: writeErr, reloadErr: reloadErr}
-	}
+	}, startBusy)
 }
 
 func (m *Model) startKill(reason string) tea.Cmd {
@@ -474,9 +499,9 @@ func (m *Model) startKill(reason string) tea.Cmd {
 		return nil
 	}
 	action := m.action
-	m.action.busy = true
+	startBusy := m.startActionBusy()
 	backend, user := m.actionStore, m.user
-	return func() tea.Msg {
+	return tea.Batch(func() tea.Msg {
 		var killReason *string
 		if reason != "" {
 			killReason = &reason
@@ -486,7 +511,7 @@ func (m *Model) startKill(reason string) tea.Cmd {
 		return taskActionStoredMsg{kind: actionKill, taskID: action.task.ID, title: action.task.Title,
 			from: action.task.Status, to: action.target, board: canonical,
 			writeErr: writeErr, reloadErr: reloadErr}
-	}
+	}, startBusy)
 }
 
 func (m *Model) startRestore(task board.Task) tea.Cmd {
@@ -495,15 +520,15 @@ func (m *Model) startRestore(task board.Task) tea.Cmd {
 		return nil
 	}
 	m.action = newTaskActionState()
-	m.action.busy = true
+	startBusy := m.startActionBusy()
 	backend, user := m.actionStore, m.user
 	target := board.StatusTodo
-	return func() tea.Msg {
+	return tea.Batch(func() tea.Msg {
 		_, writeErr := backend.UpdateAndMoveTask(user, task.ID, store.TaskPatch{}, &target, nil, nil)
 		canonical, reloadErr := backend.Board(user)
 		return taskActionStoredMsg{kind: actionRestore, taskID: task.ID, title: task.Title,
 			from: task.Status, to: target, board: canonical, writeErr: writeErr, reloadErr: reloadErr}
-	}
+	}, startBusy)
 }
 
 func (m *Model) startPurge() tea.Cmd {
@@ -512,14 +537,14 @@ func (m *Model) startPurge() tea.Cmd {
 		return nil
 	}
 	action := m.action
-	m.action.busy = true
+	startBusy := m.startActionBusy()
 	backend, user := m.actionStore, m.user
-	return func() tea.Msg {
+	return tea.Batch(func() tea.Msg {
 		_, writeErr := backend.DeleteCancelledTask(user, action.task.ID)
 		canonical, reloadErr := backend.Board(user)
 		return taskActionStoredMsg{kind: actionPurge, taskID: action.task.ID, title: action.task.Title,
 			from: action.task.Status, board: canonical, writeErr: writeErr, reloadErr: reloadErr}
-	}
+	}, startBusy)
 }
 
 type checklistStoredMsg struct {
@@ -545,15 +570,15 @@ func (m *Model) startChecklistToggle() tea.Cmd {
 	after[action.checkIndex].Done = !after[action.checkIndex].Done
 	turningOn := after[action.checkIndex].Done
 	autoShip := turningOn && shippableStatus(action.task.Status) && checksComplete(after)
-	m.action.busy = true
+	startBusy := m.startActionBusy()
 	backend, user := m.actionStore, m.user
-	return func() tea.Msg {
+	return tea.Batch(func() tea.Msg {
 		updated, writeErr := backend.UpdateTaskIfFieldsMatch(user, action.task.ID,
 			store.TaskPatch{Checks: &before}, store.TaskPatch{Checks: &after})
 		canonical, reloadErr := backend.Board(user)
 		return checklistStoredMsg{taskID: action.task.ID, task: updated, board: canonical,
 			writeErr: writeErr, reloadErr: reloadErr, autoShip: autoShip && writeErr == nil}
-	}
+	}, startBusy)
 }
 
 type autoShipCheckMsg struct{ taskID string }
@@ -622,15 +647,15 @@ func (m Model) autoShipInputOwned() bool {
 
 func (m *Model) startGuardedAutoShip() tea.Cmd {
 	action := m.action
-	m.action.busy = true
+	startBusy := m.startActionBusy()
 	backend, user := m.actionStore, m.user
-	return func() tea.Msg {
+	return tea.Batch(func() tea.Msg {
 		_, writeErr := backend.UpdateAndMoveTask(user, action.task.ID, store.TaskPatch{},
 			&action.target, &action.index, autoShipGuard)
 		canonical, reloadErr := backend.Board(user)
 		return taskActionStoredMsg{kind: actionShip, taskID: action.task.ID, title: action.task.Title,
 			from: action.task.Status, to: action.target, board: canonical, writeErr: writeErr, reloadErr: reloadErr}
-	}
+	}, startBusy)
 }
 
 func shippableStatus(status board.Status) bool {
@@ -880,9 +905,13 @@ func (m Model) taskActionSurface(background string) pointer.Surface {
 		Title:  m.taskActionTitle(),
 		Seq:    m.taskActionSeq(),
 		Body:   m.actionRowContent(styles, rows, paneWidth),
-		Footer: m.taskActionFooter(),
+		Footer: m.taskActionFooter(max(paneWidth-inset, 1)),
 		Width:  paneWidth,
 		Height: paneHeight,
+		// Spec section 10.1.4, ratified call 6: the armed two-step is the one
+		// state in the TUI that recolors a header band, and the band then wears
+		// the same pair section 1.9 gives the armed button.
+		Armed: m.action.armed,
 	}
 	background = fitActionFrame(background, width, height)
 	layers := append(
@@ -973,17 +1002,49 @@ func (m Model) taskActionSeq() string {
 }
 
 // taskActionFooter is the hint row, which the panel carries in its footer band
-// instead of spending a body row on it.
-func (m Model) taskActionFooter() string {
-	hints := "Tab choose  Enter confirm  Esc cancel"
+// instead of spending a body row on it. Spec section 10.4.6: the rungs are
+// declared once and packed to the band, and section 10.8.4 rule 1 replaces the
+// ladder's head with the busy line while a write is outstanding, leaving the
+// dismissal rung live as its tail.
+func (m Model) taskActionFooter(width int) string {
+	styles := m.themeStyles()
+	line, _ := widget.Hints(styles, m.taskActionLadder(styles, width), width)
+	return m.pointerState.Render(styles, taskActionControlID(taskActionPointerCancel, 0), line)
+}
+
+func (m Model) taskActionLadder(styles *theme.Styles, width int) widget.Ladder {
+	dismiss := "Esc cancel"
+	if m.action.mode == taskActionChecklist {
+		dismiss = "Esc close"
+	}
+	if m.action.busy {
+		return widget.Ladder{
+			Head: []string{widget.Busy(styles, widget.BusyOpts{
+				Frame: styles.Work.Label.Render(m.action.spin.View()),
+				Label: taskActionBusyLabel,
+				On:    theme.OverlayBand,
+				Width: width,
+			})},
+			Tail: []string{dismiss},
+		}
+	}
 	switch m.action.mode {
 	case taskActionChecklist:
-		hints = "j/k choose  Space toggle  Esc close"
+		return widget.Ladder{Head: []string{"j/k choose"}, Middle: []string{"Space toggle"}, Tail: []string{dismiss}}
 	case taskActionPurge:
-		hints = "Enter arm  Enter again confirm  Esc cancel"
+		return widget.Ladder{
+			Head:   []string{"Enter arm"},
+			Middle: []string{"Enter again confirm"},
+			Tail:   []string{dismiss},
+		}
+	default:
+		return widget.Ladder{Head: []string{"Tab choose"}, Middle: []string{"Enter confirm"}, Tail: []string{dismiss}}
 	}
-	return m.pointerState.Render(m.themeStyles(), taskActionControlID(taskActionPointerCancel, 0), hints)
 }
+
+// taskActionBusyLabel is the dialog's busy copy. Spec section 10.8.7 puts the
+// task action dialog on the plain tier: every write it makes is local.
+const taskActionBusyLabel = "saving"
 
 func (m Model) taskActionFooterLabels() []actionLabel {
 	label := "Esc cancel"
@@ -1000,14 +1061,13 @@ func (m Model) taskActionFooterLabels() []actionLabel {
 // receive a message.
 func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 	a := m.action
-	busy := ""
-	if a.busy {
-		busy = " (saving...)"
-	}
+	// Spec section 10.8.4 rule 5: a busy state never rides on a headline. The
+	// " (saving...)" suffix this dialog used to append to its own question is
+	// deleted and the state lives in the footer band.
 	surface := styles.Overlay.FieldValue
 	switch a.mode {
 	case taskActionShip:
-		rows := []actionRow{{content: surface.Render(actionFit("Move "+sanitizeTerminal(a.task.Title)+" to Done?"+busy, width))}}
+		rows := []actionRow{{content: surface.Render(actionFit("Move "+sanitizeTerminal(a.task.Title)+" to Done?", width))}}
 		if notes := shipWarningNotes(a.warning); len(notes) > 0 {
 			// The note already ends in a blank row of its own.
 			rows = append(rows, m.huhRows(formview.HuhNote(styles, notes, width), nil)...)
@@ -1015,12 +1075,12 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 			rows = append(rows, actionRow{})
 		}
 		rows = append(rows, m.shipChoiceRows(styles, width)...)
-		return appendActionError(styles, rows, a.errorText, width)
+		return appendActionError(styles, rows, a.errorText, shipRetryLabel(a.warning), width)
 	case taskActionKill:
 		reason := m.pointerState.Render(styles, taskActionControlID(taskActionPointerKillReason, 0), "Reason:") +
 			" " + settingsInputDisplay(a.reason, false, true, max(width-8, 1))
 		rows := []actionRow{
-			{content: surface.Render(actionFit("Why reject "+sanitizeTerminal(a.task.Title)+"?"+busy, width))},
+			{content: surface.Render(actionFit("Why reject "+sanitizeTerminal(a.task.Title)+"?", width))},
 			m.huhRow(formview.HuhNote(styles, []string{"The card moves to Cancelled. The reason is optional."}, width)),
 			{
 				content: formview.Selection(surface, a.mark.Active(killReasonField)).
@@ -1030,9 +1090,9 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 			{},
 		}
 		rows = append(rows, m.choiceButtonRows(styles, killChoices(), a.choice, taskActionPointerKillChoice, width)...)
-		return appendActionError(styles, rows, a.errorText, width)
+		return appendActionError(styles, rows, a.errorText, "Kill with reason", width)
 	case taskActionChecklist:
-		rows := []actionRow{{content: surface.Render(actionFit("Checklist: "+sanitizeTerminal(a.task.Title)+busy, width))}}
+		rows := []actionRow{{content: surface.Render(actionFit("Checklist: "+sanitizeTerminal(a.task.Title), width))}}
 		for index, check := range a.task.Checks {
 			state := widget.CheckOpen
 			if check.Done {
@@ -1047,7 +1107,7 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 				labels: []actionLabel{{text: label, kind: taskActionPointerCheck, index: index}},
 			})
 		}
-		return appendActionError(styles, rows, a.errorText, width)
+		return appendActionError(styles, rows, a.errorText, "", width)
 	case taskActionPurge:
 		label := "Press Enter to arm permanent delete"
 		if a.armed {
@@ -1057,7 +1117,7 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 		// spec section 10.4.2 marks no hotkey on it.
 		purgeText, purgeUnderline := widget.Hotkey(actionFit(label, max(width-2*choiceButtonPad, 1)), nil)
 		rows := []actionRow{
-			{content: surface.Render(actionFit("Delete "+sanitizeTerminal(a.task.Title)+" permanently?"+busy, width))},
+			{content: surface.Render(actionFit("Delete "+sanitizeTerminal(a.task.Title)+" permanently?", width))},
 			{content: styles.Overlay.FieldLabel.Render(actionFit("The card, comments, links, and kill reason are removed for good.", width))},
 			{},
 			{
@@ -1066,6 +1126,7 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 					Variant:        theme.ButtonDanger,
 					Armed:          a.armed,
 					Selected:       !a.armed,
+					Hovered:        m.pointerState.IsHovered(taskActionControlID(taskActionPointerPurge, 0)),
 					Pressed:        m.pointerState.IsPressed(taskActionControlID(taskActionPointerPurge, 0)),
 					UnderlineIndex: purgeUnderline,
 					Padding:        [2]int{choiceButtonPad, choiceButtonPad},
@@ -1073,7 +1134,10 @@ func (m Model) taskActionRows(styles *theme.Styles, width int) []actionRow {
 				labels: []actionLabel{{text: label, kind: taskActionPointerPurge, pad: choiceButtonPad}},
 			},
 		}
-		return appendActionError(styles, rows, a.errorText, width)
+		// A purge failure carries no tail: the armed control is the row directly
+		// above it, and section 10.8.5 grows no second control for an action that
+		// already has one.
+		return appendActionError(styles, rows, a.errorText, "", width)
 	default:
 		return nil
 	}
@@ -1114,6 +1178,7 @@ func (m Model) choiceButtonRows(
 			Text:           text,
 			Variant:        choice.variant,
 			Selected:       index == selected,
+			Hovered:        m.pointerState.IsHovered(taskActionControlID(kind, index)),
 			Pressed:        m.pointerState.IsPressed(taskActionControlID(kind, index)),
 			UnderlineIndex: underline,
 			Padding:        [2]int{choiceButtonPad, choiceButtonPad},
@@ -1151,6 +1216,15 @@ const (
 type dialogChoice struct {
 	label   string
 	variant theme.ButtonVariant
+}
+
+// shipRetryLabel is the ship dialog's affirmative, which is the control an
+// error row names as the way to run the failed write again (spec section
+// 10.8.5). The guard's three-way form and huh's yes/no core carry different
+// affirmatives, so the label is derived from the same warning the choices are.
+func shipRetryLabel(warning shipWarning) string {
+	choices := shipChoices(warning)
+	return choices[len(choices)-1].label
 }
 
 func shipChoices(warning shipWarning) []dialogChoice {
@@ -1219,14 +1293,27 @@ func (m Model) huhRow(rendered string) actionRow {
 	return rows[0]
 }
 
-func appendActionError(styles *theme.Styles, rows []actionRow, message string, width int) []actionRow {
-	if message == "" {
+// appendActionError is the failure block of spec section 10.8.5: TintDanger on
+// OverlaySurf, because StatusDanger on that tier measures 2.96 and fails AA; the
+// Alert glyph with a hanging indent; and up to ErrorMaxLines of wrapped message
+// rather than one hard cut with no truncation mark. The tail names the dialog's
+// own affirmative, which is the control that will run the operation again.
+func appendActionError(styles *theme.Styles, rows []actionRow, message, retry string, width int) []actionRow {
+	lines := widget.Error(styles, widget.ErrorOpts{
+		Message:  message,
+		Key:      retry,
+		On:       theme.OverlaySurf,
+		Width:    width,
+		MaxLines: styles.Metrics.ErrorMaxLines,
+	})
+	if len(lines) == 0 {
 		return rows
 	}
-	return append(rows, actionRow{}, actionRow{
-		content: styles.On(theme.StatusDanger, theme.OverlaySurf).
-			Render(actionFit("error: "+sanitizeTerminal(message), width)),
-	})
+	rows = append(rows, actionRow{})
+	for _, line := range lines {
+		rows = append(rows, actionRow{content: line})
+	}
+	return rows
 }
 
 func actionFit(line string, width int) string {

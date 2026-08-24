@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/golden"
@@ -14,6 +15,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
 
 type stubReader struct {
@@ -66,10 +68,10 @@ func TestModelLoadsAndRendersFullDetail(t *testing.T) {
 	if command == nil || !m.IsOpen() || m.TaskID() != "task-1" || !m.loading {
 		t.Fatalf("open state = %+v, command nil=%v", m, command == nil)
 	}
-	if body := ansi.Strip(m.renderBody(72)); !strings.Contains(body, "loading comments and context") {
+	if body := ansi.Strip(m.renderBody(72)); !strings.Contains(body, "loading comments") {
 		t.Fatalf("loading body:\n%s", body)
 	}
-	m.Update(command())
+	m.Update(busyResult(t, command))
 	body := ansi.Strip(m.renderBody(72))
 	for _, want := range []string{
 		"DETAIL", "status      cancelled  blocked", "priority    1", "due         2026-08-19",
@@ -115,7 +117,7 @@ func TestDetailMouseHandlerRoutesOnlyPaneWheelAndOutsideLeftClick(t *testing.T) 
 	if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command == nil {
 		t.Fatal("inside wheel down was ignored")
 	} else {
-		m.Update(command())
+		m.Update(busyResult(t, command))
 	}
 	if m.scrollOffset() != 3 {
 		t.Fatalf("wheel down scroll = %d", m.scrollOffset())
@@ -123,7 +125,7 @@ func TestDetailMouseHandlerRoutesOnlyPaneWheelAndOutsideLeftClick(t *testing.T) 
 	if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelUp}); command == nil {
 		t.Fatal("inside wheel up was ignored")
 	} else {
-		m.Update(command())
+		m.Update(busyResult(t, command))
 	}
 	if m.scrollOffset() != 0 {
 		t.Fatalf("wheel up scroll = %d", m.scrollOffset())
@@ -131,7 +133,7 @@ func TestDetailMouseHandlerRoutesOnlyPaneWheelAndOutsideLeftClick(t *testing.T) 
 	if command := handler(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command == nil {
 		t.Fatal("outside left click was ignored")
 	} else {
-		m.Update(command())
+		m.Update(busyResult(t, command))
 	}
 	if m.IsOpen() {
 		t.Fatal("outside left click did not close detail")
@@ -146,14 +148,14 @@ func TestDetailMouseWheelStopsAtUpperBound(t *testing.T) {
 	handler := m.MouseHandler(80, 12)
 	for range 100 {
 		if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command != nil {
-			m.Update(command())
+			m.Update(busyResult(t, command))
 		}
 	}
 	if m.scrollOffset() != m.maxScroll() {
 		t.Fatalf("wheel down upper bound = %d, want %d", m.scrollOffset(), m.maxScroll())
 	}
 	if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command != nil {
-		m.Update(command())
+		m.Update(busyResult(t, command))
 	}
 	if m.scrollOffset() != m.maxScroll() {
 		t.Fatalf("wheel down crossed upper bound = %d, want %d", m.scrollOffset(), m.maxScroll())
@@ -168,11 +170,11 @@ func TestModelHandlesErrorsStaleLoadsScrollAndClose(t *testing.T) {
 	if !m.loading {
 		t.Fatal("stale result changed loading state")
 	}
-	m.Update(command())
+	m.Update(busyResult(t, command))
 	if m.loading || !errors.Is(m.commentsErr, loadErr) || m.linksErr == nil {
 		t.Fatalf("load error state = loading %v, comments %v, links %v", m.loading, m.commentsErr, m.linksErr)
 	}
-	if body := ansi.Strip(m.renderBody(40)); !strings.Contains(body, "comments error:") || !strings.Contains(body, "blocker links error:") {
+	if body := ansi.Strip(m.renderBody(40)); !strings.Contains(body, "▲ comments broke") || !strings.Contains(body, "▲ links broke") {
 		t.Fatalf("error body:\n%s", body)
 	}
 
@@ -194,7 +196,7 @@ func TestModelHandlesErrorsStaleLoadsScrollAndClose(t *testing.T) {
 	}
 
 	m.Close()
-	if m.IsOpen() || m.TaskID() != "" || m.Update(command()) != nil {
+	if m.IsOpen() || m.TaskID() != "" || m.Update(busyResult(t, command)) != nil {
 		t.Fatal("closed pane accepted a late load")
 	}
 }
@@ -211,9 +213,9 @@ func TestModelRendersIndependentEnrichmentResults(t *testing.T) {
 		found:       true,
 	}, "u", testStyles())
 
-	commentsFailed.Update(commentsFailed.Open(task)())
+	commentsFailed.Update(busyResult(t, commentsFailed.Open(task)))
 	body := ansi.Strip(commentsFailed.renderBody(60))
-	for _, want := range []string{"blocks      [#9 doing]", "killed 17 Aug 2026", "comments error: comments unavailable"} {
+	for _, want := range []string{"blocks      [#9 doing]", "killed 17 Aug 2026", "▲ comments unavailable"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("comments failure hid %q:\n%s", want, body)
 		}
@@ -228,9 +230,9 @@ func TestModelRendersIndependentEnrichmentResults(t *testing.T) {
 		tombstoneErr: errors.New("killed unavailable"),
 	}, "u", testStyles())
 
-	contextFailed.Update(contextFailed.Open(task)())
+	contextFailed.Update(busyResult(t, contextFailed.Open(task)))
 	body = ansi.Strip(contextFailed.renderBody(60))
-	for _, want := range []string{"available", "blocker links error: links unavailable", "killed context error: killed unavailable"} {
+	for _, want := range []string{"available", "▲ links unavailable", "killed context error: killed unavailable"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("context failure hid %q:\n%s", want, body)
 		}
@@ -243,11 +245,11 @@ func TestModelRejectsStaleLoadForReopenedTask(t *testing.T) {
 	first := m.Open(task)
 	second := m.Open(task)
 
-	m.Update(first())
+	m.Update(busyResult(t, first))
 	if !m.loading {
 		t.Fatal("stale same-task result changed loading state")
 	}
-	m.Update(second())
+	m.Update(busyResult(t, second))
 	if m.loading {
 		t.Fatal("current same-task result did not finish loading")
 	}
@@ -279,18 +281,18 @@ func TestRefreshCoalescesEnrichmentLoads(t *testing.T) {
 		t.Fatal("second refresh overlapped the active enrichment load")
 	}
 
-	successor := m.Update(first())
+	successor := m.Update(busyResult(t, first))
 	if successor == nil || !m.loading || m.reloadPending || len(m.comments) != 0 {
 		t.Fatalf("coalesced first result = loading %v pending %v comments %v command %v", m.loading, m.reloadPending, m.comments, successor)
 	}
-	m.Update(successor())
+	m.Update(busyResult(t, successor))
 	if m.loading || reader.loads != 2 || m.task.Title != "latest" || len(m.comments) != 1 || m.comments[0].Body != "version 2" {
 		t.Fatalf("coalesced successor = model %+v loads %d", m, reader.loads)
 	}
 
 	late := m.Refresh(board.Task{ID: "same", Title: "closed", Status: board.StatusDone})
 	m.Close()
-	if command := m.Update(late()); command != nil || m.IsOpen() {
+	if command := m.Update(busyResult(t, late)); command != nil || m.IsOpen() {
 		t.Fatal("closed detail restarted a pending refresh")
 	}
 }
@@ -559,4 +561,35 @@ func TestScrollAndViewReuseRenderedMarkdown(t *testing.T) {
 	if renders != initial+1 {
 		t.Fatalf("width change renders = %d, want %d", renders, initial+1)
 	}
+}
+
+// busyResult runs a command and returns the result message it carried. An
+// operation that raises a busy state batches its plain-tier tick alongside the
+// work (spec section 10.2.4), so the batch is walked and the tick - a timer,
+// not a result - is skipped.
+func busyResult(t *testing.T, command tea.Cmd) tea.Msg {
+	t.Helper()
+	if command == nil {
+		t.Fatal("command is nil")
+	}
+	message := command()
+	batch, batched := message.(tea.BatchMsg)
+	if !batched {
+		return message
+	}
+	for _, sub := range batch {
+		if sub == nil {
+			continue
+		}
+		result := sub()
+		if _, tick := result.(spinner.TickMsg); tick {
+			continue
+		}
+		if _, step := result.(spin.StepMsg); step {
+			continue
+		}
+		return result
+	}
+	t.Fatal("batch produced no result message")
+	return nil
 }

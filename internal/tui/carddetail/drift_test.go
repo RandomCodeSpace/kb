@@ -59,13 +59,13 @@ func TestDriftSelectCheckAndAcceptConflict(t *testing.T) {
 	if command == nil || !m.OwnsInput() || m.driftBusy != "provenance" {
 		t.Fatal("drift selection did not start")
 	}
-	m.Update(command())
+	m.Update(busyResult(t, command))
 	if len(m.driftChoices) != 2 || m.driftMode != driftSelect {
 		t.Fatalf("choices = %+v", m.driftChoices)
 	}
 	m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	command = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	m.Update(command())
+	m.Update(busyResult(t, command))
 	if m.driftMode != driftReview || m.driftResult.State != "drifted" || backend.checked[0] != "gitlab:gl-key" {
 		t.Fatalf("drift result = %+v checked=%v", m.driftResult, backend.checked)
 	}
@@ -76,11 +76,14 @@ func TestDriftSelectCheckAndAcceptConflict(t *testing.T) {
 		}
 	}
 	command = m.Update(tea.KeyPressMsg{Code: 'u'})
-	m.Update(command())
+	m.Update(busyResult(t, command))
 	if m.statusMessage != upstreamConflictCopy || !m.statusIsError || backend.accepted != 1 {
 		t.Fatalf("conflict status = %q accepted=%d", m.statusMessage, backend.accepted)
 	}
-	if view := m.View(120, 18); !strings.Contains(view, "error: Upstream changed again") {
+	// Spec section 10.8.5: a failure is the Alert glyph and a TintDanger run
+	// pinned above the action row, never the "error: " text prefix the pane
+	// used to write into a body line.
+	if view := ansi.Strip(m.View(120, 18)); !strings.Contains(view, "▲ Upstream changed again") {
 		t.Fatalf("conflict status not visible:\n%s", view)
 	}
 	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -115,7 +118,7 @@ func TestPointerDriftSelectCheckAcceptAndBack(t *testing.T) {
 		t.Fatalf("second provenance is not visible:\n%s", ansi.Strip(surface.Content))
 	}
 	press := surface.Pointer(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-	if press == nil || m.Update(press()) != nil {
+	if press == nil || m.Update(busyResult(t, press)) != nil {
 		t.Fatal("provenance did not enter pressed state")
 	}
 	pressed := m.PointerSurface("board", pointerWidth, pointerHeight)
@@ -123,7 +126,7 @@ func TestPointerDriftSelectCheckAcceptAndBack(t *testing.T) {
 		t.Fatal("provenance did not render pressed feedback")
 	}
 	release := pressed.Pointer(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
-	activate := m.Update(release())
+	activate := m.Update(busyResult(t, release))
 	message, _ := m.ResolvePointerMessage(activate())
 	m.Update(message)
 	if m.driftSelection != 1 {
@@ -131,12 +134,12 @@ func TestPointerDriftSelectCheckAcceptAndBack(t *testing.T) {
 	}
 
 	check := clickControl(t, &m, "Check selected")
-	m.Update(check())
+	m.Update(busyResult(t, check))
 	if m.driftMode != driftReview || backend.checked[0] != "gitlab:gl-key" {
 		t.Fatalf("pointer drift check = mode:%v checked:%v", m.driftMode, backend.checked)
 	}
 	accept := clickControl(t, &m, "Update baseline")
-	m.Update(accept())
+	m.Update(busyResult(t, accept))
 	if backend.accepted != 1 || m.driftResult.State != "unchanged" {
 		t.Fatalf("pointer baseline update = accepted:%d result:%+v", backend.accepted, m.driftResult)
 	}
@@ -202,7 +205,7 @@ func TestDriftErrorsMissingLinksAndBusyInput(t *testing.T) {
 	if m.updateDrift(tea.KeyPressMsg{Code: tea.KeyEscape}) != nil || m.driftBusy != "check" {
 		t.Fatal("busy escape leaked")
 	}
-	m.Update(command())
+	m.Update(busyResult(t, command))
 	if m.statusMessage != "drift check failed" || !m.driftModeActive() {
 		t.Fatalf("check error = %q mode=%d", m.statusMessage, m.driftMode)
 	}
@@ -218,12 +221,18 @@ func TestRawImportLinksAndDriftRenderingHelpers(t *testing.T) {
 	m := New(nil, "u", testStyles())
 	m.open = true
 	m.driftMode, m.driftBusy = driftSelect, "check"
-	if !strings.Contains(m.driftBody(20), "check in progress") || m.driftFooter() != "check in progress | input locked" {
-		t.Fatal("busy rendering")
+	// Spec section 10.8.4 rule 1: the busy state is a footer band line and the
+	// body's own "<op> in progress..." row is gone, so the body does not reflow
+	// when the check lands.
+	if strings.Contains(m.driftBody(20), "in progress") {
+		t.Fatal("busy body row survived")
+	}
+	if busy := m.actionFooter(40); !strings.Contains(busy, "esc cancel") {
+		t.Fatalf("busy footer = %q", busy)
 	}
 	m.driftBusy = ""
 	m.driftChoices = []store.ImportLink{{Source: "forge", Title: "title", URL: "https://example"}}
-	if !strings.Contains(m.driftBody(20), "Choose provenance") || !strings.Contains(m.driftFooter(), "enter check") {
+	if !strings.Contains(m.driftBody(20), "Choose provenance") || !strings.Contains(m.actionFooter(60), "enter check") {
 		t.Fatal("selection rendering")
 	}
 	if driftError(&forge.Error{Message: "safe"}) != "safe" || driftError(errors.New("secret")) != "drift check failed" {

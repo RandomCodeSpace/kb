@@ -377,7 +377,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 	}
 	if m.action.open() || m.action.busy {
 		switch message.(type) {
-		case tea.KeyPressMsg:
+		case tea.KeyPressMsg, spinner.TickMsg:
 			return m, m.updateTaskAction(message)
 		case boardCardClickedMsg, boardColumnClickedMsg,
 			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg, filterProjectClickedMsg,

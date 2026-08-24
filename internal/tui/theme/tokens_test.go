@@ -228,6 +228,7 @@ func TestGlyphsCarryTheAccentVocabulary(t *testing.T) {
 		"Track":    {glyphs.Track, "░"},
 		"Empty":    {glyphs.Empty, "○"},
 		"Alert":    {glyphs.Alert, "▲"},
+		"HintSep":  {glyphs.HintSep, " | "},
 
 		"HalfTop":    {glyphs.HalfTop, "▀"},
 		"HalfBottom": {glyphs.HalfBottom, "▄"},
@@ -268,6 +269,7 @@ func TestGlyphWidthsMatchTheSpecTable(t *testing.T) {
 		"Track":    {ansi.StringWidth(glyphs.Track), 1},
 		"Empty":    {ansi.StringWidth(glyphs.Empty), 1},
 		"Alert":    {ansi.StringWidth(glyphs.Alert), 1},
+		"HintSep":  {ansi.StringWidth(glyphs.HintSep), 3},
 
 		"HalfTop":    {ansi.StringWidth(glyphs.HalfTop), 1},
 		"HalfBottom": {ansi.StringWidth(glyphs.HalfBottom), 1},

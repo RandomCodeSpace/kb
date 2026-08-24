@@ -24,6 +24,13 @@ type OverlayOpts struct {
 	Hint   string   // footer band scroll indicator, right-aligned
 	Width  int
 	Height int
+
+	// Armed re-fills the header band to StatusAlarm with FgBase bold. Spec
+	// section 10.1.4, ratified call 6: this is the only header-band recolor in
+	// the TUI, it fires on the Armed state of section 1.9 and on nothing else,
+	// and it carries the mode structurally rather than recovering it from a
+	// rendered label.
+	Armed bool
 }
 
 // Overlay renders the panel of spec section 4 steps 3 to 6: the OverlaySurf
@@ -59,11 +66,28 @@ func OverlayLayers(styles *theme.Styles, opts OverlayOpts, x, y int) []*lipgloss
 }
 
 // Section renders one section break of spec section 4 step 5: an OverlayBand
-// row carrying a bold FgSubtle label, never a rule. Count is rendered
-// right-aligned when it is not empty, which is how a section says how much it
-// holds without spending a body row on it.
+// row carrying a bold label, never a rule. Count is rendered right-aligned when
+// it is not empty, which is how a section says how much it holds without
+// spending a body row on it.
+//
+// The label carries the resting ramp of spec section 10.1.2. The donor
+// gradient-paints a diagonal rule trailing its dialog title; section 4 forbids
+// that shape, so the ramp moves onto the label and the band keeps one element.
 func Section(styles *theme.Styles, label, count string, width int) string {
-	return bandRow(styles, theme.BandSection, styles.Overlay.SectionBand, label, count, width)
+	return SectionRamp(styles, label, count, width, theme.GradSection)
+}
+
+// SectionRamp is Section with the state-dependent ramp of spec section 10.1.4
+// named by the caller: GradSectionDanger while a destructive action is pending,
+// GradSectionArmed once it is armed. The lead is the same tint in both, so
+// arming deepens the tail rather than re-tinting the label - an escalation of a
+// state the user is already in, not a new one.
+//
+// The mode is a property of the overlay and is passed in structurally; it is
+// never recovered by matching a rendered label.
+func SectionRamp(styles *theme.Styles, label, count string, width int, ramp theme.Ramp) string {
+	return bandRow(styles, theme.BandSection, styles.Overlay.SectionBand, label, count, width,
+		func(head string) string { return styles.GradBold(ramp, head) })
 }
 
 // OverlayRow renders one body row: already-styled content inset OverlayInsetX,
@@ -141,7 +165,11 @@ func overlayRows(styles *theme.Styles, opts OverlayOpts) []string {
 		return nil
 	}
 	rows := make([]string, 0, opts.Height)
-	rows = append(rows, bandRow(styles, theme.BandHeader, styles.Overlay.HeaderBand, opts.Title, opts.Seq, opts.Width))
+	header, headerStyle := theme.BandHeader, styles.Overlay.HeaderBand
+	if opts.Armed {
+		header, headerStyle = theme.BandHeaderArmed, styles.Overlay.HeaderBandArmed
+	}
+	rows = append(rows, bandRow(styles, header, headerStyle, opts.Title, opts.Seq, opts.Width, nil))
 	body := max(opts.Height-2, 0)
 	for index := 0; index < body; index++ {
 		if index < len(opts.Body) {
@@ -151,27 +179,44 @@ func overlayRows(styles *theme.Styles, opts OverlayOpts) []string {
 		rows = append(rows, pad(styles.Overlay.Surf, opts.Width))
 	}
 	if opts.Height > 1 {
-		rows = append(rows, bandRow(styles, theme.BandFooter, styles.Overlay.FooterBand, opts.Footer, opts.Hint, opts.Width))
+		rows = append(rows, bandRow(styles, theme.BandFooter, styles.Overlay.FooterBand, opts.Footer, opts.Hint, opts.Width, nil))
 	}
 	return rows[:opts.Height]
 }
 
 // bandRow renders one full-width band: content inset OverlayInsetX from the
-// left with the tail right-aligned at the band's own edge. The tail wins when
-// the two cannot both fit, because it is the count or the scroll position and
-// it must not be overwritten.
+// left with the tail right-aligned at the band's own edge. Spec section 10.4.5
+// fixes the order of sacrifice - the info is never truncated, the title is
+// truncated per section 3.3, and the fill never drops below one cell - and the
+// arithmetic below is that table.
 //
 // A band is one styled run over the whole row, so content that carries its own
-// color - the branded spinner frame of spec section 10.2.5 - is passed through
-// BandRun, which re-arms the band after every reset inside it. Plain content is
-// returned untouched and renders the bytes it always did.
-func bandRow(styles *theme.Styles, band theme.Band, style lipgloss.Style, content, tail string, width int) string {
+// color - the branded spinner frame of spec section 10.2.5, the graded section
+// label of section 10.1.2 - is passed through BandRun, which re-arms the band
+// after every reset inside it. Plain content is returned untouched and renders
+// the bytes it always did.
+//
+// paint is applied to the already-truncated head, never before: a gradient
+// walks grapheme clusters and emits an SGR run per cluster, and truncating that
+// by cell width would cut an escape sequence in half.
+func bandRow(
+	styles *theme.Styles,
+	band theme.Band,
+	style lipgloss.Style,
+	content, tail string,
+	width int,
+	paint func(string) string,
+) string {
 	if width <= 0 {
 		return ""
 	}
 	inset := min(styles.Metrics.OverlayInsetX, width)
 	field := max(width-inset, 0)
-	if ansi.StringWidth(tail) > field {
+	// Row three of the table: below the info's own width plus two there is no
+	// room for a title and a fill beside it, so the info is dropped outright and
+	// the title takes the whole field. Dropping the title instead would leave a
+	// band that says only how much a section holds and never which one it is.
+	if ansi.StringWidth(tail)+2 > field {
 		tail = ""
 	}
 	separator := 0
@@ -180,6 +225,9 @@ func bandRow(styles *theme.Styles, band theme.Band, style lipgloss.Style, conten
 	}
 	head := truncate(styles, content, max(field-ansi.StringWidth(tail)-separator, 0))
 	gap := max(field-ansi.StringWidth(head)-ansi.StringWidth(tail), 0)
+	if paint != nil && head != "" {
+		head = paint(head)
+	}
 	row := spaces(inset) + styles.BandRun(band, head) + spaces(gap) + tail
 	return style.Render(exact(row, width))
 }

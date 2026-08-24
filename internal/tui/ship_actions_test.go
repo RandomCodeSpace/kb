@@ -881,7 +881,7 @@ func TestActionSuccessDetailAndDispatchEdges(t *testing.T) {
 	m := newTestRootModel(reader, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
 	detailLoad := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	updateTestModel(t, &m, detailLoad())
+	updateTestModel(t, &m, resultSkippingSpinnerTick(t, detailLoad))
 	if selected, ok := m.actionTask(); !ok || selected.ID != task.ID {
 		t.Fatalf("detail action task = %+v, %v", selected, ok)
 	}
@@ -889,7 +889,7 @@ func TestActionSuccessDetailAndDispatchEdges(t *testing.T) {
 	if refresh == nil {
 		t.Fatal("detail adoption did not refresh enrichment")
 	}
-	updateTestModel(t, &m, refresh())
+	updateTestModel(t, &m, resultSkippingSpinnerTick(t, refresh))
 	if reader.commentLoads < 2 {
 		t.Fatalf("detail refresh loads = %d", reader.commentLoads)
 	}

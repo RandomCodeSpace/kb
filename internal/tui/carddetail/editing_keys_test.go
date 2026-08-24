@@ -38,7 +38,7 @@ func detailActionModel(t *testing.T, action actionMode) *Model {
 	t.Helper()
 	model := New(&actionStore{}, "u", testStyles())
 	load := model.Open(board.Task{ID: "task", Seq: 1, Status: board.StatusTodo})
-	model.Update(load())
+	model.Update(busyResult(t, load))
 	model.beginAction(action)
 	if model.action != action {
 		t.Fatalf("action = %v, want %v", model.action, action)

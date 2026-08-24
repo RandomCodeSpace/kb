@@ -352,15 +352,18 @@ func (m *Model) startAddComment() tea.Cmd {
 		return nil
 	}
 	m.saving = true
-	m.setStatus("adding comment...", false)
+	// The busy state lives in the footer band now (spec section 10.8.4 rule
+	// 5): a body notice saying the same thing is a second busy statement and
+	// reflows the body while the write runs.
+	m.setStatus("", false)
 	m.rebuildBody()
 	taskID, session, user, writer := m.task.ID, m.actionSession, m.user, m.writer
-	return func() tea.Msg {
+	return tea.Batch(func() tea.Msg {
 		comment, err := writer.AddComment(user, taskID, user, body)
 		return mutationCompletedMsg{
 			taskID: taskID, session: session, kind: mutationAddComment, comment: comment, err: err,
 		}
-	}
+	}, m.startPlain())
 }
 
 func (m *Model) startDeleteComment() tea.Cmd {
@@ -369,15 +372,15 @@ func (m *Model) startDeleteComment() tea.Cmd {
 	}
 	comment := m.comments[min(max(m.selection, 0), len(m.comments)-1)]
 	m.saving = true
-	m.setStatus(fmt.Sprintf("deleting comment c%d...", comment.ID), false)
+	m.setStatus("", false)
 	m.rebuildBody()
 	taskID, session, user, writer := m.task.ID, m.actionSession, m.user, m.writer
-	return func() tea.Msg {
+	return tea.Batch(func() tea.Msg {
 		deleted, err := writer.DeleteComment(user, comment.ID)
 		return mutationCompletedMsg{
 			taskID: taskID, session: session, kind: mutationDeleteComment, comment: deleted, err: err,
 		}
-	}
+	}, m.startPlain())
 }
 
 func (m *Model) startAddLink() tea.Cmd {
@@ -388,11 +391,11 @@ func (m *Model) startAddLink() tea.Cmd {
 		return nil
 	}
 	m.saving = true
-	m.setStatus("adding blocker link...", false)
+	m.setStatus("", false)
 	m.rebuildBody()
 	taskID, session, user, writer := m.task.ID, m.actionSession, m.user, m.writer
 	currentBlocks := m.currentBlocks
-	return func() tea.Msg {
+	return tea.Batch(func() tea.Msg {
 		blockerRef, blockedRef := taskID, target
 		if !currentBlocks {
 			blockerRef, blockedRef = target, taskID
@@ -402,7 +405,7 @@ func (m *Model) startAddLink() tea.Cmd {
 			taskID: taskID, session: session, kind: mutationAddLink,
 			blocker: blocker, blocked: blocked, err: err,
 		}
-	}
+	}, m.startPlain())
 }
 
 func (m *Model) startDeleteLink() tea.Cmd {
@@ -412,17 +415,17 @@ func (m *Model) startDeleteLink() tea.Cmd {
 	}
 	choice := choices[min(max(m.selection, 0), len(choices)-1)]
 	m.saving = true
-	m.setStatus("removing blocker link...", false)
+	m.setStatus("", false)
 	m.rebuildBody()
 	taskID, session, user, writer := m.task.ID, m.actionSession, m.user, m.writer
 	currentSeq := m.task.Seq
-	return func() tea.Msg {
+	return tea.Batch(func() tea.Msg {
 		err := writer.Unlink(user, taskID, choice.task.ID)
 		return mutationCompletedMsg{
 			taskID: taskID, session: session, kind: mutationDeleteLink,
 			other: choice.task, currentSeq: currentSeq, err: err,
 		}
-	}
+	}, m.startPlain())
 }
 
 func (m *Model) finishMutation(msg mutationCompletedMsg) tea.Cmd {
@@ -558,12 +561,11 @@ func (m Model) actionBody(width int) string {
 			lines = append(lines, fmt.Sprintf("  ... %d later", len(choices)-end))
 		}
 	}
-	if m.statusMessage != "" {
-		prefix := "status: "
-		if m.statusIsError {
-			prefix = "error: "
-		}
-		lines = append(lines, "", prefix+m.statusMessage)
+	// A failure is pinned above the action row by spec section 10.8.5 rather
+	// than appended to the scrolling body; a non-failure notice is ordinary
+	// body text and stays here.
+	if m.statusMessage != "" && !m.statusIsError {
+		lines = append(lines, "", "status: "+m.statusMessage)
 	}
 	for i := range lines {
 		lines[i] = fitDetailLine(safeText(lines[i], true), max(width, 1))
@@ -590,28 +592,61 @@ func selectionWindow(count, selection, limit int) (int, int) {
 // actionFooter is the footer band of spec section 4 step 6: keyboard hints
 // only. The clickable affordances left the band for the pinned action row of
 // issue #152, so the band no longer competes with the buttons for the width.
+//
+// The rungs are declared once and packed by widget.Hints (spec section 10.4.6)
+// rather than joined into one string and cut, so a narrow panel drops whole
+// rungs and never leaves a dangling separator. A busy panel replaces the ladder
+// head with its busy line and keeps the hints that are still live (section
+// 10.8.4 rule 1), which is why the band is the only row whose content changes
+// while an operation runs.
 func (m Model) actionFooter(width int) string {
-	if m.driftMode != driftNone {
-		return fitDetailLine(m.driftFooter(), width)
+	line, _ := widget.Hints(m.styles, m.footerLadder(width), width)
+	return line
+}
+
+func (m Model) footerLadder(width int) widget.Ladder {
+	if busy := m.footerBusy(width); busy != "" {
+		return widget.Ladder{Head: []string{busy}, Tail: []string{m.busyTail()}}
 	}
-	if m.saving {
-		return "write in progress | esc stays here"
+	if m.driftMode != driftNone {
+		return m.driftLadder()
 	}
 	if m.confirm && (m.action == actionDeleteComment || m.action == actionDeleteLink) {
-		return fitDetailLine("enter confirm delete | esc cancel", width)
+		return widget.Ladder{Head: []string{"enter confirm delete"}, Tail: []string{"esc cancel"}}
 	}
-	hints := "up/down scroll | esc close"
 	switch m.action {
 	case actionAddComment:
-		hints = "ctrl+s add comment | esc back"
+		return widget.Ladder{Head: []string{"ctrl+s add comment"}, Tail: []string{"esc back"}}
 	case actionDeleteComment:
-		hints = "up/down choose | enter delete | esc back"
+		return widget.Ladder{
+			Head:   []string{"up/down choose"},
+			Middle: []string{"enter delete"},
+			Tail:   []string{"esc back"},
+		}
 	case actionAddLink:
-		hints = "tab direction | enter add | esc back"
+		return widget.Ladder{
+			Head:   []string{"tab direction"},
+			Middle: []string{"enter add"},
+			Tail:   []string{"esc back"},
+		}
 	case actionDeleteLink:
-		hints = "up/down choose | enter remove | esc back"
+		return widget.Ladder{
+			Head:   []string{"up/down choose"},
+			Middle: []string{"enter remove"},
+			Tail:   []string{"esc back"},
+		}
 	}
-	return fitDetailLine(hints, width)
+	return widget.Ladder{Head: []string{"up/down scroll"}, Tail: []string{"esc close"}}
+}
+
+// busyTail is the hint that survives beside a busy head. A cancellable
+// operation keeps its cancel key; a local write that cannot be called back says
+// what Esc does instead (spec section 10.8.7).
+func (m Model) busyTail() string {
+	if m.brandBusy() {
+		return "esc cancel"
+	}
+	return "esc stays here"
 }
 
 // detailPointerControl is one action of the pinned action row: its label, the
@@ -753,8 +788,12 @@ func (m Model) actionButtonRow(controls []detailPointerControl) string {
 	for _, control := range controls {
 		label, underline := detailButtonLabel(control)
 		buttons = append(buttons, widget.Button(m.styles, widget.ButtonOpts{
-			Text:           label,
-			Variant:        control.variant,
+			Text:    label,
+			Variant: control.variant,
+			// A button has no cursor to adopt, so it runs rows 1 to 6 of the
+			// machine only and wears the hovered token of spec section 1.9.
+			Hovered:        m.pointerState.IsHovered(detailFooterControlID(control)),
+			Armed:          m.Armed() && control.variant == theme.ButtonDanger,
 			Pressed:        m.pointerState.IsPressed(detailFooterControlID(control)),
 			UnderlineIndex: underline,
 			Padding:        [2]int{m.styles.Metrics.ButtonPadX, m.styles.Metrics.ButtonPadX},

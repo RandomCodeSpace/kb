@@ -41,6 +41,7 @@ type Glyphs struct {
 	Track    string // U+2591, progress meter and scrollbar track (section 10.1.3)
 	Empty    string // U+25CB, empty-state mark (section 10.8.3)
 	Alert    string // U+25B2, failure mark (section 10.8.5)
+	HintSep  string // hint ladder separator, three cells (section 10.4.6)
 
 	// The half-block pair of spec section 10.6.1. These are the only glyphs in
 	// the vocabulary that widen the block-glyph risk section 3.6 records rather
@@ -81,6 +82,7 @@ var defaultGlyphs = Glyphs{
 	Track:    "░",
 	Empty:    "○",
 	Alert:    "▲",
+	HintSep:  " | ",
 
 	HalfTop:    "▀",
 	HalfBottom: "▄",
