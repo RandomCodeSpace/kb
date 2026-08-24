@@ -62,20 +62,27 @@ func TestHintsPacksEveryLadderAtEveryWidth(t *testing.T) {
 					t.Fatalf("width %d: %d columns for %d rungs", width, len(columns), len(rungs))
 				}
 
-				// The ellipsis is present exactly when a middle rung was dropped,
-				// with two exceptions the algorithm itself names: step 1, where the
-				// pinned set does not fit and the middle is never considered, and
-				// step 3, where the mark is what no longer fits.
+				// The mark is present if and only if a middle rung was dropped and
+				// at least one middle rung is admitted. Step 1 is the exception on
+				// the absent side: the pinned set does not fit there and the middle
+				// is never considered at all.
 				pinned := append(append([]int{}, head...), tail...)
 				pinnedFits := lineWidth(packed(rungs, pinned, nil, "", nil), separator) <= width
 				dropped := droppedMiddle(columns, middle)
+				admitted := admittedMiddle(columns, middle)
 				mark := strings.Contains(plain, styles.Glyph.Ellipsis)
 				roomForMark := ansi.StringWidth(plain)+markCost <= width
-				if pinnedFits && dropped && !mark && roomForMark {
+				if pinnedFits && dropped && admitted && !mark && roomForMark {
 					t.Fatalf("width %d: dropped a middle rung with no mark: %q", width, plain)
 				}
-				if pinnedFits && !dropped && mark && len(middle) > 0 {
+				// The pinnedFits guard is what keeps step 1 out of both directions:
+				// its truncated head ends in the same glyph the mark is spelled
+				// with, and that glyph is a cut, not a rung.
+				if pinnedFits && mark && !dropped {
 					t.Fatalf("width %d: marked a ladder that dropped nothing: %q", width, plain)
+				}
+				if pinnedFits && mark && !admitted {
+					t.Fatalf("width %d: marked a ladder with no admitted middle rung: %q", width, plain)
 				}
 
 				// Every pinned rung is present whenever the pinned set fits.
@@ -123,6 +130,15 @@ func droppedMiddle(columns []int, middle []int) bool {
 	return false
 }
 
+func admittedMiddle(columns []int, middle []int) bool {
+	for _, index := range middle {
+		if columns[index] >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // TestHintsDropsFromTheEndAndIsTerminal is the contrast with the meta chip row
 // of spec section 3.4: a ladder is ordered by importance, so a dropped rung is
 // terminal and the shorter rungs behind it are not attempted.
@@ -130,20 +146,59 @@ func TestHintsDropsFromTheEndAndIsTerminal(t *testing.T) {
 	styles := theme.New(true)
 	ladder := Ladder{
 		Head:   []string{"head"},
-		Middle: []string{"a very long middle rung", "x"},
+		Middle: []string{"first", "a very long middle rung", "x"},
 		Tail:   []string{"tail"},
 	}
-	line, columns := Hints(styles, ladder, 20)
-	if got := ansi.Strip(line); got != "head | … | tail" {
+	line, columns := Hints(styles, ladder, 23)
+	if got := ansi.Strip(line); got != "head | first | … | tail" {
 		t.Fatalf("packed line = %q", got)
 	}
-	if columns[1] >= 0 || columns[2] >= 0 {
+	if columns[2] >= 0 || columns[3] >= 0 {
 		t.Fatalf("a short rung was admitted behind a dropped one: %v", columns)
 	}
 	// The mark holds a column of its own, so the pinned tail sits behind it:
-	// head(4) + sep(3) + mark(1) + sep(3).
-	if columns[0] != 0 || columns[3] != 11 {
+	// head(4) + sep(3) + first(5) + sep(3) + mark(1) + sep(3).
+	if columns[0] != 0 || columns[1] != 7 || columns[4] != 19 {
 		t.Fatalf("pinned columns = %v", columns)
+	}
+}
+
+// TestHintsSuppressesTheMarkWhenNoMiddleRungIsAdmitted is step 3 of spec section
+// 10.4.6 as amended after the #187 dogfood: a mark with no admitted middle rung
+// spends the cells that could carry the most important rung on saying nothing.
+func TestHintsSuppressesTheMarkWhenNoMiddleRungIsAdmitted(t *testing.T) {
+	styles := theme.New(true)
+	// The help pane's own ladder, which is what the dogfood caught: at 27 cells
+	// the mark form fits and is still the wrong answer, because the one rung
+	// that dismisses the pane fits too.
+	pane := Ladder{Head: []string{"[Close]"}, Middle: []string{"? or esc close help", "q quit"}}
+	line, columns := Hints(styles, pane, 29)
+	if got := ansi.Strip(line); got != "[Close] | ? or esc close help" {
+		t.Fatalf("help pane line = %q", got)
+	}
+	if columns[0] != 0 || columns[1] != 10 || columns[2] >= 0 {
+		t.Fatalf("help pane columns = %v", columns)
+	}
+
+	// One cell short of the retry, the pinned set is all that is left - and the
+	// mark is not resurrected to fill the room it frees.
+	line, columns = Hints(styles, pane, 28)
+	if got := ansi.Strip(line); got != "[Close]" {
+		t.Fatalf("narrow help pane line = %q", got)
+	}
+	if columns[0] != 0 || columns[1] >= 0 || columns[2] >= 0 {
+		t.Fatalf("narrow help pane columns = %v", columns)
+	}
+
+	// With a pinned tail, the fallback is the whole pinned set, never a bare
+	// head: step 1 has already established that the pinned set fits.
+	tailed := Ladder{
+		Head:   []string{"head"},
+		Middle: []string{"a very long middle rung"},
+		Tail:   []string{"tail"},
+	}
+	if got := ansi.Strip(mustLine(Hints(styles, tailed, 20))); got != "head | tail" {
+		t.Fatalf("pinned fallback = %q", got)
 	}
 }
 

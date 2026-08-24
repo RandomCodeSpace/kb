@@ -79,10 +79,15 @@ func TestHelpFooterLadderKeepsTheCloseControl(t *testing.T) {
 		t.Fatalf("wide footer = %q", full)
 	}
 	// Spec section 10.4.6 step 2: the ellipsis rung costs its own cell plus a
-	// separator, so a band that cannot seat the first dismissal alongside the
-	// mark drops the rung and keeps the mark. The line says there is more rather
-	// than cutting a rung mid-word, which is what the packer replaces.
-	if middle := ansi.Strip(m.helpFooter(styles, keys, 30)); middle != helpCloseLabel+" | …" {
+	// separator, so a band that can seat one dismissal alongside the mark says
+	// there is more rather than cutting a rung mid-word.
+	if wide := ansi.Strip(m.helpFooter(styles, keys, 33)); wide != helpCloseLabel+" | ? or esc close help | …" {
+		t.Fatalf("marked footer = %q", wide)
+	}
+	// Step 3 as amended after the #187 dogfood: a band too narrow for the mark
+	// alongside a rung suppresses the mark instead, because the pane's only
+	// dismissal hint fits in exactly the cells the mark was spending.
+	if middle := ansi.Strip(m.helpFooter(styles, keys, 30)); middle != helpCloseLabel+" | ? or esc close help" {
 		t.Fatalf("medium footer = %q", middle)
 	}
 	if narrow := ansi.Strip(m.helpFooter(styles, keys, 8)); narrow != helpCloseLabel {
