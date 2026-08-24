@@ -24,6 +24,8 @@ const (
 	rowSection
 	rowHint
 	rowError
+	rowChoice // an activatable list row: hover raises it whole
+	rowWidget // a row one of the section 10.8 widgets rendered whole
 )
 
 // importButton is one action inside a row, with its column offset in the row's
@@ -37,7 +39,11 @@ type importButton struct {
 // importRow is one logical body row. Targets are carried structurally rather
 // than recovered by matching rendered text: a forge draft's title is untrusted
 // input, and text matching let it impersonate a control.
+// mark is the row's focus gutter in plain cells (spec section 10.4.3), empty
+// on a static row that reserves none. It costs FocusGutterW + FocusGutterGap
+// whichever state the row is in, so focus never reflows the text it lands on.
 type importRow struct {
+	mark     string
 	text     string
 	rendered string
 	target   string
@@ -127,7 +133,26 @@ func (m Model) visibleRows(frame importFrame) []string {
 }
 
 // renderRow applies the token the row's role names.
+//
+// The focus gutter is drawn here rather than baked into the row's text: the
+// widget owns the bar, so a row that wraps carries it on every rendered line
+// (spec section 10.4.3).
 func (m Model) renderRow(row importRow, width int) string {
+	styles := m.themeStyles()
+	on := theme.OverlaySurf
+	if row.kind == rowChoice {
+		on = styles.RowSurface(m.hovered(row.target))
+	}
+	if row.mark == "" {
+		return m.renderContent(row, width, on)
+	}
+	gutter := widget.Gutter(styles, m.focusTarget() == row.target, theme.Brand, on)
+	content := m.renderContent(row, max(width-ansi.StringWidth(gutter), 0), on)
+	return gutter + m.pointerState.Render(styles, controlID(row.target), content)
+}
+
+// renderContent renders the cells to the right of a row's gutter.
+func (m Model) renderContent(row importRow, width int, on theme.Slot) string {
 	styles := m.themeStyles()
 	if row.rendered != "" {
 		return ansi.Truncate(row.rendered, max(width, 0), "")
@@ -135,9 +160,13 @@ func (m Model) renderRow(row importRow, width int) string {
 	line := fit(row.text, width)
 	switch row.kind {
 	case rowError:
-		return styles.On(theme.StatusDanger, theme.OverlaySurf).Render(line)
+		// Ratified call 12: StatusDanger fails AA on the panel tier at 2.96, so
+		// an error inside a panel is TintDanger.
+		return styles.On(theme.TintDanger, theme.OverlaySurf).Render(line)
 	case rowHint:
 		return styles.Overlay.FieldLabel.Render(line)
+	case rowChoice:
+		return styles.On(theme.FgBase, on).Render(line)
 	case rowField:
 		if m.focusTarget() == row.target {
 			return formview.Selection(
@@ -151,6 +180,13 @@ func (m Model) renderRow(row importRow, width int) string {
 	}
 }
 
+// hovered reports whether the pointer is over this row's control. Spec section
+// 10.5.1: hover is pointer feedback and focus is keyboard position, so it
+// changes the row's fill and never its gutter.
+func (m Model) hovered(target string) bool {
+	return target != "" && m.pointerState.IsHovered(controlID(target))
+}
+
 func (m Model) bodyRows(width, height int) []importRow {
 	if m.stage == stageInput {
 		return m.inputRows(width)
@@ -160,18 +196,71 @@ func (m Model) bodyRows(width, height int) []importRow {
 
 func (m Model) inputRows(width int) []importRow {
 	styles := m.themeStyles()
-	rows := []importRow{
-		{text: "SOURCE", kind: rowSection},
-		m.sourceRow(width),
-		m.refRow(width),
-		m.fieldRow("max", fmt.Sprintf("max     %d", m.max)),
+	inner := max(width-m.gutterWidth(), 1)
+	rows := []importRow{{text: "SOURCE", kind: rowSection}}
+	if len(m.sources) == 0 && !m.brandBusy() {
+		// Spec section 10.8.7: an unconfigured forge is an empty state, and its
+		// tail names the control the panel's action row already carries.
+		rows = append(rows, m.emptyRow(width, "no forge configured", "Cancel"))
+	} else {
+		rows = append(rows, m.sourceRow(inner))
 	}
-	if m.brandBusy() {
-		rows = append(rows, importRow{}, m.brandRow(styles))
-	}
+	rows = append(rows, m.refRow(inner), m.fieldRow("max", fmt.Sprintf("max     %d", m.max)))
+	// The busy row moved to the footer band (spec section 10.8.4 rule 1), so
+	// the body does not reflow when the operation lands.
+	rows = append(rows, m.errorRows(width)...)
 	return append(rows, importRow{}, m.actionsRow(styles,
 		importAction{target: "import", label: "Import", variant: theme.ButtonPrimary},
 		importAction{target: "cancel", label: "Cancel"}))
+}
+
+// gutterWidth is the reserve every focusable row spends on its left edge.
+func (m Model) gutterWidth() int {
+	metrics := m.themeStyles().Metrics
+	return max(metrics.FocusGutterW, 0) + max(metrics.FocusGutterGap, 0)
+}
+
+// gutterMark is the plain form of the focus gutter of spec section 10.4.3.
+func (m Model) gutterMark(target string) string {
+	styles := m.themeStyles()
+	metrics := styles.Metrics
+	gap := strings.Repeat(" ", max(metrics.FocusGutterGap, 0))
+	if m.focusTarget() == target {
+		return strings.Repeat(styles.Glyph.Rail, max(metrics.FocusGutterW, 0)) + gap
+	}
+	return strings.Repeat(" ", max(metrics.FocusGutterW, 0)) + gap
+}
+
+// emptyRow is the empty state of spec section 10.8.3, rendered whole by the
+// widget so the panel never composes the ladder itself.
+func (m Model) emptyRow(width int, headline, key string) importRow {
+	row := widget.Empty(m.themeStyles(), widget.EmptyOpts{
+		Headline: headline, Key: key, On: theme.OverlaySurf, Width: width,
+	})
+	return importRow{text: ansi.Strip(row), rendered: row, kind: rowWidget}
+}
+
+// errorRows is the error block of spec section 10.8.5, pinned directly above
+// the action row so the failure and the control that will retry it are
+// adjacent. It is empty while the panel has nothing to report.
+func (m Model) errorRows(width int) []importRow {
+	if !m.statusError || m.status == "" {
+		return nil
+	}
+	styles := m.themeStyles()
+	block := widget.Error(styles, widget.ErrorOpts{
+		Message:  m.status,
+		Key:      m.statusTail,
+		On:       theme.OverlaySurf,
+		Width:    width,
+		MaxLines: styles.Metrics.ErrorMaxLines,
+	})
+	rows := make([]importRow, 0, len(block)+1)
+	rows = append(rows, importRow{})
+	for _, line := range block {
+		rows = append(rows, importRow{text: ansi.Strip(line), rendered: line, kind: rowError})
+	}
+	return rows
 }
 
 // sourceRow is the forge choice. Spec section 5.2 assigns huh's Select to the
@@ -179,7 +268,7 @@ func (m Model) inputRows(width int) []importRow {
 // layout and its per-row pointer target give it.
 func (m Model) sourceRow(width int) importRow {
 	styles := m.themeStyles()
-	label := m.controlMark("source", m.focus == 0) + "source  "
+	const label = "source  "
 	names := make([]string, 0, len(m.sources))
 	for _, source := range m.sources {
 		names = append(names, source.Name)
@@ -193,6 +282,7 @@ func (m Model) sourceRow(width int) importRow {
 	}
 	field := max(width-ansi.StringWidth(label), 1)
 	return importRow{
+		mark:     m.gutterMark("source"),
 		text:     label + m.sourceName(),
 		rendered: surface.Render(label) + formview.HuhInlineSelect(styles, names, m.source, field),
 		target:   "source",
@@ -209,10 +299,10 @@ const refMarkField = "ref"
 // escapes, and this row's own truncation used to fold them into visible text.
 func (m Model) refRow(width int) importRow {
 	const label = "ref     "
-	prefix := m.controlMark("ref", m.focusTarget() == "ref") + label
-	available := max(width-ansi.StringWidth(prefix), 1)
+	available := max(width-ansi.StringWidth(label), 1)
 	return importRow{
-		text:   prefix + formview.Input(m.ref, m.focus == 1, available, sanitize, cursorViewport),
+		mark:   m.gutterMark("ref"),
+		text:   label + formview.Input(m.ref, m.focus == 1, available, sanitize, cursorViewport),
 		target: "ref",
 		kind:   rowField,
 	}
@@ -247,6 +337,7 @@ func sanitize(value string) string {
 
 func (m Model) reviewRows(width, height int) []importRow {
 	styles := m.themeStyles()
+	inner := max(width-m.gutterWidth(), 1)
 	summary := fmt.Sprintf("fetched %d", m.preview.Fetched)
 	if m.preview.Truncated {
 		summary = fmt.Sprintf("fetched %d of about %d; results truncated", m.preview.Fetched, m.preview.TotalHint)
@@ -257,15 +348,22 @@ func (m Model) reviewRows(width, height int) []importRow {
 	}
 	rows = append(rows, importRow{}, importRow{text: "ISSUES", kind: rowSection})
 	start, end := m.reviewWindow(reviewLimit(height))
+	if len(m.rows) == 0 {
+		rows = append(rows, m.emptyRow(width, "no issues fetched", "Back"))
+	}
 	for index := start; index < end; index++ {
-		rows = append(rows, m.issueRow(index, width))
+		rows = append(rows, m.issueRow(index, inner))
 		if m.rows[index].err != "" {
-			rows = append(rows, importRow{text: "      " + m.rows[index].err, kind: rowError})
+			// A per-item error stays inline under its own row: one line,
+			// TintDanger, ellipsized, no glyph and no tail. The panel row is
+			// reserved for what failed the operation (spec section 10.8.5).
+			rows = append(rows, importRow{text: "    " + m.rows[index].err, kind: rowError})
 		}
 	}
 	if bar := m.progressRow(width); bar.text != "" {
 		rows = append(rows, importRow{}, bar)
 	}
+	rows = append(rows, m.errorRows(width)...)
 	return append(rows, importRow{}, m.actionsRow(styles,
 		importAction{target: "import", label: "Import", variant: theme.ButtonPrimary},
 		importAction{target: "back", label: "Back"},
@@ -279,7 +377,6 @@ func (m Model) issueRow(index, width int) importRow {
 	styles := m.themeStyles()
 	item := m.rows[index]
 	target := "row:" + strconv.Itoa(index)
-	cursor := m.controlMark(target, index == m.selection)
 	state := ""
 	switch {
 	case item.created:
@@ -294,12 +391,14 @@ func (m Model) issueRow(index, width int) importRow {
 	case item.include:
 		check = widget.CheckDone
 	}
-	label := fit(item.draft.Title+state, max(width-ansi.StringWidth(cursor)-2, 1))
+	on := styles.RowSurface(m.hovered(target))
+	label := fit(item.draft.Title+state, max(width-2, 1))
 	return importRow{
-		text:     cursor + checkGlyph(styles, check) + " " + label,
-		rendered: styles.Overlay.Surf.Render(cursor) + widget.Check(styles, label, check, theme.OverlaySurf, index == m.selection),
+		mark:     m.gutterMark(target),
+		text:     checkGlyph(styles, check) + " " + label,
+		rendered: widget.Check(styles, label, check, on, index == m.selection),
 		target:   target,
-		kind:     rowField,
+		kind:     rowChoice,
 	}
 }
 
@@ -312,7 +411,9 @@ func (m Model) progressRow(width int) importRow {
 		return importRow{}
 	}
 	styles := m.themeStyles()
-	barWidth := max(min(width-ansi.StringWidth(label)-1, 24), 1)
+	// Spec section 10.8.4 rule 3: the determinate meter's cap is MeterCells,
+	// which is the token that promotes the literal this line used to carry.
+	barWidth := max(min(width-ansi.StringWidth(label)-1, styles.Metrics.MeterCells), 1)
 	bar := progressBar(styles, barWidth).ViewAs(m.progressRatio())
 	return importRow{
 		text:     strings.Repeat(styles.Glyph.RailFull, barWidth) + " " + label,
@@ -330,7 +431,8 @@ func (m Model) progressRatio() float64 {
 
 func (m Model) fieldRow(target, text string) importRow {
 	return importRow{
-		text:   m.controlMark(target, m.focusTarget() == target) + text,
+		mark:   m.gutterMark(target),
+		text:   text,
 		target: target,
 		kind:   rowField,
 	}
@@ -363,6 +465,7 @@ func (m Model) actionsRow(styles *theme.Styles, actions ...importAction) importR
 		row.rendered += widget.Button(styles, widget.ButtonOpts{
 			Text:           label,
 			Variant:        action.variant,
+			Hovered:        m.hovered(action.target),
 			Pressed:        m.pressed(action.target),
 			UnderlineIndex: underline,
 		})
@@ -372,35 +475,39 @@ func (m Model) actionsRow(styles *theme.Styles, actions ...importAction) importR
 
 // footerLine is the footer band: the frozen hint ladder, or the status the
 // overlay is reporting.
+// footerLine is the footer band. Spec section 10.8.4 rule 1: a busy panel
+// replaces the head of its hint ladder with the busy line and the hints that
+// are still live survive as the ladder's tail.
+//
+// It never carries an error. Ratified call 12: neither Danger slot clears the
+// contrast floor on OverlayBand, so a failure is reported in a body row above
+// the action row instead.
 func (m Model) footerLine(width int) string {
 	hints := "Tab fields  Left/Right change  Enter preview  Esc close"
 	if m.stage == stageReview {
 		hints = "Up/Down select  Space toggle  Enter import/retry  Esc back"
 	}
-	if m.status != "" {
-		prefix := "status  "
-		if m.statusError {
-			prefix = "error   "
-		}
-		hints = prefix + m.status
+	if m.brandBusy() {
+		busy := m.brandBand(width)
+		return busy + fit("  esc cancel", max(width-ansi.StringWidth(busy), 0))
+	}
+	if m.status != "" && !m.statusError {
+		hints = "status  " + m.status
 	}
 	return fit(hints, width)
 }
 
-// brandRow is the branded tier's busy row (spec section 10.2.5). It is a body
-// row rather than a band row because the panel's own footer is describing
-// something else, per spec section 10.8.4 rule 2.
-//
-// The engine's run carries no background of its own, so it is laid onto the
-// panel surface with SurfaceRun and handed over already rendered. While the
-// engine is unmounted or inside the birth delay the row is the ordinary static
-// label, which is also what a backgrounded overlay shows.
-func (m Model) brandRow(styles *theme.Styles) importRow {
-	row := m.brand.View()
-	if row == "" {
-		return importRow{text: previewLabel + "...", kind: rowHint}
+// brandBand is the branded tier's band row (spec section 10.2.5). The engine is
+// frame and label in one run, so it is laid in whole; while it is unmounted or
+// still inside the birth delay the row is the ordinary static label, which is
+// also what a backgrounded overlay shows.
+func (m Model) brandBand(width int) string {
+	if row := m.brand.View(); row != "" {
+		return row
 	}
-	return importRow{rendered: styles.SurfaceRun(theme.OverlaySurf, row), kind: rowHint}
+	return widget.Busy(m.themeStyles(), widget.BusyOpts{
+		Label: m.brandLabel(), On: theme.OverlayBand, Width: width,
+	})
 }
 
 // checkGlyph is the plain form of a checklist mark, for a row's text.
@@ -413,16 +520,6 @@ func checkGlyph(styles *theme.Styles, state widget.CheckState) string {
 	default:
 		return styles.Glyph.Check
 	}
-}
-
-func (m Model) controlMark(target string, active bool) string {
-	if m.pressed(target) {
-		return "! "
-	}
-	if active {
-		return "> "
-	}
-	return "  "
 }
 
 // focusTarget names the field the keyboard focus index points at.

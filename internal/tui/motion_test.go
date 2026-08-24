@@ -22,7 +22,7 @@ func mountImportEngine(t *testing.T, model *Model) {
 	t.Helper()
 	model.issueImport = issueimport.New(&rootImportStore{}, rootImportBackend{}, "alice", context.Background())
 	if command := updateTestModel(t, model, tea.KeyPressMsg{Code: 'i'}); command != nil {
-		updateTestModel(t, model, command())
+		drainTestCommand(t, model, command)
 	}
 	updateTestModel(t, model, tea.KeyPressMsg{Code: tea.KeyTab})
 	for _, letter := range "acme/kb" {
@@ -32,6 +32,25 @@ func mountImportEngine(t *testing.T, model *Model) {
 	if !model.issueImport.BrandMounted() {
 		t.Fatal("the forge preview did not mount a branded engine")
 	}
+}
+
+// drainTestCommand runs a command and feeds every message it produces back into
+// the root, walking a batch the way the runtime would. Opening the issue-import
+// overlay now returns its source fetch and the branded engine's first step
+// together (spec section 10.2.4).
+func drainTestCommand(t *testing.T, model *Model, command tea.Cmd) {
+	t.Helper()
+	if command == nil {
+		return
+	}
+	message := command()
+	if batch, batched := message.(tea.BatchMsg); batched {
+		for _, sub := range batch {
+			drainTestCommand(t, model, sub)
+		}
+		return
+	}
+	updateTestModel(t, model, message)
 }
 
 // TestAtMostOneBrandedEngineTicks is obligation 11 of spec section 10.2.7 and
@@ -117,7 +136,9 @@ func TestFrontSurfaceIsTheZOrder(t *testing.T) {
 		}, surfaceAction},
 		{"issue import", func(m *Model) {
 			m.issueImport = issueimport.New(&rootImportStore{}, rootImportBackend{}, "alice", context.Background())
-			_ = m.issueImport.Open()
+			// The source fetch is branded (spec section 10.2.4), so the open is
+			// drained: a stack whose fetch has landed holds no engine.
+			drainTestCommand(t, m, m.issueImport.Open())
 		}, surfaceImport},
 		{"help", func(m *Model) { m.helpOpen = true }, surfaceHelp},
 		{"command palette", func(m *Model) { _ = m.openPalette() }, surfacePalette},

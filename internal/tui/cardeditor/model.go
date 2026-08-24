@@ -35,6 +35,12 @@ const (
 	// 10.8.4: lowercase, present continuous, and no ellipsis of its own,
 	// because the animation is the ellipsis.
 	draftLabel = "drafting card"
+
+	// saveLabel is the plain tier's label for the local store write, and
+	// similarLabel the plain tier's label for the similar-items lookup. Both
+	// obey the same rule draftLabel does.
+	saveLabel    = "saving card"
+	similarLabel = "searching similar items"
 )
 
 // SkillRunner is the shared direct-store AI runner used by the editor. The
@@ -177,14 +183,19 @@ type Model struct {
 	similarGen        uint64
 	statusMessage     string
 	statusIsError     bool
-	scroll            int
-	manualScroll      bool
-	pointerState      pointer.State
-	styles            *theme.Styles
-	spin              spinner.Model
-	brand             spin.Engine
-	draftStarted      time.Time
-	frontMost         bool
+	// statusTail is the button an errored operation returns the user to. Spec
+	// section 10.8.5: an errored operation does not grow a Retry button, the
+	// error row names the control that started it, and a failure with no
+	// retryable trigger leaves this empty.
+	statusTail   string
+	scroll       int
+	manualScroll bool
+	pointerState pointer.State
+	styles       *theme.Styles
+	spin         spinner.Model
+	brand        spin.Engine
+	draftStarted time.Time
+	frontMost    bool
 }
 
 // New creates a closed editor. A nil store keeps the feature unavailable in
@@ -408,7 +419,8 @@ func (m *Model) openForm(nextMode mode, task board.Task) {
 	m.labelsErr, m.similarErr = nil, nil
 	m.similarLoading, m.similarQuery, m.similarExclusions = false, "", ""
 	m.similarCache = make(map[string][]store.SimilarHit)
-	m.statusMessage, m.statusIsError, m.scroll, m.manualScroll = "", false, 0, false
+	m.statusMessage, m.statusIsError, m.statusTail = "", false, ""
+	m.scroll, m.manualScroll = 0, false
 	m.pointerState = pointer.State{}
 	m.draftGen++
 	m.resetInputs()
@@ -491,7 +503,7 @@ func (m *Model) Refresh(task board.Task, found bool) tea.Cmd {
 		} else {
 			m.statusMessage = "card disappeared outside the editor; current edits were preserved"
 		}
-		m.statusIsError = true
+		m.statusIsError, m.statusTail = true, ""
 		return nil
 	}
 	if !found {
@@ -504,7 +516,7 @@ func (m *Model) Refresh(task board.Task, found bool) tea.Cmd {
 	m.applyTask(task)
 	m.initial = m.currentSnapshot()
 	m.stale = false
-	m.statusMessage, m.statusIsError = "card refreshed", false
+	m.statusMessage, m.statusIsError, m.statusTail = "card refreshed", false, ""
 	return m.scheduleSimilar()
 }
 
@@ -565,7 +577,7 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		m.saving = false
 		if msg.err != nil {
 			m.statusMessage = "save refused: " + safeError(msg.err)
-			m.statusIsError = true
+			m.statusIsError, m.statusTail = true, "Save card"
 			return nil
 		}
 		m.base, m.canonical, m.canonicalFound = msg.task, msg.task, true
@@ -584,11 +596,11 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		m.brand.Stop()
 		if msg.err != nil {
 			m.statusMessage = "AI draft failed: " + safeError(msg.err)
-			m.statusIsError = true
+			m.statusIsError, m.statusTail = true, "Draft"
 			return nil
 		}
 		m.applyDraft(msg.draft)
-		m.statusMessage, m.statusIsError = "AI draft applied; review before saving", false
+		m.statusMessage, m.statusIsError, m.statusTail = "AI draft applied; review before saving", false, ""
 		return m.scheduleSimilar()
 	case pointerClickMsg:
 		return m.updatePointer(msg)

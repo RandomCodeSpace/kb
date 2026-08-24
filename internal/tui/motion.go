@@ -73,6 +73,7 @@ func (m *Model) syncEngines() tea.Cmd {
 		m.issueImport.SetFrontMost(front == surfaceImport),
 		m.editor.SetFrontMost(front == surfaceEditor),
 		m.adr.SetFrontMost(front == surfaceADR),
+		m.settings.SetFrontMost(front == surfaceSettings),
 	)
 }
 
@@ -84,6 +85,7 @@ func (m Model) mountedEngines() int {
 		m.issueImport.BrandMounted(),
 		m.editor.BrandMounted(),
 		m.adr.BrandMounted(),
+		m.settings.BrandMounted(),
 	} {
 		if mounted {
 			count++

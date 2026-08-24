@@ -21,7 +21,7 @@ type pointerActionMsg struct {
 // frame. Every target comes from the row that carries it, never from matching
 // the rendered text: a forge draft's title is untrusted and must not be able to
 // impersonate a control.
-func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
+func (m *Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 	if !m.open {
 		return nil
 	}
@@ -35,13 +35,13 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 		if row.target != "" {
 			addPointerRegion(&hitMap, pointer.Rect{
 				X0: frame.x, Y0: y, X1: frame.x + frame.width, Y1: y + 1,
-			}, row.target, m, width, height)
+			}, row.target, *m, width, height)
 		}
 		for _, button := range row.buttons {
 			addPointerRegion(&hitMap, pointer.Rect{
 				X0: frame.x + inset + button.x0, Y0: y,
 				X1: frame.x + inset + button.x0 + ansi.StringWidth(button.label), Y1: y + 1,
-			}, button.target, m, width, height)
+			}, button.target, *m, width, height)
 		}
 	}
 	pane := pointer.Rect{X0: frame.x, Y0: frame.y, X1: frame.x + frame.width, Y1: frame.y + frame.height}
@@ -56,6 +56,11 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 			return pointerActionMsg{target: "scroll", session: m.session, generation: m.generation, scrollDelta: delta * 3, maxScroll: maxScroll}
 		})
 	}
+	// Rows 6 and 9 of spec section 10.5.2: the pointer can stand still while the
+	// content moves under it, so a wheel scroll or a resize re-resolves hover
+	// from the retained point against the map this frame just built. A point
+	// that no longer lands on a region clears hover and mouse mode with it.
+	m.pointerState = m.pointerState.Reresolve(hitMap)
 	return hitMap.Handler()
 }
 

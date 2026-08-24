@@ -107,7 +107,23 @@ func runSettingsCommand(t *testing.T, model *settingsModel, command tea.Cmd) {
 	if command == nil {
 		t.Fatal("settings command is nil")
 	}
-	model.Update(command())
+	// A start now returns its operation and the busy tier's first tick
+	// together, so the helper drains the batch the way the runtime would.
+	drainSettingsCommand(model, command)
+}
+
+func drainSettingsCommand(model *settingsModel, command tea.Cmd) {
+	if command == nil {
+		return
+	}
+	message := command()
+	if batch, ok := message.(tea.BatchMsg); ok {
+		for _, next := range batch {
+			drainSettingsCommand(model, next)
+		}
+		return
+	}
+	model.Update(message)
 }
 
 // settingsButtonNeedle is a padded button label bounded by the row padding that
@@ -262,7 +278,7 @@ func TestSettingsPointerWheelMovesFocusAndViewportTogether(t *testing.T) {
 	if model.focus != "ai:model" {
 		t.Fatalf("wheel focus = %q, want ai:model", model.focus)
 	}
-	if view := model.Surface("", 42, 7).Content; !strings.Contains(view, "> Model:") {
+	if view := model.Surface("", 42, 7).Content; !strings.Contains(ansi.Strip(view), settingsFocusBar()+"Model:") {
 		t.Fatalf("wheel-selected control is outside viewport:\n%s", view)
 	}
 }
@@ -312,7 +328,10 @@ func TestSettingsPointerActivatesVisibleActionsThroughExistingStateMachines(t *t
 		t.Fatalf("pointer-confirmed remove retained rows: %+v", model.rows)
 	}
 
-	if command := clickSettingsText(t, model, 80, 40, "+ Add integration"); command != nil {
+	// With the last integration gone the empty state of spec section 10.8.3 is
+	// showing, and its action tail names this same button, so the row that
+	// carries the control is the second match.
+	if command := clickSettingsTextAt(t, model, 80, 40, 1, "+ Add integration"); command != nil {
 		t.Fatalf("pointer add returned an async command: %#v", command())
 	}
 	if len(model.rows) != 1 || model.focus != "forge:draft:1:name" {
@@ -415,7 +434,9 @@ func TestSettingsPointerPersistsAndRemovesDraftIntegration(t *testing.T) {
 		st, &recordingAIProber{}, &recordingForgeProber{}, "alice", context.Background(),
 	)
 	loadSettingsForTest(t, model)
-	clickSettingsText(t, model, 80, 40, "+ Add integration")
+	// The empty state names the same button in its action tail (spec section
+	// 10.8.3), so the row that carries the control is the second match.
+	clickSettingsTextAt(t, model, 80, 40, 1, "+ Add integration")
 	draft := &model.rows[0]
 	draft.name.SetValue("work")
 	draft.baseURL.SetValue("https://gitlab.example")
@@ -435,7 +456,7 @@ func TestSettingsPointerPersistsAndRemovesDraftIntegration(t *testing.T) {
 		t.Fatalf("pointer-removed source = store:%+v model:%+v err:%v", sources, model.rows, err)
 	}
 
-	clickSettingsText(t, model, 80, 40, "+ Add integration")
+	clickSettingsTextAt(t, model, 80, 40, 1, "+ Add integration")
 	clickSettingsText(t, model, 80, 40, settingsButtonNeedle("Remove"))
 	if command := clickSettingsText(t, model, 80, 40, "Confirm remove"); command != nil {
 		t.Fatalf("draft removal unexpectedly became asynchronous: %#v", command())
@@ -700,17 +721,26 @@ func TestSettingsViewportKeepsEveryFocusedControlVisible(t *testing.T) {
 	}
 	model.focus = "ai:base"
 	model.applyFocus()
-	if view := ansi.Strip(model.View(42, 7)); !strings.Contains(view, "> Base URL") {
+	if view := ansi.Strip(model.View(42, 7)); !strings.Contains(view, settingsFocusBar()+"Base URL") {
 		t.Fatalf("viewport did not scroll back to AI focus:\n%s", view)
 	}
 }
 
+// settingsFocusBar is the plain form of the focus gutter of spec section
+// 10.4.3: the Rail glyph plus its gap, which replaced the "> " marker the pane
+// used to spell into its own text.
+func settingsFocusBar() string {
+	styles := theme.New(true)
+	return strings.Repeat(styles.Glyph.Rail, styles.Metrics.FocusGutterW) +
+		strings.Repeat(" ", styles.Metrics.FocusGutterGap)
+}
+
 // settingsShowsFocusMarker reports whether a rendered pane carries the focus
-// marker on some row. The overlay panel insets its body, so the marker is no
-// longer the first cell of the line.
+// gutter on some row. The overlay panel insets its body, so the bar is not the
+// first cell of the line.
 func settingsShowsFocusMarker(view string) bool {
 	for _, line := range strings.Split(ansi.Strip(view), "\n") {
-		if strings.HasPrefix(strings.TrimLeft(line, " "), ">") {
+		if strings.HasPrefix(strings.TrimLeft(line, " "), settingsFocusBar()) {
 			return true
 		}
 	}

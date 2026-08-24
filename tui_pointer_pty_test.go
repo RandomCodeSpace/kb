@@ -107,10 +107,16 @@ func waitForPTYMarkerAfter(t *testing.T, output *lockedPTYOutput, offset int, ma
 	t.Fatalf("PTY output after byte %d did not contain %q:\n%s", offset, marker, output.string())
 }
 
-// pressMarkerPattern is the cursor move to a control cell followed by the
-// same-width press marker. The editor is themed, so the terminal writes the
-// control's SGR run between the cursor move and the marker glyph.
-var pressMarkerPattern = regexp.MustCompile("H(\x1b\\[[0-9;]*m)*!")
+// pressMarkerPattern is the SGR reverse attribute in any parameter position,
+// which is the press token of spec section 9.1.
+//
+// Spec section 10.4.4 took the literal "!" marker away: a state change may
+// alter colors and attributes and may never add a cell, so pressed feedback is
+// an attribute on the control's own run rather than a glyph that would reflow
+// the row beside it. The regression this guards is the protocol one - a press
+// rerenders the editor and replaces its immutable pointer handler - and the
+// attribute is what the terminal writes when the press lands.
+var pressMarkerPattern = regexp.MustCompile("\x1b\\[[0-9;]*\\b7[;m]")
 
 func waitForPTYPatternAfter(t *testing.T, output *lockedPTYOutput, offset int, pattern *regexp.Regexp) {
 	t.Helper()
@@ -277,9 +283,8 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	}
 	// Press feedback rerenders the editor and replaces its immutable pointer
 	// handler. Releasing through that new handler is the protocol regression.
-	// Body controls use a same-width literal marker so sanitization and narrow
-	// terminal clipping cannot erase the feedback. The terminal diff moves to
-	// that cell and writes the marker before release.
+	// The feedback is the reverse attribute (spec section 10.4.4), so it costs
+	// no cells and neither sanitization nor narrow clipping can erase it.
 	waitForPTYPatternAfter(t, &output, pressOffset, pressMarkerPattern)
 	if _, err := fmt.Fprintf(terminal, "\x1b[<0;%d;%dm", saveX, saveY); err != nil {
 		t.Fatal(err)

@@ -33,8 +33,10 @@ func TestBrandedEngineDrivesTheFetchRow(t *testing.T) {
 		t.Fatal("a fetching overlay did not mount the branded engine")
 	}
 	timing := m.themeStyles().Timing
-	if got := ansi.Strip(m.View(90, 22)); !strings.Contains(got, previewLabel+"...") {
-		t.Fatalf("pre-birth body row = %s", got)
+	// Spec section 10.8.4: the busy line lives in the footer band, and its
+	// static label carries no ellipsis because the animation is the ellipsis.
+	if got := ansi.Strip(m.View(90, 22)); !strings.Contains(got, previewLabel+"  esc cancel") {
+		t.Fatalf("pre-birth band row = %s", got)
 	}
 	step := spin.StepMsg{Seed: spin.SeedImportFetch, Gen: m.brand.Gen()}
 	if m.brandStep(spin.StepMsg{Seed: spin.SeedAdrPropose, Gen: step.Gen}) != nil {
@@ -103,7 +105,7 @@ func TestBrandedEngineFollowsTheZOrder(t *testing.T) {
 	if m.SetFrontMost(false) != nil || m.BrandMounted() {
 		t.Fatal("a backgrounded overlay kept its engine")
 	}
-	if got := ansi.Strip(m.View(90, 22)); !strings.Contains(got, previewLabel+"...") {
+	if got := ansi.Strip(m.View(90, 22)); !strings.Contains(got, previewLabel+"  esc cancel") {
 		t.Fatalf("a backgrounded overlay dropped its static busy label: %s", got)
 	}
 	if m.SetFrontMost(true) == nil || !m.BrandMounted() {

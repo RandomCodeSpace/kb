@@ -195,7 +195,9 @@ func (m *Model) renderRow(row splitRow, width int) string {
 		}
 		return styles.Overlay.Surf.Render(line)
 	case rowError:
-		return styles.On(theme.StatusDanger, theme.OverlaySurf).Render(line)
+		// Ratified call 12: StatusDanger fails AA on the panel tier at 2.96, so
+		// an error inside a panel is TintDanger.
+		return styles.On(theme.TintDanger, theme.OverlaySurf).Render(line)
 	case rowHint:
 		return styles.Overlay.FieldLabel.Render(line)
 	case rowField:
@@ -234,18 +236,23 @@ func (m *Model) inputRows(width int) []splitRow {
 		rows = append(rows, m.inputRow("file", "ADR file", m.filePath, width))
 		rows = append(rows, m.noteRows("read is bounded before AI receives the file", width)...)
 	}
-	rows = append(rows,
-		m.choiceRow("max", "Max stories", storyCountChoices(), m.max-1, "  (1-20)", width),
+	rows = append(rows, m.choiceRow("max", "Max stories", storyCountChoices(), m.max-1, "  (1-20)", width))
+	rows = append(rows, m.errorRows(width)...)
+	return append(rows,
 		splitRow{},
 		m.actionRow("cancel", "Cancel", theme.ButtonNeutral),
 		m.actionRow("split", "Propose stories", theme.ButtonPrimary),
 	)
-	return rows
 }
 
 func (m *Model) reviewRows(width int) []splitRow {
 	rows := m.noteRows("Nothing is created until Add selected.", width)
 	rows = append(rows, splitRow{text: "STORIES", kind: rowSection})
+	if len(m.rows) == 0 {
+		// The band renders whether or not it is filled, so the section takes
+		// the empty row of spec section 10.8.3 rather than showing nothing.
+		rows = append(rows, m.emptyRow(width, "no stories proposed", "Back to source"))
+	}
 	for index := range m.rows {
 		row := &m.rows[index]
 		story := []splitRow{
@@ -267,12 +274,15 @@ func (m *Model) reviewRows(width int) []splitRow {
 		case row.created:
 			rows = append(rows, splitRow{text: "    created", kind: rowHint})
 		case row.err != "":
-			rows = append(rows, splitRow{text: "    error: " + sanitize(row.err), kind: rowError})
+			// A per-item error stays inline under its own row: one line, no
+			// glyph and no tail (spec section 10.8.5).
+			rows = append(rows, splitRow{text: "    " + sanitize(row.err), kind: rowError})
 		}
 		rows = append(rows, splitRow{})
 	}
+	rows = append(rows, m.choiceRow("dest", "Destination", statusChoices(), statusIndex(m.dest), "", width))
+	rows = append(rows, m.errorRows(width)...)
 	return append(rows,
-		m.choiceRow("dest", "Destination", statusChoices(), statusIndex(m.dest), "", width),
 		splitRow{},
 		m.actionRow("back", "Back to source", theme.ButtonNeutral),
 		m.actionRow("cancel", "Close", theme.ButtonNeutral),
@@ -390,42 +400,94 @@ func (m *Model) areaBlock(target, label string, area textarea.Model, width, rows
 
 // footerLine is the footer band content: the frozen hint ladder, the operation
 // in progress, or the close guard.
+// footerLine is the footer band: the hint ladder, or the busy line that
+// replaces its head while an operation runs (spec section 10.8.4 rule 1).
+//
+// It never carries an error. Ratified call 12: neither Danger slot clears the
+// contrast floor on OverlayBand, so a failure is reported in a body row above
+// the action row and the band goes back to hints.
 func (m *Model) footerLine(width int) string {
 	footer := "tab navigate | esc close"
 	switch {
 	case m.guardClose:
 		return m.confirmFooter()
 	case m.brandBusy():
-		footer = m.brandRow() + " | esc cancel"
+		return m.busyBand(m.brandRow(width), "esc cancel", width)
 	case m.operation != "":
-		footer = m.busyPrefix() + m.operation + " | esc cancel"
+		return m.busyBand(m.plainBand(m.operation, width), "esc cancel", width)
 	case m.adding:
-		footer = m.busyPrefix() + m.status
-	case m.status != "":
-		prefix := "status: "
-		if m.statusIsError {
-			prefix = "error: "
-		}
-		footer = prefix + sanitize(m.status)
+		return m.busyBand(m.plainBand(addLabel, width), "", width)
+	case m.status != "" && !m.statusIsError:
+		footer = "status: " + sanitize(m.status)
 	}
 	return fit(footer, width)
 }
 
-// busyPrefix is the plain tier's frame (spec section 10.2.4): bubbles dots,
-// plain text, so the footer band renders it in the band's own FgSubtle. The
-// file read and the card writes are plumbing and keep it.
-func (m Model) busyPrefix() string {
-	return ansi.Strip(m.spin.View())
+// busyBand appends the hints that are still live to a busy head, so the band is
+// the only row whose content changes while an operation runs.
+func (m *Model) busyBand(head, tail string, width int) string {
+	if tail == "" {
+		return head
+	}
+	return head + fit(" | "+tail, max(width-ansi.StringWidth(head), 0))
 }
 
-// brandRow is the branded tier's busy row (spec section 10.2.5). It renders the
-// ordinary static label while the engine is unmounted or still inside the birth
-// delay, which is also what a backgrounded overlay shows.
-func (m Model) brandRow() string {
+// plainBand is the plain tier's busy line (spec section 10.2.4): bubbles dots
+// on the band's own FgSubtle. The file read and the card writes are plumbing
+// and keep it.
+//
+// The frame is no longer stripped. Spec section 10.8.4 deletes the ansi.Strip
+// at all three sites: the frame is the one part of a busy row that is supposed
+// to carry a color, and the band re-arms itself around it through BandRun.
+func (m *Model) plainBand(label string, width int) string {
+	return widget.Busy(m.themeStyles(), widget.BusyOpts{
+		Frame: m.spin.View(), Label: label, On: theme.OverlayBand, Width: width,
+	})
+}
+
+// brandRow is the branded tier's band row (spec section 10.2.5). The engine is
+// frame and label in one run, so it is laid in whole; while it is unmounted or
+// still inside the birth delay the row is the ordinary static label, which is
+// also what a backgrounded overlay shows.
+func (m *Model) brandRow(width int) string {
 	if row := m.brand.View(); row != "" {
 		return row
 	}
-	return opSplitADR + "..."
+	return widget.Busy(m.themeStyles(), widget.BusyOpts{
+		Label: opSplitADR, On: theme.OverlayBand, Width: width,
+	})
+}
+
+// emptyRow is the empty state of spec section 10.8.3, rendered whole by the
+// widget so the panel never composes the ladder itself.
+func (m *Model) emptyRow(width int, headline, key string) splitRow {
+	row := widget.Empty(m.themeStyles(), widget.EmptyOpts{
+		Headline: headline, Key: key, On: theme.OverlaySurf, Width: width,
+	})
+	return splitRow{text: ansi.Strip(row), rendered: row, kind: rowHint}
+}
+
+// errorRows is the error block of spec section 10.8.5, pinned directly above
+// the action row so the failure and the control that will retry it are
+// adjacent. It is empty while the panel has nothing to report.
+func (m *Model) errorRows(width int) []splitRow {
+	if !m.statusIsError || m.status == "" {
+		return nil
+	}
+	styles := m.themeStyles()
+	block := widget.Error(styles, widget.ErrorOpts{
+		Message:  sanitize(m.status),
+		Key:      m.statusTail,
+		On:       theme.OverlaySurf,
+		Width:    width,
+		MaxLines: styles.Metrics.ErrorMaxLines,
+	})
+	rows := make([]splitRow, 0, len(block)+1)
+	rows = append(rows, splitRow{})
+	for _, line := range block {
+		rows = append(rows, splitRow{text: ansi.Strip(line), rendered: line, kind: rowError})
+	}
+	return rows
 }
 
 func (m Model) selectedCount() int {

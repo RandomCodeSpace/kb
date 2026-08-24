@@ -136,7 +136,9 @@ func TestPasteSplitRunsReadOnlySharedSkillAndBuildsReview(t *testing.T) {
 	m.adr.SetValue("# ADR\n\nChoose the boring thing.")
 	m.max = 12
 	command := m.startSplit()
-	if m.operation != "splitting ADR" || !strings.Contains(m.status, "splitting") {
+	// The busy state is described once, by the band (spec section 10.8.4), so
+	// the status slot no longer carries a second copy of it.
+	if m.operation != opSplitADR || m.status != "" {
 		t.Fatalf("progress = operation:%q status:%q", m.operation, m.status)
 	}
 	message := commandMsg(t, command)
@@ -195,7 +197,7 @@ func TestSplitValidationErrorsAndStaleCompletions(t *testing.T) {
 		t.Fatalf("empty run status = %q", m.status)
 	}
 
-	m.operation = "splitting ADR"
+	m.operation = opSplitADR
 	m.generation = 10
 	if command := m.Update(splitCompletedMsg{session: m.session + 1, generation: 10, run: ai.RunResult{Cards: []ai.Draft{testDraft("stale")}}}); command != nil || len(m.rows) != 0 {
 		t.Fatal("stale session completion mutated overlay")
@@ -247,7 +249,7 @@ func TestFileModeReadsBoundedUTF8ThenRunsSplit(t *testing.T) {
 		t.Fatalf("file progress = %q", m.operation)
 	}
 	run := m.Update(commandMsg(t, read))
-	if m.operation != "splitting ADR" || run == nil {
+	if m.operation != opSplitADR || run == nil {
 		t.Fatalf("post-read operation=%q command=%v", m.operation, run)
 	}
 	m.Update(commandMsg(t, run))
@@ -615,7 +617,7 @@ func TestPointerControlsClipScrolledRowsAndGuardBusyWork(t *testing.T) {
 	if command := pointerRelease(m, handler, 3, 0); command == nil {
 		t.Fatal("idle backdrop had no dismiss action")
 	}
-	m.operation = "splitting ADR"
+	m.operation = opSplitADR
 	if command := pointerRelease(m, handler, 3, 8); command != nil {
 		if m.Update(command()) != nil || m.focus != "source" {
 			t.Fatal("busy overlay exposed pointer action")

@@ -1198,6 +1198,7 @@ func TestPointerPressRendersMarkerAndReleaseActivatesOnce(t *testing.T) {
 	const width, height = 120, 40
 	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
+	resting := model.View(width, height)
 	handler := model.MouseHandler(width, height)
 	var hit pointerHit
 	for _, candidate := range model.pointerHits(width, height) {
@@ -1214,8 +1215,15 @@ func TestPointerPressRendersMarkerAndReleaseActivatesOnce(t *testing.T) {
 		t.Fatal("pointer press produced no interaction message")
 	}
 	model.Update(press())
-	if got := ansi.Strip(model.View(width, height)); !strings.Contains(got, "! Blocked:") {
-		t.Fatalf("pressed marker missing or changed width:\n%s", got)
+	// Spec section 10.4.4: a state change may alter colors and attributes and
+	// may never add a cell, so pressed feedback is the reverse attribute over
+	// the row rather than a marker glyph that would reflow the text beside it.
+	pressed := model.View(width, height)
+	if pressed == resting {
+		t.Fatal("pointer press left the view unchanged")
+	}
+	if ansi.Strip(pressed) != ansi.Strip(resting) {
+		t.Fatalf("pressed feedback reflowed the pane:\n%s", ansi.Strip(pressed))
 	}
 	release := model.MouseHandler(width, height)(tea.MouseReleaseMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseNone})
 	if release == nil {

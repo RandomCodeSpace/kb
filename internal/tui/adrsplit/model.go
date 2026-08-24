@@ -132,15 +132,19 @@ type Model struct {
 
 	status        string
 	statusIsError bool
-	scroll        int
-	manualScroll  bool
-	pointerState  pointer.State
-	styles        *theme.Styles
-	spin          spinner.Model
-	brand         spin.Engine
-	brandStarted  time.Time
-	frontMost     bool
-	now           func() time.Time
+	// statusTail is the button an errored operation returns the user to. Spec
+	// section 10.8.5: the error row names the control that started the
+	// operation rather than growing a Retry button of its own.
+	statusTail   string
+	scroll       int
+	manualScroll bool
+	pointerState pointer.State
+	styles       *theme.Styles
+	spin         spinner.Model
+	brand        spin.Engine
+	brandStarted time.Time
+	frontMost    bool
+	now          func() time.Time
 }
 
 // SetDataDir names the directory the active project is resolved from — the
@@ -204,6 +208,7 @@ func (m *Model) Open() tea.Cmd {
 	m.generation++
 	m.open, m.stage, m.source = true, stageInput, sourcePaste
 	m.focus, m.guardClose, m.status, m.statusIsError = "source", false, "", false
+	m.statusTail = ""
 	m.max, m.dest, m.rows = defaultMax, board.StatusTodo, nil
 	m.changed, m.scroll, m.manualScroll, m.pointerState = false, 0, false, pointer.State{}
 	m.resetInputs()
@@ -254,9 +259,15 @@ func (m Model) busy() bool { return m.operation != "" || m.adding }
 
 // The two operation names, so the tier rule of spec section 10.2.4 reads as a
 // comparison against a token rather than a literal repeated at five sites.
+// The labels are the copy spec section 10.8.7 fixes for these two busy states:
+// lowercase, present continuous, and no ellipsis of their own, because the
+// animation is the ellipsis.
 const (
 	opReadFile = "reading file"
-	opSplitADR = "splitting ADR"
+	opSplitADR = "proposing stories"
+
+	// addLabel is the plain tier's label for the batch write.
+	addLabel = "adding stories"
 )
 
 // plainBusy is the plain tier's gate: reading a local file and writing cards
@@ -648,7 +659,7 @@ func (m *Model) startSplit() tea.Cmd {
 	generation, session := m.generation, m.session
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel, m.operation = cancel, opReadFile
-	m.status, m.statusIsError = "reading ADR file...", false
+	m.status, m.statusIsError, m.statusTail = "", false, ""
 	return tea.Batch(m.startSpinner(), func() tea.Msg {
 		text, err := readADRFile(ctx, path)
 		return fileLoadedMsg{session: session, generation: generation, text: text, err: err}
@@ -660,7 +671,7 @@ func (m *Model) startRun(text string) tea.Cmd {
 	generation, session, maximum := m.generation, m.session, m.max
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel, m.operation = cancel, opSplitADR
-	m.status, m.statusIsError = "splitting ADR...", false
+	m.status, m.statusIsError, m.statusTail = "", false, ""
 	// The operation leads the batch and the animation follows it: a branded
 	// tick is scheduled against the one clock, and a caller draining the batch
 	// in order should reach the work without waiting a frame for it.
@@ -709,9 +720,11 @@ func (m *Model) startAdd() tea.Cmd {
 	}
 	if len(m.addQueue) == 0 {
 		if m.failedCount > 0 {
-			m.status, m.statusIsError = "no valid selected stories; fix the reported rows", true
+			// Fixed by editing the rows the focus can already reach, so the
+			// row names no control (spec section 10.8.5).
+			m.status, m.statusIsError, m.statusTail = "no valid selected stories; fix the reported rows", true, ""
 		} else {
-			m.status, m.statusIsError = "select at least one story", true
+			m.status, m.statusIsError, m.statusTail = "select at least one story", true, ""
 		}
 		return nil
 	}
@@ -763,10 +776,9 @@ func (m *Model) finishAdd(msg cardAddedMsg) tea.Cmd {
 	m.adding = false
 	if m.failedCount > 0 {
 		m.status = fmt.Sprintf("created %d; %d failed - review rows and retry", m.createdCount, m.failedCount)
-		m.statusIsError = true
+		m.statusIsError, m.statusTail = true, fmt.Sprintf("Add selected (%d)", m.selectedCount())
 	} else {
-		m.status = fmt.Sprintf("created %d cards", m.createdCount)
-		m.statusIsError = false
+		m.status, m.statusIsError, m.statusTail = fmt.Sprintf("created %d cards", m.createdCount), false, ""
 	}
 	return nil
 }
@@ -859,7 +871,7 @@ func (m *Model) resetInputs() {
 func (m *Model) requestClose() {
 	if m.dirty() {
 		m.guardClose = true
-		m.status, m.statusIsError = "reviewed work would be discarded", true
+		m.status, m.statusIsError, m.statusTail = "reviewed work would be discarded", true, ""
 		return
 	}
 	m.closeNow()
@@ -869,8 +881,16 @@ func (m Model) dirty() bool {
 	return strings.TrimSpace(m.adr.Value()) != "" || strings.TrimSpace(m.filePath.Value()) != "" || len(m.rows) > 0
 }
 
+// setError reports a failed operation and names the control that will run it
+// again. Spec section 10.8.5: an errored operation returns its control to the
+// blurred state and the error row names it, rather than growing a second button
+// for an action that already has one.
 func (m *Model) setError(err error) {
-	m.status, m.statusIsError = safeError(err), true
+	tail := "Propose stories"
+	if m.stage == stageReview {
+		tail = fmt.Sprintf("Add selected (%d)", m.selectedCount())
+	}
+	m.status, m.statusIsError, m.statusTail = safeError(err), true, tail
 }
 
 func safeError(err error) string {

@@ -122,7 +122,10 @@ type Metrics struct {
 	EmptyHeadlineMin int // inner width at or above which an empty row keeps its headline
 	EmptyActionMin   int // inner width at or above which an empty row keeps its action tail
 	ActionGap        int // columns before an empty row's action tail
-	BusyGap          int // columns between a spinner frame and its label (section 10.8.4)
+
+	// The busy and error rows of section 10.8.4 and 10.8.5.
+	BusyGap       int // columns between a spinner frame and its label
+	ErrorMaxLines int // lines an error message may wrap to inside a panel
 
 	// The brand mark of spec section 10.6.8. The reveal's span is a timing
 	// token and lives in Timing.BrandBirthSteps; the two half-block glyphs are
@@ -193,7 +196,9 @@ var defaultMetrics = Metrics{
 	EmptyHeadlineMin: 24,
 	EmptyActionMin:   10,
 	ActionGap:        2,
-	BusyGap:          1,
+
+	BusyGap:       1,
+	ErrorMaxLines: 3,
 
 	BrandMarkW:       10,
 	BrandMarkH:       5,

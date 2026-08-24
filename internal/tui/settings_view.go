@@ -4,6 +4,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -13,6 +14,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 	"github.com/RandomCodeSpace/kb/internal/tui/widget"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
 
 // settingsRowKind is the semantic role of one settings row, which decides the
@@ -26,6 +28,7 @@ const (
 	settingsRowSection
 	settingsRowButton
 	settingsRowHint
+	settingsRowWidget // a row one of the section 10.8 widgets rendered whole
 )
 
 // settingsRenderRow is one rendered pane row. A row with a label is a table
@@ -38,16 +41,17 @@ const (
 // width is only known once every label in the pane has been seen, and the input
 // display has to be cut to it.
 type settingsRenderRow struct {
-	line    string
-	label   string
-	value   string
-	input   *textinput.Model
-	secret  bool
-	button  string
-	target  string
-	variant theme.ButtonVariant
-	armed   bool
-	kind    settingsRowKind
+	line     string
+	rendered string
+	label    string
+	value    string
+	input    *textinput.Model
+	secret   bool
+	button   string
+	target   string
+	variant  theme.ButtonVariant
+	armed    bool
+	kind     settingsRowKind
 }
 
 func settingsControlID(target string) pointer.ControlID {
@@ -107,7 +111,15 @@ func (m *settingsModel) Surface(background string, width, height int) pointer.Su
 
 	body := []settingsRenderRow{{line: ""}, {line: "AI SETTINGS", kind: settingsRowSection}}
 	if !m.loaded {
-		body = append(body, settingsRenderRow{line: "loading settings...", kind: settingsRowHint})
+		// Spec section 10.8.7: the AI block's first read is a plain-tier busy
+		// row under its own band, not a static line and not the footer. A read
+		// that failed is no longer loading, so the error takes the row instead -
+		// the pane has no action row to pin it above yet.
+		if m.statusIsError {
+			body = append(body, m.errorRows(inner)...)
+		} else {
+			body = append(body, m.busyRow(loadSettingsLabel, inner))
+		}
 	} else {
 		body = append(body,
 			m.inputModelRow("ai:base", "Base URL", &m.aiBase, false),
@@ -119,28 +131,30 @@ func (m *settingsModel) Surface(background string, width, height int) pointer.Su
 			settingsRenderRow{line: "FORGE INTEGRATIONS", kind: settingsRowSection},
 		)
 		if len(m.rows) == 0 {
-			body = append(body, settingsRenderRow{line: "(none configured)", kind: settingsRowHint})
+			body = append(body, m.emptyRow("no integrations", "+ Add integration", inner))
 		}
 		for i := range m.rows {
 			body = append(body, m.renderForgeRow(&m.rows[i], inner)...)
 		}
 		body = append(body, m.actionRow("forge:add", "+ Add integration", theme.ButtonNeutral, inner))
 	}
+	if m.loaded && m.statusIsError {
+		// Ratified call 12: an error leaves the band and lands in a body row
+		// pinned directly above the action row, so the failure and the control
+		// that will retry it are adjacent.
+		body = append(body, settingsRenderRow{line: ""})
+		body = append(body, m.errorRows(inner)...)
+	}
 	m.layoutSettingsTable(body, inner)
-	status := m.status
-	if status == "" {
-		status = "ready"
-	}
-	if m.statusIsError {
-		status = "error: " + status
-	}
-	footer := settingsFit("[Close] | "+status+" | tab navigate | enter act", inner)
-	footer = strings.Replace(footer, "[Close]", m.pointerState.Render(styles, settingsControlID("close"), "[Close]"), 1)
+	footer := m.footerLine(inner)
 
 	bodyHeight := max(frame.height-2, 1)
 	focusLine := -1
 	for i, row := range body {
-		if strings.HasPrefix(row.line, ">") {
+		// The focus marker used to be a glyph in the row's own text; the gutter
+		// of spec section 10.4.3 reserves the same cells in every state, so the
+		// focused row is found structurally instead.
+		if row.target != "" && row.target == m.focus && row.kind != settingsRowSection {
 			focusLine = i
 			break
 		}
@@ -194,6 +208,11 @@ func (m *settingsModel) Surface(background string, width, height int) pointer.Su
 		pointer.Rect{X0: frame.x + inset, Y0: footerY, X1: min(frame.x+frame.width, frame.x+inset+7), Y1: footerY + 1},
 		func(pointer.Point) tea.Msg { return settingsPointerMsg{owner: m, target: "close"} },
 	)
+	// Rows 6 and 9 of spec section 10.5.2: the pointer can stand still while the
+	// content moves under it, so a wheel scroll or a resize re-resolves hover
+	// from the retained point against the map this render just built. A point
+	// that no longer lands on a region clears hover and mouse mode with it.
+	m.pointerState = m.pointerState.Reresolve(hitMap)
 	return pointer.Surface{Content: content, Pointer: hitMap.Handler()}
 }
 
@@ -217,44 +236,175 @@ func settingsCompose(styles *theme.Styles, opts widget.OverlayOpts, background s
 	return fitActionFrame(lipgloss.NewCompositor(layers...).Render(), width, height)
 }
 
-// renderSettingsRow applies the token the row's role names.
-func (m *settingsModel) renderSettingsRow(row settingsRenderRow, width int) string {
+// footerLine is the footer band. Spec section 10.8.4 rule 1: a busy pane
+// replaces the head of its hint ladder with the busy line and the hints that
+// are still live survive as the ladder's tail, so the band is the only row
+// whose content changes while an operation runs.
+//
+// It never carries an error. Ratified call 12: neither Danger slot clears the
+// contrast floor on OverlayBand, so a failure is reported in a body row.
+func (m *settingsModel) footerLine(width int) string {
 	styles := m.themeStyles()
-	line := settingsFit(row.line, width)
-	if row.kind == settingsRowButton {
-		if padded := settingsFit(settingsButtonPad+row.button+settingsButtonPad, width); strings.HasSuffix(line, padded) {
-			marker := strings.TrimSuffix(line, padded)
-			// A settings row is driven by focus and Enter, so the resolver of
-			// spec section 10.4.2 marks no hotkey on it.
-			text, underline := widget.Hotkey(row.button, nil)
-			return styles.Overlay.Surf.Render(marker) + widget.Button(styles, widget.ButtonOpts{
-				Text:           text,
-				Variant:        row.variant,
-				Selected:       m.focus == row.target,
-				Armed:          row.armed,
-				Pressed:        m.pointerState.IsPressed(settingsControlID(row.target)),
-				UnderlineIndex: underline,
-				Padding:        [2]int{styles.Metrics.ButtonPadX, styles.Metrics.ButtonPadX},
-			})
+	head := "[Close]"
+	if label := m.busyLabel(); label != "" && m.loaded {
+		head = m.busyBand(label, width)
+	}
+	tail := " | tab navigate | enter act"
+	if m.statusIsError {
+		tail = " | esc close"
+	} else if m.status != "" {
+		tail = " | " + sanitizeTerminal(m.status) + tail
+	}
+	line := head + settingsFit(tail, max(width-ansi.StringWidth(head), 0))
+	if strings.HasPrefix(line, "[Close]") {
+		line = strings.Replace(line, "[Close]", m.pointerState.Render(styles, settingsControlID("close"), "[Close]"), 1)
+	}
+	return line
+}
+
+// busyBand is the band's busy head. The branded engine is frame and label in
+// one run, so it is laid in whole; the plain tier composes frame, BusyGap and
+// label through the widget.
+func (m *settingsModel) busyBand(label string, width int) string {
+	if m.brandBusy() {
+		if row := m.brand.View(); row != "" {
+			return row
 		}
 	}
-	if row.target != "" {
-		line = m.pointerState.Render(styles, settingsControlID(row.target), line)
+	frame := ""
+	if !m.brandBusy() {
+		frame = m.plainFrame()
 	}
+	return widget.Busy(m.themeStyles(), widget.BusyOpts{
+		Frame: frame, Label: label, On: theme.OverlayBand, Width: width,
+	})
+}
+
+// busyRow is a section's own busy row, for content that is still arriving while
+// the footer is describing the panel as a whole (spec section 10.8.4 rule 2).
+func (m *settingsModel) busyRow(label string, width int) settingsRenderRow {
+	row := widget.Busy(m.themeStyles(), widget.BusyOpts{
+		Frame: m.plainFrame(), Label: label, On: theme.OverlaySurf, Width: width,
+	})
+	return settingsRenderRow{line: ansi.Strip(row), rendered: row, kind: settingsRowWidget}
+}
+
+// emptyRow is the empty state of spec section 10.8.3. The tail is the button's
+// own label, because the pane's action row owns the action.
+func (m *settingsModel) emptyRow(headline, key string, width int) settingsRenderRow {
+	row := widget.Empty(m.themeStyles(), widget.EmptyOpts{
+		Headline: headline, Key: key, On: theme.OverlaySurf, Width: width,
+	})
+	return settingsRenderRow{line: ansi.Strip(row), rendered: row, kind: settingsRowWidget}
+}
+
+// errorRows is the error block of spec section 10.8.5, one pane row per
+// rendered line, empty while the pane has nothing to report.
+func (m *settingsModel) errorRows(width int) []settingsRenderRow {
+	if !m.statusIsError || m.status == "" {
+		return nil
+	}
+	styles := m.themeStyles()
+	block := widget.Error(styles, widget.ErrorOpts{
+		Message:  sanitizeTerminal(m.status),
+		Key:      m.statusTail,
+		On:       theme.OverlaySurf,
+		Width:    width,
+		MaxLines: styles.Metrics.ErrorMaxLines,
+	})
+	rows := make([]settingsRenderRow, 0, len(block))
+	for _, line := range block {
+		rows = append(rows, settingsRenderRow{line: ansi.Strip(line), rendered: line, kind: settingsRowWidget})
+	}
+	return rows
+}
+
+// renderSettingsRow applies the token the row's role names.
+//
+// A row that carries a control spends its first FocusGutterW + FocusGutterGap
+// cells on the focus gutter of spec section 10.4.3. The reserve is in the row's
+// plain text in every state, so the table's column arithmetic is the same
+// whichever row has the keyboard and focus never reflows the pane.
+func (m *settingsModel) renderSettingsRow(row settingsRenderRow, width int) string {
+	styles := m.themeStyles()
+	if row.rendered != "" {
+		return ansi.Truncate(row.rendered, max(width, 0), "")
+	}
+	line := settingsFit(row.line, width)
+	if row.target == "" {
+		return m.renderSettingsContent(row, line, theme.OverlaySurf)
+	}
+	on := theme.OverlaySurf
+	if row.kind == settingsRowField {
+		// Spec section 10.5.1: a settings key/value row is activatable, so
+		// hover raises the whole row by one tier.
+		on = styles.RowSurface(m.hovered(row.target))
+	}
+	gutter := widget.Gutter(styles, m.focus == row.target, theme.Brand, on)
+	content := m.renderSettingsContent(row, trimGutter(styles, line), on)
+	if row.kind != settingsRowButton {
+		// The button widget owns its own pressed token; every other row takes
+		// the attribute here, which costs no cells (spec section 10.4.4).
+		content = m.pointerState.Render(styles, settingsControlID(row.target), content)
+	}
+	return gutter + content
+}
+
+// renderSettingsContent renders the cells to the right of a row's gutter.
+func (m *settingsModel) renderSettingsContent(row settingsRenderRow, line string, on theme.Slot) string {
+	styles := m.themeStyles()
 	switch row.kind {
+	case settingsRowButton:
+		// A settings button is driven by focus and Enter, so the resolver of
+		// spec section 10.4.2 marks no hotkey on it; it is called anyway so no
+		// surface resolves its own.
+		label := settingsFit(row.button, max(ansi.StringWidth(line)-2*styles.Metrics.ButtonPadX, 0))
+		if label == "" {
+			return styles.Overlay.Surf.Render(line)
+		}
+		text, underline := widget.Hotkey(label, nil)
+		return widget.Button(styles, widget.ButtonOpts{
+			Text:           text,
+			Variant:        row.variant,
+			Selected:       m.focus == row.target,
+			Hovered:        m.hovered(row.target),
+			Armed:          row.armed,
+			Pressed:        m.pointerState.IsPressed(settingsControlID(row.target)),
+			UnderlineIndex: underline,
+			Padding:        [2]int{styles.Metrics.ButtonPadX, styles.Metrics.ButtonPadX},
+		})
 	case settingsRowHint:
 		return styles.Overlay.FieldLabel.Render(line)
 	case settingsRowField:
 		if m.focus == row.target {
 			return formview.Selection(
-				styles.OnBold(theme.FgBase, theme.OverlaySurf),
+				styles.OnBold(theme.FgBase, on),
 				m.mark.Active(row.target),
 			).Render(line)
 		}
-		return styles.Overlay.FieldValue.Render(line)
+		// Hover raises the tier and never re-hues (spec section 10.5.1), so the
+		// pair is Overlay.FieldValue's own foreground on whichever surface the
+		// row resolved to.
+		return styles.On(theme.FgBase, on).Render(line)
 	default:
-		return styles.Overlay.Surf.Render(line)
+		return styles.On(theme.FgBase, on).Render(line)
 	}
+}
+
+// hovered reports whether the pointer is over this row's control.
+func (m *settingsModel) hovered(target string) bool {
+	return target != "" && m.pointerState.IsHovered(settingsControlID(target))
+}
+
+// trimGutter drops the gutter reserve a row carries in its plain text, which
+// renderSettingsRow replaces with the styled bar.
+func trimGutter(styles *theme.Styles, line string) string {
+	metrics := styles.Metrics
+	reserve := max(metrics.FocusGutterW, 0) + max(metrics.FocusGutterGap, 0)
+	if ansi.StringWidth(line) <= reserve {
+		return ""
+	}
+	return ansi.Cut(line, reserve, ansi.StringWidth(line))
 }
 
 func (m *settingsModel) renderForgeRow(row *integrationSettingsRow, width int) []settingsRenderRow {
@@ -348,11 +498,16 @@ func keyLabel(label string, saved bool) string {
 // label and its colon. The colon stays on the label so the table's own padding
 // falls between the two columns rather than inside the label.
 func (m *settingsModel) settingsLabelCell(target, label string) string {
-	marker := "  "
-	if m.focus == target {
-		marker = "> "
-	}
-	return marker + label + ":"
+	return settingsGutterReserve(m.themeStyles()) + label + ":"
+}
+
+// settingsGutterReserve is the focus gutter's cells, in plain text. It is the
+// same count in every state (spec section 10.4.4), so the table lays a focused
+// row and a blurred one out identically and the styled bar of spec section
+// 10.4.3 drops straight onto it at render time.
+func settingsGutterReserve(styles *theme.Styles) string {
+	metrics := styles.Metrics
+	return strings.Repeat(" ", max(metrics.FocusGutterW, 0)+max(metrics.FocusGutterGap, 0))
 }
 
 func (m *settingsModel) inputRow(target, label, value string) settingsRenderRow {
@@ -418,12 +573,8 @@ func (m *settingsModel) layoutSettingsTable(body []settingsRenderRow, width int)
 }
 
 func (m *settingsModel) actionRow(target, label string, variant theme.ButtonVariant, width int) settingsRenderRow {
-	marker := "  "
-	if m.focus == target {
-		marker = "> "
-	}
 	return settingsRenderRow{
-		line:    settingsFit(marker+settingsButtonPad+label+settingsButtonPad, width),
+		line:    settingsFit(settingsGutterReserve(m.themeStyles())+settingsButtonPad+label+settingsButtonPad, width),
 		button:  label,
 		target:  target,
 		variant: variant,
@@ -465,7 +616,7 @@ func isSettingsMessage(message tea.Msg) bool {
 	switch message.(type) {
 	case settingsLoadedMsg, aiSettingsTestedMsg, aiSettingsSavedMsg,
 		forgeSettingsTestedMsg, forgeSettingsSavedMsg, forgeSettingsRemovedMsg,
-		settingsPointerMsg, settingsWheelMsg:
+		settingsPointerMsg, settingsWheelMsg, spinner.TickMsg, spin.StepMsg:
 		return true
 	default:
 		return false

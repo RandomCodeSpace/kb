@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
 
 const settingsTestTimeout = 20 * time.Second
@@ -100,19 +102,36 @@ type settingsModel struct {
 	busy          string
 	status        string
 	statusIsError bool
-	armedRemove   string
-	scroll        int
-	testCancel    context.CancelFunc
-	closed        bool
-	styles        *theme.Styles
-	mark          formview.Mark
+	// statusTail is the button an errored operation returns the user to. Spec
+	// section 10.8.5: an errored operation does not grow a Retry button, the
+	// error row names the control that started it, and a validation failure the
+	// user fixes in the field they are already in leaves this empty.
+	statusTail  string
+	armedRemove string
+	scroll      int
+	testCancel  context.CancelFunc
+	closed      bool
+	styles      *theme.Styles
+	mark        formview.Mark
+
+	// The two busy tiers of spec section 10.2.4 and their z-order gate.
+	spin         spinner.Model
+	brand        spin.Engine
+	brandStarted time.Time
+	now          func() time.Time
+	frontMost    bool
 }
 
 // SetStyles hands the settings pane the resolved design system. Spec section
 // 6.2: the root builds it once and threads it down.
 func (m *settingsModel) SetStyles(styles *theme.Styles) {
-	if styles != nil {
-		m.styles = styles
+	if styles == nil {
+		return
+	}
+	m.styles = styles
+	m.spin.Spinner = styles.Spinner
+	if m.brandBusy() {
+		m.configureBrand()
 	}
 }
 
@@ -155,7 +174,9 @@ func newSettingsModelWithBackends(
 		aiModel: settingsInput("model", false),
 		aiKey:   settingsInput("blank keeps saved key", true),
 		focus:   "ai:base",
+		now:     time.Now,
 	}
+	m.spin = spinner.New(spinner.WithSpinner(m.themeStyles().Spinner))
 	m.applyFocus()
 	return m
 }
@@ -201,6 +222,10 @@ func (m *settingsModel) Update(message tea.Msg) tea.Cmd {
 		return command
 	}
 	switch msg := message.(type) {
+	case spinner.TickMsg:
+		return m.spinTick(msg)
+	case spin.StepMsg:
+		return m.brandStep(msg)
 	case settingsLoadedMsg:
 		m.finishLoad(msg)
 		return nil
@@ -281,10 +306,26 @@ func settingsPointerActivates(target string) bool {
 		strings.HasSuffix(target, ":save") || strings.HasSuffix(target, ":remove")
 }
 
+// clearStatus retires whatever the pane last reported. A busy state is
+// described in one place - the band of spec section 10.8.4 - so the status slot
+// does not carry a second copy of it while an operation runs.
+func (m *settingsModel) clearStatus() {
+	m.status, m.statusIsError, m.statusTail = "", false, ""
+}
+
+// failStatus reports a failed operation and names the control that will run it
+// again. Spec section 10.8.5: an errored operation returns its control to the
+// blurred state and the error row names it, rather than growing a second
+// button for an action that already has one. A failure the user fixes in the
+// field they are already in carries no tail.
+func (m *settingsModel) failStatus(message, tail string) {
+	m.status, m.statusIsError, m.statusTail = message, true, tail
+}
+
 func (m *settingsModel) finishLoad(msg settingsLoadedMsg) {
 	if msg.err != nil {
-		m.status = safeSettingsError(msg.err)
-		m.statusIsError = true
+		// The pane cannot re-read itself, so the failure names no control.
+		m.failStatus(safeSettingsError(msg.err), "")
 		return
 	}
 	m.loaded = true
@@ -550,17 +591,19 @@ func (m *settingsModel) startAITest() tea.Cmd {
 	ctx, cancel := context.WithTimeout(m.ctx, settingsTestTimeout)
 	m.testCancel = cancel
 	m.busy = "ai:test"
-	m.status = "testing AI connection..."
-	m.statusIsError = false
+	m.clearStatus()
 	config := kbai.Config{
 		BaseURL: strings.TrimSpace(m.aiBase.Value()),
 		Model:   strings.TrimSpace(m.aiModel.Value()),
 		Key:     m.aiKey.Value(),
 	}
-	return func() tea.Msg {
+	probe := func() tea.Msg {
 		defer cancel()
 		return aiSettingsTestedMsg{err: m.ai.Probe(ctx, m.user, config)}
 	}
+	// The operation leads and the animation follows it, so a probe that
+	// completes inside the birth delay never renders a frame at all.
+	return batchCommands(probe, m.startBrand())
 }
 
 func (m *settingsModel) finishTest(err error, secret string) {
@@ -568,13 +611,16 @@ func (m *settingsModel) finishTest(err error, secret string) {
 		m.testCancel()
 		m.testCancel = nil
 	}
+	tail := "Test connection"
+	if strings.HasPrefix(m.busy, "forge:test:") {
+		tail = "Test"
+	}
 	m.busy = ""
-	m.statusIsError = err != nil
 	if err == nil {
-		m.status = "connection ok"
+		m.status, m.statusIsError, m.statusTail = "connection ok", false, ""
 		return
 	}
-	m.status = safeSettingsError(err, secret)
+	m.failStatus(safeSettingsError(err, secret), tail)
 }
 
 func (m *settingsModel) startAISave() tea.Cmd {
@@ -582,31 +628,29 @@ func (m *settingsModel) startAISave() tea.Cmd {
 	base, model, key := optionalTrimmed(m.aiBase.Value()), optionalTrimmed(m.aiModel.Value()), optionalSecret(m.aiKey.Value())
 	if base != nil {
 		if err := kbai.ValidateBaseURL(*base); err != nil {
-			m.status = safeSettingsError(err)
-			m.statusIsError = true
+			m.failStatus(safeSettingsError(err), "")
 			return nil
 		}
 	}
 	m.busy = "ai:save"
-	m.status = "saving AI settings..."
-	m.statusIsError = false
+	m.clearStatus()
 	keySet := key != nil
-	return func() tea.Msg {
+	write := func() tea.Msg {
 		cleared, err := m.store.SetAISettings(m.user, base, model, key)
 		return aiSettingsSavedMsg{keySet: keySet, keyCleared: cleared, err: err}
 	}
+	return batchCommands(write, m.startSpinner())
 }
 
 func (m *settingsModel) finishAISave(msg aiSettingsSavedMsg) {
 	m.busy = ""
 	if msg.err != nil {
-		m.status = safeSettingsError(msg.err, m.aiKey.Value())
-		m.statusIsError = true
+		m.failStatus(safeSettingsError(msg.err, m.aiKey.Value()), "Save AI settings")
 		return
 	}
 	m.hasKey = msg.keySet || (m.hasKey && !msg.keyCleared)
 	m.aiKey.SetValue("")
-	m.statusIsError = false
+	m.statusIsError, m.statusTail = false, ""
 	if msg.keyCleared {
 		m.status = "saved; endpoint changed, re-enter the API key"
 	} else {
@@ -635,45 +679,44 @@ func (m *settingsModel) startForgeTest(row *integrationSettingsRow) tea.Cmd {
 	ctx, cancel := context.WithTimeout(m.ctx, settingsTestTimeout)
 	m.testCancel = cancel
 	m.busy = "forge:test:" + row.id
-	m.status = "testing " + row.name.Value() + "..."
-	m.statusIsError = false
+	m.clearStatus()
 	id := row.id
 	config := forge.ForgeProbeConfig{
 		Name: row.name.Value(), Kind: row.kind, BaseURL: row.baseURL.Value(),
 		Project: row.project.Value(), Token: row.token.Value(), Saved: row.persisted,
 	}
-	return func() tea.Msg {
+	probe := func() tea.Msg {
 		defer cancel()
 		err := m.forge.Probe(ctx, m.user, config)
 		return forgeSettingsTestedMsg{id: id, err: err}
 	}
+	return batchCommands(probe, m.startBrand())
 }
 
 func (m *settingsModel) startForgeSave(row *integrationSettingsRow) tea.Cmd {
 	m.disarmRemove()
 	name := strings.TrimSpace(row.name.Value())
 	if name == "" {
-		m.status, m.statusIsError = "integration name is required", true
+		m.failStatus("integration name is required", "")
 		return nil
 	}
 	for i := range m.rows {
 		other := &m.rows[i]
 		if other.id != row.id && strings.EqualFold(strings.TrimSpace(other.name.Value()), name) {
-			m.status, m.statusIsError = "integration name already exists", true
+			m.failStatus("integration name already exists", "")
 			return nil
 		}
 	}
 	baseURL := optionalTrimmed(row.baseURL.Value())
 	if !row.persisted && baseURL == nil {
-		m.status, m.statusIsError = "forge base URL is required", true
+		m.failStatus("forge base URL is required", "")
 		return nil
 	}
 	token := optionalSecret(row.token.Value())
 	m.busy = "forge:save:" + row.id
-	m.status = "saving " + name + "..."
-	m.statusIsError = false
+	m.clearStatus()
 	id, kind := row.id, row.kind
-	return func() tea.Msg {
+	write := func() tea.Msg {
 		cleared, err := m.store.SetForgeSource(m.user, name, kind, baseURL, token)
 		if err != nil {
 			return forgeSettingsSavedMsg{id: id, tokenCleared: cleared, err: err}
@@ -689,6 +732,7 @@ func (m *settingsModel) startForgeSave(row *integrationSettingsRow) tea.Cmd {
 		}
 		return forgeSettingsSavedMsg{id: id, tokenCleared: cleared, err: errors.New("saved integration unavailable")}
 	}
+	return batchCommands(write, m.startSpinner())
 }
 
 func (m *settingsModel) finishForgeSave(msg forgeSettingsSavedMsg) {
@@ -698,8 +742,7 @@ func (m *settingsModel) finishForgeSave(msg forgeSettingsSavedMsg) {
 		return
 	}
 	if msg.err != nil {
-		m.status = safeSettingsError(msg.err, row.token.Value())
-		m.statusIsError = true
+		m.failStatus(safeSettingsError(msg.err, row.token.Value()), "Save")
 		return
 	}
 	replacement := persistedIntegrationRow(msg.source)
@@ -730,11 +773,12 @@ func (m *settingsModel) startForgeRemove(row *integrationSettingsRow) tea.Cmd {
 		return nil
 	}
 	m.busy = "forge:remove:" + row.id
-	m.status = "removing " + row.name.Value() + "..."
+	m.clearStatus()
 	id, name := row.id, row.name.Value()
-	return func() tea.Msg {
+	write := func() tea.Msg {
 		return forgeSettingsRemovedMsg{id: id, err: m.store.DeleteForgeSource(m.user, name)}
 	}
+	return batchCommands(write, m.startSpinner())
 }
 
 func (m *settingsModel) finishForgeRemove(msg forgeSettingsRemovedMsg) {
@@ -745,15 +789,13 @@ func (m *settingsModel) finishForgeRemove(msg forgeSettingsRemovedMsg) {
 		if row != nil {
 			secret = row.token.Value()
 		}
-		m.status = safeSettingsError(msg.err, secret)
-		m.statusIsError = true
+		m.failStatus(safeSettingsError(msg.err, secret), "Confirm remove")
 		return
 	}
 	m.removeRow(msg.id)
 	m.focus = "forge:add"
 	m.applyFocus()
-	m.status = "integration removed"
-	m.statusIsError = false
+	m.status, m.statusIsError, m.statusTail = "integration removed", false, ""
 }
 
 func (m *settingsModel) rowByID(id string) *integrationSettingsRow {
