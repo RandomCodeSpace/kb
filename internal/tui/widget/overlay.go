@@ -69,10 +69,21 @@ func Section(styles *theme.Styles, label, count string, width int) string {
 // OverlayRow renders one body row: already-styled content inset OverlayInsetX,
 // padded to the panel width so the row carries the panel surface edge to edge.
 func OverlayRow(styles *theme.Styles, content string, width int) string {
+	return OverlayRowOn(styles, content, width, theme.OverlaySurf)
+}
+
+// OverlayRowOn is OverlayRow on a named surface, which is how a choice row
+// wears its hovered fill. Spec section 10.5.1: hover raises the whole row, and
+// the raise is panel edge to panel edge, so the row's own padding has to carry
+// the same slot as its content or the raise would stop at the text.
+//
+// Callers reach the slot through Styles.RowSurface rather than naming a tier
+// here; a row that is not activatable is not hoverable and keeps OverlayRow.
+func OverlayRowOn(styles *theme.Styles, content string, width int, on theme.Slot) string {
 	if width <= 0 {
 		return ""
 	}
-	surface := styles.Overlay.Surf
+	surface := styles.On(theme.FgBase, on)
 	inset := min(styles.Metrics.OverlayInsetX, width)
 	field := max(width-2*inset, 0)
 	body := clip(content, field)

@@ -115,12 +115,23 @@ type CardStyles struct {
 // ChipStyles are the runs of one pill (spec section 3.6): two half-block end
 // caps carrying the fill color as foreground over the surface behind, the text
 // body on the fill, the dark half of a scoped pill, and the compact flat form.
+//
+// BodyHover and FlatHover are the hovered forms of spec section 10.5.1. A pill
+// is a saturated fill with two half-block end caps: there is no tier left to
+// raise and the caps cannot grow without costing columns, so the cue is an
+// underline on the body run. It costs zero cells, survives 256-color
+// quantization and the ASCII structure profile, and changes no color, so it
+// cannot move the pair's contrast. Bold is unavailable because section 2.6
+// already spends it on the compact flat chip, and a hue swap would break the
+// label wheel's identity.
 type ChipStyles struct {
 	CapLeft   lipgloss.Style
 	CapRight  lipgloss.Style
 	Body      lipgloss.Style
+	BodyHover lipgloss.Style
 	ScopedKey lipgloss.Style
 	Flat      lipgloss.Style
+	FlatHover lipgloss.Style
 }
 
 // StatusStyles are the semantic status roles of spec section 1.5.
@@ -333,6 +344,23 @@ func (s *Styles) Surface(selected, alternate bool) Slot {
 	}
 }
 
+// RowSurface returns the surface for one overlay choice row. Spec section
+// 10.5.1: hover raises the whole row one tier in the section 1.1 depth order,
+// panel edge to panel edge, and OverlayBand under FgBase is the pair section
+// 1.9 already measured as the Neutral hovered button, so a hovered row and a
+// hovered Neutral button in the same panel read as one system.
+//
+// The row does not bold: bolding a full-width run is a shout where bolding a
+// six-cell label is a nudge. A row's own selected state is the focus gutter
+// glyph of section 10.4.3, which does not spend the tier step, so the full-row
+// raise collides with nothing.
+func (s *Styles) RowSurface(hovered bool) Slot {
+	if hovered {
+		return OverlayBand
+	}
+	return OverlaySurf
+}
+
 func build(table paletteRGB, isDark bool, timing Timing) *Styles {
 	pal := table.colors()
 	blank := lipgloss.NewStyle()
@@ -440,17 +468,21 @@ func build(table paletteRGB, isDark bool, timing Timing) *Styles {
 
 type styleFunc func(foreground, background Slot) lipgloss.Style
 
-// ChipRuns returns the five runs of one pill fill over one surface. Styles.Chip
-// and Styles.Label are this composition against the resting card surface; a
-// chip on any other surface resolves here, which costs struct copies and never
-// a style construction.
+// ChipRuns returns the runs of one pill fill over one surface. Styles.Chip and
+// Styles.Label are this composition against the resting card surface; a chip on
+// any other surface resolves here, which costs struct copies and never a style
+// construction.
 func (s *Styles) ChipRuns(fill, surface Slot) ChipStyles {
+	body := s.On(FgOnAccent, fill)
+	flat := s.OnBold(fill, surface)
 	return ChipStyles{
 		CapLeft:   s.On(fill, surface),
 		CapRight:  s.On(fill, surface),
-		Body:      s.On(FgOnAccent, fill),
+		Body:      body,
+		BodyHover: body.Underline(true),
 		ScopedKey: s.On(FgSubtle, Surface),
-		Flat:      s.OnBold(fill, surface),
+		Flat:      flat,
+		FlatHover: flat.Underline(true),
 	}
 }
 

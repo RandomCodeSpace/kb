@@ -19,6 +19,14 @@ type BandOpts struct {
 	Hue     theme.Slot
 	Focused bool
 	Width   int
+
+	// Hovered thickens the unfocused band's rail glyph, per spec section
+	// 10.5.1. The band is already bold, so bold is not available as a cue, and
+	// it cannot change background without becoming the focused band; the rail
+	// slot is the one cell it has spare. A focused band renders no hover: it is
+	// already the acting column, and ratified call 9 keeps focus off the
+	// pointer, so there is nothing for hover to promise.
+	Hovered bool
 }
 
 // Band renders one column header band. Unfocused it sits on the Raised tier
@@ -36,9 +44,12 @@ func Band(styles *theme.Styles, opts BandOpts) string {
 	}
 	text := styles.OnBold(opts.Hue, theme.BandRest)
 	head := styles.Glyph.Rail
-	if opts.Focused {
+	switch {
+	case opts.Focused:
 		text = styles.OnBold(theme.FgOnAccent, opts.Hue)
 		head = styles.Glyph.Focus
+	case opts.Hovered:
+		head = styles.Glyph.RailFull
 	}
 	head += styles.Glyph.Dot + " " + strconv.Itoa(opts.Index) + " "
 

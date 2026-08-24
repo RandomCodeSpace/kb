@@ -91,7 +91,7 @@ func TestLabelForms(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			got := ansi.Strip(Label(styles, testCase.tag, theme.Card, testCase.flat))
+			got := ansi.Strip(Label(styles, testCase.tag, theme.Card, testCase.flat, false))
 			if got != testCase.want {
 				t.Errorf("Label(%q, flat=%v) = %q, want %q", testCase.tag, testCase.flat, got, testCase.want)
 			}
@@ -100,7 +100,7 @@ func TestLabelForms(t *testing.T) {
 }
 
 func TestLabelIsEmptyWithoutATag(t *testing.T) {
-	if got := Label(theme.New(true), "", theme.Card, false); got != "" {
+	if got := Label(theme.New(true), "", theme.Card, false, false); got != "" {
 		t.Errorf("empty tag rendered %q", got)
 	}
 }
@@ -109,7 +109,7 @@ func TestLabelHuesFollowTheWheel(t *testing.T) {
 	styles := theme.New(true)
 	seen := map[string]bool{}
 	for _, tag := range []string{"a", "b", "c", "d", "e"} {
-		seen[Label(styles, tag, theme.Card, true)] = true
+		seen[Label(styles, tag, theme.Card, true, false)] = true
 	}
 	if len(seen) < 2 {
 		t.Error("the wheel must produce more than one hue across tags")

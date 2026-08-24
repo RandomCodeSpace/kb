@@ -29,6 +29,15 @@ type CardOpts struct {
 	Width     int
 	DescLines int
 	Density   Density
+
+	// Hovered raises the card's rail cell one tier, per spec section 10.5.1.
+	// It is an affordance cue and nothing more: ratified call 9 keeps the board
+	// cursor off the pointer, so a hovered card is never the acting selection.
+	Hovered bool
+	// HoverTag is the label pill under the pointer, empty for none. A card's
+	// labels are a set, so the tag identifies the pill without an index whose
+	// zero value would name the first one.
+	HoverTag string
 }
 
 // CardSpan locates one rendered label pill inside the rows a card returned.
@@ -83,7 +92,7 @@ func CardWithSpans(styles *theme.Styles, opts CardOpts) ([]string, []CardSpan) {
 		content = append(content, "")
 	}
 
-	rail := Rail(styles, opts.Priority, surface, opts.Selected)
+	rail := Rail(styles, opts.Priority, railSurface(opts, surface), opts.Selected)
 	left := pad(surfaceStyle, metrics.CardPad(opts.Density))
 	right := pad(surfaceStyle, metrics.CardPadRight)
 	out := make([]string, 0, rows)
@@ -91,6 +100,20 @@ func CardWithSpans(styles *theme.Styles, opts CardOpts) ([]string, []CardSpan) {
 		out = append(out, rail+left+fill(surfaceStyle, clip(line, inner), inner)+right)
 	}
 	return out, spans
+}
+
+// railSurface is the ground the rail cell is drawn on. Spec section 10.5.1:
+// where an element's selected state already spends the tier step - the card,
+// and only the card - hover raises the rail cell instead of the surface, so a
+// hovered card reads as a hue half-block against a lighter half and a selected
+// one as a full block with no ground showing. A selected card renders no hover
+// at all: its surface is already Raised edge to edge, so the step has nowhere
+// to go, and the pointer over the already-selected card is offering nothing new.
+func railSurface(opts CardOpts, surface theme.Slot) theme.Slot {
+	if opts.Hovered && !opts.Selected {
+		return theme.Raised
+	}
+	return surface
 }
 
 // offsetSpans moves chip-row-relative spans onto the card's own grid: down by
@@ -209,7 +232,7 @@ func cardChips(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner in
 	flat := opts.Density.Compact()
 	labels := make([]string, 0, len(opts.Labels))
 	for _, tag := range opts.Labels {
-		labels = append(labels, Label(styles, tag, surface, flat))
+		labels = append(labels, Label(styles, tag, surface, flat, tag != "" && tag == opts.HoverTag))
 	}
 	if flat {
 		entries := append(append([]string{}, opts.Meta...), labels...)

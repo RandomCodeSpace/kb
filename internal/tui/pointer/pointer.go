@@ -40,8 +40,15 @@ type Action func(Point) tea.Msg
 type ControlID string
 
 // State tracks transient pointer feedback independently from domain state.
+//
+// Hover mirrors press: one control id and the cell it resolved from. Spec
+// section 10.5.2: mouse mode is not a stored flag, it is the hovered id being
+// set and resolving to one of a surface's own regions, so there is exactly one
+// bit of state to clear and no second copy of the same fact to disagree with.
 type State struct {
 	pressed ControlID
+	hovered ControlID
+	hoverAt Point
 }
 
 // IsPressed reports whether the identified control owns the active pointer
@@ -52,6 +59,58 @@ func (s State) IsPressed(id ControlID) bool {
 
 // Active reports whether any rendered control owns the current press.
 func (s State) Active() bool { return s.pressed != "" }
+
+// IsHovered reports whether the identified control is under the pointer.
+// Callers use this while rendering the control's hovered style.
+func (s State) IsHovered(id ControlID) bool {
+	return id != "" && s.hovered == id
+}
+
+// Hovered returns the control under the pointer, empty when there is none.
+func (s State) Hovered() ControlID { return s.hovered }
+
+// HoverPoint returns the cell hover last resolved from. The second result is
+// false while nothing is hovered, so a re-resolve has nothing to re-resolve.
+func (s State) HoverPoint() (Point, bool) {
+	if s.hovered == "" {
+		return Point{}, false
+	}
+	return s.hoverAt, true
+}
+
+// Hover sets the hovered control and the cell it resolved from. An empty id
+// clears hover while retaining the point, which is what a motion onto an
+// overlay's own backdrop reports.
+func (s State) Hover(id ControlID, at Point) State {
+	s.hovered = id
+	s.hoverAt = at
+	return s
+}
+
+// ClearHover turns mouse mode off for every surface. Spec section 10.5.2:
+// turning mouse mode off is clearing hover, and that is the whole of it.
+func (s State) ClearHover() State {
+	s.hovered = ""
+	return s
+}
+
+// Reresolve re-derives hover from the retained point against a freshly built
+// map. Rows 6 and 9 of spec section 10.5.2: the pointer can stand still while
+// the content moves under it, so a scroll, a resize or a changed filter has to
+// re-resolve rather than wait for a motion that never comes. A point that no
+// longer lands on a hoverable region clears hover.
+func (s State) Reresolve(m Map) State {
+	point, ok := s.HoverPoint()
+	if !ok {
+		return s
+	}
+	id, hit := m.Resolve(point)
+	if !hit {
+		return s.ClearHover()
+	}
+	s.hovered = id
+	return s
+}
 
 // Render applies same-width pressed feedback to the active control. The caller
 // supplies already-sanitized terminal content.
@@ -74,6 +133,8 @@ func (s State) Update(message tea.Msg) (State, tea.Cmd, bool) {
 		return s, nil, false
 	}
 	switch event.kind {
+	case interactionHover:
+		return s.Hover(event.id, event.point), nil, true
 	case interactionPress:
 		s.pressed = event.id
 		return s, nil, true
@@ -103,6 +164,7 @@ const (
 	interactionPress interactionKind = iota + 1
 	interactionRelease
 	interactionCancel
+	interactionHover
 )
 
 type interactionMsg struct {
@@ -142,11 +204,13 @@ type Map struct {
 }
 
 type handlerSnapshot struct {
-	regions []region
-	wheels  []wheelRegion
-	tracked bool
-	pressed int
-	dragged bool
+	regions    []region
+	wheels     []wheelRegion
+	tracked    bool
+	pressed    int
+	dragged    bool
+	lastMotion Point
+	haveMotion bool
 }
 
 // Add registers an action region. Later regions take precedence when they overlap.
@@ -190,6 +254,29 @@ func (m *Map) AddWheel(rect Rect, action func(delta int) tea.Msg) {
 	m.wheels = append(m.wheels, wheelRegion{rect: rect, action: action})
 }
 
+// Resolve returns the hoverable control containing point, topmost first. It is
+// the region scan of Handler's motion path, exposed for the re-resolve rows 6
+// and 9 of spec section 10.5.2 drive after the content moved under a still
+// pointer.
+func (m Map) Resolve(point Point) (ControlID, bool) {
+	id := resolveHover(m.regions, point)
+	return id, id != ""
+}
+
+// resolveHover is the region scan restricted to the regions that opted into
+// hover by carrying a control id. Same list as clicks, same topmost-wins
+// precedence: spec section 10.5.3 forbids a second region list and a second
+// scan, so both the motion path and Resolve run through here.
+func resolveHover(regions []region, point Point) ControlID {
+	for index := len(regions) - 1; index >= 0; index-- {
+		candidate := regions[index]
+		if candidate.id != "" && candidate.action != nil && candidate.rect.contains(point) {
+			return candidate.id
+		}
+	}
+	return ""
+}
+
 // Handler returns the immutable render snapshot's mouse callback.
 func (m Map) Handler() func(tea.MouseMsg) tea.Cmd {
 	snapshot := &handlerSnapshot{
@@ -216,7 +303,7 @@ func (h *handlerSnapshot) handle(message tea.MouseMsg) tea.Cmd {
 	case tea.MouseClickMsg:
 		return h.handleClick(mouse, point)
 	case tea.MouseMotionMsg:
-		return h.handleMotion(mouse)
+		return h.handleMotion(mouse, point)
 	case tea.MouseReleaseMsg:
 		return h.handleRelease(mouse, point)
 	default:
@@ -258,14 +345,30 @@ func (h *handlerSnapshot) handleClick(mouse tea.Mouse, point Point) tea.Cmd {
 	return nil
 }
 
-func (h *handlerSnapshot) handleMotion(mouse tea.Mouse) tea.Cmd {
-	if mouse.Button != tea.MouseLeft {
+// handleMotion is the hover half of spec section 10.5.2's table. The coord
+// guard of section 10.5.3 comes before the region scan and is on raw cell
+// coordinates rather than on the resolved id, so idle motion inside one large
+// region costs one comparison rather than a linear scan (row 1).
+func (h *handlerSnapshot) handleMotion(mouse tea.Mouse, point Point) tea.Cmd {
+	if h.haveMotion && h.lastMotion == point {
 		return nil
 	}
-	if h.pressed >= 0 {
-		h.dragged = true
+	h.haveMotion, h.lastMotion = true, point
+	if mouse.Button == tea.MouseLeft {
+		// Row 4: the drag path, unchanged. Hover is neither read nor written.
+		if h.pressed >= 0 {
+			h.dragged = true
+		}
+		return h.cancelTracked(nil)
 	}
-	return h.cancelTracked(nil)
+	if !h.tracked {
+		return nil
+	}
+	// Rows 2 and 3: hoverable is opt-in on the region that already exists, so
+	// a map with no control ids never emits hover and never re-renders for it,
+	// and a point that resolves to none of them clears hover rather than
+	// leaving the previous one lit.
+	return hoverCommand(resolveHover(h.regions, point), point)
 }
 
 func (h *handlerSnapshot) handleRelease(mouse tea.Mouse, point Point) tea.Cmd {
@@ -342,6 +445,12 @@ func pressCommand(id ControlID) tea.Cmd {
 func releaseCommand(id ControlID, point Point, action Action) tea.Cmd {
 	return func() tea.Msg {
 		return interactionMsg{kind: interactionRelease, id: id, point: point, activate: action}
+	}
+}
+
+func hoverCommand(id ControlID, point Point) tea.Cmd {
+	return func() tea.Msg {
+		return interactionMsg{kind: interactionHover, id: id, point: point}
 	}
 }
 
