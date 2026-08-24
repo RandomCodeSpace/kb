@@ -35,7 +35,7 @@ func fullEditorTask() board.Task {
 }
 
 func TestEditorGolden(t *testing.T) {
-	model := New(newTestStore(t), "default")
+	model := newTestEditor(newTestStore(t), "default")
 	model.OpenEdit(fullEditorTask())
 	model.labels = []string{"tui", "type::feature", "release"}
 	model.similar = []store.SimilarHit{
@@ -54,14 +54,14 @@ func TestEditorGolden(t *testing.T) {
 // ASCII-pinned golden of a design whose depth model is background color
 // asserts nothing about the design, so this one pins truecolor.
 func TestEditorColorGolden(t *testing.T) {
-	model := New(newTestStore(t), "default")
+	model := newTestEditor(newTestStore(t), "default")
 	model.OpenEdit(fullEditorTask())
 	model.focus = "save"
 	golden.RequireEqual(t, []byte(theme.Downsample(model.View(48, 14), theme.ColorProfile)))
 }
 
 func TestViewCoversErrorsSuggestionsGuardsAndControlSafety(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenEdit(fullEditorTask())
 	model.title.SetValue("bad\x1b[31m title")
 	model.emoji.SetValue("👨‍💻")
@@ -120,7 +120,7 @@ func TestViewCoversErrorsSuggestionsGuardsAndControlSafety(t *testing.T) {
 
 func TestAIDraftControlsRenderProgressAndControlSafePrompt(t *testing.T) {
 	runner := &fakeDraftRunner{}
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.SetAIRunner(runner, nil)
 	model.SetAIRunner(runner, context.Background())
 	model.OpenAdd(board.StatusTodo)
@@ -146,7 +146,7 @@ func TestAIDraftControlsRenderProgressAndControlSafePrompt(t *testing.T) {
 // editor's drafting and saving states carry the bubbles spinner instead of
 // static text, and the tick loop stops as soon as nothing is in flight.
 func TestSpinnerAdvancesOnlyWhileDraftingOrSaving(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	if model.busy() || model.spinTick(spinner.TickMsg{}) != nil {
 		t.Fatal("idle editor kept a spinner tick alive")
@@ -191,7 +191,7 @@ func TestSpinnerAdvancesOnlyWhileDraftingOrSaving(t *testing.T) {
 }
 
 func TestOverlayAndTinyViewStayBounded(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	background := strings.Repeat("b", 30) + "\n" + strings.Repeat("b", 30)
 	if got := model.Overlay(background, 30, 8); got != background || model.View(30, 8) != "" {
 		t.Fatal("closed editor changed the surface")

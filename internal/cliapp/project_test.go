@@ -512,6 +512,31 @@ func TestCurrentProjectOfWantsExactlyOne(t *testing.T) {
 	}
 }
 
+// TestActiveProjectIsTheExportedResolution covers the seam other local
+// surfaces (the TUI) take their default from: the same order as the commands,
+// minus the flag they do not have.
+func TestActiveProjectIsTheExportedResolution(t *testing.T) {
+	dir := noProjectEnv(t)
+	name, ok, err := ActiveProject(dir)
+	if err != nil || ok || name != "" {
+		t.Fatalf("unset active project = %q, %v, %v", name, ok, err)
+	}
+	if _, _, code := runCmd(t, "project", "use", "stored", "--data", dir); code != 0 {
+		t.Fatal("project use failed")
+	}
+	if name, ok, err := ActiveProject(dir); err != nil || !ok || name != "stored" {
+		t.Fatalf("stored active project = %q, %v, %v", name, ok, err)
+	}
+	t.Setenv("KB_PROJECT", "fromenv")
+	if name, ok, err := ActiveProject(dir); err != nil || !ok || name != "fromenv" {
+		t.Fatalf("env active project = %q, %v, %v", name, ok, err)
+	}
+	t.Setenv("KB_PROJECT", "two words")
+	if _, _, err := ActiveProject(dir); err == nil || !strings.Contains(err.Error(), "KB_PROJECT") {
+		t.Fatalf("invalid KB_PROJECT = %v", err)
+	}
+}
+
 func TestProjectCommandsReportUnreadableState(t *testing.T) {
 	dir := noProjectEnv(t)
 	if err := os.WriteFile(filepath.Join(dir, cliStateFile), []byte("not json"), 0o600); err != nil {

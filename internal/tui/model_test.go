@@ -1237,6 +1237,7 @@ func TestRootRoutesCreateEditorAndRefreshesAcknowledgedSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := NewModel(st, nil, "alice")
+	m.SetActiveProject("kb")
 	completeBoardLoad(t, &m, m.Init())
 	loadLabels := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'n'})
 	if !m.editor.IsOpen() || loadLabels == nil {
@@ -1264,6 +1265,10 @@ func TestRootRoutesCreateEditorAndRefreshesAcknowledgedSave(t *testing.T) {
 	selected, ok := m.selectedTask()
 	if !ok || selected.Title != "Root-created card" || selected.ID == "" || selected.ID == existing.ID || m.selectAfterLoad != "" {
 		t.Fatalf("created card selection = selected:%+v ok:%v pending:%q", selected, ok, m.selectAfterLoad)
+	}
+	// The card the board created carries the active project, spelled once.
+	if got := selected.Tags; len(got) != 1 || got[0] != "project::kb" {
+		t.Fatalf("created card tags = %v, want exactly [project::kb]", got)
 	}
 }
 

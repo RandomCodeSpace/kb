@@ -17,6 +17,11 @@ type tuiPreferences struct {
 	ShowCancelled bool          `json:"show_cancelled"`
 	Filter        boardFilter   `json:"filter,omitempty"`
 	Shipped       shippedRecord `json:"shipped,omitempty"`
+	// Project is the switcher's scope. Both fields empty means nothing was
+	// stored, which restores as the active project rather than as "all": a
+	// board that has never been switched opens where the CLI points.
+	Project    string `json:"project,omitempty"`
+	ProjectAll bool   `json:"project_all,omitempty"`
 }
 
 type preferenceSavedMsg struct {
@@ -62,8 +67,17 @@ func (m *Model) restorePreferences(path string) {
 	if err != nil {
 		return
 	}
+	m.adoptPreferences(preferences)
+}
+
+// adoptPreferences applies a loaded snapshot. The project scope resolves last
+// against the active project, so a board that has never been switched opens
+// where the CLI points.
+func (m *Model) adoptPreferences(preferences tuiPreferences) {
 	m.boardView.showCancelled = preferences.ShowCancelled
 	m.filter.restore(preferences.Filter)
+	m.projects.restore(projectSwitcher{name: preferences.Project, all: preferences.ProjectAll}, m.activeProject)
+	m.editor.SetProjectDefault(m.projectDefault())
 	m.shipped = preferences.Shipped
 	m.normalizeShipped()
 }
@@ -148,6 +162,8 @@ func (m *Model) preferences() tuiPreferences {
 		ShowCancelled: m.boardView.showCancelled,
 		Filter:        m.filter.value(),
 		Shipped:       m.shipped,
+		Project:       m.projects.name,
+		ProjectAll:    m.projects.all,
 	}
 }
 
@@ -187,6 +203,7 @@ func (m *Model) finishPreferences(message preferenceSavedMsg) tea.Cmd {
 
 func preferencesEqual(left, right tuiPreferences) bool {
 	if left.ShowCancelled != right.ShowCancelled || left.Filter.Text != right.Filter.Text ||
+		left.Project != right.Project || left.ProjectAll != right.ProjectAll ||
 		left.Shipped.Date != right.Shipped.Date || len(left.Filter.Tags) != len(right.Filter.Tags) ||
 		len(left.Shipped.IDs) != len(right.Shipped.IDs) {
 		return false

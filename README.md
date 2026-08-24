@@ -68,6 +68,8 @@ The TUI is the primary human interface. It includes:
 - create/edit forms with labels, due dates, effort, priority, checklists, and
   blocked state;
 - persistent text and label filters per board;
+- a project switcher scoping the board to one project or all of them, persisted
+  per board, with a mandatory project field on every card;
 - keyboard lift/drop and mouse drag moves with filtered-order correctness;
 - completion guards, tick-all/force-ship choices, auto-ship, unship, cancel,
   restore, and permanent deletion;
@@ -87,6 +89,7 @@ keys are:
 | `Space` | Lift/drop a card |
 | `n` / `e` | Create / edit a card |
 | `/` / `f` | Edit / clear filters |
+| `p` / `P` | Switch project (next / previous, `all` included) |
 | `c` | Toggle Cancelled |
 | `s` | Open settings |
 | `a` | Split an ADR into cards |
@@ -211,6 +214,13 @@ and spelling `--tag project::<name>` does the same. Contradicting `-p` with a
 Tasks created before projects existed are given `project::inbox` the first
 time kb opens the local database — automatically, once, and idempotently, so
 the rule is already true for them by the time any command can see it.
+
+The TUI reads and writes the same labels. It opens on the project the CLI would
+default to; `p`/`P` cycle the switcher through `all` and every project on the
+board, and the choice is stored in the board's preferences beside the Cancelled
+toggle. The project pill leads each card's label row, and the card editor
+carries a mandatory Project field, defaulted to the switcher's scope, that
+refuses to save a card without exactly one project.
 
 Tasks have stable per-board sequence numbers such as `#12`; bare `12` and a
 unique UUID prefix also work. `cancel` is reversible. `rm --yes` permanently

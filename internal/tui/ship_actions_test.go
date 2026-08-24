@@ -534,7 +534,10 @@ func TestShippedRecordPersistenceRolloverAndIdentity(t *testing.T) {
 		t.Fatalf("normalized shipped count = %d", got)
 	}
 	preferences := m.preferences()
-	if !preferencesEqual(preferences, tuiPreferences{Shipped: shippedRecord{Date: "2026-08-18", IDs: []string{"a", "b"}}}) {
+	if !preferencesEqual(preferences, tuiPreferences{
+		Shipped:    shippedRecord{Date: "2026-08-18", IDs: []string{"a", "b"}},
+		ProjectAll: true,
+	}) {
 		t.Fatalf("shipped preferences = %+v", preferences)
 	}
 	m.recordShipped("c")

@@ -101,6 +101,19 @@ func newTestStore(t *testing.T) *faultStore {
 	return &faultStore{Store: st}
 }
 
+// testProject is the project the root would have handed the editor before it
+// opened a form.
+const testProject = "kb"
+
+// newTestEditor is New plus that handoff, so tests about every other field do
+// not each have to spell the mandatory project out. The refusal when nothing
+// resolves has its own tests.
+func newTestEditor(st Store, user string) Model {
+	model := New(st, user)
+	model.SetProjectDefault(testProject)
+	return model
+}
+
 func run(t *testing.T, model *Model, command tea.Cmd) {
 	t.Helper()
 	if command == nil {
@@ -113,7 +126,7 @@ func press(code rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: code} }
 
 func TestCreatePersistsEveryFieldAndAcknowledgesClose(t *testing.T) {
 	backend := newTestStore(t)
-	model := New(backend, "alice")
+	model := newTestEditor(backend, "alice")
 	if !model.Enabled() || model.IsOpen() || model.TaskID() != "" || model.Dirty() {
 		t.Fatalf("initial state = enabled:%v open:%v id:%q dirty:%v", model.Enabled(), model.IsOpen(), model.TaskID(), model.Dirty())
 	}
@@ -147,7 +160,7 @@ func TestCreatePersistsEveryFieldAndAcknowledgesClose(t *testing.T) {
 	task := got.Tasks[0]
 	if task.Title != "Ship direct editor" || task.Emoji != "🧭" || task.Desc != "first line\nsecond line" ||
 		task.Status != board.StatusDoing || task.Prio != 1 || task.Due != "2026-08-31" || task.Effort != "M" ||
-		!task.Blocked || strings.Join(task.Tags, ",") != "tui,type::feature" || len(task.Checks) != 2 ||
+		!task.Blocked || strings.Join(task.Tags, ",") != "tui,type::feature,project::kb" || len(task.Checks) != 2 ||
 		task.Checks[0].Done || !task.Checks[1].Done || task.Checks[1].Text != "ship it" {
 		t.Fatalf("created task = %+v", task)
 	}
@@ -161,7 +174,7 @@ func TestEditClearSemanticsAndRefusedSavePreserveForm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	model := New(backend, "alice")
+	model := newTestEditor(backend, "alice")
 	model.OpenEdit(created)
 	model.title.SetValue("Edited")
 	model.due.SetValue("")
@@ -189,7 +202,7 @@ func TestEditClearSemanticsAndRefusedSavePreserveForm(t *testing.T) {
 }
 
 func TestWireValidationStaysOpenForUnicodeAndDateErrors(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.title.SetValue("Card")
 	for _, test := range []struct {
@@ -216,7 +229,7 @@ func TestWireValidationStaysOpenForUnicodeAndDateErrors(t *testing.T) {
 func TestUnsavedGuardAndWatcherRefreshNeverOverwriteDirtyFields(t *testing.T) {
 	backend := newTestStore(t)
 	task, _ := backend.Store.AddTask("u", board.Task{Title: "Original", Status: board.StatusTodo, Prio: 3})
-	model := New(backend, "u")
+	model := newTestEditor(backend, "u")
 	model.OpenEdit(task)
 	cleanUpdate := task
 	cleanUpdate.Title = "Fresh"
@@ -278,7 +291,7 @@ func TestEditMergesConcurrentUnrelatedStoreChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	model := New(editorStore, "u")
+	model := newTestEditor(editorStore, "u")
 	model.OpenEdit(created)
 	model.title.SetValue("Local title")
 
@@ -318,7 +331,7 @@ func TestEditRejectsSameFieldConflictAfterDirtyRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	model := New(backend, "u")
+	model := newTestEditor(backend, "u")
 	model.OpenEdit(created)
 	model.title.SetValue("Local title")
 	remoteTitle := "Remote title"
@@ -346,7 +359,7 @@ func TestEditSaveCASRejectsLateSameFieldWriteAndPreservesLateUnrelatedWrite(t *t
 		if err != nil {
 			t.Fatal(err)
 		}
-		model := New(backend, "u")
+		model := newTestEditor(backend, "u")
 		model.OpenEdit(created)
 		model.title.SetValue("Local title")
 		backend.beforeUpdate = func() {
@@ -380,7 +393,7 @@ func TestEditSaveCASRejectsLateSameFieldWriteAndPreservesLateUnrelatedWrite(t *t
 		if err != nil {
 			t.Fatal(err)
 		}
-		model := New(backend, "u")
+		model := newTestEditor(backend, "u")
 		model.OpenEdit(created)
 		model.title.SetValue("Local title")
 		convergedTitle := "Local title"
@@ -420,7 +433,7 @@ func TestEditSaveCASRejectsLateSameFieldWriteAndPreservesLateUnrelatedWrite(t *t
 		if err != nil {
 			t.Fatal(err)
 		}
-		model := New(backend, "u")
+		model := newTestEditor(backend, "u")
 		model.OpenEdit(created)
 		model.title.SetValue("Local title")
 		backend.beforeUpdate = func() {
@@ -444,7 +457,7 @@ func TestEditSaveCASRejectsLateSameFieldWriteAndPreservesLateUnrelatedWrite(t *t
 
 func TestSaveCompletionIsScopedToEditorSession(t *testing.T) {
 	backend := newTestStore(t)
-	model := New(backend, "u")
+	model := newTestEditor(backend, "u")
 	model.OpenAdd(board.StatusTodo)
 	model.title.SetValue("Old session")
 	oldSave := model.startSave()
@@ -521,7 +534,7 @@ func TestSelectiveTaskPatchCoversEveryEditableField(t *testing.T) {
 		t.Fatal("slice comparison accepted unequal values")
 	}
 
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenEdit(board.Task{ID: "task", Title: "  untouched title  ", Desc: "old", Status: board.StatusTodo, Prio: 3})
 	model.desc.SetValue("new")
 	_, whitespacePatch, err := model.buildSave()
@@ -531,7 +544,7 @@ func TestSelectiveTaskPatchCoversEveryEditableField(t *testing.T) {
 }
 
 func TestSimilarCacheReturnClearsInflightLoadingAndRejectsOldResults(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.title.SetValue("alpha query")
 	model.similarGen = 1
@@ -562,7 +575,7 @@ func TestSimilarCacheReturnClearsInflightLoadingAndRejectsOldResults(t *testing.
 }
 
 func TestLabelLoadsAreScopedToEditorSession(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	oldSession := model.session
 	model.requestClose()
@@ -605,7 +618,7 @@ func TestDuePickerUsesInjectedLocalCalendarDay(t *testing.T) {
 
 func TestLinkLabelChangesInvalidateSimilarSearchExclusions(t *testing.T) {
 	backend := newTestStore(t)
-	model := New(backend, "u")
+	model := newTestEditor(backend, "u")
 	model.OpenAdd(board.StatusTodo)
 	model.title.SetValue("same title")
 	model.tags = []string{"link::a"}
@@ -650,7 +663,7 @@ func TestSimilarDebounceExclusionsDismissalsAndKilledContext(t *testing.T) {
 	if err := backend.Store.RecordTombstone("u", killed.ID, "superseded by issue 90"); err != nil {
 		t.Fatal(err)
 	}
-	model := New(backend, "u")
+	model := newTestEditor(backend, "u")
 	model.OpenEdit(edited)
 	query := strings.TrimSpace(model.title.Value())
 	model.similarGen = 7
@@ -696,7 +709,7 @@ func TestSimilarDebounceExclusionsDismissalsAndKilledContext(t *testing.T) {
 }
 
 func TestLabelComboboxAndPickerControls(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.Update(labelsLoadedMsg{session: model.session, labels: []string{"alpha", "alphabet", "beta"}})
 	model.focus = "labels"
@@ -750,7 +763,7 @@ func TestLabelComboboxAndPickerControls(t *testing.T) {
 func TestFailureLoadsBusyRoutingAndHelperEdges(t *testing.T) {
 	backend := newTestStore(t)
 	backend.labelsErr = errors.New("labels\nfailed")
-	model := New(backend, "u")
+	model := newTestEditor(backend, "u")
 	run(t, &model, model.OpenAdd(board.Status("bad")))
 	if model.status != board.StatusTodo || model.labelsErr == nil {
 		t.Fatalf("fallback/load state = status:%q err:%v", model.status, model.labelsErr)
@@ -784,7 +797,7 @@ func TestFailureLoadsBusyRoutingAndHelperEdges(t *testing.T) {
 	if IsMessage(press('x')) || !IsMessage(labelsLoadedMsg{}) {
 		t.Fatal("message ownership mismatch")
 	}
-	disabled := New(nil, "u")
+	disabled := newTestEditor(nil, "u")
 	if disabled.Enabled() || disabled.OpenAdd(board.StatusTodo) != nil || disabled.OpenEdit(board.Task{ID: "x"}) != nil {
 		t.Fatal("nil backend exposed editor")
 	}
@@ -792,7 +805,7 @@ func TestFailureLoadsBusyRoutingAndHelperEdges(t *testing.T) {
 
 func TestKeyboardRoutesEveryFieldAndAction(t *testing.T) {
 	backend := newTestStore(t)
-	model := New(backend, "u")
+	model := newTestEditor(backend, "u")
 	model.OpenAdd(board.StatusTodo)
 	typeText := func(text string) {
 		for _, char := range text {
@@ -822,6 +835,17 @@ func TestKeyboardRoutesEveryFieldAndAction(t *testing.T) {
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	model.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+	model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	// The mandatory project field sits between blocked and the labels.
+	if model.focus != "project" {
+		t.Fatalf("focus after blocked = %q, want project", model.focus)
+	}
+	// ctrl+a marks the defaulted project, and typing replaces it.
+	model.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	typeText("atlas")
+	if model.project.Value() != "atlas" {
+		t.Fatalf("project input = %q", model.project.Value())
+	}
 	model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	model.Update(labelsLoadedMsg{session: model.session, labels: []string{"alpha", "beta"}})
 	model.labelsOpen = true
@@ -860,7 +884,7 @@ func TestKeyboardRoutesEveryFieldAndAction(t *testing.T) {
 
 func TestCtrlEnterUsesTheKeyboardSavePath(t *testing.T) {
 	backend := newTestStore(t)
-	model := New(backend, "u")
+	model := newTestEditor(backend, "u")
 	model.OpenAdd(board.StatusTodo)
 	model.title.SetValue("ctrl enter save")
 
@@ -876,7 +900,7 @@ func TestCtrlEnterUsesTheKeyboardSavePath(t *testing.T) {
 
 func TestPointerFocusAndSaveUseTheRenderedHitRegions(t *testing.T) {
 	backend := newTestStore(t)
-	model := New(backend, "u")
+	model := newTestEditor(backend, "u")
 	model.OpenAdd(board.StatusTodo)
 	model.title.SetValue("pointer saved")
 
@@ -926,7 +950,7 @@ func TestPointerFocusCoversVisibleFieldsAndCancel(t *testing.T) {
 	}
 	for _, field := range fields {
 		t.Run(field.target, func(t *testing.T) {
-			model := New(newTestStore(t), "u")
+			model := newTestEditor(newTestStore(t), "u")
 			model.OpenAdd(board.StatusTodo)
 			click := clickRenderedText(t, &model, width, height, field.label)
 			model.Update(click())
@@ -936,7 +960,7 @@ func TestPointerFocusCoversVisibleFieldsAndCancel(t *testing.T) {
 		})
 	}
 
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	cancel := clickRenderedText(t, &model, width, height, " Cancel ")
 	if cancel == nil {
@@ -949,7 +973,7 @@ func TestPointerFocusCoversVisibleFieldsAndCancel(t *testing.T) {
 }
 
 func TestPointerHandlerIgnoresOutsideAndNonLeftClicks(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	handler := model.MouseHandler(84, 32)
 	if handler == nil {
@@ -969,7 +993,7 @@ func TestPointerHandlerIgnoresOutsideAndNonLeftClicks(t *testing.T) {
 }
 
 func TestPointerDraftCancelUsesEscPath(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.SetAIRunner(&fakeDraftRunner{}, context.Background())
 	model.OpenAdd(board.StatusTodo)
 	model.drafting = true
@@ -983,7 +1007,7 @@ func TestPointerDraftCancelUsesEscPath(t *testing.T) {
 
 func TestPointerDirtyCloseOffersDiscardAndKeepEditing(t *testing.T) {
 	const width, height = 120, 40
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.title.SetValue("dirty")
 	model.requestClose()
@@ -1005,7 +1029,7 @@ func TestPointerDirtyCloseOffersDiscardAndKeepEditing(t *testing.T) {
 
 func TestPointerDirtyCloseRendersPressedFeedbackAndActivatesAfterRerender(t *testing.T) {
 	const width, height = 120, 40
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.title.SetValue("dirty")
 	model.requestClose()
@@ -1041,7 +1065,7 @@ func TestPointerDirtyCloseRendersPressedFeedbackAndActivatesAfterRerender(t *tes
 }
 
 func TestPointerLabelSuggestionUsesLabelSelectionPath(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.labels = []string{"alpha", "beta"}
 	model.focus, model.labelsOpen = "labels", true
@@ -1054,7 +1078,7 @@ func TestPointerLabelSuggestionUsesLabelSelectionPath(t *testing.T) {
 }
 
 func TestDuplicateSimilarRowsKeepDistinctPointerIdentity(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.similar = []store.SimilarHit{
 		{ID: "first", Title: "duplicate", Via: "title"},
@@ -1073,7 +1097,7 @@ func TestDuplicateSimilarRowsKeepDistinctPointerIdentity(t *testing.T) {
 }
 
 func TestTextareaContentCannotImpersonatePointerControls(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.desc.SetValue("[Save card]\nTitle:")
 	if command := clickRenderedText(t, &model, 120, 40, "Save card"); command != nil {
@@ -1086,7 +1110,7 @@ func TestTextareaContentCannotImpersonatePointerControls(t *testing.T) {
 
 func TestPointerMessagesFromClosedSessionAreIgnored(t *testing.T) {
 	const width, height = 120, 40
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	oldHandler := model.MouseHandler(width, height)
 	oldHits := model.pointerHits(width, height)
@@ -1131,7 +1155,7 @@ func TestPointerChoicesActivateExistingKeyboardPaths(t *testing.T) {
 		{target: "Blocked:", value: "yes", check: func(m Model) bool { return m.blocked }},
 	} {
 		t.Run(test.target, func(t *testing.T) {
-			model := New(newTestStore(t), "u")
+			model := newTestEditor(newTestStore(t), "u")
 			model.OpenAdd(board.StatusTodo)
 			command := clickRenderedText(t, &model, 120, 40, test.target)
 			model.Update(command())
@@ -1144,7 +1168,7 @@ func TestPointerChoicesActivateExistingKeyboardPaths(t *testing.T) {
 
 func TestPointerWheelScrollRevealsSaveControl(t *testing.T) {
 	const width, height = 84, 12
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.title.SetValue("scroll save")
 	handler := model.MouseHandler(width, height)
@@ -1172,7 +1196,7 @@ func TestPointerWheelScrollRevealsSaveControl(t *testing.T) {
 
 func TestPointerPressRendersMarkerAndReleaseActivatesOnce(t *testing.T) {
 	const width, height = 120, 40
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	handler := model.MouseHandler(width, height)
 	var hit pointerHit
@@ -1243,7 +1267,7 @@ func clickRenderedText(t *testing.T, model *Model, width, height int, text strin
 }
 
 func TestFocusTargetsHelpersAndCleanCloseBranches(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	if model.TaskID() != "" {
 		t.Fatalf("add task id = %q", model.TaskID())
@@ -1290,7 +1314,7 @@ func TestAIDraftCreateUsesReadOnlyRunnerAndFillsFormForReview(t *testing.T) {
 		Due: "2026-08-30", Effort: "L", Tags: []string{"ai", "type::feature"},
 		Checks: []ai.DraftCheck{{Text: "review"}, {Text: "ship", Done: true}},
 	}}}}
-	model := New(newTestStore(t), "alice")
+	model := newTestEditor(newTestStore(t), "alice")
 	model.SetAIRunner(runner, context.Background())
 	run(t, &model, model.OpenAdd(board.StatusDoing))
 	model.draftPrompt.SetValue("write the release task")
@@ -1322,7 +1346,7 @@ func TestAIDraftEditCarriesCurrentFormJSONAndPreservesBlocked(t *testing.T) {
 	runner := &fakeDraftRunner{run: ai.RunResult{Cards: []ai.Draft{{
 		Title: "Updated", Desc: "new", Prio: 4, Tags: []string{}, Checks: []ai.DraftCheck{},
 	}}}}
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.SetAIRunner(runner, context.Background())
 	run(t, &model, model.OpenEdit(fullEditorTask()))
 	model.title.SetValue("locally edited")
@@ -1350,7 +1374,7 @@ func TestAIDraftEditCarriesCurrentFormJSONAndPreservesBlocked(t *testing.T) {
 
 func TestAIDraftCancellationErrorsAndExternalDeleteCannotReviveEditor(t *testing.T) {
 	runner := &fakeDraftRunner{run: ai.RunResult{Cards: []ai.Draft{{Title: "late", Prio: 3}}}}
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	model.SetAIRunner(runner, context.Background())
 	run(t, &model, model.OpenEdit(fullEditorTask()))
 	model.draftPrompt.SetValue("draft")
@@ -1402,7 +1426,7 @@ func TestAIDraftCancellationErrorsAndExternalDeleteCannotReviveEditor(t *testing
 }
 
 func TestAIDraftUnavailableBlankStaleAndShutdownBranches(t *testing.T) {
-	model := New(newTestStore(t), "u")
+	model := newTestEditor(newTestStore(t), "u")
 	run(t, &model, model.OpenAdd(board.StatusTodo))
 	if command := model.startDraft(); command != nil {
 		t.Fatal("missing runner started draft")

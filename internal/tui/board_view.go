@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/project"
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
@@ -68,6 +69,7 @@ type boardColumnClickedMsg struct{ status board.Status }
 type filterTextClickedMsg struct{}
 type filterLabelClickedMsg struct{ tag string }
 type filterClearClickedMsg struct{}
+type filterProjectClickedMsg struct{}
 type boardFooterClickedMsg struct{ key string }
 type boardPointerDownMsg struct{ taskID string }
 type boardPointerMoveMsg struct {
@@ -89,6 +91,7 @@ const (
 	boardHitFilterClear
 	boardHitFooterAction
 	boardHitColumnHeading
+	boardHitProject
 )
 
 type boardHit struct {
@@ -515,6 +518,8 @@ func boardHitControlID(hit boardHit) pointer.ControlID {
 		return pointer.ControlID("board-filter:label:" + hit.tag)
 	case boardHitFilterClear:
 		return pointer.ControlID("board-filter:clear")
+	case boardHitProject:
+		return pointer.ControlID("board-filter:project")
 	case boardHitColumnHeading:
 		return pointer.ControlID("board-column:" + string(hit.status))
 	}
@@ -589,8 +594,16 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 		styles.On(theme.FgBase, theme.Surface),
 		m.filter.focus == filterText && m.filter.mark.Active(filterMarkField),
 	), boardHitFilterText, "")
+	// The project switcher sits at the end of the field row: it is the same
+	// axis as the filter, it carries the brand hue while the board is scoped to
+	// one project, and it is the toolbar's only always-present state readout.
+	projectStyle := styles.On(theme.FgMuted, theme.Canvas)
+	if !m.projects.all && m.projects.name != "" {
+		projectStyle = styles.OnBold(theme.Brand, theme.Canvas)
+	}
+	appendPart(0, "[project: "+sanitizeTerminal(m.projects.label())+"]", projectStyle, boardHitProject, "")
 	if m.filter.active() {
-		count := fmt.Sprintf("%d of %d cards", len(m.filteredBoard().Tasks), len(m.board.Tasks))
+		count := fmt.Sprintf("%d of %d cards", len(m.filteredBoard().Tasks), len(m.projectBoard().Tasks))
 		appendPart(1, count, styles.On(theme.FgMuted, theme.Canvas), boardHitDefault, "")
 	}
 	for _, tag := range labels {
@@ -827,8 +840,12 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 		isSelected := focused && i == selected
 		alternate := density.Compact() && i%2 == 1
 		surface := styles.Surface(isSelected, alternate)
-		tags := make([]string, 0, len(task.Tags))
-		for _, tag := range task.Tags {
+		// The project pill leads the label row: the row is rendered in survival
+		// order, so the card's mandatory scope is the label that stays on it
+		// when the row runs out of width (spec section 3.5).
+		ordered := project.Lead(task.Tags)
+		tags := make([]string, 0, len(ordered))
+		for _, tag := range ordered {
 			tags = append(tags, sanitizeTerminal(tag))
 		}
 		rows, cardSpans := widget.CardWithSpans(styles, widget.CardOpts{
@@ -850,7 +867,7 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 			// The span reports its position in CardOpts.Labels, so the hit keeps
 			// the task's exact tag while the card renders the sanitized one.
 			rowSpans[span.Row] = append(rowSpans[span.Row],
-				labelSpan{x0: span.X0, x1: span.X1, tag: task.Tags[span.Index]})
+				labelSpan{x0: span.X0, x1: span.X1, tag: ordered[span.Index]})
 		}
 		for rowIndex, line := range rows {
 			for spanIndex := len(rowSpans[rowIndex]) - 1; spanIndex >= 0; spanIndex-- {
@@ -1043,6 +1060,8 @@ func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.C
 				return func() tea.Msg { return filterLabelClickedMsg{tag: matched.tag} }
 			case boardHitFilterClear:
 				return func() tea.Msg { return filterClearClickedMsg{} }
+			case boardHitProject:
+				return func() tea.Msg { return filterProjectClickedMsg{} }
 			case boardHitFooterAction:
 				return func() tea.Msg { return boardFooterClickedMsg{key: matched.key} }
 			}
@@ -1123,6 +1142,8 @@ func boardControlMessage(hit boardHit) tea.Msg {
 		return filterLabelClickedMsg{tag: hit.tag}
 	case boardHitFilterClear:
 		return filterClearClickedMsg{}
+	case boardHitProject:
+		return filterProjectClickedMsg{}
 	default:
 		return boardColumnClickedMsg{status: hit.status}
 	}

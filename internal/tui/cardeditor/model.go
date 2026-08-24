@@ -19,6 +19,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/project"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
@@ -105,6 +106,7 @@ type snapshot struct {
 	prio                                    int
 	blocked                                 bool
 	tags                                    string
+	project                                 string
 }
 
 type editedFields struct {
@@ -138,6 +140,7 @@ type Model struct {
 
 	title       textinput.Model
 	emoji       textinput.Model
+	project     textinput.Model
 	desc        textarea.Model
 	due         textinput.Model
 	label       textinput.Model
@@ -148,6 +151,11 @@ type Model struct {
 	effort      string
 	blocked     bool
 	tags        []string
+
+	// defaultProject is the project a card opened without one starts in: the
+	// board's switcher selection, else the active project. Empty leaves the
+	// field blank, and the editor refuses to save until it is filled.
+	defaultProject string
 
 	labels            []string
 	labelsOpen        bool
@@ -208,6 +216,13 @@ func (m *Model) SetAIRunner(runner SkillRunner, ctx context.Context) {
 		ctx = context.Background()
 	}
 	m.ctx = ctx
+}
+
+// SetProjectDefault hands the editor the project a new card belongs to. The
+// board keeps it current as the switcher moves; an open form is left alone,
+// because the project on screen is the one the user is editing.
+func (m *Model) SetProjectDefault(name string) {
+	m.defaultProject = strings.TrimSpace(name)
 }
 
 // Enabled reports whether the root has a writable direct-store backend.
@@ -323,6 +338,7 @@ func (m *Model) resetInputs() {
 	m.emoji = editorInput("optional")
 	m.due = editorInput("YYYY-MM-DD")
 	m.label = editorInput("label or scope::value")
+	m.project = editorInput("project name")
 	m.desc = editorArea("Description", 4)
 	m.checks = editorArea("one per line; prefix x when done", 4)
 	m.draftPrompt = editorArea("Describe what to draft or change", 3)
@@ -361,7 +377,18 @@ func (m *Model) applyTask(task board.Task) {
 	}
 	m.effort = task.Effort
 	m.blocked = task.Blocked
-	m.tags = append([]string(nil), task.Tags...)
+	// The project rides in the tags but is edited in its own mandatory field,
+	// so the label field never carries it and cannot grow a second one.
+	named, rest := project.SplitTags(task.Tags)
+	m.tags = append([]string(nil), rest...)
+	name := ""
+	if len(named) > 0 {
+		name = named[0]
+	}
+	if name == "" {
+		name = m.defaultProject
+	}
+	m.project.SetValue(name)
 	m.checks.SetValue(checksToText(task.Checks))
 }
 
@@ -691,7 +718,13 @@ func (m *Model) applyDraft(draft ai.Draft) {
 	m.desc.SetValue(draft.Desc)
 	m.prio, m.effort = draft.Prio, draft.Effort
 	m.due.SetValue(draft.Due)
-	m.tags = append([]string(nil), draft.Tags...)
+	// A drafted project:: label lands in the project field; the card still
+	// carries exactly one, whatever the model returned.
+	named, rest := project.SplitTags(draft.Tags)
+	m.tags = append([]string(nil), rest...)
+	if len(named) > 0 && named[0] != "" {
+		m.project.SetValue(named[0])
+	}
 	checks := make([]board.Check, len(draft.Checks))
 	for i, check := range draft.Checks {
 		checks[i] = board.Check{Text: check.Text, Done: check.Done}
@@ -825,7 +858,17 @@ func (m *Model) updateLabels(key string, msg tea.KeyPressMsg) (tea.Cmd, bool) {
 func (m *Model) addLabels(raw string) {
 	for _, candidate := range strings.Fields(raw) {
 		candidate = strings.TrimLeft(candidate, "#")
-		if candidate == "" || contains(m.tags, candidate) {
+		if candidate == "" {
+			continue
+		}
+		// A project:: label typed here is as explicit as one typed in the
+		// project field, and a card has room for exactly one: it moves the
+		// card rather than joining the label list.
+		if name, ok := strings.CutPrefix(candidate, project.LabelPrefix); ok {
+			m.project.SetValue(name)
+			continue
+		}
+		if contains(m.tags, candidate) {
 			continue
 		}
 		m.tags = append(m.tags, candidate)
@@ -846,6 +889,8 @@ func (m *Model) markKey(msg tea.KeyPressMsg) bool {
 		return m.mark.Input(m.focus, &m.emoji, msg)
 	case "due":
 		return m.mark.Input(m.focus, &m.due, msg)
+	case "project":
+		return m.mark.Input(m.focus, &m.project, msg)
 	case "labels":
 		return m.mark.Input(m.focus, &m.label, msg)
 	case "desc":
@@ -878,6 +923,8 @@ func (m *Model) updateFocusedInput(msg tea.Msg) tea.Cmd {
 		m.desc, cmd = m.desc.Update(msg)
 	case "due":
 		m.due, cmd = m.due.Update(msg)
+	case "project":
+		m.project, cmd = m.project.Update(msg)
 	case "checks":
 		m.checks, cmd = m.checks.Update(msg)
 	case "ai-prompt":
@@ -908,7 +955,8 @@ func (m Model) focusTargets() []string {
 	if m.runner != nil {
 		targets = append(targets, "ai-prompt", "ai-draft")
 	}
-	targets = append(targets, "title", "emoji", "desc", "prio", "due", "effort", "blocked", "labels", "checks")
+	targets = append(targets, "title", "emoji", "desc", "prio", "due", "effort", "blocked",
+		"project", "labels", "checks")
 	if !m.dismissedAll {
 		for _, hit := range m.visibleSimilar() {
 			targets = append(targets, "similar:"+similarKey(hit))
@@ -926,6 +974,7 @@ func (m *Model) applyFocus() tea.Cmd {
 	m.emoji.Blur()
 	m.desc.Blur()
 	m.due.Blur()
+	m.project.Blur()
 	m.label.Blur()
 	m.checks.Blur()
 	m.draftPrompt.Blur()
@@ -938,6 +987,8 @@ func (m *Model) applyFocus() tea.Cmd {
 		return m.desc.Focus()
 	case "due":
 		return m.due.Focus()
+	case "project":
+		return m.project.Focus()
 	case "labels":
 		m.labelsOpen = true
 		return m.label.Focus()
@@ -1036,7 +1087,13 @@ func (m Model) buildSave() (board.Task, store.TaskPatch, error) {
 	task.Desc = strings.TrimSpace(m.desc.Value())
 	task.Prio, task.Due, task.Effort = m.prio, strings.TrimSpace(m.due.Value()), m.effort
 	task.Blocked = m.blocked
-	task.Tags = append([]string(nil), m.tags...)
+	// The one-project invariant, held here because this is the editor's only
+	// write path: no card reaches the store carrying zero or two projects.
+	tags, err := project.Ensure(m.tags, m.project.Value())
+	if err != nil {
+		return board.Task{}, store.TaskPatch{}, fmt.Errorf("%w; every card belongs to exactly one project", err)
+	}
+	task.Tags = tags
 	task.Checks = textToChecks(m.checks.Value())
 	if err := store.ValidateTaskFields(task); err != nil {
 		return board.Task{}, store.TaskPatch{}, err
@@ -1115,7 +1172,10 @@ func (m Model) changedFields() editedFields {
 		title: current.title != m.initial.title, emoji: current.emoji != m.initial.emoji,
 		desc: current.desc != m.initial.desc, due: current.due != m.initial.due,
 		effort: current.effort != m.initial.effort, prio: current.prio != m.initial.prio,
-		blocked: current.blocked != m.initial.blocked, tags: current.tags != m.initial.tags,
+		blocked: current.blocked != m.initial.blocked,
+		// The project is stored as a label, so moving a card between projects
+		// is a label change to every path downstream of here.
+		tags:   current.tags != m.initial.tags || current.project != m.initial.project,
 		checks: current.checks != m.initial.checks,
 	}
 }
@@ -1225,6 +1285,7 @@ func (m Model) currentSnapshot() snapshot {
 		title: m.title.Value(), emoji: m.emoji.Value(), desc: m.desc.Value(),
 		due: m.due.Value(), effort: m.effort, checks: m.checks.Value(),
 		prio: m.prio, blocked: m.blocked, tags: strings.Join(tags, "\x00"),
+		project: m.project.Value(),
 	}
 }
 
