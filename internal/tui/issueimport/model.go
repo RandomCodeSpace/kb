@@ -102,6 +102,8 @@ type Model struct {
 	queuePos     int
 	status       string
 	statusError  bool
+	statusTail   string
+	sourcesBusy  bool
 	scroll       int
 	manualScroll bool
 	pointerState pointer.State
@@ -198,12 +200,31 @@ func IsMessage(message tea.Msg) bool {
 // than a spinner, so there are no bubbles dots here to keep.
 const opPreview = "preview"
 
-// previewLabel is the branded engine's label. Spec section 10.8.4: lowercase,
-// present continuous, and no ellipsis of its own.
-const previewLabel = "fetching configured forge data and drafting"
+const (
+	// previewLabel and sourcesLabel are the branded engine's labels. Spec
+	// section 10.8.4: lowercase, present continuous, and no ellipsis of their
+	// own, because the animation is the ellipsis.
+	previewLabel = "fetching and drafting"
+	sourcesLabel = "loading sources"
+)
 
-// brandBusy is the branded tier's gate.
-func (m Model) brandBusy() bool { return m.operation == opPreview }
+// brandBusy is the branded tier's gate. Spec section 10.2.4 puts the source
+// list on the branded tier for the same reason the preview is there: the axis
+// is latency, and a source list is a round trip to whatever the integration
+// points at.
+//
+// The source fetch carries its own flag rather than reusing m.operation,
+// because m.operation is the input gate as well and the spinner never gates
+// input (spec section 10.8.4).
+func (m Model) brandBusy() bool { return m.operation == opPreview || m.sourcesBusy }
+
+// brandLabel is the label of the operation in flight.
+func (m Model) brandLabel() string {
+	if m.sourcesBusy {
+		return sourcesLabel
+	}
+	return previewLabel
+}
 
 // brandStep advances the branded engine, dropping a tick whose generation or
 // seed does not match and terminating the chain when the gate settles.
@@ -232,7 +253,7 @@ func (m *Model) configureBrand() {
 	started := m.brandStarted
 	clock := m.clock()
 	m.brand.Configure(styles, spin.Settings{
-		Label:    previewLabel,
+		Label:    m.brandLabel(),
 		Seed:     spin.SeedImportFetch,
 		Scramble: true,
 		Suffix:   func() string { return spin.Elapsed(clock().Sub(started)) },
@@ -281,14 +302,19 @@ func (m *Model) Open() tea.Cmd {
 	m.open, m.stage, m.max, m.focus = true, stageInput, defaultMax, 0
 	m.sources, m.source, m.rows, m.queue = nil, 0, nil, nil
 	m.preview, m.selection, m.queuePos = forge.Preview{}, 0, 0
-	m.status, m.statusError, m.changed, m.scroll, m.manualScroll, m.pointerState = "", false, false, 0, false, pointer.State{}
+	m.status, m.statusError, m.statusTail = "", false, ""
+	m.changed, m.scroll, m.manualScroll, m.pointerState = false, 0, false, pointer.State{}
+	m.sourcesBusy = true
 	m.ref.SetValue("")
 	m.ref.Blur()
 	session := m.session
-	return func() tea.Msg {
+	fetch := func() tea.Msg {
 		sources, err := m.backend.Sources(m.user)
 		return sourcesLoadedMsg{session: session, sources: sources, err: err}
 	}
+	// The operation leads the batch and the animation follows it, so a source
+	// list that lands inside the birth delay never renders a frame at all.
+	return tea.Batch(fetch, m.startBrand())
 }
 
 func (m *Model) Close() { m.closeNow() }
@@ -299,7 +325,7 @@ func (m *Model) closeNow() {
 	}
 	m.cancel = nil
 	m.generation++
-	m.open, m.operation = false, ""
+	m.open, m.operation, m.sourcesBusy = false, "", false
 	m.ref.Blur()
 	m.pointerState = pointer.State{}
 }
@@ -326,13 +352,19 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		if msg.session != m.session {
 			return nil
 		}
+		m.sourcesBusy = false
+		m.brand.Stop()
 		if msg.err != nil {
-			m.setStatus("sources unavailable", true)
+			// The panel cannot re-fetch its own source list, so the tail names
+			// the dismissal (spec section 10.8.7).
+			m.failStatus("sources unavailable", "Cancel")
 			return nil
 		}
 		m.sources = msg.sources
 		if len(m.sources) == 0 {
-			m.setStatus("no forge integrations configured", true)
+			// Not an error: an unconfigured forge is an empty state, and the
+			// panel renders the empty row of spec section 10.8.3 for it.
+			m.setStatus("", false)
 		}
 	case previewCompletedMsg:
 		if msg.session != m.session || msg.generation != m.generation || m.operation != opPreview {
@@ -341,7 +373,7 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		m.cancel, m.operation = nil, ""
 		m.brand.Stop()
 		if msg.err != nil {
-			m.setStatus(safeError(msg.err), true)
+			m.failStatus(safeError(msg.err), "Import")
 			return nil
 		}
 		m.preview, m.stage = msg.preview, stageReview
@@ -491,19 +523,21 @@ func (m *Model) applyFocus() tea.Cmd {
 
 func (m *Model) startPreview() tea.Cmd {
 	if len(m.sources) == 0 {
-		m.setStatus("configure a forge integration first", true)
+		m.failStatus("configure a forge integration first", "")
 		return nil
 	}
 	raw := strings.TrimSpace(m.ref.Value())
 	if raw == "" {
-		m.setStatus("reference required", true)
+		// A validation failure is fixed in the field the focus is already in,
+		// so it names no control (spec section 10.8.5).
+		m.failStatus("reference required", "")
 		return nil
 	}
 	m.generation++
 	generation, session := m.generation, m.session
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel, m.operation = cancel, opPreview
-	m.setStatus("fetching and drafting...", false)
+	m.setStatus("", false)
 	request := forge.PreviewRequest{Source: m.sources[m.source].Name, Ref: raw, Max: m.max}
 	// The operation leads the batch and the animation follows it: a branded
 	// tick is scheduled against the one clock, and a caller draining the batch
@@ -618,7 +652,15 @@ func (m *Model) cancelOperation(status string) {
 }
 
 func (m *Model) setStatus(message string, isError bool) {
-	m.status, m.statusError = message, isError
+	m.status, m.statusError, m.statusTail = message, isError, ""
+}
+
+// failStatus reports a failed operation and names the control that will run it
+// again. Spec section 10.8.5: an errored operation returns its control to the
+// blurred state and the error row names it, rather than growing a second
+// button for an action that already has one.
+func (m *Model) failStatus(message, tail string) {
+	m.status, m.statusError, m.statusTail = message, true, tail
 }
 
 func safeError(err error) string {

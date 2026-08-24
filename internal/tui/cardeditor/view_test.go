@@ -92,21 +92,21 @@ func TestViewCoversErrorsSuggestionsGuardsAndControlSafety(t *testing.T) {
 
 	model.labels = []string{"alpha"}
 	model.tags = []string{"alpha"}
-	if got := rowText(model.labelSuggestionRows()); !strings.Contains(got, "no label suggestions") {
+	if got := rowText(model.labelSuggestionRows(72)); !strings.Contains(got, "no label suggestions") {
 		t.Fatalf("empty suggestions = %q", got)
 	}
 	model.similarLoading = true
-	if got := rowText(model.similarRows()); !strings.Contains(got, "searching") {
+	if got := rowText(model.similarRows(72)); !strings.Contains(got, "searching") {
 		t.Fatalf("loading similar = %q", got)
 	}
 	model.similarLoading = false
 	model.similarErr = errors.New("lookup failed")
-	if got := rowText(model.similarRows()); !strings.Contains(got, "lookup failed") {
+	if got := rowText(model.similarRows(72)); !strings.Contains(got, "lookup failed") {
 		t.Fatalf("failed similar = %q", got)
 	}
 	model.similarErr = nil
 	model.similar = []store.SimilarHit{{Title: "plain"}, {Link: "x", Title: "imported", Via: "import"}}
-	if got := rowText(model.similarRows()); !strings.Contains(got, "[card] plain") || !strings.Contains(got, "[import] imported") {
+	if got := rowText(model.similarRows(72)); !strings.Contains(got, "[card] plain") || !strings.Contains(got, "[import] imported") {
 		t.Fatalf("similar variants = %q", got)
 	}
 
@@ -153,11 +153,11 @@ func TestPlainSpinnerAdvancesOnlyWhileSaving(t *testing.T) {
 	if model.busy() || model.plainBusy() || model.spinTick(spinner.TickMsg{}) != nil {
 		t.Fatal("idle editor kept a spinner tick alive")
 	}
-	if model.busyPrefix() == "" {
+	if model.plainFrame() == "" {
 		t.Fatal("a constructed editor has no spinner frames")
 	}
 	bare := Model{}
-	if bare.busyPrefix() != "" {
+	if bare.plainFrame() != "" {
 		t.Fatal("zero-value editor rendered a spinner frame")
 	}
 	styles := theme.New(true)
@@ -171,8 +171,18 @@ func TestPlainSpinnerAdvancesOnlyWhileSaving(t *testing.T) {
 	if !model.busy() || !model.plainBusy() || model.spinTick(spinner.TickMsg{ID: model.spin.ID()}) == nil {
 		t.Fatal("saving editor dropped the spinner tick")
 	}
-	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, model.busyPrefix()+"saving card...") {
+	// Spec section 10.8.4: frame, BusyGap, label - and no ellipsis on the label,
+	// because the animation is the ellipsis.
+	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, ansi.Strip(model.plainFrame())+" "+saveLabel) {
 		t.Fatalf("saving footer carried no spinner frame:\n%s", got)
+	}
+	if strings.Contains(ansi.Strip(model.View(72, 18)), saveLabel+"...") {
+		t.Fatal("the plain busy label kept its ellipsis")
+	}
+	// The frame is no longer stripped: it is the one part of the row that is
+	// supposed to carry a color (spec section 10.8.4).
+	if !strings.Contains(model.View(72, 18), model.plainFrame()) {
+		t.Fatal("the saving footer stripped its spinner frame")
 	}
 
 	// The draft is the branded tier, so it must not also drive the dots.
@@ -214,8 +224,11 @@ func TestBrandedEngineDrivesTheDraftFooter(t *testing.T) {
 	timing := model.themeStyles().Timing
 
 	// The static label carries the birth delay, then the engine takes over.
-	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, draftLabel+"... | esc cancel") {
+	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, draftLabel+" | esc cancel") {
 		t.Fatalf("pre-birth footer = %s", got)
+	}
+	if model.brand.View() != "" {
+		t.Fatal("the engine rendered a run inside the birth delay")
 	}
 	stale := spin.StepMsg{Seed: spin.SeedEditorDraft, Gen: model.brand.Gen() - 1}
 	if model.brandStep(stale) != nil {
@@ -227,8 +240,17 @@ func TestBrandedEngineDrivesTheDraftFooter(t *testing.T) {
 			t.Fatal("a drafting editor dropped the branded step")
 		}
 	}
-	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, "| esc cancel") || strings.Contains(got, draftLabel+"...") {
-		t.Fatalf("born footer still carried the static label: %s", got)
+	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, "| esc cancel") {
+		t.Fatalf("born footer dropped its live hint: %s", got)
+	}
+	// The band lays the engine's own run in through BandRun, which re-arms the
+	// band after each reset inside it rather than dropping the band's ground.
+	row := model.brand.View()
+	if row == "" {
+		t.Fatal("the born engine rendered no run")
+	}
+	if !strings.Contains(model.View(72, 18), model.themeStyles().BandRun(theme.BandFooter, row)) {
+		t.Fatal("born footer did not carry the engine's own run")
 	}
 
 	// Contract point 7: the settled frame is invariant across a full ellipsis
@@ -293,7 +315,7 @@ func TestBrandedEngineStopsBehindAnotherSurface(t *testing.T) {
 	if model.SetFrontMost(false) != nil || model.BrandMounted() {
 		t.Fatal("a backgrounded editor kept its engine")
 	}
-	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, draftLabel+"...") {
+	if got := ansi.Strip(model.View(72, 18)); !strings.Contains(got, draftLabel+" | esc cancel") {
 		t.Fatalf("a backgrounded editor dropped its static busy label: %s", got)
 	}
 	if model.SetFrontMost(true) == nil || !model.BrandMounted() {

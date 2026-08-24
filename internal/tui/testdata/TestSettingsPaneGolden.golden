@@ -5,7 +5,7 @@
       Base URL:        https://api.example/v1                                   
       Model:           gpt-example                                              
       API key (saved): blank keeps saved key                                    
-    >  Test connection                                                          
+    ▌  Test connection                                                          
        Save AI settings                                                         
                                                                                 
     FORGE INTEGRATIONS                                                          
@@ -26,5 +26,5 @@
                                                                                 
                                                                                 
                                                                                 
-    [Close] | ready | tab navigate | enter act                                  
+    [Close] | tab navigate | enter act                                          
                                                                                 

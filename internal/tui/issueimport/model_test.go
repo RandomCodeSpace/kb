@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -59,6 +60,12 @@ func (b *fakeBackend) CreateTask(user, _ string, task board.Task, _ forge.LinkIn
 
 func key(value string) tea.KeyPressMsg { return tea.KeyPressMsg{Code: rune(value[0]), Text: value} }
 
+// reverseVideoPattern matches the SGR reverse attribute in any parameter
+// position, which is the pressed token of spec section 9.1.
+var reverseVideoPattern = regexp.MustCompile(`\x1b\[[0-9;]*\b7[;m]`)
+
+func containsReverseVideo(content string) bool { return reverseVideoPattern.MatchString(content) }
+
 // runCmd runs a command and returns the overlay message it produced. A fetch
 // also starts the busy spinner, so the batch is walked and the spinner tick -
 // which is a timer, not a result - is skipped.
@@ -92,7 +99,9 @@ func openModel(t *testing.T, backend *fakeBackend, st *fakeStore) Model {
 	if command == nil {
 		t.Fatal("Open returned nil")
 	}
-	m.Update(command())
+	// The source fetch is branded now (spec section 10.2.4), so Open returns
+	// the fetch and the engine's first step together.
+	m.Update(runCmd(command))
 	return m
 }
 
@@ -375,14 +384,19 @@ func TestRemainingStateBranches(t *testing.T) {
 	}
 
 	empty := openModel(t, &fakeBackend{}, &fakeStore{})
-	if empty.sourceName() != "none" || !empty.statusError {
-		t.Fatal("empty source state")
+	// Spec section 10.8.7: an unconfigured forge is an empty state, not a
+	// failure, so it renders the empty row and reports no error.
+	if empty.sourceName() != "none" || empty.statusError {
+		t.Fatalf("empty source state = name:%q error:%v", empty.sourceName(), empty.statusError)
+	}
+	if got := ansi.Strip(empty.View(60, 16)); !strings.Contains(got, "no forge configured") {
+		t.Fatalf("empty source row missing:\n%s", got)
 	}
 	empty.stage = stageReview
 	empty.rows = []row{{draft: forge.Draft{Draft: ai.Draft{Title: "done"}}, created: true}, {draft: forge.Draft{Draft: ai.Draft{Title: "pending"}}, err: "retry"}}
 	empty.status, empty.statusError = "failed", true
-	view := empty.View(60, 16)
-	for _, want := range []string{"[created]", "retry", "error   failed"} {
+	view := ansi.Strip(empty.View(60, 16))
+	for _, want := range []string{"[created]", "retry", "▲ failed"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("remaining view omitted %q:\n%s", want, view)
 		}
@@ -524,9 +538,14 @@ func TestPointerPressFeedbackReleasesOnceAndDragCancels(t *testing.T) {
 	if command := m.Update(press()); command != nil || !m.pointerState.IsPressed(controlID("max")) {
 		t.Fatalf("press state command=%v pressed=%v", command, m.pointerState.IsPressed(controlID("max")))
 	}
-	pressed := ansi.Strip(m.View(80, 24))
-	if !strings.Contains(pressed, "! max     8") || ansi.StringWidth(strings.Split(before, "\n")[line-(24-len(strings.Split(before, "\n")))/2]) != ansi.StringWidth(strings.Split(pressed, "\n")[line-(24-len(strings.Split(pressed, "\n")))/2]) {
-		t.Fatalf("max press feedback was not same-width:\n%s", pressed)
+	// Spec section 10.4.4: pressed feedback is an attribute, never a glyph that
+	// would reflow the row it lands on, so the pane's cells do not move.
+	raw := m.View(80, 24)
+	if ansi.Strip(raw) != before {
+		t.Fatalf("max press feedback was not same-width:\n%s", ansi.Strip(raw))
+	}
+	if !containsReverseVideo(raw) {
+		t.Fatal("max press produced no pressed attribute")
 	}
 	release := m.MouseHandler(80, 24)(tea.MouseReleaseMsg{X: x, Y: line, Button: tea.MouseLeft})
 	if release == nil {
@@ -730,7 +749,7 @@ func TestPointerAndAsyncGuardsCoverInputEdges(t *testing.T) {
 
 	// Preview state is rendered while the asynchronous command is active.
 	m.stage, m.operation = stageInput, "preview"
-	if view := m.View(60, 16); !strings.Contains(view, "fetching configured forge data") {
+	if view := ansi.Strip(m.View(60, 16)); !strings.Contains(view, previewLabel) {
 		t.Fatalf("preview progress missing:\n%s", view)
 	}
 	m.Close()

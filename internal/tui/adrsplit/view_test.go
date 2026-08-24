@@ -1,6 +1,7 @@
 package adrsplit
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -68,8 +69,8 @@ func TestViewsCoverFileReviewProgressErrorsAndNarrowTerminals(t *testing.T) {
 		t.Fatalf("unsafe or incomplete file view:\n%s", fileView)
 	}
 
-	m.operation = "splitting ADR"
-	if got := ansi.Strip(m.View(30, 8)); !strings.Contains(got, "splitting ADR") || len(strings.Split(got, "\n")) > 8 {
+	m.operation = opSplitADR
+	if got := ansi.Strip(m.View(30, 8)); !strings.Contains(got, opSplitADR) || len(strings.Split(got, "\n")) > 8 {
 		t.Fatalf("narrow progress view:\n%s", got)
 	}
 	m.operation, m.guardClose = "", true
@@ -86,7 +87,7 @@ func TestViewsCoverFileReviewProgressErrorsAndNarrowTerminals(t *testing.T) {
 	m.focus, m.dest = "title:1", board.StatusCancelled
 	m.applyFocus()
 	review := ansi.Strip(m.View(92, 34))
-	for _, want := range []string{"REVIEW PROPOSED STORIES", "created", "error: sqliterefused", "Cancelled", "Add selected (1)"} {
+	for _, want := range []string{"REVIEW PROPOSED STORIES", "created", "sqliterefused", "Cancelled", "Add selected (1)"} {
 		if !strings.Contains(review, want) {
 			t.Errorf("review missing %q:\n%s", want, review)
 		}
@@ -100,7 +101,10 @@ func TestViewsCoverFileReviewProgressErrorsAndNarrowTerminals(t *testing.T) {
 	}
 
 	m.adding, m.status = true, "creating card 1 of 2..."
-	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, "creating card") {
+	// Spec section 10.8.4: the band names the operation, lowercase and present
+	// continuous, and the count lives in the determinate row rather than in a
+	// label the animation is already standing in for.
+	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, addLabel) {
 		t.Fatalf("batch progress footer missing:\n%s", got)
 	}
 }
@@ -210,8 +214,10 @@ func TestSpinnerAdvancesOnlyWhileBusy(t *testing.T) {
 	if !m.busy() || !m.plainBusy() || m.spinTick(spinner.TickMsg{ID: m.spin.ID()}) == nil {
 		t.Fatal("busy overlay dropped the spinner tick")
 	}
-	if m.busyPrefix() == "" {
-		t.Fatal("busy footer carried no spinner frame")
+	// Spec section 10.8.4 deletes the ansi.Strip: the frame is the one part of
+	// a busy row that is supposed to carry a color.
+	if !strings.Contains(m.View(60, 16), m.themeStyles().BandRun(theme.BandFooter, m.plainBand(opReadFile, 40))) {
+		t.Fatal("busy footer carried no rendered spinner frame")
 	}
 	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, opReadFile) {
 		t.Fatalf("busy footer = %q", got)
@@ -246,7 +252,9 @@ func TestBrandedEngineDrivesTheSplitFooter(t *testing.T) {
 		t.Fatal("a splitting overlay did not mount the branded engine")
 	}
 	timing := m.themeStyles().Timing
-	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, opSplitADR+"... | esc cancel") {
+	// Spec section 10.8.4: the static label carries no ellipsis of its own,
+	// because the animation is the ellipsis.
+	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, opSplitADR+" | esc cancel") {
 		t.Fatalf("pre-birth footer = %q", got)
 	}
 	step := spin.StepMsg{Seed: spin.SeedAdrPropose, Gen: m.brand.Gen()}
@@ -313,7 +321,7 @@ func TestBrandedEngineFollowsTheZOrder(t *testing.T) {
 	if m.SetFrontMost(false) != nil || m.BrandMounted() {
 		t.Fatal("a backgrounded overlay kept its engine")
 	}
-	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, opSplitADR+"...") {
+	if got := ansi.Strip(m.View(60, 16)); !strings.Contains(got, opSplitADR+" | esc cancel") {
 		t.Fatalf("a backgrounded overlay dropped its static busy label: %q", got)
 	}
 	if m.SetFrontMost(true) == nil || !m.BrandMounted() {
@@ -339,5 +347,46 @@ func TestPointerRegionsClipToTheTerminalGrid(t *testing.T) {
 	frame := m.layout(80, 24)
 	if regions := m.pointerRegions(frame, 0, 0); len(regions) != 0 {
 		t.Fatalf("zero-size terminal exposed %d regions", len(regions))
+	}
+}
+
+// TestReviewWithoutStoriesRendersTheEmptyRow is spec section 10.8.3: the
+// STORIES band renders whether or not it is filled, so the section takes the
+// empty row rather than showing a band over nothing.
+func TestReviewWithoutStoriesRendersTheEmptyRow(t *testing.T) {
+	m, _, _ := newTestModel()
+	m.stage, m.rows = stageReview, nil
+	got := ansi.Strip(m.View(80, 24))
+	if !strings.Contains(got, "\u25cb no stories proposed  Back to source") {
+		t.Fatalf("empty review row missing:\n%s", got)
+	}
+}
+
+// TestPanelErrorLeavesTheBand is ratified call 12 and spec section 10.8.5: the
+// error moves out of the footer band into a body row above the action row, and
+// the row names the control that will run the operation again.
+func TestPanelErrorLeavesTheBand(t *testing.T) {
+	m, _, _ := newTestModel()
+	m.setError(errors.New("model refused the request"))
+	if m.statusTail != "Propose stories" {
+		t.Fatalf("input-stage tail = %q", m.statusTail)
+	}
+	got := ansi.Strip(m.View(80, 24))
+	if !strings.Contains(got, "\u25b2 model refused the request") || !strings.Contains(got, "Propose stories") {
+		t.Fatalf("error row missing:\n%s", got)
+	}
+	lines := strings.Split(got, "\n")
+	if band := lines[len(lines)-2]; strings.Contains(band, "model refused") {
+		t.Fatalf("the footer band carried the error: %q", band)
+	}
+
+	m.stage = stageReview
+	m.rows = rowsFromDrafts([]ai.Draft{testDraft("one")})
+	m.setError(errors.New("store refused the write"))
+	if m.statusTail != "Add selected (1)" {
+		t.Fatalf("review-stage tail = %q", m.statusTail)
+	}
+	if review := ansi.Strip(m.View(92, 34)); !strings.Contains(review, "\u25b2 store refused the write") {
+		t.Fatalf("review error row missing:\n%s", review)
 	}
 }

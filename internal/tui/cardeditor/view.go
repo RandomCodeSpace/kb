@@ -29,23 +29,36 @@ const (
 	rowButton                 // an action, rendered by the button widget
 	rowHint                   // secondary text
 	rowError                  // an error line
+	rowChoice                 // an activatable list row: hover raises it whole
+	rowWidget                 // a row a widget already rendered whole
 )
 
 // editorRow is one logical body row. The target is the symbolic pointer
 // control the row activates, carried structurally instead of recovered by
 // matching the rendered text: card titles, descriptions and checklist text are
 // untrusted, and text matching let them impersonate a control.
+//
+// mark is the row's focus gutter in plain cells (spec section 10.4.3), empty on
+// a static row that reserves none. It is always FocusGutterW + FocusGutterGap
+// wide whichever state the row is in, which is what keeps focus from reflowing
+// the text it lands on (spec section 10.4.4); renderRow draws the styled bar
+// over the same cells.
+//
+// rendered carries an already-styled row for the three states of spec section
+// 10.8 - busy, empty and error - which the widgets own end to end.
 type editorRow struct {
-	text    string
-	button  string
-	target  string
-	variant theme.ButtonVariant
-	kind    rowKind
+	mark     string
+	text     string
+	rendered string
+	button   string
+	target   string
+	variant  theme.ButtonVariant
+	kind     rowKind
 }
 
 // plain is the row as unstyled text, the form the pointer geometry and the
 // control-safety tests read.
-func (r editorRow) plain() string { return r.text }
+func (r editorRow) plain() string { return r.mark + r.text }
 
 // editorFrame is the resolved geometry of one render: where the panel sits,
 // how much body fits, and which logical rows the window shows.
@@ -68,7 +81,7 @@ type pointerHit struct {
 // MouseHandler maps clicks in the rendered editor to symbolic control targets.
 // The root model can install this callback while the editor owns the screen;
 // the resulting message is routed through Update just like a key press.
-func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
+func (m *Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 	if !m.open {
 		return nil
 	}
@@ -85,6 +98,10 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 	hitMap.AddWheel(pointer.Rect{X0: frame.x, Y0: frame.y, X1: frame.x + frame.width, Y1: frame.y + frame.height}, func(delta int) tea.Msg {
 		return pointerWheelMsg{session: session, delta: delta, maxScroll: maxScroll}
 	})
+	// Rows 6 and 9 of spec section 10.5.2: a wheel scroll or a resize moves the
+	// content under a pointer that has not moved, so hover is re-resolved from
+	// the retained point against the map this frame just built.
+	m.pointerState = m.pointerState.Reresolve(hitMap)
 	return hitMap.Handler()
 }
 
@@ -247,30 +264,45 @@ func (m *Model) visibleRows(frame editorFrame) []string {
 
 // renderRow applies the token the row's role names. Spec section 6.2: the view
 // takes a *theme.Styles and never constructs one.
+//
+// The focus gutter is drawn here rather than baked into the row's text because
+// the bar is emitted per rendered line: a textarea block wraps to several rows
+// and every one of them carries the same cell, so the bar is unbroken down the
+// whole control (spec section 10.4.3).
 func (m *Model) renderRow(row editorRow, width int) string {
 	styles := m.themeStyles()
+	on := theme.OverlaySurf
+	if row.kind == rowChoice {
+		on = styles.RowSurface(m.hovered(row.target))
+	}
+	if row.mark == "" {
+		return m.renderContent(row, width, on)
+	}
+	gutter := widget.Gutter(styles, m.focus == row.target, theme.Brand, on)
+	content := m.renderContent(row, max(width-ansi.StringWidth(gutter), 0), on)
+	if row.kind != rowButton {
+		// The button widget owns its own pressed token; every other row takes
+		// the attribute here. Spec section 10.4.4: pressed costs zero cells.
+		content = m.pointerState.Render(styles, pointer.ControlID(row.target), content)
+	}
+	return gutter + content
+}
+
+// renderContent renders the row's own cells, the ones to the right of its
+// gutter.
+func (m *Model) renderContent(row editorRow, width int, on theme.Slot) string {
+	styles := m.themeStyles()
+	if row.rendered != "" {
+		return ansi.Truncate(row.rendered, max(width, 0), "")
+	}
 	line := fit(row.text, width)
 	switch row.kind {
 	case rowButton:
-		if padded := fit(buttonPadding+row.button+buttonPadding, width); strings.HasSuffix(line, padded) {
-			marker := strings.TrimSuffix(line, padded)
-			// An editor row is driven by focus and Enter, so the resolver of
-			// spec section 10.4.2 marks no hotkey on it.
-			text, underline := widget.Hotkey(row.button, nil)
-			return styles.Overlay.Surf.Render(marker) + widget.Button(styles, widget.ButtonOpts{
-				Text:           text,
-				Variant:        row.variant,
-				Selected:       m.focus == row.target,
-				Pressed:        m.pointerState.IsPressed(pointer.ControlID(row.target)),
-				UnderlineIndex: underline,
-				Padding:        [2]int{styles.Metrics.ButtonPadX, styles.Metrics.ButtonPadX},
-			})
-		}
-		return styles.Overlay.Surf.Render(line)
-	case rowError:
-		return styles.On(theme.StatusDanger, theme.OverlaySurf).Render(line)
+		return m.renderButton(row, width)
 	case rowHint:
 		return styles.Overlay.FieldLabel.Render(line)
+	case rowChoice:
+		return styles.On(theme.FgBase, on).Render(line)
 	case rowField:
 		if m.focus == row.target {
 			return formview.Selection(
@@ -283,6 +315,55 @@ func (m *Model) renderRow(row editorRow, width int) string {
 		// Body rows carry a textarea's own lines, so they take the mark too.
 		return formview.Selection(styles.Overlay.Surf, m.marked(row.target)).Render(line)
 	}
+}
+
+// renderButton draws one action row through the button widget. The label is
+// resolved through widget.Hotkey (spec section 10.4.2) even though an editor
+// button is driven by focus and Enter rather than by a single-rune key: the
+// resolver is the one place that decides, and no surface resolves its own.
+func (m *Model) renderButton(row editorRow, width int) string {
+	styles := m.themeStyles()
+	label := fit(row.button, max(width-2*styles.Metrics.ButtonPadX, 0))
+	if label == "" {
+		return styles.Overlay.Surf.Render(fit(row.text, width))
+	}
+	text, underline := widget.Hotkey(label, nil)
+	return widget.Button(styles, widget.ButtonOpts{
+		Text:           text,
+		Variant:        row.variant,
+		Selected:       m.focus == row.target,
+		Hovered:        m.hovered(row.target),
+		Pressed:        m.pointerState.IsPressed(pointer.ControlID(row.target)),
+		UnderlineIndex: underline,
+		Padding:        [2]int{styles.Metrics.ButtonPadX, styles.Metrics.ButtonPadX},
+	})
+}
+
+// hovered reports whether the pointer is over this row's control. Spec section
+// 10.5.1: hover is pointer feedback and focus is keyboard position, so it
+// changes the row's fill and never its gutter.
+func (m Model) hovered(target string) bool {
+	return target != "" && m.pointerState.IsHovered(pointer.ControlID(target))
+}
+
+// gutterMark is the plain form of the focus gutter of spec section 10.4.3: the
+// Rail glyph plus its gap when the row has the keyboard, the same count of
+// spaces when it does not. Both states cost the same cells, which is the whole
+// point of reserving the column.
+func (m *Model) gutterMark(target string) string {
+	styles := m.themeStyles()
+	metrics := styles.Metrics
+	gap := strings.Repeat(" ", max(metrics.FocusGutterGap, 0))
+	if m.focus == target {
+		return strings.Repeat(styles.Glyph.Rail, max(metrics.FocusGutterW, 0)) + gap
+	}
+	return strings.Repeat(" ", max(metrics.FocusGutterW, 0)) + gap
+}
+
+// gutterWidth is the reserve every focusable row spends on its left edge.
+func (m *Model) gutterWidth() int {
+	metrics := m.themeStyles().Metrics
+	return max(metrics.FocusGutterW, 0) + max(metrics.FocusGutterGap, 0)
 }
 
 // title2 is the header band title of spec section 4 step 4.
@@ -300,15 +381,13 @@ func (m *Model) sequenceTag() string {
 	return ""
 }
 
+// footerLine is the footer band: the hint ladder, or the busy line that
+// replaces its head while an operation runs (spec section 10.8.4 rule 1).
+//
+// The band never carries an error. Ratified call 12: neither Danger slot clears
+// the contrast floor on OverlayBand, so a failure is reported in a body row
+// above the action row and the band goes back to hints.
 func (m *Model) footerLine(width int) string {
-	footer := "tab navigate | ctrl+s/ctrl+enter save | esc close"
-	if m.statusMessage != "" {
-		prefix := "status: "
-		if m.statusIsError {
-			prefix = "error: "
-		}
-		footer = prefix + sanitize(m.statusMessage)
-	}
 	if m.guardClose {
 		line := fit("[Discard] [Keep editing] | D discard | esc keep editing", width)
 		line = strings.Replace(line, "[Discard]", m.pressedLabel("discard", "[Discard]"), 1)
@@ -316,32 +395,49 @@ func (m *Model) footerLine(width int) string {
 		return line
 	}
 	if m.drafting {
-		footer = m.brandRow() + " | esc cancel"
-	} else if m.saving {
-		footer = m.busyPrefix() + "saving card..."
+		return m.brandedBand(width)
 	}
-	return fit(footer, width)
+	if m.saving {
+		// A local save is not cancellable, so the ladder has no live tail to
+		// keep beside the busy line (spec section 10.8.4 rule 1).
+		return widget.Busy(m.themeStyles(), widget.BusyOpts{
+			Frame: m.plainFrame(), Label: saveLabel, On: theme.OverlayBand, Width: width,
+		})
+	}
+	if m.statusMessage != "" && !m.statusIsError {
+		return fit("status: "+sanitize(m.statusMessage), width)
+	}
+	return fit("tab navigate | ctrl+s/ctrl+enter save | esc close", width)
 }
 
-// busyPrefix is the plain tier's frame (spec section 10.2.4): bubbles dots,
-// plain text, so the footer band renders it in the band's own FgSubtle rather
-// than a hue of its own. A local store write is plumbing however important it
+// plainFrame is the plain tier's frame (spec section 10.2.4): bubbles dots on
+// the band's own FgSubtle. A local store write is plumbing however important it
 // is, and a branded frame spent on it would stop meaning anything.
-func (m Model) busyPrefix() string {
+//
+// The frame is no longer stripped. Spec section 10.8.4 deletes the ansi.Strip
+// at all three sites: the frame is the one part of a busy row that is supposed
+// to carry a color, and the band re-arms itself around it through BandRun.
+func (m Model) plainFrame() string {
 	if len(m.spin.Spinner.Frames) == 0 {
 		return ""
 	}
-	return ansi.Strip(m.spin.View())
+	return m.spin.View()
 }
 
-// brandRow is the branded tier's busy row (spec section 10.2.5). It renders the
-// ordinary static label while the engine is unmounted or still inside the birth
-// delay, which is also what a backgrounded editor shows.
-func (m Model) brandRow() string {
-	if row := m.brand.View(); row != "" {
-		return row
+// brandedBand is the branded tier's band row (spec section 10.2.5). The engine
+// is frame and label in one run - a gradient label that wipes in column by
+// column - so it is laid into the band whole rather than composed against a
+// second label. While the engine is unmounted or still inside the birth delay
+// the row is the ordinary static label, which is also what a backgrounded
+// editor shows.
+func (m *Model) brandedBand(width int) string {
+	row := m.brand.View()
+	if row == "" {
+		row = widget.Busy(m.themeStyles(), widget.BusyOpts{
+			Label: draftLabel, On: theme.OverlayBand, Width: width,
+		})
 	}
-	return draftLabel + "..."
+	return row + fit(" | esc cancel", max(width-ansi.StringWidth(row), 0))
 }
 
 func (m Model) pressedLabel(target, label string) string {
@@ -363,10 +459,11 @@ func (m *Model) bodyLines(width int) []string {
 }
 
 func (m *Model) bodyRows(width int) []editorRow {
+	inner := max(width-m.gutterWidth(), 1)
 	rows := []editorRow{}
 	if m.runner != nil {
 		rows = append(rows, editorRow{text: "Draft with AI (fills the form; review before Save)", kind: rowSection})
-		rows = append(rows, m.areaBlock("ai-prompt", "Request", m.draftPrompt, width, 2)...)
+		rows = append(rows, m.areaBlock("ai-prompt", "Request", m.draftPrompt, inner, 2)...)
 		action := "Draft"
 		if m.drafting {
 			action = "Cancel draft (Esc)"
@@ -374,53 +471,74 @@ func (m *Model) bodyRows(width int) []editorRow {
 		rows = append(rows, m.actionRow("ai-draft", action, theme.ButtonNeutral), editorRow{})
 	}
 	rows = append(rows,
-		m.inputRow("title", "Title", m.title, width),
-		m.inputRow("emoji", "Emoji", m.emoji, width),
+		m.inputRow("title", "Title", m.title, inner),
+		m.inputRow("emoji", "Emoji", m.emoji, inner),
 	)
 	if emoji := strings.TrimSpace(m.emoji.Value()); emoji != "" && !board.IsSingleEmoji(emoji) {
-		rows = append(rows, editorRow{
-			text: "  error: one Extended_Pictographic character plus optional variation selector",
-			kind: rowError,
-		})
+		// A validation failure is fixed by editing the field the focus is
+		// already in, so it carries no retry tail (spec section 10.8.5).
+		rows = append(rows, m.errorRows(width,
+			"one Extended_Pictographic character plus optional variation selector", "")...)
 	}
-	rows = append(rows, m.areaBlock("desc", "Description", m.desc, width, 3)...)
+	rows = append(rows, m.areaBlock("desc", "Description", m.desc, inner, 3)...)
 	rows = append(rows,
 		m.choiceRow("prio", "Priority", fmt.Sprintf("%d (%s)  left/right", m.prio, priorityName(m.prio))),
-		m.inputRow("due", "Due", m.due, width, "  [/] day; ctrl+x clear"),
+		m.inputRow("due", "Due", m.due, inner, "  [/] day; ctrl+x clear"),
 		m.choiceRow("effort", "Effort", effortName(m.effort)+"  left/right; ctrl+x clear"),
 		m.choiceRow("blocked", "Blocked", boolName(m.blocked)+"  space toggle"),
-		m.inputRow("project", "Project", m.project, width, "  required"),
-		m.inputRow("labels", "Labels", m.label, width),
+		m.inputRow("project", "Project", m.project, inner, "  required"),
+		m.inputRow("labels", "Labels", m.label, inner),
 		editorRow{text: "  selected: " + safeList(m.tags), kind: rowHint},
 	)
 	if m.focus == "labels" && m.labelsOpen {
-		rows = append(rows, m.labelSuggestionRows()...)
+		rows = append(rows, m.labelSuggestionRows(width)...)
 	}
 	if m.labelsErr != nil {
-		rows = append(rows, editorRow{text: "  labels error: " + safeError(m.labelsErr), kind: rowError})
+		rows = append(rows, m.errorRows(width, safeError(m.labelsErr), "")...)
 	}
-	rows = append(rows, m.areaBlock("checks", "Checklist (x prefix = done)", m.checks, width, 3)...)
-	rows = append(rows, m.similarRows()...)
+	rows = append(rows, m.areaBlock("checks", "Checklist (x prefix = done)", m.checks, inner, 3)...)
+	rows = append(rows, m.similarRows(width)...)
 	if m.stale {
 		rows = append(rows, editorRow{text: "  external refresh withheld while form is dirty", kind: rowHint})
 	}
 	if m.statusMessage != "" {
-		prefix, kind := "  status: ", rowHint
 		if m.statusIsError {
-			prefix, kind = "  error: ", rowError
+			// Pinned directly above the action row, so the error and the control
+			// that will retry it are adjacent (spec section 10.8.5).
+			rows = append(rows, m.errorRows(width, sanitize(m.statusMessage), m.statusTail)...)
+		} else {
+			rows = append(rows, editorRow{text: "  status: " + sanitize(m.statusMessage), kind: rowHint})
 		}
-		rows = append(rows, editorRow{text: prefix + sanitize(m.statusMessage), kind: kind})
 	}
 	return append(rows, editorRow{},
 		m.actionRow("cancel", "Cancel", theme.ButtonNeutral),
 		m.actionRow("save", "Save card", theme.ButtonPrimary))
 }
 
+// errorRows is the error block of spec section 10.8.5, one editor row per
+// rendered line. The widget owns sanitize, wrap, the hanging indent and the
+// retry tail; the pane only names its tier and the control that failed.
+func (m *Model) errorRows(width int, message, tail string) []editorRow {
+	styles := m.themeStyles()
+	block := widget.Error(styles, widget.ErrorOpts{
+		Message:  message,
+		Key:      tail,
+		On:       theme.OverlaySurf,
+		Width:    width,
+		MaxLines: styles.Metrics.ErrorMaxLines,
+	})
+	rows := make([]editorRow, 0, len(block))
+	for _, line := range block {
+		rows = append(rows, editorRow{text: ansi.Strip(line), rendered: line, kind: rowError})
+	}
+	return rows
+}
+
 func (m *Model) inputRow(target, label string, input textinput.Model, width int, suffix ...string) editorRow {
-	marker := m.controlMarker(target)
-	prefix := marker + label + ": "
+	prefix := label + ": "
 	available := max(width-ansi.StringWidth(prefix), 1)
 	return editorRow{
+		mark:   m.gutterMark(target),
 		text:   prefix + inputDisplay(input, m.focus == target, available) + strings.Join(suffix, ""),
 		target: target,
 		kind:   rowField,
@@ -429,7 +547,8 @@ func (m *Model) inputRow(target, label string, input textinput.Model, width int,
 
 func (m *Model) choiceRow(target, label, value string) editorRow {
 	return editorRow{
-		text:   m.controlMarker(target) + label + ": " + sanitize(value),
+		mark:   m.gutterMark(target),
+		text:   label + ": " + sanitize(value),
 		target: target,
 		kind:   rowField,
 	}
@@ -440,7 +559,8 @@ func (m *Model) choiceRow(target, label, value string) editorRow {
 // and the text the pointer geometry measures stay the same width.
 func (m *Model) actionRow(target, label string, variant theme.ButtonVariant) editorRow {
 	return editorRow{
-		text:    m.controlMarker(target) + buttonPadding + label + buttonPadding,
+		mark:    m.gutterMark(target),
+		text:    buttonPadding + label + buttonPadding,
 		button:  label,
 		target:  target,
 		variant: variant,
@@ -452,56 +572,76 @@ func (m *Model) actionRow(target, label string, variant theme.ButtonVariant) edi
 // the crush ButtonOpts look of spec section 5.1.
 const buttonPadding = " "
 
+// areaBlock is a textarea and its label. Every line the area wraps to carries
+// the same gutter, so the focus bar runs unbroken down the whole control
+// instead of marking only the row the label sits on (spec section 10.4.3).
 func (m *Model) areaBlock(target, label string, area textarea.Model, width, rows int) []editorRow {
 	out := []editorRow{{
-		text:   m.controlMarker(target) + label + ":",
+		mark:   m.gutterMark(target),
+		text:   label + ":",
 		target: target,
 		kind:   rowField,
 	}}
 	for _, line := range areaDisplay(area, m.focus == target, width, rows) {
-		out = append(out, editorRow{text: line, target: target, kind: rowBody})
+		out = append(out, editorRow{
+			mark:   m.gutterMark(target),
+			text:   line,
+			target: target,
+			kind:   rowBody,
+		})
 	}
 	return out
 }
 
-func (m Model) controlMarker(target string) string {
-	if m.pointerState.IsPressed(pointer.ControlID(target)) {
-		return "! "
-	}
-	if m.focus == target {
-		return "> "
-	}
-	return "  "
-}
-
-func (m Model) labelSuggestionRows() []editorRow {
+func (m *Model) labelSuggestionRows(width int) []editorRow {
 	suggestions := m.filteredLabels()
 	if len(suggestions) == 0 {
-		return []editorRow{{text: "    (no label suggestions; Enter adds typed labels)", kind: rowHint}}
+		// The block renders its header whether or not it is filled, so it takes
+		// the empty row of spec section 10.8.3 rather than vanishing.
+		return []editorRow{m.emptyRow(width, "no label suggestions", "enter", "add typed labels")}
 	}
-	rows := []editorRow{{text: "    suggestions (up/down, Enter add):", kind: rowHint}}
+	rows := []editorRow{{text: "  suggestions (up/down, Enter add):", kind: rowHint}}
 	for i, suggestion := range suggestions {
 		marker := "  "
-		if m.pointerState.IsPressed(pointer.ControlID("label:" + suggestion)) {
-			marker = "! "
-		} else if i == min(m.labelHighlight, len(suggestions)-1) {
+		if i == min(m.labelHighlight, len(suggestions)-1) {
 			marker = "› "
 		}
+		target := "label:" + suggestion
 		rows = append(rows, editorRow{
-			text:   "    " + marker + sanitize(suggestion),
-			target: "label:" + suggestion,
-			kind:   rowBody,
+			mark:   m.gutterMark(target),
+			text:   "  " + marker + sanitize(suggestion),
+			target: target,
+			kind:   rowChoice,
 		})
 	}
 	return rows
 }
 
-func (m Model) similarRows() []editorRow {
+// emptyRow is the empty state of spec section 10.8.3, rendered whole by the
+// widget so the pane never composes the ladder itself.
+func (m *Model) emptyRow(width int, headline, key, verb string) editorRow {
+	row := widget.Empty(m.themeStyles(), widget.EmptyOpts{
+		Headline: headline, Key: key, Verb: verb, On: theme.OverlaySurf, Width: width,
+	})
+	return editorRow{text: ansi.Strip(row), rendered: row, kind: rowWidget}
+}
+
+func (m *Model) similarRows(width int) []editorRow {
 	switch {
 	case m.similarLoading:
-		return []editorRow{{}, {text: "  similar items: searching...", kind: rowHint}}
+		// Rule 4 of spec section 10.8.4: one motion per surface. A body busy row
+		// under a busy footer band renders its label with no frame.
+		frame := ""
+		if !m.busy() {
+			frame = m.plainFrame()
+		}
+		row := widget.Busy(m.themeStyles(), widget.BusyOpts{
+			Frame: frame, Label: similarLabel, On: theme.OverlaySurf, Width: width,
+		})
+		return []editorRow{{}, {text: ansi.Strip(row), rendered: row, kind: rowWidget}}
 	case m.similarErr != nil:
-		return []editorRow{{}, {text: "  similar items error: " + safeError(m.similarErr), kind: rowError}}
+		// Advisory: the save is not blocked by it, so there is nothing to retry.
+		return append([]editorRow{{}}, m.errorRows(width, safeError(m.similarErr), "")...)
 	}
 	hits := m.visibleSimilar()
 	if len(hits) == 0 {
@@ -511,29 +651,21 @@ func (m Model) similarRows() []editorRow {
 	for _, hit := range hits {
 		target := "similar:" + similarKey(hit)
 		rows = append(rows, editorRow{
-			text:   m.similarMarker(target) + similarText(hit) + "  [Enter dismiss]",
+			mark:   m.gutterMark(target),
+			text:   "  " + similarText(hit) + "  [Enter dismiss]",
 			target: target,
-			kind:   rowBody,
+			kind:   rowChoice,
 		})
 	}
 	const dismissAll = "Dismiss all similar items"
 	return append(rows, editorRow{
-		text:   m.similarMarker("similar:all") + buttonPadding + dismissAll + buttonPadding,
-		button: dismissAll,
-		target: "similar:all",
-		kind:   rowButton,
+		mark:    m.gutterMark("similar:all"),
+		text:    buttonPadding + dismissAll + buttonPadding,
+		button:  dismissAll,
+		target:  "similar:all",
+		variant: theme.ButtonNeutral,
+		kind:    rowButton,
 	})
-}
-
-func (m Model) similarMarker(target string) string {
-	switch {
-	case m.pointerState.IsPressed(pointer.ControlID(target)):
-		return "!   "
-	case m.focus == target:
-		return ">   "
-	default:
-		return "    "
-	}
 }
 
 func similarText(hit store.SimilarHit) string {
