@@ -14,7 +14,7 @@ import (
 // contracts.
 
 var (
-	dateRe   = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	dateRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 	// prioRe still admits !4 even though issue #234 collapsed the scale to
 	// three values. The wire format is frozen and legacy boards on disk carry
 	// the token; narrowing the pattern would silently demote a !4 to a title
@@ -246,7 +246,7 @@ func stripCheckbox(s string) (done bool, rest string, ok bool) {
 
 // parseTitleLine decodes a task title line: optional leading
 // extended-pictographic emoji (with optional VS16), then whitespace-split
-// tokens where !1..!4 sets priority, @YYYY-MM-DD sets due, ~S/~M/~L sets
+// tokens where !1..!3 sets priority (a legacy !4 is read as !3), @YYYY-MM-DD sets due, ~S/~M/~L sets
 // effort, %blocked sets blocked, #x adds a tag, and everything else stays in
 // the title.
 // A "- [x]" checkbox forces status done regardless of section.
