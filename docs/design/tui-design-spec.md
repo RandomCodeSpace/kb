@@ -339,7 +339,7 @@ density (§2.6).
 | Selected card | Background steps `Card` → `Raised`; left rail glyph thickens `▌` (U+258C) → `█` (U+2588); title renders bold |
 | Rail hue | The card's priority hue, **always** — including when selected |
 | Pressed / active pointer target | Reverse video (SGR 7), unchanged from today's `pointer.State.Render`, but promoted into the theme as `Styles.Pressed` |
-| Focused pill (traversal over a pill set) | End caps thicken `▐`/`▌` → `█`/`█` — the rail-thickening vocabulary applied to §3.6's caps; zero width change (added by #207) |
+| Focused pill (traversal over a pill set) | Body run bolds — the one zero-cell attribute §3.6 has left; zero width change (added by #207 as cap thickening, replaced by #227) |
 
 The rail keeps the priority hue on selection. The wildcard prototype re-hued it
 to `Brand`, which erases the P1 signal on the exact card the user is looking at.
@@ -399,7 +399,7 @@ frameHeight < 30   OR   columnInnerWidth < 22
 
 The height axis is the prototype's, unchanged. The width axis is added: at 3
 columns on an 80-cell frame the panels are ~26 wide and cards are ~23 inner,
-which just fits; below that, pill end caps and the chip row stop fitting and
+which just fits; below that, pill padding and the chip row stop fitting and
 normal density produces a wall of dropped chips instead of a denser board. See
 §8, contestable call 5.
 
@@ -419,10 +419,10 @@ and matches the map's decision that the description goes first.
 5. **Card label row** — labels merge onto the meta chip row instead of owning
    their own line.
 6. **Inner paddings** — `CardPadLeft` 1 → 0 and `ColumnPadX` 1 → 0.
-7. **Pill end caps** — chips degrade to flat colored bold text (`flatChip`),
-   scoped labels keep only their value half. This is the last thing to go
-   because it is the only step that changes the vocabulary rather than the
-   spacing.
+7. **Pill padding** — chips degrade to flat colored bold text (`flatChip`),
+   dropping the cell of padding §3.6 spends at each end; scoped labels keep
+   only their value half. This is the last thing to go because it is the only
+   step that changes the vocabulary rather than the spacing.
 
 ---
 
@@ -513,55 +513,73 @@ One pill per label, wheel-hued by `sum(runes) % 5`.
 
 ### 3.6 Pill rendering
 
-The pill is the language's chip primitive: half-block end caps carrying the fill
-color as *foreground* over the surface behind, so the chip reads as rounded at
-half-cell resolution.
+The pill is the language's chip primitive: a flat span of colored cells with one
+cell of padding at each end, carrying the fill color as *background* under text
+in `FgOnAccent`.
 
 ```
-runs = [ "▐" fg=Fill  bg=On ]   U+2590 right half block
+runs = [ " "  bg=Fill ]                  padding cell
        [ text fg=FgOnAccent bg=Fill ]
-       [ "▌" fg=Fill  bg=On ]   U+258C left half block
+       [ " "  bg=Fill ]                  padding cell
 ```
 
-Cost: `width(text) + 2` columns. Both caps carry the fill color as foreground;
-the scoped variant substitutes `FgSubtle` on `Surface` for the key run only, so
-the pill reads hue-bracketed with the dark key half inside the bracket. The
-first cap was `Surface` until #219, which is near-invisible in truecolor and a
-grey bar once quantized.
+Cost: `width(text) + 2` columns. The scoped variant substitutes `FgSubtle` on
+`Surface` for the key run *and its leading pad*, so the pill is two padded spans
+meeting at a hard color boundary: a dark key half, then the hue half. There is
+no junction glyph.
+
+**Amended by #227.** Until #227 both ends were half-block glyphs — `▐` U+2590
+and `▌` U+258C — carrying the fill color as *foreground* over the surface
+behind, so the chip read as rounded at half-cell resolution. The trick was a
+kb-local invention, no charm component was involved, and it was the only piece
+of the pill language that depended on font geometry rather than on color cells.
+It failed both ways: a visible seam on a filled pill wherever the font did not
+draw the half block flush to the cell edge (evidenced across three terminals,
+worst on a mobile SSH client), and two colored bars *by construction* on an
+inactive pill, which has no fill for a hued half-block to fuse into. The #219
+cap-hue treatment and the #221 follow-up were attempts to make that
+construction read; the padding cell removes the construction instead. Width is
+untouched — the space costs the cell the cap did.
 
 **Inactive variant** (added by #207 for toggleable pill sets — today the filter
 bar; re-hued by #208). A pill that is present but not selected withdraws its
 *fill*, not its hue: `ChipRunsTint(fill, surface)` drops the fill to `Surface`
 so the pill cannot read as selected, and moves the wheel hue onto the body text
 as foreground in place of `FgOnAccent` — §1.9's rule that a variant which has
-lost its state still carries its identity as a tint on the resting surface —
-while the end caps keep the wheel hue they carry in the filled form (#219): the
-withdrawal takes the fill, never the identity. The
-scoped key run is `FgSubtle` on `Surface`, one step under the hue, preserving
-the two-tone split; it sits at the secondary rather than the tertiary role
-because it also carries the toggle marker, which is prose a user must read
-before acting and so takes the §1.9 AA floor with it. All five wheel hues clear
-AA 4.5:1 on `Surface` in truecolor and after 256-color quantization (worst 4.97
-and 5.19), which is what permits the hue on prose. The caps carry it too, but
-as glyph area they take no AA floor; what binds them is §1.7 separability,
-audited on cap foregrounds against every ground a pill lands on (`Card`,
-`Zebra`, `Raised`, `Canvas`, `OverlaySurf`).
-Hue-on-fill against hue-on-surface is the toggle affordance in color; the
-equal-width two-cell marker inside the caps (`MarkFilterOff` `+ ` /
-`MarkFilterOn` `x `, §10.4.1) carries it where color cannot — at `FidelityFlat`
-(§10.7.5), and equally in the compact form, which has no fill and no cap to
-spend, the marker is the entire toggle signal.
+lost its state still carries its identity as a tint on the resting surface.
+Both padding cells sit on that same withdrawn `Surface` ground, so an inactive
+pill is one flat Surface span carrying hued text. The scoped key run is
+`FgSubtle` on `Surface`, one step under the hue, preserving the two-tone split;
+it sits at the secondary rather than the tertiary role because it also carries
+the toggle marker, which is prose a user must read before acting and so takes
+the §1.9 AA floor with it. All five wheel hues clear AA 4.5:1 on `Surface` in
+truecolor and after 256-color quantization (worst 4.97 and 5.19), which is what
+permits the hue on prose. Hue-on-fill against hue-on-surface is the toggle
+affordance in color; the equal-width two-cell marker at the head of the body
+(`MarkFilterOff` `+ ` / `MarkFilterOn` `x `, §10.4.1) carries it where color
+cannot — at `FidelityFlat` (§10.7.5), and equally in the compact form, which
+has no fill and no padding to spend, where the marker is the entire toggle
+signal.
 
-**Focused pill** (keyboard traversal over a pill set): the end caps thicken
-`▐`/`▌` → `█`/`█`, borrowing §2.4's rail-thickening vocabulary. Zero width
-change — the old `>label<` bracket form cost two cells and reflowed the row on
-every cursor move, a §10.4.4 violation the plain-text form carried. Toggle,
-focus and hover are three orthogonal axes; none moves a cell.
+**Focused pill** (keyboard traversal over a pill set): the body run bolds. Zero
+width change. Bold is available to the pill for the same reason §10.4.2's
+hotkey underline is available to the button: §2.6 step 7 spends bold on the
+*compact flat* chip, a form that has no focus state and is never traversed, so
+the two boldings can never be read in one place. Hover keeps its underline
+(§10.5.1) and the two compose. The cue replaced #207's cap thickening, which
+died with the caps; the older `>label<` bracket form cost two cells and
+reflowed the row on every cursor move, a §10.4.4 violation. Toggle, focus and
+hover are three orthogonal axes; none moves a cell.
 
-**Known risk, carried consciously (map #136):** the entire accent vocabulary is
-U+2588 / U+258C / U+2590. On fonts without block glyphs this degrades worse than
-a border would and has no ASCII analogue. Shade tiers survive that failure; pills
-and rails do not. Accepted at the #137 resolution.
+**Known risk, carried consciously (map #136), narrowed by #227:** the remaining
+block-glyph vocabulary is `█` U+2588 and `▌` U+258C on the rails (§2.4), the
+meter's caps and track (§10.1.3), and the brand letterforms (§10.6.1). Those
+are *fills* and *rails* — glyphs whose whole job is to paint a cell or a
+half-cell of color adjacent to their neighbour — and they degrade to tofu on a
+font without block glyphs, but they never depended on edge-flush rendering the
+way a cap bolted to a colored fill did. Pills no longer carry the risk at all:
+they are background color and nothing else. Shade tiers survive the failure;
+rails and the meter do not. Accepted at the #137 resolution, re-scoped at #227.
 
 ### 3.7 Overflow cue
 
@@ -836,7 +854,7 @@ type Styles struct {
     Column  ColumnStyles   // Panel, BandRest, BandFocus, BandLabel, Meta, More
     Card    CardStyles     // Rest, Zebra, Raised, Title, TitleSel, Desc, Seq
     Rail    [5]lipgloss.Style   // by priority, index 0 unused
-    Chip    ChipStyles     // CapLeft, CapRight, Body, ScopedKey, Flat
+    Chip    ChipStyles     // Pad, ScopedPad, Body, BodyHover, BodyFocus, BodyFocusHover, ScopedKey, Flat, FlatHover
     Label   [5]ChipStyles  // the wheel
     Status  StatusStyles   // OK, Warn, Danger, Info, Dot
     Overlay OverlayStyles  // Surf, HeaderBand, SectionBand, FooterBand, Shadow, FieldLabel, FieldValue
@@ -1296,10 +1314,14 @@ the one widget whose entire job is position.
 
 **Pill form.** `widget.Meter(o MeterOpts) string` extends the §5.1 inventory:
 `MeterOpts{Done, Total, Cells int, Ground theme.Slot}`. It wraps
-`Styles.Progress.ViewAs(done/total)` in the §3.6 end caps — `Glyph.CapL` in the
+`Styles.Progress.ViewAs(done/total)` in its own end caps — `Glyph.CapL` in the
 ramp's first color, `Glyph.CapR` in its last — so the meter is a pill whose
-interior is a meter. Cost is `Cells + 2` columns. Below `MeterMinCells` the caps
-and bar are dropped and the caller's `i/N` text stands alone.
+interior is a meter. The meter is the one pill that kept the half-block caps
+#227 removed from §3.6: its caps terminate a *gradient*, not a flat fill, so
+there is no fill color for a padding cell to carry, and the ramp's lead and
+tail hues are information the padding would drop. Cost is `Cells + 2` columns.
+Below `MeterMinCells` the caps and bar are dropped and the caller's `i/N` text
+stands alone.
 
 **A pill carries a gradient only when its interior is a bounded fraction.** That
 is the whole rule for pills. The shipped counter, the column count, the
@@ -2192,8 +2214,8 @@ slice that adopts the rule that needs them.
 |---|---|---|---|---|---|
 | `Rail` | `▌` | U+258C | 1 | Card rail resting (§2.4); unfocused band rail (§2.2); focus gutter bar (§10.4.3); progress meter fill (§10.1.3) | present |
 | `RailFull` | `█` | U+2588 | 1 | Selected card rail (§2.4) | present |
-| `CapL` | `▐` | U+2590 | 1 | Pill left end cap (§3.6) | present |
-| `CapR` | `▌` | U+258C | 1 | Pill right end cap (§3.6) | present |
+| `CapL` | `▐` | U+2590 | 1 | Progress meter left end cap (§10.1.3) | present |
+| `CapR` | `▌` | U+258C | 1 | Progress meter right end cap (§10.1.3) | present |
 | `Dot` | `●` | U+25CF | 1 | Column status dot (§2.2) | present |
 | `Check` | `☐` | U+2610 | 1 | Unchecked checklist row | present |
 | `CheckOn` | `☑` | U+2611 | 1 | Checked checklist row | present |
@@ -2220,8 +2242,8 @@ slice that adopts the rule that needs them.
 | `PathSep` | `" / "` | U+0020 U+002F U+0020 | 3 | Top-bar crumb separator | new |
 
 **Font risk.** `Track` is in the same Block Elements range as `RailFull`, `Rail`
-and `CapL` and degrades identically on a font without them, so it carries no risk
-§3.6 has not already accepted. `Empty` and `Alert` are in Geometric Shapes, the
+and the meter caps and degrades identically on a font without them, so it carries
+no risk §3.6 has not already accepted. `Empty` and `Alert` are in Geometric Shapes, the
 block §2.2 and §3.4 already spend on `Dot` and `Diamond` — same terms. They also do
 real work under the ASCII profile: §6.4 keeps ASCII-pinned structure goldens, and
 with the profile flattened the hue is the one thing that does not survive, so a
@@ -2252,8 +2274,8 @@ the failure mode is an ugly chip rather than a lost value.
 | `MarkSeq` | `#` | 1 | Card reference prefix, `#142` (§3.2) |
 | `MarkTag` | `#` | 1 | Plain label pill prefix, `#tag` (§3.5) |
 | `MarkDue` | `!` | 1 | Compact due prefix, `!2d` (§3.4 position 4) |
-| `MarkFilterOff` | `+ ` | 2 | Unselected filter pill marker, inside the caps (§3.6 inactive variant; #207) |
-| `MarkFilterOn` | `x ` | 2 | Selected filter pill marker, inside the caps (§3.6 inactive variant; #207) |
+| `MarkFilterOff` | `+ ` | 2 | Unselected filter pill marker, at the head of the body run (§3.6 inactive variant; #207) |
+| `MarkFilterOn` | `x ` | 2 | Selected filter pill marker, at the head of the body run (§3.6 inactive variant; #207) |
 
 `MarkSeq` and `MarkTag` are a same-text alias, deliberate and not a collision — the
 §1.7 convention applied to glyphs. They are separate tokens because they answer to
@@ -2278,12 +2300,12 @@ the cell grid no better, and an emoji-less font substitutes tofu of whatever
 width it has. The rule binds `Dot`, `Diamond`, `Ellipsis`, `Empty`, `Alert`,
 `Bullet`, `Times`, `EmDash`, `Tick` (#224), `Blocked` and
 `EffortS`/`EffortM`/`EffortL`. It does not bind the Block Elements — `Rail`,
-`RailFull`, `CapR`, `Track`, `HalfTop`, `HalfBottom` — whose adjacency to their
-neighbour *is* the primitive: a rail that does not touch its card and a cap that
-does not touch its text are a different widget, and their cell alignment is the
-block-glyph risk §3.6 already accepts. It does not bind `Check`, `CheckOn`,
-`CheckOff`, `Focus`, `CapL` or `Chevron`, which are Neutral width, though those
-are written with a following space anyway. The rule is about the column a mark
+`RailFull`, `CapL`, `CapR`, `Track`, `HalfTop`, `HalfBottom` — whose adjacency
+to their neighbour *is* the primitive: a rail that does not touch its card and
+a meter cap that does not touch its bar are a different widget, and their cell
+alignment is the block-glyph risk §3.6 accepts. It does not bind `Check`,
+`CheckOn`, `CheckOff`, `Focus` or `Chevron`, which are Neutral width, though
+those are written with a following space anyway. The rule is about the column a mark
 occupies, not about its token: the space belongs to the render site, and every
 `Cells` value in the table above is unchanged.
 
@@ -2433,7 +2455,7 @@ anything that appears.
 | Column header band (§2.2) | `Rail` + `Dot` + `" i "` = 5 | `Focus` + `" i "` = 4 | **Violated today** — see below |
 | Branded engine row (§10.2.5) | label + `EllipsisField` + `SuffixField` | same | Both fields are reserved whether or not their content is present |
 | Scroll affordance (§10.3.4) | column reserved | column reserved | Tint changes; geometry does not |
-| Filter pill (§3.6, #207) | `CapL` `▐` + mark + text + `CapR` `▌` | `RailFull` `█` caps, same interior | Caps swap for same-width glyphs; toggle marks are equal-width (`MarkFilterOff`/`MarkFilterOn`, 2 each); the retired `>label<` form violated this rule |
+| Filter pill (§3.6, #207) | 1 pad cell + mark + text + 1 pad cell | same cells, body run bolded | Padding is one cell per end in both states; the focus cue is an SGR attribute and costs nothing; toggle marks are equal-width (`MarkFilterOff`/`MarkFilterOn`, 2 each); the retired `>label<` form and the retired cap-thickening both predate this row |
 
 **The band exception.** The band's *total* width is identical in both states — both
 fill the panel width — but its interior is not: the label starts at column 5
@@ -2669,18 +2691,21 @@ promise. Cost: zero cells, both states are one glyph. Any future tab strip is bu
 the same way — hovered-and-unselected thickens its rail, hovered-and-selected does
 nothing — and gets no new tokens for it.
 
-**Chip / label pill.** A pill (§3.6) is a saturated fill with `FgOnAccent` text and
-two half-block end caps; there is no tier left to raise and the caps cannot grow
-without costing columns. The cue is **underline on the body run** — zero cells,
-survives 256-color quantization, survives the ASCII structure profile, and does not
-touch the pair's contrast because it changes no color. Bold is unavailable: §2.6
-step 7 already spends bold on the compact flat chip, so bold would mean "compact" at
-one density and "hovered" at the other. A hue swap would break the label wheel's
-identity (§1.6). The hotkey underline of §10.4.2 lives on buttons and never on
-pills, so the two underlines never appear in the same widget.
+**Chip / label pill.** A pill (§3.6) is a saturated fill with `FgOnAccent` text
+and one padding cell at each end; there is no tier left to raise and no cell to
+spend on anything larger. The cue is **underline on the body run** — zero cells,
+survives 256-color quantization, survives the ASCII structure profile, and does
+not touch the pair's contrast because it changes no color. Bold is unavailable to
+*hover*: §2.6 step 7 already spends bold on the compact flat chip, so bold on a
+hovered pill would mean "compact" at one density and "hovered" at the other, and
+since #227 bold is additionally spent on the focused pill, which shares the
+widget. A hue swap would break the label wheel's identity (§1.6). The hotkey
+underline of §10.4.2 lives on buttons and never on pills, so the two underlines
+never appear in the same widget.
 
-This costs two cached styles, `ChipStyles.BodyHover` and `ChipStyles.FlatHover`,
-built in `New` beside the rest (§6.2). No view toggles the attribute itself.
+This costs four cached styles, `ChipStyles.BodyHover`, `FlatHover`, `BodyFocus`
+and `BodyFocusHover`, built in `New` beside the rest (§6.2). No view toggles the
+attribute itself.
 
 Hover introduces no timing constant: it has no animation, no grace period and no
 auto-hide, so nothing here reaches §10.3.
@@ -3329,7 +3354,7 @@ cannot be argued into class A or class C **is** class B.
 |---|---|---|---|
 | **A — degrades** | The effect's value at any instant is one `Slot` plus a blend fraction toward a second `Slot`. Removing the fraction leaves a correct, meaningful frame | Renders `base` flat. Any tick chain that only drives the fraction does not arm | Every ramp of §10.1.2; the state-dependent section-label recolor of §10.1.4 (crush `dialog/sessions.go:308-315`) |
 | **B — suppressed** | The information lives in the color *difference* across the run, or in a transient the settled frame does not contain | The element renders its settled, ungraded state directly. The effect does not run, and its tick chain is never armed | The branded engine's staggered birth wipe (§10.2.5) and the launch reveal (§10.6.6), both crush `anim.go:325-330` — pre-birth cells render `.`, so a flattened wipe is a flash of punctuation |
-| **C — profile-independent** | Carried by glyph, geometry, weight, shade tier or SGR attribute, not by hue | Runs unchanged at every fidelity, including `FidelityFlat` | Half-block rails and pill caps (§2.4, §3.6); the meter's fill/track glyph split (§10.1.3); the hover underline and rail thickening (§10.5.1); `Styles.Pressed` reverse video; the hotkey underline (§10.4.2); the shade-tier depth model |
+| **C — profile-independent** | Carried by glyph, geometry, weight, shade tier or SGR attribute, not by hue | Runs unchanged at every fidelity, including `FidelityFlat` | Half-block rails (§2.4); the meter's fill/track glyph split and its end caps (§10.1.3); the hover underline, the focused-pill bold and rail thickening (§10.5.1, §3.6); `Styles.Pressed` reverse video; the hotkey underline (§10.4.2); the shade-tier depth model |
 
 The gradient-as-progress-bar of §10.1.3 is a deliberate hybrid: its ramp is class A
 and its *position* is class C, which is exactly why `Glyph.Track` exists. Without a
