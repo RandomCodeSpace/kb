@@ -124,9 +124,34 @@ func Field(styles *theme.Styles, label, value string, width int) string {
 	gutter := styles.Metrics.OverlayLabelW
 	inset := styles.Metrics.OverlayInsetX
 	field := max(width-2*inset, 0)
-	name := styles.Overlay.FieldLabel.Render(exact(truncate(styles, label, max(gutter-1, 0)), min(gutter, field)))
 	text := styles.Overlay.FieldValue.Render(truncate(styles, value, max(field-gutter, 0)))
-	return OverlayRow(styles, name+text, width)
+	return OverlayRow(styles, fieldLabel(styles, label, gutter, field)+text, width)
+}
+
+// FieldRun is Field for a value that arrives already styled: the blocker chip
+// row of issue #222, whose chips carry their own hover and pressed runs and so
+// cannot be handed to FieldValue as text. Layout is Field's, cell for cell, so
+// a row that gains an activatable chip moves nothing (spec section 10.4.4).
+//
+// It reports where the value field starts, as a cell column from the row's own
+// left edge, and how many cells that field holds. Those are the recorded bounds
+// spec section 10.5.3 asks a widget-rendered control to be anchored at: the
+// caller placed the runs inside the value, so it knows their offsets, and never
+// has to recover them by scanning the rendered row.
+func FieldRun(styles *theme.Styles, label, value string, width int) (row string, column, cells int) {
+	gutter := styles.Metrics.OverlayLabelW
+	inset := styles.Metrics.OverlayInsetX
+	field := max(width-2*inset, 0)
+	cells = max(field-gutter, 0)
+	row = OverlayRow(styles, fieldLabel(styles, label, gutter, field)+truncate(styles, value, cells), width)
+	return row, inset + min(gutter, field), cells
+}
+
+// fieldLabel is the key half of a field row: the label in FgMuted, truncated a
+// column short of the gutter so a label and its value never touch, padded out
+// to hold the value column straight down the panel.
+func fieldLabel(styles *theme.Styles, label string, gutter, field int) string {
+	return styles.Overlay.FieldLabel.Render(exact(truncate(styles, label, max(gutter-1, 0)), min(gutter, field)))
 }
 
 // FieldWrap is Field for a value that arrives as already-styled runs rather

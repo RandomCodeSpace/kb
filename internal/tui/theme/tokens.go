@@ -33,6 +33,7 @@ type Glyphs struct {
 	Check    string // U+2610, unchecked checklist row
 	CheckOn  string // U+2611, checked checklist row
 	CheckOff string // U+2612, dropped checklist row
+	Tick     string // U+2713, resolved-blocker mark inside a blocker chip
 	Diamond  string // U+25C7, effort marker
 	Focus    string // U+25B8, focused band caret
 	More     string // overflow cue prefix, rendered as "+N more"
@@ -84,6 +85,7 @@ var defaultGlyphs = Glyphs{
 	Check:    "☐",
 	CheckOn:  "☑",
 	CheckOff: "☒",
+	Tick:     "✓",
 	Diamond:  "◇",
 	Focus:    "▸",
 	More:     "+",
