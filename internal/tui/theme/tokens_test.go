@@ -191,9 +191,9 @@ func TestDescLinesClimbTheHeightLadder(t *testing.T) {
 
 // TestInnerPadRowsClimbTheHeightLadder is the interior vertical rhythm of
 // section 3.1 as issue #240 added it: none when compact, one separator below
-// CardInnerPadTwo and both above it. The count is a rung of the frame and never
-// of the card's content, which is what keeps CardRows the pure function section
-// 2.5 requires.
+// CardInnerPadTwo and both above it. The rung is the frame's; whether the card
+// spends both of them is issue #243's business, and a card with no labels
+// spends only the first.
 func TestInnerPadRowsClimbTheHeightLadder(t *testing.T) {
 	metrics := defaultMetrics
 	cases := map[int]int{30: 1, 44: 1, 45: 1, 54: 1, 55: 2, 75: 2, 200: 2}
@@ -209,11 +209,13 @@ func TestInnerPadRowsClimbTheHeightLadder(t *testing.T) {
 	}
 }
 
-// TestCardRowsSumsEveryAllotment keeps the one place that answers "how tall is a
-// card" in agreement with the four that answer "how many rows does this section
-// get". A section added to the card without being added to the sum would put the
-// column's overflow cue on a row that belongs to a card.
-func TestCardRowsSumsEveryAllotment(t *testing.T) {
+// TestCardRowsSumsEveryCeiling keeps the one place that answers "how tall may a
+// card get" in agreement with the four that answer "how many rows may this
+// section spend". Issue #243 made the answer a bound rather than a height - the
+// column measures each card now - but a section added to the card without being
+// added to the sum would still let a card draw past what the ladder budgeted at
+// that frame height.
+func TestCardRowsSumsEveryCeiling(t *testing.T) {
 	metrics := defaultMetrics
 	for height := 8; height <= 200; height++ {
 		for _, density := range []Density{DensityNormal, DensityCompact} {
@@ -229,11 +231,11 @@ func TestCardRowsSumsEveryAllotment(t *testing.T) {
 	}
 }
 
-// TestCardRowGridIsAFunctionOfDensityAndHeight is the invariant the whole of
-// section 3.1 rests on: a card's height is decided before its content is, which
-// is what lets a column reserve its scroll affordance and its overflow cue
-// before the cards in it are rendered. Nothing here takes a card.
-func TestCardRowGridIsAFunctionOfDensityAndHeight(t *testing.T) {
+// TestCardRowCeilingsAreAFunctionOfDensityAndHeight is what survived issue #243
+// of the old grid rule. What a card may spend is still the frame's decision and
+// nothing here takes a card; what it does spend inside those ceilings is the
+// card's, and widget.CardHeight answers that.
+func TestCardRowCeilingsAreAFunctionOfDensityAndHeight(t *testing.T) {
 	metrics := defaultMetrics
 	if got := metrics.TitleRows(100, DensityCompact); got != 1 {
 		t.Errorf("compact title rows = %d, want 1", got)
@@ -253,9 +255,10 @@ func TestCardRowGridIsAFunctionOfDensityAndHeight(t *testing.T) {
 	if got := metrics.LabelRows(100, DensityCompact); got != 0 {
 		t.Errorf("compact label rows = %d, want 0; step 5 merges them onto the meta row", got)
 	}
-	// Total rows: title + description + interior padding + the one meta row +
-	// labels. The padding rows are issue #240's; the ladder in section 2.6
-	// records what each rung traded for them.
+	// The tallest a card may be: title + description + interior padding + the
+	// one meta row + labels, every one of them at its cap. The padding rows are
+	// issue #240's; the ladder in section 2.6 records what each rung traded for
+	// them.
 	rows := map[int]int{30: 5, 44: 5, 45: 8, 54: 8, 55: 10, 65: 11, 75: 12}
 	for height, want := range rows {
 		if got := metrics.CardRows(height, DensityNormal); got != want {

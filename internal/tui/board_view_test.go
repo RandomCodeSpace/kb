@@ -684,6 +684,56 @@ func TestBoardViewSmallHelpers(t *testing.T) {
 	}
 }
 
+// TestBoardOverflowCueCountsTheCardsItCouldNotDrawWhole is the section 3.7 cue
+// under issue #243's content-sized cards, with arithmetic small enough to check
+// by hand. Five identical bare cards - a title, no description, no labels - are
+// three rows each at normal density: the title, the interior separator, the meta
+// row. With the one-row inter-card gutter the stack is 19 rows.
+//
+// The panel gets 11: one for the band, one for the column meta line, one for the
+// cue, and eight for the body. Two cards and the gutter after each fill those
+// eight exactly, the third would need four more, and the cue therefore says
+// three. Nothing is clipped to make it fit.
+func TestBoardOverflowCueCountsTheCardsItCouldNotDrawWhole(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	fixture := board.Board{Title: "Roadmap"}
+	for index := range 5 {
+		fixture.Tasks = append(fixture.Tasks, board.Task{
+			ID: fmt.Sprintf("todo-%d", index), Seq: index + 1, Title: "Card",
+			Status: board.StatusTodo, Prio: 1, CreatedAt: now, MovedAt: now,
+		})
+	}
+	m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
+	m.loading, m.haveBoardSnapshot = false, true
+	m.board = fixture
+	m.now = func() time.Time { return now }
+	m.renderedAt = now
+	m.width, m.height = 120, 40
+
+	tasks := tasksInStatus(m.filteredBoard(), board.StatusTodo)
+	heights := m.measureCards(tasks, board.StatusTodo, 40, theme.DensityNormal)
+	for index, height := range heights {
+		if height != 3 {
+			t.Fatalf("card %d measured %d rows, want the bare card's 3", index, height)
+		}
+	}
+	if got := m.columnStackHeight(heights, theme.DensityNormal); got != 19 {
+		t.Fatalf("the stack measured %d rows, want 19", got)
+	}
+
+	column := m.renderBoardColumnAt(board.StatusTodo, 44, 11, theme.DensityNormal)
+	body := strings.Join(mapPlain(column.lines), "\n")
+	if !strings.Contains(body, "+3 more") {
+		t.Errorf("the column did not say +3 more:\n%s", body)
+	}
+	if strings.Contains(body, "#3") {
+		t.Errorf("the third card was drawn although it did not fit whole:\n%s", body)
+	}
+	if !strings.Contains(body, "#2") {
+		t.Errorf("the second card fit and was not drawn:\n%s", body)
+	}
+}
+
 // TestBoardStateCarriesSemanticHue pins the footer's state segment onto the
 // status colors of spec section 1.5.
 func TestBoardStateCarriesSemanticHue(t *testing.T) {
@@ -1044,23 +1094,29 @@ func TestCardDescriptionKeepsSourceLineStructure(t *testing.T) {
 
 // TestCardDescriptionWrapsWithinASourceLine is the other half of the rule: a
 // source line starts a rendered line, and then it word-wraps inside the card's
-// allotment like any prose. The allotment still binds - the last row the ladder
-// gave the description carries the ellipsis and nothing runs past the card.
+// ceiling like any prose. The ceiling still binds - the last row the ladder
+// allows the description carries the ellipsis and nothing runs past the card.
+//
+// Issue #243 moved that row. The title is "Ship" and takes one row of its
+// two-row ceiling rather than holding the second open for a block it shares, so
+// the description starts on row 1 and the ceiling runs out on row DescLines.
 func TestCardDescriptionWrapsWithinASourceLine(t *testing.T) {
 	long := strings.Repeat("wrapping ", 24)
 	m, tasks := descriptionCardModel(t, "head line\n"+long)
 	rows, _, _ := m.renderTaskLines(tasks, board.StatusTodo, 40, theme.DensityNormal)
 	styles := m.themeStyles()
 	descLines := styles.Metrics.DescLines(m.height, theme.DensityNormal)
-	block := styles.Metrics.TitleRows(m.height, theme.DensityNormal) + descLines
 	if got := plain(rows[1]); !strings.Contains(got, "head line") || strings.Contains(got, "wrapping") {
 		t.Errorf("row 1 = %q, want the first source line alone on its own row", got)
 	}
-	last := plain(rows[block-1])
+	last := plain(rows[descLines])
 	if !strings.Contains(last, styles.Glyph.Ellipsis) {
-		t.Errorf("last description row %d = %q, want the ellipsis the allotment ran out on", block-1, last)
+		t.Errorf("last description row %d = %q, want the ellipsis the ceiling ran out on", descLines, last)
 	}
-	for index, row := range rows[:block] {
+	if got := plain(rows[descLines+1]); strings.Contains(got, "wrapping") {
+		t.Errorf("row %d = %q, want the description to stop at its ceiling", descLines+1, got)
+	}
+	for index, row := range rows[:descLines+1] {
 		if got := ansi.StringWidth(row); got != 40 {
 			t.Errorf("row %d is %d cells, want 40", index, got)
 		}

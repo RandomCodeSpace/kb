@@ -37,7 +37,12 @@ func TestCardIsEmptyWithoutWidth(t *testing.T) {
 	}
 }
 
-func TestCardRowGridIsFixedByDensity(t *testing.T) {
+// TestCardRowsFollowItsContentUnderTheCeiling is issue #243. The section 2.6
+// ladder is a ceiling now, not an allotment: the card takes a title row, the
+// rows its description fills, the meta row and the rows its pills wrap onto,
+// and a description that fills one row of a two-row ceiling makes the card one
+// row shorter rather than leaving a blank one under it.
+func TestCardRowsFollowItsContentUnderTheCeiling(t *testing.T) {
 	styles := theme.New(true)
 	cases := []struct {
 		name      string
@@ -45,8 +50,9 @@ func TestCardRowGridIsFixedByDensity(t *testing.T) {
 		descLines int
 		rows      int
 	}{
-		{"normal", DensityNormal, 1, 5},
-		{"tall", DensityNormal, 2, 6},
+		// title(1) + description + meta(1) + labels(1).
+		{"one description row", DensityNormal, 1, 4},
+		{"two description rows", DensityNormal, 2, 5},
 		{"compact", DensityCompact, 2, 2},
 	}
 	for _, testCase := range cases {
@@ -64,19 +70,87 @@ func TestCardRowGridIsFixedByDensity(t *testing.T) {
 	}
 }
 
-func TestCardKeepsTheChipRowsPinnedForAShortDescription(t *testing.T) {
+// TestCardGivesBackTheDescriptionRowsItDidNotFill is the defect issue #243 was
+// opened for: a description of one line under a ceiling of two used to leave the
+// second row blank inside the card. It now gives the row back to the column, and
+// the meta row sits directly under the prose.
+func TestCardGivesBackTheDescriptionRowsItDidNotFill(t *testing.T) {
 	styles := theme.New(true)
 	opts := cardFixture(styles, DensityNormal, 2)
 	opts.Desc = "short"
 	rows := Card(styles, opts)
-	if len(rows) != 6 {
-		t.Fatalf("card rendered %d rows, want 6", len(rows))
+	if len(rows) != 4 {
+		t.Fatalf("card rendered %d rows, want 4", len(rows))
 	}
-	if plain := strings.TrimSpace(ansi.Strip(rows[3])); plain != "▌" {
-		t.Errorf("row 3 = %q, the unused description row must stay blank", plain)
+	if plain := ansi.Strip(rows[1]); !strings.Contains(plain, "short") {
+		t.Errorf("row 1 = %q, want the one description row", plain)
 	}
-	if !strings.Contains(ansi.Strip(rows[4]), " 1 ") {
-		t.Errorf("row 4 = %q, want the meta chip row", ansi.Strip(rows[4]))
+	if !strings.Contains(ansi.Strip(rows[2]), " 1 ") {
+		t.Errorf("row 2 = %q, want the meta chip row directly under the description", ansi.Strip(rows[2]))
+	}
+}
+
+// TestCardWithoutADescriptionDrawsNoDescriptionRow is the same rule at zero.
+// An empty description is not a short one: the card carries no description row
+// at all, and the prose block is the title alone.
+func TestCardWithoutADescriptionDrawsNoDescriptionRow(t *testing.T) {
+	styles := theme.New(true)
+	opts := cardFixture(styles, DensityNormal, 5)
+	opts.Desc = ""
+	rows := Card(styles, opts)
+	// title(1) + meta(1) + labels(1).
+	if len(rows) != 3 {
+		t.Fatalf("card rendered %d rows, want 3", len(rows))
+	}
+	if !strings.Contains(ansi.Strip(rows[1]), " 1 ") {
+		t.Errorf("row 1 = %q, want the meta chip row directly under the title", ansi.Strip(rows[1]))
+	}
+}
+
+// TestCardWithoutLabelsDropsTheSeparatorAboveThem is the section 3.1 separator
+// rule as issue #243 re-cut it: an interior separator sits between two sections
+// the card actually drew. With no labels there is nothing under the meta row for
+// the second separator to separate it from, so it goes with them.
+func TestCardWithoutLabelsDropsTheSeparatorAboveThem(t *testing.T) {
+	styles := theme.New(true)
+	opts := cardFixture(styles, DensityNormal, 1)
+	opts.PadRows = 2
+	opts.LabelRows = 2
+	withLabels := Card(styles, opts)
+	opts.Labels = nil
+	bare := Card(styles, opts)
+	// title(1) + description(1) + separator + meta(1) + separator + labels(1).
+	if len(withLabels) != 6 {
+		t.Fatalf("a labelled card rendered %d rows, want 6", len(withLabels))
+	}
+	// title(1) + description(1) + separator + meta(1): the label rows and the
+	// separator that was holding them off the meta row both go.
+	if len(bare) != 4 {
+		t.Fatalf("a card with no labels rendered %d rows, want 4", len(bare))
+	}
+	if plain := strings.TrimSpace(ansi.Strip(bare[len(bare)-1])); plain == "▌" {
+		t.Error("the last row of a card with no labels is blank; no separator may abut blank space")
+	}
+}
+
+// TestCardKeepsTheProseSeparatorWithoutADescription is the other arm. The prose
+// block is at least the title and the meta row is always drawn, so the first
+// separator has two sections to sit between whatever the description did.
+func TestCardKeepsTheProseSeparatorWithoutADescription(t *testing.T) {
+	styles := theme.New(true)
+	opts := cardFixture(styles, DensityNormal, 3)
+	opts.Desc = ""
+	opts.PadRows = 1
+	rows := Card(styles, opts)
+	// title(1) + separator + meta(1) + labels(1).
+	if len(rows) != 4 {
+		t.Fatalf("card rendered %d rows, want 4", len(rows))
+	}
+	if plain := strings.TrimSpace(ansi.Strip(rows[1])); plain != "▌" {
+		t.Errorf("row 1 = %q, want the separator between the title and the meta row", plain)
+	}
+	if !strings.Contains(ansi.Strip(rows[2]), " 1 ") {
+		t.Errorf("row 2 = %q, want the meta chip row", ansi.Strip(rows[2]))
 	}
 }
 
@@ -208,12 +282,18 @@ func TestCardTooNarrowRendersSurfaceAndRailOnly(t *testing.T) {
 	opts := cardFixture(styles, DensityNormal, 1)
 	opts.Width = 8
 	rows := Card(styles, opts)
-	if len(rows) != 5 {
-		t.Fatalf("card rendered %d rows, want 5", len(rows))
+	// Issue #243: a card with no room for content is one row of rail and
+	// surface. There is no grid left to hold open, and every row under the first
+	// would be blank space the reader cannot tell from the gutter.
+	if len(rows) != 1 {
+		t.Fatalf("card rendered %d rows, want 1", len(rows))
 	}
 	for index, row := range rows {
 		if plain := strings.TrimSpace(ansi.Strip(row)); plain != "▌" {
 			t.Errorf("row %d = %q, want the rail and blank surface only", index, plain)
+		}
+		if got := ansi.StringWidth(row); got != opts.Width {
+			t.Errorf("row %d is %d cells, want %d", index, got, opts.Width)
 		}
 	}
 }
@@ -221,8 +301,9 @@ func TestCardTooNarrowRendersSurfaceAndRailOnly(t *testing.T) {
 func TestCardWithoutLabelsOrMeta(t *testing.T) {
 	styles := theme.New(true)
 	rows := Card(styles, CardOpts{Title: "bare", Width: 20, TitleLines: 2, DescLines: 1, LabelRows: 1})
-	if len(rows) != 5 {
-		t.Fatalf("card rendered %d rows, want 5", len(rows))
+	// title(1) + meta(1): no description, no labels, nothing to hold open.
+	if len(rows) != 2 {
+		t.Fatalf("card rendered %d rows, want 2", len(rows))
 	}
 	for _, row := range rows {
 		if got := ansi.StringWidth(row); got != 20 {
@@ -330,7 +411,7 @@ func TestCardTitleSplitsItsEmojiOffTheTitle(t *testing.T) {
 	opts := cardFixture(styles, DensityNormal, 1)
 	opts.Emoji = styles.Glyph.Blocked
 	opts.Seq = ""
-	row := cardTitle(styles, opts, theme.Card, 40, 1)[0]
+	row := cardTitle(styles, opts, theme.Card, 40, planCard(styles, opts))[0]
 	segments := markRunSegments(row)
 	if len(segments) == 0 || segments[0] != opts.Emoji+" " {
 		t.Fatalf("title runs = %q, want the emoji and its column first", segments)
@@ -355,7 +436,7 @@ func TestCardTitleWithoutAWideEmojiKeepsOneRun(t *testing.T) {
 		if emoji != "" {
 			head = emoji + " " + opts.Title
 		}
-		row := cardTitle(styles, opts, theme.Card, 40, 1)[0]
+		row := cardTitle(styles, opts, theme.Card, 40, planCard(styles, opts))[0]
 		if segments := markRunSegments(row); len(segments) == 0 || !strings.HasPrefix(segments[0], head) {
 			t.Errorf("emoji %q: title runs = %q, want the head in one run", emoji, segments)
 		}
@@ -485,13 +566,13 @@ func TestCardDescriptionEllipsizesOnItsLastAllottedRow(t *testing.T) {
 	}
 }
 
-// TestCardTitleAndDescriptionShareOneBlock is the reconciliation issue #232
-// forced on section 3.1. The card's height stays a pure function of density and
-// frame height, so the panel can still reserve a column before rendering it,
-// but a title that fits one row hands its spare row to the description instead
-// of spending it on blank surface. The meta row sits at the same offset either
-// way.
-func TestCardTitleAndDescriptionShareOneBlock(t *testing.T) {
+// TestCardTitleWrapCostsItsOwnRowAndNothingElse retires the shared block issue
+// #232 introduced and issue #243 made unnecessary. The title used to hand a
+// spare row to the description so the card's height could stay content-blind;
+// with the height content-sized there is no spare row to hand over - a one-line
+// title simply makes the card one row shorter, and the description takes the
+// same rows either way.
+func TestCardTitleWrapCostsItsOwnRowAndNothingElse(t *testing.T) {
 	styles := theme.New(true)
 	short := cardFixture(styles, DensityNormal, 2)
 	short.Width = 40
@@ -501,26 +582,25 @@ func TestCardTitleAndDescriptionShareOneBlock(t *testing.T) {
 	long.Title = "a title long enough that it must wrap onto its second allotted row"
 
 	shortRows, longRows := Card(styles, short), Card(styles, long)
-	if len(shortRows) != len(longRows) {
-		t.Fatalf("card heights differ: %d and %d rows", len(shortRows), len(longRows))
+	if len(longRows) != len(shortRows)+1 {
+		t.Fatalf("card heights are %d and %d rows; the wrapped title must cost exactly its own row",
+			len(shortRows), len(longRows))
 	}
-	if got := len(shortRows); got != 6 {
-		t.Fatalf("card rendered %d rows, want 6", got)
+	// title(1) + description(2) + meta(1) + labels(1).
+	if got := len(shortRows); got != 5 {
+		t.Fatalf("the one-line card rendered %d rows, want 5", got)
 	}
-	// Row 4 is the meta row in both: the title-and-description block above it is
-	// the same height whichever way the two split it.
-	for name, rows := range map[string][]string{"short title": shortRows, "wrapped title": longRows} {
-		if got := ansi.Strip(rows[4]); !strings.Contains(got, " 1 ") {
-			t.Errorf("%s: row 4 = %q, want the meta row at a fixed offset", name, got)
-		}
-	}
-	// The short title spent its spare row on description, so it carries more of
-	// the description than the wrapped one does.
-	shortBody := ansi.Strip(strings.Join(shortRows[1:4], ""))
+	// The description is the same two rows on both: its ceiling is its own, and
+	// the title's spare row goes back to the column rather than to it.
+	shortBody := ansi.Strip(strings.Join(shortRows[1:3], ""))
 	longBody := ansi.Strip(strings.Join(longRows[2:4], ""))
-	if len(strings.Fields(shortBody)) <= len(strings.Fields(longBody)) {
-		t.Errorf("the short title did not hand its spare row to the description:\n%q\n%q",
-			shortBody, longBody)
+	if strings.TrimSpace(shortBody) != strings.TrimSpace(longBody) {
+		t.Errorf("the two cards drew different descriptions:\n%q\n%q", shortBody, longBody)
+	}
+	for name, rows := range map[string][]string{"short title": shortRows, "wrapped title": longRows} {
+		if got := ansi.Strip(rows[len(rows)-2]); !strings.Contains(got, " 1 ") {
+			t.Errorf("%s: the meta row is not directly above the labels: %q", name, got)
+		}
 	}
 }
 
@@ -537,20 +617,20 @@ func TestCardInteriorPaddingSitsOnTheSectionBoundaries(t *testing.T) {
 	opts.LabelRows = 2
 	opts.PadRows = 2
 	rows := Card(styles, opts)
-	// title(2) + description(2) + pad + meta + pad + labels(2).
-	if got := len(rows); got != 9 {
-		t.Fatalf("card rendered %d rows, want 9", got)
+	// title(1) + description(2) + pad + meta + pad + labels(1).
+	if got := len(rows); got != 7 {
+		t.Fatalf("card rendered %d rows, want 7", got)
 	}
-	for _, row := range []int{4, 6} {
+	for _, row := range []int{3, 5} {
 		if plain := strings.TrimSpace(ansi.Strip(rows[row])); plain != "▌" {
 			t.Errorf("row %d = %q, want a blank interior separator carrying the rail only", row, plain)
 		}
 	}
-	if got := ansi.Strip(rows[5]); !strings.Contains(got, " 1 ") {
-		t.Errorf("row 5 = %q, want the meta chip row between the two separators", got)
+	if got := ansi.Strip(rows[4]); !strings.Contains(got, " 1 ") {
+		t.Errorf("row 4 = %q, want the meta chip row between the two separators", got)
 	}
-	if got := ansi.Strip(rows[7]); !strings.Contains(got, "feature") {
-		t.Errorf("row 7 = %q, want the first label row under the second separator", got)
+	if got := ansi.Strip(rows[6]); !strings.Contains(got, "feature") {
+		t.Errorf("row 6 = %q, want the first label row under the second separator", got)
 	}
 }
 
@@ -580,10 +660,10 @@ func TestCardInteriorPaddingIsCardSurface(t *testing.T) {
 			rows := Card(styles, opts)
 			surface := styles.Surface(opts.Selected, opts.Alt)
 			want := rowBackgrounds(styles.On(theme.FgBase, surface).Render(" "))
-			// The separators are rows 3 and 5, either side of the meta row. Each
+			// The separators are rows 2 and 4, either side of the meta row. Each
 			// paints one ground and it is the card's, so the row highlights and
 			// stripes with everything else on the card.
-			for _, row := range []int{3, 5} {
+			for _, row := range []int{2, 4} {
 				if got := rowBackgrounds(rows[row]); got != want {
 					t.Errorf("separator row %d ground = %q, want the card's own %q", row, got, want)
 				}
@@ -685,6 +765,111 @@ func TestCardLabelSpansClearTheInteriorPadding(t *testing.T) {
 		}
 		if got := ansi.Strip(rows[span.Row]); !strings.Contains(got, "alpha") {
 			t.Errorf("pads %d: span points at row %d = %q, want the row carrying the pill", pads, span.Row, got)
+		}
+	}
+}
+
+// cardShapes is the content matrix the measure invariant runs over. Card height
+// is a function of content now, so the matrix that proves measure and render
+// agree has to vary content rather than frame size: every branch of the plan -
+// an empty section, a section that exactly fills its ceiling, a section that
+// overruns it, a word too wide for the field, a source line break - is a way
+// the two could come apart.
+func cardShapes(styles *theme.Styles) []CardOpts {
+	titles := []string{
+		"",
+		"t",
+		"Drag ghost sticks on resize",
+		"a title long enough that it must wrap onto its second row and then run well past the end of it",
+		"supercalifragilisticexpialidociousandthensomemore",
+	}
+	descs := []string{
+		"",
+		"short",
+		"one two three four five six seven eight nine ten eleven twelve thirteen",
+		"first source line\nsecond source line\n\nfourth after a blank",
+		"## Heading\n- bullet one\n7. seventh\n`code` and [link](http://example.com)",
+		strings.Repeat("wordy ", 80),
+		"antidisestablishmentarianismandthensomemorelettersbesides",
+	}
+	labels := [][]string{
+		nil,
+		{"one"},
+		{"type::feature", "area", "urgent", "team::platform", "needs::review"},
+		{"averyverylongsinglelabelnorowcouldeverhold"},
+	}
+	var out []CardOpts
+	for _, density := range []Density{DensityNormal, DensityCompact} {
+		for _, width := range []int{4, 8, 18, 24, 40, 72} {
+			for _, ceiling := range [][4]int{{1, 0, 0, 1}, {1, 1, 1, 1}, {2, 2, 1, 2}, {2, 5, 2, 2}} {
+				for _, title := range titles {
+					for _, desc := range descs {
+						for _, tags := range labels {
+							out = append(out, CardOpts{
+								Title: title, Emoji: "*", Seq: "#142", Desc: desc,
+								Meta:       []string{Priority(styles, 1, theme.Card, density.Compact())},
+								Labels:     tags,
+								Priority:   1,
+								Blocked:    len(desc)%2 == 0,
+								Width:      width,
+								TitleLines: ceiling[0], DescLines: ceiling[1],
+								PadRows: ceiling[2], LabelRows: ceiling[3],
+								Density: density,
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// TestCardHeightMatchesTheRowsItDraws is the invariant issue #243 put in place
+// of the CardRows reservation. Content-independence is gone; determinism is not.
+// The column packs against CardHeight and the card then draws Card, and the two
+// are the same plan, so a card can never draw a row the column did not pack.
+func TestCardHeightMatchesTheRowsItDraws(t *testing.T) {
+	styles := theme.New(true)
+	for _, opts := range cardShapes(styles) {
+		measured, drawn := CardHeight(styles, opts), len(Card(styles, opts))
+		if measured != drawn {
+			t.Fatalf("width %d, density %v, title %q, desc %q, labels %v: measured %d rows, drew %d",
+				opts.Width, opts.Density, opts.Title, opts.Desc, opts.Labels, measured, drawn)
+		}
+	}
+}
+
+// TestCardNeverExceedsItsCeiling is the other half: the section 2.6 ladder is a
+// ceiling rather than an allotment, so a card takes less than it than it used to
+// and never more. The sum here is theme.Metrics.CardRows written out in the
+// caller's terms - every section at its cap, plus the two interior separators.
+func TestCardNeverExceedsItsCeiling(t *testing.T) {
+	styles := theme.New(true)
+	for _, opts := range cardShapes(styles) {
+		ceiling := opts.TitleLines + opts.DescLines + opts.PadRows + 1 + opts.LabelRows
+		if opts.Density.Compact() {
+			ceiling = 2
+		}
+		if got := CardHeight(styles, opts); got > ceiling {
+			t.Fatalf("width %d, density %v, title %q, desc %q: card is %d rows, ceiling is %d",
+				opts.Width, opts.Density, opts.Title, opts.Desc, got, ceiling)
+		}
+	}
+}
+
+// TestCardRowsAreAlwaysTheFrameWidth is the composition rule every golden pins
+// at board scale, asserted here over the whole content matrix: a card is a
+// filled slab, and a row short of the width would punch a hole in the panel it
+// sits on.
+func TestCardRowsAreAlwaysTheFrameWidth(t *testing.T) {
+	styles := theme.New(true)
+	for _, opts := range cardShapes(styles) {
+		for index, row := range Card(styles, opts) {
+			if got := ansi.StringWidth(row); got != opts.Width {
+				t.Fatalf("width %d, density %v, title %q, desc %q: row %d is %d cells",
+					opts.Width, opts.Density, opts.Title, opts.Desc, index, got)
+			}
 		}
 	}
 }

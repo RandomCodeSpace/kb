@@ -800,20 +800,31 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 		}
 	}
 	inset := metrics.ColumnPad(density)
-	// The affordance column is decided before the cards are rendered, because
-	// reserving it narrows them. Spec sections 10.3.4 and 10.4.4: kb composes
-	// strings, so a column that appeared and disappeared with activity would
-	// reflow the body measure of every row under it, twice, for a cue - it is
-	// reserved for the whole time the body overflows and the tint is what moves.
-	stack := m.columnStackHeight(len(tasks), density)
+	bodyWidth := max(width-2*inset, 0)
+	// Measure before render. Spec section 2.5 as issue #243 re-cut it: a card's
+	// height is content-sized under the section 2.6 ceilings, so the column has
+	// no grid to reserve. It measures the cards it is about to draw, at the
+	// width it is about to draw them at, and packs against that.
+	//
+	// The affordance column is still decided before the cards are rendered,
+	// because reserving it narrows them. Spec sections 10.3.4 and 10.4.4: kb
+	// composes strings, so a column that appeared and disappeared with activity
+	// would reflow the body measure of every row under it, twice, for a cue - it
+	// is reserved for the whole time the body overflows and the tint is what
+	// moves.
+	stack := m.columnStackHeight(m.measureCards(tasks, status, bodyWidth, density), density)
 	contentHeight := max(height-1-metaRows, 0)
 	if stack > contentHeight && contentHeight > 0 {
 		contentHeight-- // the overflow cue of spec section 3.7 owns the last row
 	}
-	bodyWidth := max(width-2*inset, 0)
 	railed := widget.ScrollbarShown(stack, contentHeight) && bodyWidth > widget.ScrollbarW
 	if railed {
+		// The affordance narrows every card, and a narrower card wraps onto more
+		// rows, so the stack is measured again at the width the cards will
+		// actually take. Narrowing can only make a card taller, so the second
+		// measure can never take the affordance back and there is no third pass.
 		bodyWidth -= widget.ScrollbarW
+		stack = m.columnStackHeight(m.measureCards(tasks, status, bodyWidth, density), density)
 	}
 	cardLines, owners, spans := m.renderTaskLines(tasks, status, bodyWidth, density)
 
@@ -824,13 +835,14 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 	}
 	hits[0].scroll = start
 	hits[0].maxScroll = maxScroll
+	end := visibleCardEnd(owners, start, contentHeight)
 
 	rail := m.columnScrollbar(styles, railed, index, stack, contentHeight, start)
 	body := make([]string, 0, contentHeight)
 	for row := 0; row < contentHeight; row++ {
 		source := start + row
 		line := ""
-		if source < len(cardLines) {
+		if source < end {
 			line = cardLines[source]
 		}
 		if railed {
@@ -841,18 +853,19 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 			line = fillRow(styles.Column.Panel, line, bodyWidth) + cell
 		}
 		body = append(body, line)
+		if source >= end {
+			continue
+		}
 		y := 1 + metaRows + row
-		if source < len(owners) && owners[source] != "" {
+		if owners[source] != "" {
 			hits = append(hits, boardHit{x1: width, y0: y, y1: y + 1, status: status, taskID: owners[source]})
 		}
-		if source < len(spans) {
-			for _, span := range spans[source] {
-				hits = append(hits, boardHit{
-					x0: inset + span.x0, x1: min(inset+span.x1, width),
-					y0: y, y1: y + 1, status: status,
-					kind: boardHitFilterLabel, tag: span.tag, taskID: owners[source],
-				})
-			}
+		for _, span := range spans[source] {
+			hits = append(hits, boardHit{
+				x0: inset + span.x0, x1: min(inset+span.x1, width),
+				y0: y, y1: y + 1, status: status,
+				kind: boardHitFilterLabel, tag: span.tag, taskID: owners[source],
+			})
 		}
 	}
 
@@ -868,7 +881,7 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 		Meta:    meta,
 		MetaLit: m.celebrateLit(status),
 		Body:    body,
-		More:    hiddenCards(owners, start+contentHeight),
+		More:    hiddenCards(owners, end),
 		Width:   width,
 		Height:  height,
 		Density: density,
@@ -879,23 +892,44 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 	return renderedColumn{lines: lines, hits: hits}
 }
 
-// columnStackHeight is the number of body rows the card stack will occupy,
-// resolved before the cards are rendered so the scroll affordance can claim its
-// column first. It is width-independent by construction: spec section 3.1 fixes
-// the row grid by density, not by content, so a short description does not pull
-// the chip rows up and a narrow column does not add a row.
-func (m Model) columnStackHeight(count int, density theme.Density) int {
-	metrics := m.themeStyles().Metrics
-	if count <= 0 {
+// columnStackHeight is the number of body rows the card stack will occupy: the
+// measured heights plus the inter-card gutters between them.
+//
+// Issue #243 replaced the reservation this used to compute. A card is
+// content-sized now, so there is no per-card constant to multiply by: the
+// column measures each card at the width it will draw it and sums what came
+// back. Measure and render are the same pure function of (task content, column
+// width, density, frame height), so the sum here is exactly the number of rows
+// renderTaskLines goes on to emit.
+func (m Model) columnStackHeight(heights []int, density theme.Density) int {
+	if len(heights) == 0 {
 		return 1 // the empty or busy row of spec section 10.8
 	}
-	rows := metrics.CardRows(max(m.height, 8), density)
-	return count*rows + metrics.CardGapRows(density)*(count-1)
+	rows := m.themeStyles().Metrics.CardGapRows(density) * (len(heights) - 1)
+	for _, height := range heights {
+		rows += height
+	}
+	return rows
+}
+
+// measureCards is the measure half of the measure-before-render rule: the row
+// count every card in the column will draw at this body width, without drawing
+// any of them. It builds the same options the render pass builds, so the two
+// cannot answer differently.
+func (m Model) measureCards(tasks []board.Task, status board.Status, width int, density theme.Density) []int {
+	styles := m.themeStyles()
+	opts, _ := m.cardOptsFor(styles, tasks, status, width, density)
+	heights := make([]int, 0, len(opts))
+	for _, card := range opts {
+		heights = append(heights, widget.CardHeight(styles, card))
+	}
+	return heights
 }
 
 // columnScrollbar is the affordance of spec section 10.3.4 at column scope. It
-// is measured against the same stack height the reserve was decided from, so
-// the column and the bar can never disagree about whether the body overflows.
+// is measured against the same stack height the affordance column was decided
+// from, so the column and the bar can never disagree about whether the body
+// overflows.
 func (m Model) columnScrollbar(styles *theme.Styles, railed bool, index, total, visible, offset int) []string {
 	if !railed {
 		return nil
@@ -945,11 +979,19 @@ func columnMetaLine(styles *theme.Styles, tasks []board.Task) string {
 	return line
 }
 
-// hiddenCards counts the cards whose rows start below the visible window.
+// hiddenCards counts the cards the body did not draw whole - every card with a
+// row at or below the last one the window reached. Under issue #243's
+// content-sized cards the cue has to count what the reader cannot finish
+// reading rather than what starts off-screen: card heights vary now, so a card
+// showing only its title row is indistinguishable from a short card, and a cue
+// that left it out would be counting a card the reader cannot see the rest of.
+//
+// Cards scrolled off the top are not counted: their last row is above the
+// window, and the scroll affordance is what says they exist.
 func hiddenCards(owners []string, from int) int {
 	count, previous := 0, ""
 	for index, owner := range owners {
-		if owner != "" && owner != previous && index >= from {
+		if owner != "" && owner != previous && cardLastRow(owners, index) >= from {
 			count++
 		}
 		previous = owner
@@ -957,11 +999,55 @@ func hiddenCards(owners []string, from int) int {
 	return count
 }
 
-func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width int, density theme.Density) ([]string, []string, [][]labelSpan) {
-	styles := m.themeStyles()
-	if len(tasks) == 0 {
-		return []string{m.columnPlaceholder(styles, width)}, []string{""}, [][]labelSpan{nil}
+// cardLastRow is the index of the final row belonging to the card that starts
+// at first.
+func cardLastRow(owners []string, first int) int {
+	last := first
+	for last+1 < len(owners) && owners[last+1] == owners[first] {
+		last++
 	}
+	return last
+}
+
+// visibleCardEnd is one past the last row the column body draws: the end of the
+// last card that fits whole inside the window.
+//
+// Issue #243's cards are content-sized, so a clipped card is ambiguous in a way
+// it never was under a fixed grid - three rows of a twelve-row card and a
+// three-row card are the same three rows. The bottom of the stack therefore
+// drops a card that does not fit instead of clipping it, and the "+N more" cue
+// of section 3.7 counts it. The rows it would have taken stay panel surface.
+//
+// The one exception is a window too short to hold even one whole card, where
+// there is nothing to drop to: it clips, because an empty body under a "+N
+// more" says less than a partial card does.
+func visibleCardEnd(owners []string, start, height int) int {
+	limit := min(start+height, len(owners))
+	end := start
+	for row := start; row < limit; {
+		if owners[row] == "" {
+			row++
+			end = row
+			continue
+		}
+		last := cardLastRow(owners, row)
+		if last >= limit {
+			break
+		}
+		row = last + 1
+		end = row
+	}
+	if end == start {
+		return limit
+	}
+	return end
+}
+
+// cardOptsFor builds one CardOpts per task at a body width, plus each task's
+// tags in the survival order the card renders them in. Both the measure pass
+// and the render pass go through it, so the height the column packed against is
+// the height the card draws (spec section 2.5 as issue #243 re-cut it).
+func (m Model) cardOptsFor(styles *theme.Styles, tasks []board.Task, status board.Status, width int, density theme.Density) ([]widget.CardOpts, [][]string) {
 	index := statusIndex(status)
 	focused := m.boardView.column == index
 	selected := m.boardView.rows[index]
@@ -970,19 +1056,15 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 	descLines := styles.Metrics.DescLines(frameHeight, density)
 	labelRows := styles.Metrics.LabelRows(frameHeight, density)
 	padRows := styles.Metrics.InnerPadRows(frameHeight, density)
-	gap := styles.Metrics.CardGapRows(density)
 	metas := make([][]string, len(tasks))
 	for i, task := range tasks {
 		metas[i] = m.cardMeta(styles, task,
 			styles.Surface(focused && i == selected, density.Compact() && i%2 == 1), density)
 	}
 	depth := metaDepth(metas, styles.Metrics.CardInner(width, density))
-	lines := make([]string, 0, len(tasks)*5)
-	owners := make([]string, 0, len(tasks)*5)
-	spans := make([][]labelSpan, 0, len(tasks)*5)
+	opts := make([]widget.CardOpts, 0, len(tasks))
+	orders := make([][]string, 0, len(tasks))
 	for i, task := range tasks {
-		isSelected := focused && i == selected
-		alternate := density.Compact() && i%2 == 1
 		// The project pill leads the label row: the row is rendered in survival
 		// order, so the card's mandatory scope is the label that stays on it
 		// when the row runs out of width (spec section 3.5).
@@ -991,7 +1073,8 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 		for _, tag := range ordered {
 			tags = append(tags, sanitizeTerminal(tag))
 		}
-		rows, cardSpans := widget.CardWithSpans(styles, widget.CardOpts{
+		orders = append(orders, ordered)
+		opts = append(opts, widget.CardOpts{
 			Title:      sanitizeTerminal(task.Title),
 			Emoji:      sanitizeTerminal(task.Emoji),
 			Seq:        seqLabel(task),
@@ -1000,8 +1083,8 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 			Labels:     tags,
 			Priority:   task.Prio,
 			Blocked:    task.Blocked,
-			Selected:   isSelected,
-			Alt:        alternate,
+			Selected:   focused && i == selected,
+			Alt:        density.Compact() && i%2 == 1,
 			Width:      width,
 			TitleLines: titleLines,
 			DescLines:  descLines,
@@ -1011,6 +1094,23 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 			Hovered:    m.pointerState.IsHovered(boardCardControlID(task.ID)),
 			HoverTag:   m.hoveredCardTag(task.ID, ordered),
 		})
+	}
+	return opts, orders
+}
+
+func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width int, density theme.Density) ([]string, []string, [][]labelSpan) {
+	styles := m.themeStyles()
+	if len(tasks) == 0 {
+		return []string{m.columnPlaceholder(styles, width)}, []string{""}, [][]labelSpan{nil}
+	}
+	cards, orders := m.cardOptsFor(styles, tasks, status, width, density)
+	gap := styles.Metrics.CardGapRows(density)
+	lines := make([]string, 0, len(tasks)*5)
+	owners := make([]string, 0, len(tasks)*5)
+	spans := make([][]labelSpan, 0, len(tasks)*5)
+	for i, task := range tasks {
+		ordered := orders[i]
+		rows, cardSpans := widget.CardWithSpans(styles, cards[i])
 		rowSpans := make([][]labelSpan, len(rows))
 		for _, span := range cardSpans {
 			// The span reports its position in CardOpts.Labels, so the hit keeps
@@ -1220,7 +1320,16 @@ func visibleCardStart(lines, owners []string, selected, height int) int {
 		}
 		lastOwner = owner
 	}
-	return min(max(selectedLine-1, 0), len(lines)-height)
+	// The window opens one row above the selected card, and then drops far
+	// enough for the whole of it to fit. Issue #243 made that second clamp load-
+	// bearing: cards are content-sized, so the selected one can be taller than
+	// the slack the first clamp left, and the bottom of the stack drops a card
+	// it cannot draw whole rather than clipping it.
+	start := max(selectedLine-1, 0)
+	if end := cardLastRow(owners, selectedLine) + 1; end > start+height {
+		start = end - height
+	}
+	return min(max(start, 0), len(lines)-height)
 }
 
 // joinColumns lays the panels out side by side with a Canvas gutter and the

@@ -123,20 +123,24 @@ func blockMarker(styles *theme.Styles, block mdparity.Block) string {
 	}
 }
 
-// wrapWords is the greedy wrap of spec section 3.3 over styled words. A word
-// that starts a block starts a line, a word too wide for the field is
-// truncated, and the last allotted line carries the ellipsis when words remain.
-func wrapWords(styles *theme.Styles, words []styledWord, base lipgloss.Style, width, lines int) []string {
-	out := make([]string, 0, lines)
-	if width <= 0 {
-		for len(out) < lines {
-			out = append(out, "")
-		}
-		return out
+// layoutWords is the greedy wrap of spec section 3.3 over styled words, broken
+// into lines but not yet drawn. A word that starts a block starts a line, and a
+// line takes words until the next one does not fit.
+//
+// Issue #243 made the wrap stop at the words rather than at the allotment: it
+// returns only the lines the text fills, up to the ceiling, and reports whether
+// text remained so the render can put the ellipsis on the last of them. The
+// line count is the card's description height, which is why the break has to
+// happen before anything is styled - a measure that rendered would be a second
+// implementation of this loop.
+func layoutWords(words []styledWord, width, lines int) ([][]styledWord, bool) {
+	if width <= 0 || lines <= 0 {
+		return nil, len(words) > 0
 	}
+	out := make([][]styledWord, 0, lines)
 	index := 0
-	for len(out) < lines {
-		line, used := "", 0
+	for index < len(words) && len(out) < lines {
+		line, used := make([]styledWord, 0, 4), 0
 		for index < len(words) {
 			word := words[index]
 			if used > 0 && word.stop {
@@ -146,27 +150,52 @@ func wrapWords(styles *theme.Styles, words []styledWord, base lipgloss.Style, wi
 			if used > 0 {
 				separator = 1
 			}
-			text, cells := word.text, ansi.StringWidth(word.text)
+			cells := ansi.StringWidth(word.text)
 			if used == 0 && cells > width {
-				text, cells = truncate(styles, word.text, width), width
+				// A word longer than the field is hard-truncated rather than
+				// overflowing, and it is then the whole of its line.
+				cells = width
 			}
 			if used+separator+cells > width {
 				break
 			}
-			if separator == 1 {
-				line += base.Render(" ")
-			}
-			line += word.style.Render(text)
+			line = append(line, word)
 			used += separator + cells
 			index++
 		}
-		if len(out) == lines-1 && index < len(words) {
-			// The ellipsis is rendered in the base style rather than appended
-			// raw: a card row is a filled surface, and a tail with no
-			// background would punch a hole in the shade tier.
-			line = ansi.Truncate(line, max(width-1, 0), "") + base.Render(styles.Glyph.Ellipsis)
+		out = append(out, line)
+	}
+	return out, index < len(words)
+}
+
+// renderWordRows draws the lines layoutWords broke. The last line carries the
+// ellipsis when text remained, which is what keeps the wrap from running past
+// the card.
+func renderWordRows(styles *theme.Styles, rows [][]styledWord, base lipgloss.Style, width int, more bool) []string {
+	out := make([]string, 0, len(rows))
+	for _, words := range rows {
+		line, used := "", 0
+		for _, word := range words {
+			separator := 0
+			if used > 0 {
+				separator = 1
+				line += base.Render(" ")
+			}
+			text, cells := word.text, ansi.StringWidth(word.text)
+			if used == 0 && cells > width {
+				text, cells = truncate(styles, word.text, width), width
+			}
+			line += word.style.Render(text)
+			used += separator + cells
 		}
 		out = append(out, line)
+	}
+	if more && len(out) > 0 {
+		// The ellipsis is rendered in the base style rather than appended raw: a
+		// card row is a filled surface, and a tail with no background would
+		// punch a hole in the shade tier.
+		last := len(out) - 1
+		out[last] = ansi.Truncate(out[last], max(width-1, 0), "") + base.Render(styles.Glyph.Ellipsis)
 	}
 	return out
 }

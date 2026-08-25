@@ -507,8 +507,10 @@ func TestBoardMoveFailureIsDistinguishableFromASuccessfulDrop(t *testing.T) {
 }
 
 // TestBoardStackHeightMatchesTheRenderedStack is what lets the scroll affordance
-// claim its column before the cards are rendered: spec section 3.1 fixes the row
-// grid by density, so the count is width-independent and the two must agree.
+// claim its column before the cards are rendered. Issue #243 turned the
+// reservation into a measurement: the column measures the cards it is about to
+// draw, at the width it is about to draw them at, and the sum must be the rows
+// the render then emits.
 func TestBoardStackHeightMatchesTheRenderedStack(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	fixture := boardViewFixture(now)
@@ -517,19 +519,50 @@ func TestBoardStackHeightMatchesTheRenderedStack(t *testing.T) {
 	m.board = fixture
 	m.now = func() time.Time { return now }
 	m.renderedAt = now
-	for _, height := range []int{20, 40, 60} {
+	for _, height := range []int{20, 40, 60, 80} {
 		m.height = height
 		for _, density := range []theme.Density{theme.DensityNormal, theme.DensityCompact} {
-			for _, status := range []board.Status{board.StatusTodo, board.StatusDoing, board.StatusCancelled} {
-				tasks := tasksInStatus(m.filteredBoard(), status)
-				lines, _, _ := m.renderTaskLines(tasks, status, 40, density)
-				if got := m.columnStackHeight(len(tasks), density); got != len(lines) {
-					t.Fatalf("height %d density %v status %s: predicted %d rows, rendered %d",
-						height, density, status, got, len(lines))
+			for _, width := range []int{18, 26, 40, 64} {
+				for _, status := range []board.Status{board.StatusTodo, board.StatusDoing, board.StatusCancelled} {
+					tasks := tasksInStatus(m.filteredBoard(), status)
+					lines, owners, _ := m.renderTaskLines(tasks, status, width, density)
+					heights := m.measureCards(tasks, status, width, density)
+					if got := m.columnStackHeight(heights, density); got != len(lines) {
+						t.Fatalf("height %d width %d density %v status %s: measured %d rows, rendered %d",
+							height, width, density, status, got, len(lines))
+					}
+					// Per card, not only in total: two cards that were wrong by
+					// the same amount in opposite directions would sum right and
+					// still put a hit region on the wrong row.
+					for index, drawn := range drawnCardRows(owners) {
+						if index < len(heights) && heights[index] != drawn {
+							t.Fatalf("height %d width %d density %v status %s: card %d measured %d rows, drew %d",
+								height, width, density, status, index, heights[index], drawn)
+						}
+					}
 				}
 			}
 		}
 	}
+}
+
+// drawnCardRows counts the rows each card actually took, in column order, from
+// the owner track the render returns.
+func drawnCardRows(owners []string) []int {
+	var rows []int
+	previous := ""
+	for _, owner := range owners {
+		if owner == "" {
+			previous = owner
+			continue
+		}
+		if owner != previous {
+			rows = append(rows, 0)
+		}
+		rows[len(rows)-1]++
+		previous = owner
+	}
+	return rows
 }
 
 // TestBoardHoverIdsAreStableAndScoped keys the two hover identities apart: a
@@ -597,19 +630,17 @@ func TestBoardRowsAreExactlyFrameWidthAtEveryPinnedSize(t *testing.T) {
 	}
 }
 
-// TestBoardCardHeightMatchesTheReservedStackHeight is the other half of the
-// same contract. The panel reserves a column's scroll affordance and its
-// overflow cue from columnStackHeight before any card is rendered, so a card
-// that drew a row more or less than the metrics promised would put the "+N
-// more" cue on a row that belongs to a card. Issue #232 made the title and the
-// description share a block, which is exactly the kind of change that can
-// silently break the promise.
-func TestBoardCardHeightMatchesTheReservedStackHeight(t *testing.T) {
+// TestBoardCardNeverExceedsItsCeiling is what replaced the reservation invariant
+// of issues #232 and #240. A card's height is its content's business now, but
+// the section 2.6 ladder still bounds it: Metrics.CardRows is the tallest a card
+// may be at a density and frame height, and a card that drew past it would be
+// spending rows the ladder never budgeted at that terminal size.
+func TestBoardCardNeverExceedsItsCeiling(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	fixture := boardViewFixture(now)
 	fixture.Tasks[0].Title = "a title long enough to wrap onto the second allotted row and beyond it"
 	fixture.Tasks[0].Desc = strings.Repeat("description ", 40)
-	for _, size := range []struct{ width, height int }{{120, 40}, {60, 50}, {60, 80}, {40, 20}} {
+	for _, size := range []struct{ width, height int }{{120, 40}, {60, 50}, {60, 80}, {40, 20}, {200, 90}} {
 		m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
 		m.loading = false
 		m.board = fixture
@@ -620,21 +651,92 @@ func TestBoardCardHeightMatchesTheReservedStackHeight(t *testing.T) {
 		metrics := m.themeStyles().Metrics
 		layout := boardColumnLayout(metrics, size.width, len(m.boardView.visibleStatuses()))
 		density := metrics.DensityFor(size.height, layout.inner)
-		want := metrics.CardRows(max(m.height, 8), density)
+		ceiling := metrics.CardRows(max(m.height, 8), density)
 
 		tasks := tasksInStatus(m.filteredBoard(), board.StatusTodo)
 		width := max(layout.widths[0]-2*metrics.ColumnPad(density), 0)
 		_, owners, _ := m.renderTaskLines(tasks, board.StatusTodo, width, density)
-		rows, previous := 0, owners[0]
-		for _, owner := range owners {
-			if owner != previous {
-				break
+		for index, rows := range drawnCardRows(owners) {
+			if rows > ceiling {
+				t.Errorf("%dx%d: card %d drew %d rows, the ladder caps it at %d",
+					size.width, size.height, index, rows, ceiling)
 			}
-			rows++
+			if rows < 1 {
+				t.Errorf("%dx%d: card %d drew no rows at all", size.width, size.height, index)
+			}
 		}
-		if rows != want {
-			t.Errorf("%dx%d: the first card drew %d rows, the column reserved %d",
-				size.width, size.height, rows, want)
+	}
+}
+
+// TestBoardColumnPacksWholeCardsAndCountsTheRest is the column half of the same
+// contract, and the one the "+N more" cue depends on. The body window is a fixed
+// number of rows and the stack packs measured cards into it until the next one
+// does not fit whole. Nothing the column draws may run past the panel, no card
+// is drawn in part, and every card the window could not hold is in the cue -
+// under content-sized cards a clipped card and a short card are the same rows,
+// so a cue that undercounted would be hiding a card in plain sight.
+func TestBoardColumnPacksWholeCardsAndCountsTheRest(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	fixture := boardViewFixture(now)
+	fixture.Tasks[0].Desc = strings.Repeat("description ", 40)
+	for _, size := range []struct{ width, height int }{{120, 40}, {60, 50}, {80, 32}, {200, 90}, {100, 24}} {
+		for _, budget := range []int{6, 9, 14, 30} {
+			m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
+			m.loading, m.haveBoardSnapshot = false, true
+			m.board = fixture
+			m.now = func() time.Time { return now }
+			m.renderedAt = now
+			sized, _ := m.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
+			m = sized.(Model)
+			metrics := m.themeStyles().Metrics
+			statuses := m.boardView.visibleStatuses()
+			layout := boardColumnLayout(metrics, size.width, len(statuses))
+			density := metrics.DensityFor(max(m.height, 8), layout.inner)
+			for _, status := range statuses {
+				width := layout.widths[0]
+				column := m.renderBoardColumnAt(status, width, budget, density)
+				if got := len(column.lines); got != budget {
+					t.Fatalf("%dx%d budget %d %s: the column drew %d rows, want %d",
+						size.width, size.height, budget, status, got, budget)
+				}
+				for row, line := range column.lines {
+					if got := ansi.StringWidth(line); got != width {
+						t.Errorf("%dx%d budget %d %s: row %d is %d cells, want %d",
+							size.width, size.height, budget, status, row, got, width)
+					}
+				}
+				// Every card that reached the body reached it whole: its hit
+				// region covers exactly the rows it measured.
+				tasks := tasksInStatus(m.filteredBoard(), status)
+				bodyWidth := max(width-2*metrics.ColumnPad(density), 0)
+				drawn := map[string]int{}
+				for _, hit := range column.hits {
+					if hit.taskID != "" && hit.kind == boardHitDefault {
+						drawn[hit.taskID] += hit.y1 - hit.y0
+					}
+				}
+				if len(drawn) > len(tasks) {
+					t.Fatalf("%dx%d budget %d %s: %d cards drawn, %d exist",
+						size.width, size.height, budget, status, len(drawn), len(tasks))
+				}
+				heights := m.measureCards(tasks, status, bodyWidth, density)
+				partial := 0
+				for index, task := range tasks {
+					rows, ok := drawn[task.ID]
+					if !ok || rows == heights[index] {
+						continue
+					}
+					partial++
+					// The one card a column may clip is the first one in the
+					// window, and only when the window is too short to hold it
+					// whole - there is nothing to drop to there, and an empty
+					// body under a "+N more" says less than a partial card does.
+					if partial > 1 || index > 0 || rows >= heights[index] {
+						t.Errorf("%dx%d budget %d %s: card %s drew %d rows of its %d",
+							size.width, size.height, budget, status, task.ID, rows, heights[index])
+					}
+				}
+			}
 		}
 	}
 }

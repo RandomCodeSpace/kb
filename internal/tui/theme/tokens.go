@@ -207,11 +207,11 @@ type Metrics struct {
 	CompactInnerW int // column inner width below which density compacts
 	DescTwoLines  int // frame height at or above which the snippet gets a second line
 
-	// The card row grid of spec section 3.1, rewritten by issue #232 and given
-	// interior vertical rhythm by issue #240. Every allotment here is a function
-	// of density and frame height and never of content, which is the invariant
-	// that lets columnStackHeight resolve a column's height before the cards in
-	// it are rendered.
+	// The card row ceilings of spec section 2.6, rewritten by issue #232, given
+	// interior vertical rhythm by issue #240 and re-cut into ceilings by issue
+	// #243. Each is a function of density and frame height and bounds what its
+	// section may spend; how much of it the section actually takes is a function
+	// of the card's own content.
 	CardTitleLines   int // title rows a card carries on a frame at or above DescTwoLines
 	CardDescMax      int // description rows a card may carry at its tallest
 	CardDescStep     int // frame rows that buy one more description line
@@ -446,16 +446,19 @@ func clampPane(frame, percent, slack, floor int) int {
 	return max(min(pane, frame-slack), 1)
 }
 
-// DescLines is the number of description rows a card carries. Spec section 3.3
-// as issue #232 rewrote it: none when compact, one on a short normal frame, and
-// one more for every CardDescStep rows above DescTwoLines up to CardDescMax.
+// DescLines is the most description rows a card may carry. Spec section 3.3 as
+// issue #232 rewrote it: none when compact, one on a short normal frame, and one
+// more for every CardDescStep rows above DescTwoLines up to CardDescMax.
 //
 // The ladder spends height the frame has rather than height it might have: a
 // 45-row terminal buys the second line the original rule bought, and only a
 // terminal tall enough to keep the same number of cards on screen buys the
-// third, fourth and fifth. The allotment is a frame property and never a
-// content one, so a one-line description leaves its remaining rows blank and
-// the rows under it do not move up.
+// third, fourth and fifth.
+//
+// Issue #243 made it a ceiling rather than an allotment. The frame decides how
+// much description a card may show; the description decides how much of that it
+// takes, and a card with none takes no rows at all instead of holding blank
+// ones open under the title.
 func (m Metrics) DescLines(frameHeight int, density Density) int {
 	if density.Compact() {
 		return 0
@@ -466,8 +469,9 @@ func (m Metrics) DescLines(frameHeight int, density Density) int {
 	return min(2+(frameHeight-m.DescTwoLines)/m.CardDescStep, m.CardDescMax)
 }
 
-// TitleRows is the number of title rows a card carries. Spec section 3.2 as
-// issue #232 rewrote it: the title wraps rather than being ellipsized to one
+// TitleRows is the most title rows a card may carry - one, or two where the
+// frame affords the wrap and the title needs it (issue #243). Spec section 3.2
+// as issue #232 rewrote it: the title wraps rather than being ellipsized to one
 // line, and it is the last allotted row that carries the ellipsis when the
 // title still does not fit. Compact keeps the single row it always had.
 //
@@ -510,11 +514,14 @@ func (m Metrics) InnerPadRows(frameHeight int, density Density) int {
 	return m.CardInnerPadRows
 }
 
-// LabelRows is the number of label rows a card carries. Spec section 3.5 as
-// issue #232 rewrote it: labels own rows of their own below the meta line and
-// wrap onto the second when one row does not hold them. Compact reports zero,
-// because step 5 of the section 2.6 drop order merges the labels onto the meta
-// row instead of giving them one.
+// LabelRows is the most label rows a card may carry. Spec section 3.5 as issue
+// #232 rewrote it: labels own rows of their own below the meta line and wrap
+// onto the second when one row does not hold them. Compact reports zero, because
+// step 5 of the section 2.6 drop order merges the labels onto the meta row
+// instead of giving them one.
+//
+// Issue #243 made it a ceiling too: a card whose pills fit one row draws one,
+// and a card with no labels draws none and loses the separator above them.
 func (m Metrics) LabelRows(frameHeight int, density Density) int {
 	if density.Compact() {
 		return 0
@@ -525,14 +532,16 @@ func (m Metrics) LabelRows(frameHeight int, density Density) int {
 	return 1
 }
 
-// CardRows is the content row count of one card: the whole of spec section
-// 3.1's grid in one place, so the panel that reserves a column's height and the
-// widget that draws the card can never disagree about it.
+// CardRows is the tallest one card may be: every section of spec section 3.1 at
+// its ceiling, in one place.
 //
-// Issue #240 added the interior padding rows to the sum. They are rows like any
-// other here, which is what keeps the count a pure function of density and
-// frame height: the card cannot decide it has nothing worth separating and give
-// a row back, any more than a short description can pull the meta row up.
+// Until issue #243 this was the card's height outright, and columnStackHeight
+// reserved a column from it before any card was rendered. Content-sized cards
+// retired the reservation - a column measures the cards it is about to draw
+// (widget.CardHeight) and packs against that - and what is left here is the
+// bound: no card at this density and frame height can draw more rows than this,
+// whatever its content, because every section is capped and the two interior
+// separators are the only other rows on it.
 func (m Metrics) CardRows(frameHeight int, density Density) int {
 	if density.Compact() {
 		return 2
