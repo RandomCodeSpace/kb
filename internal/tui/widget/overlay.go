@@ -129,6 +129,77 @@ func Field(styles *theme.Styles, label, value string, width int) string {
 	return OverlayRow(styles, name+text, width)
 }
 
+// FieldWrap is Field for a value that arrives as already-styled runs rather
+// than as text: the label pill row of spec sections 3.5 and 3.6, whose runs
+// carry their own fills and cannot be handed to FieldValue.
+//
+// The runs are laid left to right one column apart and wrap whole to the next
+// row, which keeps the caps of section 3.6 paired: a pill is the smallest unit
+// the row can break on, and one split across two rows would read as two pills
+// with one cap each. A run wider than the value field is truncated onto a row of
+// its own rather than dropped, because a field row is the card's only statement
+// of that label. Continuation rows repeat the gutter and leave the label column
+// blank, so the value column is one straight edge.
+func FieldWrap(styles *theme.Styles, label string, runs []string, width int) []string {
+	gutter := styles.Metrics.OverlayLabelW
+	inset := styles.Metrics.OverlayInsetX
+	field := max(width-2*inset, 0)
+	value := max(field-gutter, 0)
+	surface := styles.On(theme.FgBase, theme.OverlaySurf)
+	head := styles.Overlay.FieldLabel.Render(exact(truncate(styles, label, max(gutter-1, 0)), min(gutter, field)))
+	blank := pad(surface, min(gutter, field))
+	var rows []string
+	for _, line := range wrapRuns(surface, runs, value) {
+		lead := blank
+		if len(rows) == 0 {
+			lead = head
+		}
+		rows = append(rows, OverlayRow(styles, lead+line, width))
+	}
+	return rows
+}
+
+// wrapRuns packs already-styled runs into rows of at most width cells, one
+// column of surface between neighbours. It is the wrapping counterpart of
+// joinAt, which skips what does not fit because a card's chip row is exactly one
+// row; a field row may grow downward instead.
+func wrapRuns(style lipgloss.Style, runs []string, width int) []string {
+	if width <= 0 {
+		return nil
+	}
+	var rows []string
+	line, used := "", 0
+	for _, run := range runs {
+		if run == "" {
+			continue
+		}
+		cost := ansi.StringWidth(run)
+		separator := 0
+		if used > 0 {
+			separator = 1
+		}
+		if used+separator+cost > width {
+			if used > 0 {
+				rows = append(rows, line)
+				line, used, separator = "", 0, 0
+			}
+			if cost > width {
+				rows = append(rows, ansi.Truncate(run, width, ""))
+				continue
+			}
+		}
+		if separator == 1 {
+			line += pad(style, 1)
+		}
+		line += run
+		used += separator + cost
+	}
+	if used > 0 {
+		rows = append(rows, line)
+	}
+	return rows
+}
+
 // CheckState is the state of one checklist row. Spec section 5.1 names three
 // marks; a source that only knows done and not-done uses the first two.
 type CheckState uint8

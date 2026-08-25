@@ -158,6 +158,52 @@ func TestBoardCardLabelHoverBeatsTheCardUnderIt(t *testing.T) {
 	}
 }
 
+// TestFilterLabelPillsCarryTheirHitRegions is the half of issue #206 the pill
+// form could have broken: the toolbar's labels are multi-run strings now, so
+// every click region has to be measured from the rendered run rather than from a
+// plain-text length. The region is asserted against the pill the widget renders,
+// and the pointer is then hovered inside it.
+func TestFilterLabelPillsCarryTheirHitRegions(t *testing.T) {
+	m := newTestRootModel(stubBoardReader{}, nil, "u")
+	m.loading, m.haveBoardSnapshot = false, true
+	m.board = filterFixture()
+	m.width, m.height = 160, 40
+	styles := m.themeStyles()
+
+	_, hits := m.renderFilterBar(m.width)
+	for _, hit := range hits {
+		if hit.kind != boardHitFilterLabel {
+			continue
+		}
+		pill := widget.FilterLabel(styles, hit.tag, theme.Canvas, m.filter.hasTag(hit.tag), false, false)
+		if got, want := hit.x1-hit.x0, ansi.StringWidth(pill); got != want {
+			t.Errorf("hit region for %q is %d cells, the pill is %d", hit.tag, got, want)
+		}
+	}
+
+	label := boardHitFor(t, m, func(hit boardHit) bool {
+		return hit.kind == boardHitFilterLabel && hit.taskID == ""
+	})
+	hoverBoard(t, &m, label.x0, label.y0)
+	if got := m.pointerState.Hovered(); got != pointer.ControlID("board-filter:label:"+label.tag) {
+		t.Fatalf("hovered control = %q, want the filter pill for %q", got, label.tag)
+	}
+	if strings.Contains(m.render(), widget.FilterLabel(styles, label.tag, theme.Canvas, false, false, false)) {
+		t.Fatal("the hovered filter pill rendered its resting form")
+	}
+	// Toggling the label lights the pill without moving the row behind it.
+	before, _ := m.renderFilterBar(m.width)
+	updateTestModel(t, &m, filterLabelClickedMsg{tag: label.tag})
+	after, _ := m.renderFilterBar(m.width)
+	if ansi.StringWidth(before) != ansi.StringWidth(after) {
+		t.Errorf("toggling %q reflowed the toolbar: %d cells became %d",
+			label.tag, ansi.StringWidth(before), ansi.StringWidth(after))
+	}
+	if !strings.Contains(plain(after), styles.Glyph.MarkFilterOn+styles.Glyph.MarkTag+label.tag) {
+		t.Errorf("the selected pill kept the unselected mark: %q", plain(after))
+	}
+}
+
 // TestBoardColumnEmptyStatesNameTheirAction is spec section 10.8.7's two board
 // column rows. The tail comes from the action registry, so a board built without
 // a card editor falls through to the import binding rather than naming a key it

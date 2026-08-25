@@ -237,6 +237,9 @@ func TestGlyphsCarryTheAccentVocabulary(t *testing.T) {
 		"MarkSeq":  {glyphs.MarkSeq, "#"},
 		"MarkTag":  {glyphs.MarkTag, "#"},
 		"MarkDue":  {glyphs.MarkDue, "!"},
+
+		"MarkFilterOff": {glyphs.MarkFilterOff, "+ "},
+		"MarkFilterOn":  {glyphs.MarkFilterOn, "x "},
 	}
 	for name, pair := range cases {
 		if pair[0] != pair[1] {
@@ -247,9 +250,11 @@ func TestGlyphsCarryTheAccentVocabulary(t *testing.T) {
 
 // TestGlyphWidthsMatchTheSpecTable is the second guard of spec section 10.4.1:
 // a future re-spelling that silently changes a mark's width fails the build
-// rather than the layout. Every token is one cell except Blocked, which is two,
-// and that is what makes Blocked ineligible as a state alternative to any
-// one-cell mark under the no-reflow rule of section 10.4.4.
+// rather than the layout. Every token is one cell except Blocked and the two
+// filter marks, which are two, and HintSep, which is three; that is what makes
+// Blocked ineligible as a state alternative to any one-cell mark under the
+// no-reflow rule of section 10.4.4, and what makes the filter marks eligible as
+// alternatives to each other.
 func TestGlyphWidthsMatchTheSpecTable(t *testing.T) {
 	glyphs := New(true).Glyph
 	cases := map[string][2]int{
@@ -278,6 +283,12 @@ func TestGlyphWidthsMatchTheSpecTable(t *testing.T) {
 		"MarkSeq":  {ansi.StringWidth(glyphs.MarkSeq), 1},
 		"MarkTag":  {ansi.StringWidth(glyphs.MarkTag), 1},
 		"MarkDue":  {ansi.StringWidth(glyphs.MarkDue), 1},
+
+		// The filter marks are two cells each - the mark and its separating
+		// column - and equal to each other, which is what lets a filter label
+		// pill toggle in place under section 10.4.4.
+		"MarkFilterOff": {ansi.StringWidth(glyphs.MarkFilterOff), 2},
+		"MarkFilterOn":  {ansi.StringWidth(glyphs.MarkFilterOn), 2},
 	}
 	if got := reflect.TypeOf(glyphs).NumField(); got != len(cases) {
 		t.Fatalf("Glyphs has %d fields, the width table covers %d", got, len(cases))

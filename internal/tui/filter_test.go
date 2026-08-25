@@ -270,7 +270,10 @@ func TestFilterCountAndNarrowLayout(t *testing.T) {
 	m.filter.labelIndex = len(m.filterLabels()) - 1
 	m.width = 16
 	focusedLine, _ := m.renderFilterBar(m.width)
-	if !strings.HasPrefix(ansi.Strip(focusedLine), ">[+ ui]<") {
+	// The focused label leads the field row, and it wears the thickened end
+	// caps of the pill's focus state rather than the angle brackets v1.0.1
+	// spelled it with.
+	if !strings.HasPrefix(ansi.Strip(focusedLine), "█+ #ui█") {
 		t.Fatalf("focused label is outside the viewport: %q", ansi.Strip(focusedLine))
 	}
 	m.filter.restore(boardFilter{Text: "login"})

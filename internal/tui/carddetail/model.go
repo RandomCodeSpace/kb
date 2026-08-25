@@ -1024,8 +1024,17 @@ func (m Model) fieldRows(width int) []string {
 	if m.task.Effort != "" {
 		rows = append(rows, widget.Field(m.styles, "effort", safeText(m.task.Effort, false), width))
 	}
+	// The labels row carries the section 3.6 pills the board cards carry, not a
+	// joined string: a label is the same object on both surfaces and reads as
+	// the same object (issue #206). The pane is not a card, so the pills are
+	// never the compact flat form, and a Field row is not activatable, so they
+	// are never hovered either (section 10.5.1).
 	if tags := regularTags(m.task.Tags); len(tags) > 0 {
-		rows = append(rows, widget.Field(m.styles, "labels", strings.Join(tags, "  "), width))
+		pills := make([]string, 0, len(tags))
+		for _, tag := range tags {
+			pills = append(pills, widget.Label(m.styles, tag, theme.OverlaySurf, false, false))
+		}
+		rows = append(rows, widget.FieldWrap(m.styles, "labels", pills, width)...)
 	}
 	if links := importLinks(m.task.Tags); len(links) > 0 {
 		rows = append(rows, widget.Field(m.styles, "links", strings.Join(links, "  "), width))
@@ -1140,11 +1149,15 @@ func (m Model) markdown(source string, width int) string {
 	return m.renderMarkdown(source, width)
 }
 
+// regularTags are the card's labels, sanitized and in board order, with the
+// import links removed: those carry their own row. The tags are returned bare
+// because the labels row renders them as pills, which supply their own
+// delimiters (spec section 3.6).
 func regularTags(tags []string) []string {
 	var out []string
 	for _, tag := range tags {
 		if !strings.HasPrefix(tag, "link::") {
-			out = append(out, "["+safeText(tag, false)+"]")
+			out = append(out, safeText(tag, false))
 		}
 	}
 	return out

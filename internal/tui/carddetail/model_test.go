@@ -75,7 +75,7 @@ func TestModelLoadsAndRendersFullDetail(t *testing.T) {
 	body := ansi.Strip(m.renderBody(72))
 	for _, want := range []string{
 		"DETAIL", "status      cancelled  blocked", "priority    1", "due         2026-08-19",
-		"effort      M", "labels      [type::feature]", "links       [github#86]",
+		"effort      M", "labels      ▐type:feature▌", "links       [github#86]",
 		"killed 17 Aug 2026", "superseded", "Plan", "first",
 		"CHECKLIST", "1/2", "☑ done", "☐ left", "blocks      [#9 todo]", "blocked by  [legacy done]",
 		"COMMENTS", "c3  alice  17 Aug 2026", "looks", "good",
@@ -311,7 +311,7 @@ func TestNilReaderAndRenderingHelpers(t *testing.T) {
 		t.Fatal("tiny overlay was empty")
 	}
 
-	if got := regularTags([]string{"a", "link::x"}); len(got) != 1 || got[0] != "[a]" {
+	if got := regularTags([]string{"a", "link::x"}); len(got) != 1 || got[0] != "a" {
 		t.Fatalf("regularTags = %v", got)
 	}
 	if got := importLinks([]string{"link:: x ", "link::x", "link::"}); len(got) != 1 || got[0] != "[x]" {

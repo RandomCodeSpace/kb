@@ -578,10 +578,11 @@ func boardCardLabelControlID(taskID, tag string) pointer.ControlID {
 }
 
 // renderFilterBar draws the two toolbar rows on the Canvas tier with the filter
-// field on Surface (spec section 2.1). The row's text vocabulary is unchanged
-// from v1.0.1: the [+ tag] / [x tag] markers are the filter's state affordance
-// and every click region is keyed to their plain-text widths, so this slice
-// restyles the tiers and hues and leaves the glyphs alone.
+// field on Surface (spec section 2.1). The labels are the section 3.6 pills the
+// board cards carry (issue #206), which makes them multi-run strings: every hit
+// region is measured from the rendered run with ansi.StringWidth rather than
+// from a plain-text length, and appendRun takes content that has already been
+// styled so a pill is not re-wrapped in a style that would flatten its fills.
 func (m Model) renderFilterBar(width int) (string, []boardHit) {
 	styles := m.themeStyles()
 	width = max(width, 1)
@@ -589,19 +590,22 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 	separator := styles.On(theme.FgMuted, theme.Canvas).Render(" | ")
 	hits := make([]boardHit, 0, 2+len(m.filterLabels()))
 	lines := [2][]string{}
-	appendPart := func(row int, part string, style lipgloss.Style, kind boardHitKind, tag string) {
+	appendRun := func(row int, content string, kind boardHitKind, tag string) {
 		x := ansi.StringWidth(strings.Join(lines[row], ""))
 		if len(lines[row]) > 0 {
 			lines[row] = append(lines[row], separator)
 			x += 3
 		}
 		start := x
-		partWidth := ansi.StringWidth(part)
+		partWidth := ansi.StringWidth(content)
 		hit := boardHit{x0: start, x1: min(start+partWidth, width), y0: row + 1, y1: row + 2, kind: kind, tag: tag}
-		lines[row] = append(lines[row], m.pointerState.Render(styles, boardHitControlID(hit), style.Render(part)))
+		lines[row] = append(lines[row], m.pointerState.Render(styles, boardHitControlID(hit), content))
 		if kind != boardHitDefault && start < width {
 			hits = append(hits, hit)
 		}
+	}
+	appendPart := func(row int, part string, style lipgloss.Style, kind boardHitKind, tag string) {
+		appendRun(row, style.Render(part), kind, tag)
 	}
 
 	value := sanitizeTerminal(m.filter.input.Value())
@@ -617,22 +621,17 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 	if m.filter.focus == filterLabels && len(labels) > 0 {
 		focusTag = labels[min(max(m.filter.labelIndex, 0), len(labels)-1)]
 	}
-	labelStyle := func(tag string) lipgloss.Style {
-		if !m.filter.hasTag(tag) {
-			return styles.On(theme.FgMuted, theme.Canvas)
-		}
-		return styles.OnBold(theme.LabelSlot(widget.LabelWheel(tag)), theme.Canvas)
-	}
+	// A filter label is a pill with three orthogonal states: the toggle is the
+	// hue against the dim form, keyboard focus thickens the end caps, and the
+	// pointer underlines the body. None of the three changes a cell count, so
+	// toggling or traversing the row never reflows the toolbar (section 10.4.4).
 	appendLabel := func(row int, tag string) {
-		marker := "+"
-		if m.filter.hasTag(tag) {
-			marker = "x"
-		}
-		label := "[" + marker + " " + sanitizeTerminal(tag) + "]"
-		if tag == focusTag {
-			label = ">" + label + "<"
-		}
-		appendPart(row, label, labelStyle(tag), boardHitFilterLabel, tag)
+		hit := boardHit{kind: boardHitFilterLabel, tag: tag}
+		appendRun(row, widget.FilterLabel(styles, sanitizeTerminal(tag), theme.Canvas,
+			m.filter.hasTag(tag),
+			tag == focusTag,
+			m.pointerState.IsHovered(boardHitControlID(hit)),
+		), boardHitFilterLabel, tag)
 	}
 	if focusTag != "" {
 		appendLabel(0, focusTag)
