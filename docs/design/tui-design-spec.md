@@ -72,7 +72,7 @@ with `OverlayBand` escaping the greyscale ramp into the blue cube at 59.
 |---|---|---|---|
 | `FgBase` | `#e3e9f2` | 255 | Primary text: card titles, field values, overlay body |
 | `FgSubtle` | `#9aa5b6` | 248 | Secondary text: footer, band labels, effort, section labels |
-| `FgMuted` | `#6b7686` | 243 | Tertiary text: description snippet, `#seq`, age, counts, hints |
+| `FgMuted` | `#6b7686` | 243 | Tertiary text: card description, wrapped title continuation rows, `#seq`, age, upcoming due, counts, hints |
 | `FgOnAccent` | `#0b0e14` | 233 | Text drawn on a saturated fill (pill interiors, focused band) |
 
 `FgOnAccent` is a same-hex alias of `Canvas`; that is deliberate and is not a
@@ -92,22 +92,37 @@ collision.
 
 | Slot | Hex | x256 | Role |
 |---|---|---|---|
-| `Prio1` | `#ff5a48` | 203 | P1 |
-| `Prio2` | `#ffb020` | 214 | P2 |
-| `Prio3` | `#4f8ef7` | 69 | P3, and the fallback for any unknown priority |
-| `Prio4` | `#b8bdc7` | 7 | P4 |
+| `Prio1` | `#ff5a48` | 203 | Priority 1, high — rail hue and meta digit fill |
+| `Prio2` | `#ffb020` | 214 | Priority 2, medium — rail hue and meta digit fill |
+| `Prio3` | `#4f8ef7` | 69 | Priority 3, low — rail hue and meta digit fill, and the fallback for any unknown priority |
+| `Prio4` | `#b8bdc7` | 7 | — unreferenced since #232; see the amendment below |
 
 Mapping is exact-match on 1/2/4, everything else falls to `Prio3`
 (prototype `prioSlot`).
+
+**Amended by [#232](https://github.com/RandomCodeSpace/kb/issues/232).** The
+scale is three values — 1 high, 2 medium, 3 low. `PrioritySlot` matches 1 and 2
+exactly and resolves everything else to `Prio3`, hue and digit alike.
+
+This is the render seam and it is deliberately tolerant of the four-value data
+the store still holds until the priority migration lands: a stored `4` arrives
+here and reads as low, which is what it always meant. Nothing at this seam
+writes a task.
+
+`Prio4` `#b8bdc7` stays in the palette and stays unreferenced. Removing a slot
+moves every index after it and rewrites §1.7's audit tables, which belongs to
+the migration rather than to the card; a hue nothing renders is dead weight, but
+it is not a wrong color on a card. **The follow-up issue owns deleting it and
+re-running the §1.7 audit against a three-hue ramp.**
 
 ### 1.5 Status colors
 
 | Slot | Hex | x256 | Role |
 |---|---|---|---|
 | `StatusOK` | `#3fbf7f` | 72 | shipped counter, ready dot, `clear` completion gate |
-| `StatusWarn` | `#ffb020` | 214 | blocked chip, warnings |
-| `StatusDanger` | `#ff5a48` | 203 | overdue chip, errors, purge arm state |
-| `StatusInfo` | `#4f8ef7` | 69 | due chip (not overdue), informational |
+| `StatusWarn` | `#ffb020` | 214 | blocked alarm (§3.2), effort `M` fill (§3.4), warnings |
+| `StatusDanger` | `#ff5a48` | 203 | overdue chip (§3.4), errors, purge arm state |
+| `StatusInfo` | `#4f8ef7` | 69 | effort `S` fill (§3.4), informational |
 | `StatusAlarm` | `#b31f14` | 124 | the armed fill of a two-step destructive confirm (§1.9) |
 
 ### 1.6 Label pill wheel
@@ -389,6 +404,23 @@ is gone and a floor takes its place.
 
 A card whose `inner < 6` renders the surface and rail only, no content.
 
+**Card height.** Amended by [#232](https://github.com/RandomCodeSpace/kb/issues/232).
+A card's row count is `Metrics.CardRows(frameHeight, density)`, which is the
+whole of §3.1's grid in one place:
+
+| Token | Value | Applies to |
+|---|---|---|
+| `CardTitleLines` | `2` | Title rows at normal density; compact takes 1 |
+| `CardDescMax` | `5` | Ceiling on description rows |
+| `CardDescStep` | `10` | Frame rows that buy one more description line |
+| `CardLabelRows` | `2` | Label rows on a frame at or above `DescTwoLines` |
+
+`CardRows` is a function of density and frame height and never of content. That
+is the invariant the column depends on: `columnStackHeight` reserves the scroll
+affordance and the `+N more` row before any card in the column is rendered, and
+a card that drew a row more or less than the metric promised would put the
+overflow cue on a row that belongs to a card.
+
 ### 2.6 Compact density
 
 **Threshold.** Compaction fires when
@@ -403,26 +435,48 @@ which just fits; below that, pill padding and the chip row stop fitting and
 normal density produces a wall of dropped chips instead of a denser board. See
 §8, contestable call 5.
 
-**Second description line.** At `frameHeight >= 45` the description snippet gets
-a second line (card grows from 4 to 5 content rows). Below that it is one
-ellipsized line.
+**Description ladder.** Superseded by
+[#232](https://github.com/RandomCodeSpace/kb/issues/232), which replaced the
+single 45-row step with a ladder. `DescLines` is `1` below `DescTwoLines`, then
+`2 + (frameHeight - DescTwoLines) / CardDescStep`, capped at `CardDescMax`:
+
+| Frame height | Description rows | Label rows | Card content rows |
+|---|---|---|---|
+| 30-44 | 1 | 1 | 5 |
+| 45-54 | 2 | 2 | 7 |
+| 55-64 | 3 | 2 | 8 |
+| 65-74 | 4 | 2 | 9 |
+| 75+ | 5 | 2 | 10 |
+
+The ladder spends height the frame actually has rather than height it might
+have: a 45-row terminal buys the second line the original rule bought, and only
+a terminal tall enough to keep the same number of cards on screen buys the
+third, fourth and fifth. Compact is unchanged at 2 content rows.
 
 **Drop order.** Compaction is not gradual — crossing the threshold applies all of
 it at once. The order below is normative for any future partial-compaction work
 and matches the map's decision that the description goes first.
 
-1. **Description snippet** — dropped entirely.
-2. **Page padding row** — `PagePadTop` 1 → 0.
-3. **Column meta line** — the `N cards · N blocked` row.
-4. **Inter-card gutter** — `CardGap` 1 → 0, replaced by `Zebra` striping on
+1. **Description rows** — dropped entirely, however many the ladder allotted.
+2. **Title continuation rows** — `TitleRows` `CardTitleLines` → 1. The title is
+   ellipsized on its single row, which is the one place the compact card still
+   spends §3.3's truncation primitive on a title.
+3. **Page padding row** — `PagePadTop` 1 → 0.
+4. **Column meta line** — the `N cards · N blocked` row.
+5. **Inter-card gutter** — `CardGap` 1 → 0, replaced by `Zebra` striping on
    alternate cards so the stack still separates.
-5. **Card label row** — labels merge onto the meta chip row instead of owning
-   their own line.
-6. **Inner paddings** — `CardPadLeft` 1 → 0 and `ColumnPadX` 1 → 0.
-7. **Pill padding** — chips degrade to flat colored bold text (`flatChip`),
+6. **Card label rows** — `LabelRows` → 0; labels merge onto the meta chip row
+   instead of owning rows of their own.
+7. **Inner paddings** — `CardPadLeft` 1 → 0 and `ColumnPadX` 1 → 0.
+8. **Pill padding** — chips degrade to flat colored bold text (`flatChip`),
    dropping the cell of padding §3.6 spends at each end; scoped labels keep
-   only their value half. This is the last thing to go because it is the only
-   step that changes the vocabulary rather than the spacing.
+   only their value half, the priority digit and the effort letter keep only
+   themselves. This is the last thing to go because it is the only step that
+   changes the vocabulary rather than the spacing.
+
+Step 2 is new with #232 and sits second because a wrapped title is the item
+whose absence costs the least: the first row still carries the whole of what a
+scan reads, and the ellipsis says the rest exists.
 
 ---
 
@@ -430,52 +484,122 @@ and matches the map's decision that the description goes first.
 
 ### 3.1 Rows by density
 
-**Normal** (`30 <= h < 45`) — 4 content rows + 1 gutter = 5 rows per card:
+Amended by [#232](https://github.com/RandomCodeSpace/kb/issues/232). The card is
+title rows, description rows, one meta row and label rows. The count of each is
+`Metrics.CardRows`'s business (§2.5) and is a function of density and frame
+height alone.
+
+**Normal** (`30 <= h < 45`) — 5 content rows + 1 gutter = 6 rows per card:
 
 ```
-▌🐛 Drag ghost sticks on resize      #142     row 0  title
-▌Pointer capture leaks when the col…          row 1  description (FgMuted)
-▌P1 3d old ▐blocked▌ ▐in 2d▌ 🟨 M            row 2  meta chips
-▌▐type:▌feature▌ ▐#area:tui▌                  row 3  label pills
-                                              gutter (Canvas-free: Surface)
+▌🐛 Drag ghost sticks on resize     ⛔ #142    rows 0-1  title, wrapping
+▌Pointer capture leaks when the column…        row 2    description
+▌ 1  3d !5d  M                                 row 3    meta
+▌ type:feature   #area:tui                     row 4    labels
+                                               gutter (Canvas-free: Surface)
 ```
 
-**Tall** (`h >= 45`) — 5 content rows + 1 gutter = 6 rows per card. Row 1 becomes
-rows 1-2, description wrapped to two lines. Chip rows stay pinned at
-`1 + descLines` and `2 + descLines`, so a one-line description does not pull the
-chips up; the card's row grid is fixed by density, not by content.
+**Tall** (`h >= 45`) — 7 to 10 content rows by the §2.6 ladder, + 1 gutter.
 
 **Compact** (`h < 30` or `innerW < 22`) — 2 content rows, no gutter:
 
 ```
-▌🐛 Drag ghost stic…          #142     row 0  title
-▌P1 3d old ⛔ !2d 🟨 M bug            row 1  meta + labels, flat chips
+▌🐛 Drag ghost stic…            ⛔ #142    row 0  title
+▌1 3d !5d M bug                            row 1  meta + labels, flat chips
 ```
+
+**The shared block.** The title rows and the description rows are one fixed
+block of `TitleRows + DescLines` rows, and the title takes only what it needs
+inside it. A title that fits one row hands its spare row to the description
+rather than spending it on blank surface; a title that wraps takes the row back.
+The block's total never moves, so the meta row and the label rows sit at a fixed
+offset from the card's top and the card's height stays the pure function §2.5
+requires.
+
+That is the amended reading of the old "the row grid is fixed by density, not by
+content" rule. What is fixed is the card's height and the offset of every row
+below the block; what varies inside the block is how two adjacent text fields
+split rows they both draw prose into. A description shorter than what it is
+handed still leaves its remaining rows blank, and nothing below moves up.
 
 ### 3.2 Row 0 — title
 
-`emoji + " " + title`, foreground `FgBase`, bold only when selected. A
-two-cell emoji and the space after it are their own styled run (§10.4.1, as
-amended by #229): the title row ends in a padding run, so a title left inside
-the emoji's run loses its last character under that padding. Right-aligned
-`#seq` in `FgMuted`. The title field is `inner - width(seq) - 1` wide and is
-ellipsized to fit; `#seq` is never truncated.
+`emoji + " " + title`, foreground `FgBase`, bold only when selected.
 
-### 3.3 Row 1 — description snippet
+**Amended by [#232](https://github.com/RandomCodeSpace/kb/issues/232).** The
+title wraps across its allotment instead of being ellipsized to one line. It is
+greedily word-wrapped over `TitleRows` rows, and only the **last** allotted row
+carries the ellipsis when text remains — §3.3's rule, applied to the title.
+Compact keeps the single ellipsized row it always had.
 
-Foreground `FgMuted`. Greedy word wrap to `inner` columns across `descLines`
-lines. Rules:
+**The trailer** is the right end of row 0: the blocked alarm, then `#seq` in
+`FgMuted`. Row 0's field is `inner - width(trailer) - 1`; the rows under it take
+the whole of `inner`, which is where a wrapped title gets the space a one-line
+title never had. `#seq` is never truncated.
+
+**Blocked** is `Blocked` `⛔` U+26D4 immediately before `#seq`, with the column
+after it owned per §10.4.1's adjacency rule, so the trailer costs
+`2 + 1 + width(seq)`. #232 moved it here from the §3.4 meta chip row, where it
+was a `blocked` pill at normal density and the bare mark when compact. Being
+blocked is a fact about the card's identity rather than about its schedule, it
+reads beside the card's own reference, and the meta row gets nine cells back.
+
+The mark and its owned column are their own styled run, and `#seq` is the run
+after it. A terminal shapes one styled run as a unit, so a sequence number left
+inside the pictograph's run is drawn pushed right by its excess advance and then
+clipped by the run that lands on the cell the grid gave it — the defect #229
+found in the effort chip, following the mark that still carries it.
+
+### 3.3 Description
+
+Amended by [#232](https://github.com/RandomCodeSpace/kb/issues/232). The card
+renders **markdown**, not a plain snippet, and it renders it through the same
+frozen grammar the card detail pane hands to glamour (§5.2). That grammar now
+lives in `internal/tui/mdparity` and both surfaces read it: a construct the pane
+understands and the card does not, or the reverse, is a fork of the product
+contract.
+
+What differs between the two is the output stage and nothing else. The pane
+needs a document, so `mdparity.Parity` escapes everything outside the grammar
+and spends a blank line between blocks. A card has neither the rows for blank
+lines nor a second parser to defend itself from, so `mdparity.Blocks` returns
+the same recognizers' output as styled runs and the card wraps them itself.
+
+**Block rendering at card scale:**
+
+| Block | Rendered as |
+|---|---|
+| Heading (ATX 1-3) | The text, bold, marker dropped; emphasis inside it flattens, matching the frozen renderer |
+| `- item` | `Bullet` `·` + its owned column + the text |
+| `N. item` | The author's own marker, kept literal — the frozen renderer never renumbers a run of ordinals |
+| Fenced code | The source lines in the §5.2 code foreground, fences dropped |
+| Anything else | Prose |
+
+**Inline emphasis:** bold bolds, italic italicizes, a code span takes §5.2's
+`Code` foreground and a link its `Link` foreground, so a description reads the
+same on the card and in the pane that opens from it. A link renders its label
+and drops its href; the card has no width for a URL beside its text. Every one
+of these is an attribute or a foreground and never a cell, so a description
+carrying markdown wraps to exactly the rows the same text would without it.
+
+**Wrapping rules**, unchanged from the snippet they replace:
 
 - A word longer than `inner` is hard-truncated with an ellipsis rather than
   overflowing.
+- A block starts a line.
+- A blank source line yields no row: the card's budget is small enough that
+  spending a row on nothing is a row of description the reader does not get.
 - The **last** allotted line carries the ellipsis when text remains, so the
-  snippet can never wrap past the card.
-- A description shorter than the allotment leaves its remaining rows blank; the
-  chip rows do not move up.
-- Line count: `descLines = 0` compact, `1` normal, `2` when `frameHeight >= 45`.
+  description can never wrap past the card.
+- A description shorter than its allotment leaves its remaining rows blank; the
+  rows below it do not move up.
+- Line count: `DescLines` per the §2.6 ladder — `0` compact, `1` below
+  `DescTwoLines`, rising to `CardDescMax` by `CardDescStep`.
 
-Truncation primitive: `ansi.Truncate(s, w-1, "") + "…"` — width-aware, not
-byte- or rune-aware.
+Truncation primitive: `ansi.Truncate(s, w-1, "") + "…"` — width-aware, not byte-
+or rune-aware. The ellipsis is rendered in the description's own style, because
+a card row is a filled surface and a tail with no background punches a hole in
+the shade tier.
 
 ### 3.4 Meta chip row
 
@@ -485,29 +609,85 @@ fit are skipped individually and shorter chips behind them are still attempted
 
 | Position | Content | Normal | Compact |
 |---|---|---|---|
-| 1 | Priority | `P1` bold, priority hue, no pill | same |
-| 2 | Age | `3d old` / `6h here` / `new` / `shipped`, `FgMuted` | same |
-| 3 | Blocked | pill `blocked` on `StatusWarn` | `⛔` in `StatusWarn` |
-| 4 | Due | pill `today` / `in 2d` / `overdue · 2d` on `StatusInfo`, or `StatusDanger` when overdue | `!today` / `!in 2d` / `!2d`, same hue |
-| 5 | Effort | `🟦 S` / `🟨 M` / `🟧 L`, `FgSubtle` | same |
+| 1 | Priority | digit on `PrioritySlot` fill, 3 cells | flat digit, 1 cell |
+| 2 | Age | `3d` / `6h` / `new` / `shipped`, `FgMuted` | same |
+| 3 | Due | ahead: `today` / `in 2d` in `FgMuted`. Passed: `!2d` on `StatusDanger`, 5 cells | same text; the passed form is flat |
+| 4 | Effort | letter on its fill — `S` `StatusInfo`, `M` `StatusWarn`, `L` `Label1` — 3 cells | flat letter, 1 cell |
 
-Priority survives longest because it is never a pill and is only two cells.
+Priority survives longest because nothing on the row is shorter.
 
-The effort chip's own interior space is not the chip separator: it is the
-§10.4.1 adjacency rule, and the chip is four cells in both densities — a
-two-cell square, the column it owns, and the letter. The letter is not
-redundant with the square: color alone must not carry the value, and the
-letter is what still reads on a font that has no pictograph and draws tofu.
-An effort value the S/M/L scale does not name falls back to `Diamond` and
-three cells. `metaRowWidth` measures each chip rather than assuming a width,
-so the survival order and the column-wide drop of `metaDepth` carry the cost
-without a constant to maintain. The square and the column it owns are their
-own styled run (§10.4.1, as amended by #229); the fourth cell is spent on the last label of
-the compact flat row at the widths where that row was already full.
+**Amended by [#232](https://github.com/RandomCodeSpace/kb/issues/232).** The row
+is now one grammar: a single ASCII character on a colored fill, plus short
+values. Four changes make it so.
 
-### 3.5 Label pill row
+**Blocked left the row** for §3.2's title trailer. The row is four categories,
+not five, and `cardMetaSlots` is 4.
 
-One pill per label, wheel-hued by `sum(runes) % 5`.
+**Priority is the digit on its hue**, the one-character pill of §3.6, replacing
+the `P1` text treatment. The `MarkPrio` `P` token is retired: it said nothing
+the digit and the priority-hued rail beside the card did not, and it cost a cell
+on the row §3.4 spends the most effort keeping short. The scale is three values
+— 1 high, 2 medium, 3 low — see §1.4. Digits and not H/M/L letters,
+because the effort marker on the same row is already a letter on a fill and
+renders an `M` of its own; two letter-on-fill `M`s a few cells apart would be
+one grammar saying two unrelated things.
+
+**Effort is the letter on its hue**, same anatomy, retiring `EffortS`/`EffortM`/
+`EffortL`. The squares were the #223 pictograph experiment; #229 found them
+rendering partially on real terminals and #230 fixed the run split, but the
+underlying cost stands — a colored square is drawn by font machinery that
+respects the cell grid no better than its width promises, and an emoji-less font
+substitutes tofu. A binary alarm survives that (§10.4.1); a value out of three
+does not. ASCII on background color is what §3.6 says a pill owes a terminal
+font, and it is now the whole of the marker. The three fills are palette slots
+that already exist and are already audited against `FgOnAccent` as pill fills:
+no new hex enters §1.7's table for a three-value scale. An effort value the
+scale does not name keeps the `Diamond` `◇` fallback, its owned column, and the
+value beside it — three cells, one run.
+
+**Due dropped the word "overdue"** and the pill that carried it. A deadline
+still ahead is plain muted text; a card that is merely scheduled is not an alarm
+and does not earn a fill on a row with three other things to say. A deadline
+passed is `MarkDue` `!` and the bare elapsed count on `StatusDanger`. §1.9's
+floor is met by the mark and by the text, not by the hue: `!` says the deadline
+has passed on a terminal with no color at all, and `today`, `in 2d` and a bare
+`5d` are three different strings before they are three different colors. The
+`Bullet` separator the `overdue · 2d` form spent is gone from this row; the
+token survives for §2.3's column meta line and §3.3's list marker.
+
+**Age dropped its trailing word.** `3d old` and `6h here` spent four and five
+cells saying which clock the number came from. The column the card sits in
+already says it — a card in DOING is measured from when it arrived there, a card
+anywhere else from when it was made.
+
+`metaRowWidth` measures each chip rather than assuming a width, so the survival
+order and the column-wide drop of `metaDepth` carry whichever form each chip
+took without a constant to maintain.
+
+### 3.5 Label rows
+
+One pill per label, wheel-hued by `sum(runes) % 5`. The pill form is unchanged
+by [#232](https://github.com/RandomCodeSpace/kb/issues/232); what changed is
+where the pills sit and how they run out of room.
+
+**Rows.** Labels own `LabelRows` rows of their own below the meta line — 2 on a
+frame at or above `DescTwoLines`, 1 below it, 0 when compact, where §2.6 step 6
+merges them onto the meta row instead.
+
+**Spacing** is a fixed one-cell gutter, which is what "equally spaced" resolves
+to on a cell grid: every gap is the same cell whatever the row holds, so a label
+that changes, appears or disappears moves the pills after it and nothing else.
+Distributing slack between pills instead would make the gutter a function of the
+row's contents — the same label would sit at a different column on two cards,
+and every gap would move whenever any pill changed width. That is a reflow
+§10.4.4 spends real effort avoiding elsewhere.
+
+**Wrap** is greedy in the order the caller supplies, which is the survival order
+this section already fixes (the project pill leads). A pill that does not fit
+the rest of the current row starts the next one. A pill too wide for a row of
+its own is skipped rather than truncated into an unreadable stub. Pills still
+unplaced when the allotment runs out are dropped — the rule §3.4 already applies
+to a chip that does not fit.
 
 - **Scoped** `key::value` → two-tone pill: `key:` on `Surface` in `FgSubtle`,
   `value` on the wheel hue in `FgOnAccent`.
@@ -531,6 +711,15 @@ Cost: `width(text) + 2` columns. The scoped variant substitutes `FgSubtle` on
 `Surface` for the key run *and its leading pad*, so the pill is two padded spans
 meeting at a hard color boundary: a dark key half, then the hue half. There is
 no junction glyph.
+
+**The one-character pill** (added by
+[#232](https://github.com/RandomCodeSpace/kb/issues/232)). The priority digit
+and the effort letter are the pill anatomy at its minimum: pad, one character,
+pad — three cells. They are the anatomy verbatim and not a tighter form, because
+the tighter form already means something: a colored character with no padding is
+the flat chip of §2.6 step 8, the compact degradation of a pill, and spending it
+at normal density would say the row had run out of width when it had not. The
+compact row does spend it, and both markers are one cell there.
 
 **Amended by #227.** Until #227 both ends were half-block glyphs — `▐` U+2590
 and `▌` U+258C — carrying the fill color as *foreground* over the surface
@@ -1380,7 +1569,7 @@ every neighbouring tier already lives.
 Absolutely, on every surface not named in §10.1.2:
 
 - **Anything a user reads as content.** Card titles and `#seq` (§3.2),
-  description snippets (§3.3), field values (§4), overlay body prose, glamour
+  card descriptions (§3.3), field values (§4), overlay body prose, glamour
   markdown output (§5.2), help key and description columns, filter text, comment
   bodies.
 - **Anything a user reads before acting.** Button labels and their hotkey
@@ -2226,19 +2415,16 @@ slice that adopts the rule that needs them.
 | `CheckOff` | `☒` | U+2612 | 1 | Dropped checklist row; cancelled-blocker mark in a blocker chip (#224) | present |
 | `Tick` | `✓` | U+2713 | 1 | Resolved-blocker mark inside a blocker chip (#224) | new |
 | `Diamond` | `◇` | U+25C7 | 1 | Effort marker for a value outside the S/M/L scale (§3.4) | present |
-| `EffortS` | `🟦` | U+1F7E6 | **2** | Effort marker, S (§3.4) | present |
-| `EffortM` | `🟨` | U+1F7E8 | **2** | Effort marker, M (§3.4) | present |
-| `EffortL` | `🟧` | U+1F7E7 | **2** | Effort marker, L (§3.4) | present |
 | `Focus` | `▸` | U+25B8 | 1 | Focused band caret (§2.2) | present |
 | `More` | `+` | U+002B | 1 | Overflow cue prefix (§3.7) | present |
 | `Ellipsis` | `…` | U+2026 | 1 | Truncation tail (§3.3) | present |
-| `Blocked` | `⛔` | U+26D4 | **2** | Compact blocked mark (§3.4) | present |
+| `Blocked` | `⛔` | U+26D4 | **2** | Blocked alarm beside `#seq` (§3.2) | present |
 | `Track` | `░` | U+2591 | 1 | Progress meter track (§10.1.3) | new |
 | `Empty` | `○` | U+25CB | 1 | Empty-state mark (§10.8.3) | new |
 | `Alert` | `▲` | U+25B2 | 1 | Failure mark (§10.8.5) | new |
 | `HalfTop` | `▀` | U+2580 | 1 | Brand letterform upper half (§10.6.1) | new |
 | `HalfBottom` | `▄` | U+2584 | 1 | Brand letterform lower half (§10.6.1) | new |
-| `Bullet` | `·` | U+00B7 | 1 | Meta separator: `4 cards · 1 blocked`, `overdue · 2d` | new |
+| `Bullet` | `·` | U+00B7 | 1 | Meta separator `4 cards · 1 blocked` (§2.3); list marker in a card description (§3.3) | present |
 | `Times` | `×` | U+00D7 | 1 | Shipped-counter prefix in the top bar | new |
 | `EmDash` | `—` | U+2014 | 1 | Reason clause separator in the editor's stale banner | new |
 | `Chevron` | `›` | U+203A | 1 | Similar-item marker in the editor | new |
@@ -2265,16 +2451,36 @@ value is 2 and `ansi.StringWidth` agrees. `Blocked` already satisfied the rule
 and is now held to it.
 
 The cost is font coverage: a terminal font without the pictograph draws tofu.
-That is accepted consciously on the same terms §3.6 accepts the block glyphs,
-and on one condition — a square never carries a fact alone. The effort letter
-is rendered beside it and is what stays readable when the pictograph fails, so
-the failure mode is an ugly chip rather than a lost value.
+
+**Narrowed by [#232](https://github.com/RandomCodeSpace/kb/issues/232) to one
+token, and the condition restated.** The original condition was that a square
+never carries a fact alone — the effort letter beside it was what stayed
+readable when the pictograph failed. That held, and it was still not enough:
+#229 found the squares rendering partially on the user's terminals after the
+#220 adjacency rule and the #223 admission rule were both in force, and #230's
+run split fixed the mechanism without changing the underlying exposure. A glyph
+whose rendered geometry is a property of the font will keep finding new ways to
+be wrong.
+
+So the rule is now about **what the pictograph carries**, not about what is
+drawn beside it. A pictograph is admitted only where it carries a **binary**
+fact. `Blocked` qualifies: a font with no `⛔` draws tofu beside the card's
+sequence number, and tofu beside a sequence number still says this card is
+flagged — the reader loses the glyph's shape and no information. The effort
+squares did not: they carried one of three values, and a substituted or clipped
+glyph lost *which*, with the letter beside it doing all the work the square was
+supposed to do. #232 replaced them with the letter on a colored fill (§3.4),
+which is ASCII and background color and owes a terminal font nothing.
+
+Note the direction of the trade: this section admits one pictograph while
+removing three. That is not an inconsistency to be resolved later — it is the
+rule doing its job, keeping the glyph where its failure mode is legible and
+taking it out where it was not.
 
 **Markers.** ASCII prefixes that are vocabulary, not prose.
 
 | Token | Text | Cells | Role |
 |---|---|---|---|
-| `MarkPrio` | `P` | 1 | Priority chip prefix, `P1` (§3.4 position 1) |
 | `MarkSeq` | `#` | 1 | Card reference prefix, `#142` (§3.2) |
 | `MarkTag` | `#` | 1 | Plain label pill prefix, `#tag` (§3.5) |
 | `MarkDue` | `!` | 1 | Compact due prefix, `!2d` (§3.4 position 4) |
@@ -2286,12 +2492,13 @@ the failure mode is an ugly chip rather than a lost value.
 different sections and either may be re-spelled without the other.
 
 **Width rule.** Every token is one cell wide except `HintSep` and `PathSep` (3
-each), `Blocked` and the three effort squares (2 each), and the filter marks
-`MarkFilterOff`/`MarkFilterOn` (2 each). The three squares are deliberately
-equal-width, so the effort chip changes value without moving a column. A token wider than one cell is ineligible as a state alternative to any
+each), `Blocked` (2), and the filter marks `MarkFilterOff`/`MarkFilterOn` (2
+each). A token wider than one cell is ineligible as a state alternative to any
 one-cell mark (§10.4.4); the two filter marks are deliberately equal-width so
 they are eligible as alternatives to *each other* — the toggle never moves a
-cell.
+cell. `Blocked` is not a state alternative to anything: it is present or absent,
+and §3.2 reserves its cells in the trailer only when it is present, on a row
+whose right edge is right-aligned rather than packed.
 
 **Adjacency rule** (added by #218/#220, widened by #223). An ambiguous- or
 wide-width mark owns the column after it: the cell following it is a space, or
@@ -2301,9 +2508,8 @@ fonts draw them wider than the cell the cursor was advanced past, so anything
 written in the next column is drawn on top of the mark. A wide pictograph
 measures honestly at two cells but is drawn by font machinery that respects
 the cell grid no better, and an emoji-less font substitutes tofu of whatever
-width it has. The rule binds `Dot`, `Diamond`, `Ellipsis`, `Empty`, `Alert`,
-`Bullet`, `Times`, `EmDash`, `Tick` (#224), `Blocked` and
-`EffortS`/`EffortM`/`EffortL`. It does not bind the Block Elements — `Rail`,
+width it has. The rule binds `Dot`, `Diamond`, `Ellipsis`, `Empty`, `Alert`, `Bullet`,
+`Times`, `EmDash`, `Tick` (#224) and `Blocked`. It does not bind the Block Elements — `Rail`,
 `RailFull`, `CapL`, `CapR`, `Track`, `HalfTop`, `HalfBottom` — whose adjacency
 to their neighbour *is* the primitive: a rail that does not touch its card and
 a meter cap that does not touch its bar are a different widget, and their cell
@@ -2478,6 +2684,7 @@ anything that appears.
 | Branded engine row (§10.2.5) | label + `EllipsisField` + `SuffixField` | same | Both fields are reserved whether or not their content is present |
 | Scroll affordance (§10.3.4) | column reserved | column reserved | Tint changes; geometry does not |
 | Filter pill (§3.6, #207) | 1 pad cell + mark + text + 1 pad cell | same cells, body run bolded | Padding is one cell per end in both states; the focus cue is an SGR attribute and costs nothing; toggle marks are equal-width (`MarkFilterOff`/`MarkFilterOn`, 2 each); the retired `>label<` form and the retired cap-thickening both predate this row |
+| Card meta chip (§3.4) | 1 pad cell + character + 1 pad cell | same | Priority and effort are one-character pills in every state; a value change swaps the character and the fill and moves no cell. Density changes the form, and density is not a state |
 
 **The band exception.** The band's *total* width is identical in both states — both
 fill the panel width — but its interior is not: the label starts at column 5
