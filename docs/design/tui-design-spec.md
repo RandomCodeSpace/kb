@@ -415,35 +415,55 @@ is gone and a floor takes its place.
 - normal: `rail(1) + padLeft(1) + inner + padRight(1) = W`, so `inner = W - 3`
 - compact: `rail(1) + inner + padRight(1) = W`, so `inner = W - 2`
 
-A card whose `inner < 6` renders the surface and rail only, no content.
+A card whose `inner < 6` renders the surface and rail only, no content, and is
+one row tall. **Amended by
+[#243](https://github.com/RandomCodeSpace/kb/issues/243).** It used to hold the
+whole row grid open with nothing in it. A card that cannot hold content has no
+grid to hold: every row under the first would be blank space the reader cannot
+tell from the inter-card gutter.
 
-**Card height.** Amended by [#232](https://github.com/RandomCodeSpace/kb/issues/232).
-A card's row count is `Metrics.CardRows(frameHeight, density)`, which is the
-whole of §3.1's grid in one place:
+**Card height.** Amended by
+[#232](https://github.com/RandomCodeSpace/kb/issues/232), then re-cut by
+[#243](https://github.com/RandomCodeSpace/kb/issues/243). A card's row count is
+what its content fills under the §2.6 ceilings.
+`Metrics.CardRows(frameHeight, density)` is no longer that count but its bound —
+the tallest a card at this density and frame height may be:
 
 | Token | Value | Applies to |
 |---|---|---|
-| `CardTitleLines` | `2` | Title rows on a frame at or above `DescTwoLines`; below it, and compact, take 1 |
+| `CardTitleLines` | `2` | Most title rows on a frame at or above `DescTwoLines`; below it, and compact, 1 |
 | `CardDescMax` | `5` | Ceiling on description rows |
 | `CardDescStep` | `10` | Frame rows that buy one more description line |
-| `CardLabelRows` | `2` | Label rows on a frame at or above `DescTwoLines` |
-| `CardInnerPadRows` | `2` | Interior blank rows a card carries at its tallest |
-| `CardInnerPadTwo` | `55` | Frame height at or above which the card carries both |
+| `CardLabelRows` | `2` | Most label rows on a frame at or above `DescTwoLines` |
+| `CardInnerPadRows` | `2` | Interior blank rows a card may carry at its tallest |
+| `CardInnerPadTwo` | `55` | Frame height at or above which the card may carry both |
 
-`CardRows` is a function of density and frame height and never of content. That
-is the invariant the column depends on: `columnStackHeight` reserves the scroll
-affordance and the `+N more` row before any card in the column is rendered, and
-a card that drew a row more or less than the metric promised would put the
-overflow cue on a row that belongs to a card.
+**Measure before render.** The old invariant was purity: `CardRows` was a
+function of density and frame height and never of content, so
+`columnStackHeight` could reserve the scroll affordance and the `+N more` row
+before any card in the column was rendered. #243 retired the reservation. A card
+is content-sized now, so the column measures the cards it is about to draw, at
+the width it is about to draw them at, and packs against that.
 
-**Amended by [#240](https://github.com/RandomCodeSpace/kb/issues/240).** The sum
-gained the interior padding rows of §3.1. They are rows like any other here,
-which is what keeps the count pure: the card cannot decide it has nothing worth
-separating and give a row back, any more than a short description can pull the
-meta row up. `CardInnerPadTwo` is a rung of its own and not derived from
-`DescTwoLines`, because the second separator and the third description line are
-bought at different heights and coupling them would make one of the two arrive
-where the frame cannot afford it.
+What dies is content-*independence*, not determinism. A card's height is still a
+pure function of (task content, column width, density, frame height), the same
+inputs produce the same frame, and the §10.2.2 contract and the goldens hold
+unchanged. `widget.CardHeight` and `widget.Card` come out of one plan and are
+not two implementations of the same arithmetic, which is what makes measured
+height and drawn height the same number rather than two numbers a test compares.
+The affordance column is still decided first, because reserving it narrows the
+cards; narrowing can only make a card taller, so the stack is measured a second
+time at the narrowed width and never a third.
+
+#240's reading — that the interior padding rows are rows like any other, and the
+card cannot decide it has nothing worth separating and give a row back — is
+reversed by #243 for the second separator only. A separator sits between two
+sections the card actually drew: the first always has the title above it and the
+meta row below it, and the second has label rows below it or does not exist.
+`CardInnerPadTwo` remains a rung of its own and not derived from `DescTwoLines`,
+because the second separator and the third description line are bought at
+different heights and coupling them would make one of the two arrive where the
+frame cannot afford it.
 
 ### 2.6 Compact density
 
@@ -467,6 +487,14 @@ single 45-row step with a ladder. `DescLines` is `1` below `DescTwoLines`, then
 **Re-cut by [#240](https://github.com/RandomCodeSpace/kb/issues/240)** to absorb
 the interior padding rows of §3.1. `InnerPadRows` is `0` when compact, `1` below
 `CardInnerPadTwo` and `CardInnerPadRows` at or above it.
+
+**Re-cut again by [#243](https://github.com/RandomCodeSpace/kb/issues/243)** into
+ceilings. Every column of the table below is the most its section may spend and
+not what it does spend: `TitleRows` is 1 or 2 as the title's own text needs,
+`DescLines` is 0 to its rung as the rendered description fills, `LabelRows` is 0
+to its rung as the pills wrap, and the meta row is always exactly 1. The last
+column is therefore the tallest a card may be at that rung — `Metrics.CardRows` —
+and a card with less to say is shorter. Compact is untouched at 2 rows.
 
 | Frame height | Title rows | Description rows | Padding rows | Label rows | Card content rows |
 |---|---|---|---|---|---|
@@ -502,6 +530,11 @@ a four-card column is a worse failure than a denser card.
 
 Across every normal frame the floor is four cards on screen, which is where the
 pre-#240 ladder left it.
+
+**What #243 did to that floor.** It can only raise it. Every card is now at most
+the height its rung budgeted and usually less, so a column holds at least as many
+cards as the table promises and generally more. The four-card floor stands as a
+worst case and is no longer the typical case.
 
 **Drop order.** Compaction is not gradual — crossing the threshold applies all of
 it at once. The order below is normative for any future partial-compaction work
@@ -541,13 +574,20 @@ the 30-44 rung, which has already spent that row on its separator.
 ### 3.1 Rows by density
 
 Amended by [#232](https://github.com/RandomCodeSpace/kb/issues/232). The card is
-title rows, description rows, one meta row and label rows. The count of each is
-`Metrics.CardRows`'s business (§2.5) and is a function of density and frame
-height alone.
+title rows, description rows, one meta row and label rows.
 
 **Amended by [#240](https://github.com/RandomCodeSpace/kb/issues/240).** The card
 also carries `InnerPadRows` blank interior rows, on the boundaries between its
 sections.
+
+**Amended by [#243](https://github.com/RandomCodeSpace/kb/issues/243).** How many
+rows each section *may* take is `Metrics.CardRows`'s business (§2.5) and is a
+function of density and frame height alone. How many it *does* take is the card's:
+the title takes 1 row or 2 as its text needs, the description takes the rows its
+rendered text fills and 0 when it is empty, the labels take the rows their pills
+wrap onto and 0 when there are none, and the meta row is always 1. The three
+examples below are cards whose content happens to fill their rung; the row counts
+beside them are ceilings, and a card with less to say is shorter.
 
 **Normal** (`30 <= h < 45`) — 5 content rows + 1 gutter = 6 rows per card:
 
@@ -599,19 +639,30 @@ separator under the title: the shared block is exactly `TitleRows + DescLines`,
 so a row inside it would cost a description line at every rung. It is not free
 and it is not taken.
 
-**The shared block.** The title rows and the description rows are one fixed
-block of `TitleRows + DescLines` rows, and the title takes only what it needs
-inside it. A title that fits one row hands its spare row to the description
-rather than spending it on blank surface; a title that wraps takes the row back.
-The block's total never moves, so the meta row and the label rows sit at a fixed
-offset from the card's top and the card's height stays the pure function §2.5
-requires.
+**Amended by [#243](https://github.com/RandomCodeSpace/kb/issues/243): a
+separator sits between two sections the card drew.** The prose block is at least
+the title row and the meta row is always drawn, so the first separator survives
+an absent description — a card with no description is title, separator, meta. The
+second has nothing under it when the card has no labels, so it goes with them. No
+separator ever abuts blank space, which is the whole of what a separator is for:
+a card that separated its meta row from nothing would be spending a row to say
+that a section it does not have is elsewhere.
 
-That is the amended reading of the old "the row grid is fixed by density, not by
-content" rule. What is fixed is the card's height and the offset of every row
-below the block; what varies inside the block is how two adjacent text fields
-split rows they both draw prose into. A description shorter than what it is
-handed still leaves its remaining rows blank, and nothing below moves up.
+**The shared block, retired by
+[#243](https://github.com/RandomCodeSpace/kb/issues/243).** #232 made the title
+rows and the description rows one fixed block of `TitleRows + DescLines` rows, so
+a title that fit one row handed its spare row to the description rather than
+spending it on blank surface, and the card's height could stay content-blind.
+With the height content-sized there is no spare row to hand over: a one-line
+title makes the card one row shorter, and the description takes the rows its own
+ceiling allows either way. The two fields have separate ceilings now and neither
+borrows from the other.
+
+The old "the row grid is fixed by density, not by content" rule is gone with it.
+Nothing on the card sits at a fixed offset from its top any more, and nothing
+needs to: the column measures each card before it draws it (§2.5), so the hit
+regions, the scroll arithmetic and the `+N more` cue all follow the rows the card
+actually took.
 
 ### 3.2 Row 0 — title
 
@@ -694,13 +745,18 @@ carrying markdown wraps to exactly the rows the same text would without it.
   spending a row on nothing is a row of description the reader does not get.
 - The **last** allotted line carries the ellipsis when text remains, so the
   description can never wrap past the card.
-- A description shorter than its allotment leaves its remaining rows blank; the
-  rows below it do not move up.
-- Line count: `DescLines` per the §2.6 ladder — `0` compact, `1` below
-  `DescTwoLines`, rising to `CardDescMax` by `CardDescStep`. Below
-  `DescTwoLines` the allotment is now exact rather than a floor: #240 holds the
-  shared block of §3.1 at two rows there, so a one-line title no longer hands the
-  description a second row it was never allotted.
+- **Amended by [#243](https://github.com/RandomCodeSpace/kb/issues/243).** A
+  description shorter than its ceiling takes fewer rows, and the rows below it
+  move up. An empty description takes none at all: it is not a short description,
+  and the card that has one is title, separator, meta. This replaces the #232
+  rule that the remaining rows stayed blank, which is the defect #243 was opened
+  for — a five-row ceiling on a tall frame left four blank rows inside the card.
+- Line count: at most `DescLines` per the §2.6 ladder — `0` compact, `1` below
+  `DescTwoLines`, rising to `CardDescMax` by `CardDescStep` — and exactly as many
+  of those as the rendered text fills. #243 made it a ceiling. #240's note that a
+  one-line title no longer hands the description a second row survives it, for a
+  stronger reason: the shared block that would have done the handing is gone
+  (§3.1).
 
 Truncation primitive: `ansi.Truncate(s, w-1, "") + "…"` — width-aware, not byte-
 or rune-aware. The ellipsis is rendered in the description's own style, because
@@ -784,6 +840,13 @@ between the meta line and the first label row on a frame at or above
 `CardInnerPadTwo`. It carries the card's own fill and belongs to the card, not to
 the label block: the pills' own hit regions still start on the first label row,
 and the separator takes a click as card surface like every other row.
+
+**Amended by [#243](https://github.com/RandomCodeSpace/kb/issues/243).**
+`LabelRows` is the most rows the labels may own, not the rows they own. Pills that
+fit one row take one; a card with no labels, or whose every pill was too wide for
+a row of its own, owns none, and #240's separator goes with them (§3.1). The wrap
+rule below is unchanged — what changed is that the rows the wrap did not reach are
+given back to the column instead of drawn blank.
 
 **Spacing** is a fixed one-cell gutter, which is what "equally spaced" resolves
 to on a cell grid: every gap is the same cell whatever the row holds, so a label
@@ -889,6 +952,21 @@ rails and the meter do not. Accepted at the #137 resolution, re-scoped at #227.
 
 When the stack cannot fit every card, the panel's last row carries
 `+N more` in `FgMuted` on `Surface`, inset `ColumnMetaInset`.
+
+**Amended by [#243](https://github.com/RandomCodeSpace/kb/issues/243).** `N` is
+the number of cards the body could not draw *whole*, and the body draws no card
+in part: it packs measured cards from the scroll offset and stops before one the
+window cannot hold, leaving those rows as panel surface. Under content-sized
+cards a clipped card and a short card are the same rows, so a cue counting only
+the cards that start off-screen would hide a card in plain sight, and a clipped
+card at the bottom of the stack would read as a card with nothing to say.
+
+Two edges are exempt. A window too short to hold even one whole card clips
+instead — there is nothing to drop to, and an empty body under a `+N more` says
+less than a partial card does. A card clipped at the *top* by a manual scroll
+still draws its tail: scroll is row-granular and follows actual heights, the
+scrollbar thumb is what says the reader is mid-list, and `+N more` speaks about
+the bottom of the stack only.
 
 ---
 
