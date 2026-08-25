@@ -435,7 +435,7 @@ and matches the map's decision that the description goes first.
 ```
 ▌🐛 Drag ghost sticks on resize      #142     row 0  title
 ▌Pointer capture leaks when the col…          row 1  description (FgMuted)
-▌P1 3d old ▐blocked▌ ▐in 2d▌ ◇M               row 2  meta chips
+▌P1 3d old ▐blocked▌ ▐in 2d▌ 🟨 M            row 2  meta chips
 ▌▐type:▌feature▌ ▐#area:tui▌                  row 3  label pills
                                               gutter (Canvas-free: Surface)
 ```
@@ -449,7 +449,7 @@ chips up; the card's row grid is fixed by density, not by content.
 
 ```
 ▌🐛 Drag ghost stic…          #142     row 0  title
-▌P1 3d old ⛔ !2d ◇M bug               row 1  meta + labels, flat chips
+▌P1 3d old ⛔ !2d 🟨 M bug            row 1  meta + labels, flat chips
 ```
 
 ### 3.2 Row 0 — title
@@ -486,15 +486,20 @@ fit are skipped individually and shorter chips behind them are still attempted
 | 2 | Age | `3d old` / `6h here` / `new` / `shipped`, `FgMuted` | same |
 | 3 | Blocked | pill `blocked` on `StatusWarn` | `⛔` in `StatusWarn` |
 | 4 | Due | pill `today` / `in 2d` / `overdue · 2d` on `StatusInfo`, or `StatusDanger` when overdue | `!today` / `!in 2d` / `!2d`, same hue |
-| 5 | Effort | `◇ M`, `FgSubtle` | same |
+| 5 | Effort | `🟦 S` / `🟨 M` / `🟧 L`, `FgSubtle` | same |
 
 Priority survives longest because it is never a pill and is only two cells.
 
 The effort chip's own interior space is not the chip separator: it is the
-§10.4.1 adjacency rule, and the chip is three cells in both densities.
-`metaRowWidth` measures each chip rather than assuming a width, so the survival
-order and the column-wide drop of `metaDepth` carry the cost without a constant
-to maintain.
+§10.4.1 adjacency rule, and the chip is four cells in both densities — a
+two-cell square, the column it owns, and the letter. The letter is not
+redundant with the square: color alone must not carry the value, and the
+letter is what still reads on a font that has no pictograph and draws tofu.
+An effort value the S/M/L scale does not name falls back to `Diamond` and
+three cells. `metaRowWidth` measures each chip rather than assuming a width,
+so the survival order and the column-wide drop of `metaDepth` carry the cost
+without a constant to maintain; the fourth cell is spent on the last label of
+the compact flat row at the widths where that row was already full.
 
 ### 3.5 Label pill row
 
@@ -2180,7 +2185,7 @@ runes: a view that needs a mark the vocabulary does not carry has found a missin
 token, and the fix is a new token, not a literal.
 
 This table is the whole vocabulary, including every glyph the rest of §10
-introduces. Thirteen tokens exist and are in use today; the rest are added by the
+introduces. The Status column tracks which tokens are in use today; the rest are added by the
 slice that adopts the rule that needs them.
 
 | Token | Glyph | Code point | Cells | Role | Status |
@@ -2194,7 +2199,10 @@ slice that adopts the rule that needs them.
 | `CheckOn` | `☑` | U+2611 | 1 | Checked checklist row | present |
 | `CheckOff` | `☒` | U+2612 | 1 | Dropped checklist row; cancelled-blocker mark in a blocker chip (#224) | present |
 | `Tick` | `✓` | U+2713 | 1 | Resolved-blocker mark inside a blocker chip (#224) | new |
-| `Diamond` | `◇` | U+25C7 | 1 | Effort marker (§3.4) | present |
+| `Diamond` | `◇` | U+25C7 | 1 | Effort marker for a value outside the S/M/L scale (§3.4) | present |
+| `EffortS` | `🟦` | U+1F7E6 | **2** | Effort marker, S (§3.4) | present |
+| `EffortM` | `🟨` | U+1F7E8 | **2** | Effort marker, M (§3.4) | present |
+| `EffortL` | `🟧` | U+1F7E7 | **2** | Effort marker, L (§3.4) | present |
 | `Focus` | `▸` | U+25B8 | 1 | Focused band caret (§2.2) | present |
 | `More` | `+` | U+002B | 1 | Overflow cue prefix (§3.7) | present |
 | `Ellipsis` | `…` | U+2026 | 1 | Truncation tail (§3.3) | present |
@@ -2221,6 +2229,21 @@ glyph is what tells an ASCII terminal that a row is empty or failed. `HalfTop` a
 `HalfBottom` genuinely **widen** the §3.6 risk, and are accepted only for the launch
 mark, where §10.6.1 argues the case.
 
+**Emoji admission** (added by #223). A pictograph enters the vocabulary only
+as a **single code point with `Emoji_Presentation=Yes`**: no variation-selector
+form, no zero-width-joiner sequence, no modifier. Anything else is a grapheme
+cluster whose rendered width is a property of the terminal's segmentation
+rather than of its runes, which is exactly what the `Cells` column promises kb
+has pinned. Such a glyph is East Asian Wide by construction, so its `Cells`
+value is 2 and `ansi.StringWidth` agrees. `Blocked` already satisfied the rule
+and is now held to it.
+
+The cost is font coverage: a terminal font without the pictograph draws tofu.
+That is accepted consciously on the same terms §3.6 accepts the block glyphs,
+and on one condition — a square never carries a fact alone. The effort letter
+is rendered beside it and is what stays readable when the pictograph fails, so
+the failure mode is an ugly chip rather than a lost value.
+
 **Markers.** ASCII prefixes that are vocabulary, not prose.
 
 | Token | Text | Cells | Role |
@@ -2237,19 +2260,24 @@ mark, where §10.6.1 argues the case.
 different sections and either may be re-spelled without the other.
 
 **Width rule.** Every token is one cell wide except `HintSep` and `PathSep` (3
-each), `Blocked` (2), and the filter marks `MarkFilterOff`/`MarkFilterOn` (2
-each). A token wider than one cell is ineligible as a state alternative to any
+each), `Blocked` and the three effort squares (2 each), and the filter marks
+`MarkFilterOff`/`MarkFilterOn` (2 each). The three squares are deliberately
+equal-width, so the effort chip changes value without moving a column. A token wider than one cell is ineligible as a state alternative to any
 one-cell mark (§10.4.4); the two filter marks are deliberately equal-width so
 they are eligible as alternatives to *each other* — the toggle never moves a
 cell.
 
-**Adjacency rule** (added by #218/#220). An ambiguous-width mark owns the column
-after it: the cell following it is a space, or the row ends. East Asian
-Ambiguous glyphs measure one cell to `ansi.StringWidth` and to every width
-calculation kb makes, but many terminal fonts draw them wider than the cell the
-cursor was advanced past, so anything written in the next column is drawn on top
-of the mark. The rule binds `Dot`, `Diamond`, `Ellipsis`, `Empty`, `Alert`,
-`Bullet`, `Times`, `EmDash` and `Tick` (#224). It does not bind the Block Elements — `Rail`,
+**Adjacency rule** (added by #218/#220, widened by #223). An ambiguous- or
+wide-width mark owns the column after it: the cell following it is a space, or
+the row ends. East Asian Ambiguous glyphs measure one cell to
+`ansi.StringWidth` and to every width calculation kb makes, but many terminal
+fonts draw them wider than the cell the cursor was advanced past, so anything
+written in the next column is drawn on top of the mark. A wide pictograph
+measures honestly at two cells but is drawn by font machinery that respects
+the cell grid no better, and an emoji-less font substitutes tofu of whatever
+width it has. The rule binds `Dot`, `Diamond`, `Ellipsis`, `Empty`, `Alert`,
+`Bullet`, `Times`, `EmDash`, `Tick` (#224), `Blocked` and
+`EffortS`/`EffortM`/`EffortL`. It does not bind the Block Elements — `Rail`,
 `RailFull`, `CapR`, `Track`, `HalfTop`, `HalfBottom` — whose adjacency to their
 neighbour *is* the primitive: a rail that does not touch its card and a cap that
 does not touch its text are a different widget, and their cell alignment is the
@@ -2266,12 +2294,24 @@ or above U+00A0, or with either of the token-owned separator strings `" | "` and
 rendered, not what is explained. A second test asserts every `Glyphs` field's
 `ansi.StringWidth` matches the cells column above, so a future re-spelling that
 silently changes a mark's width fails the build rather than the layout. A third
-test (#220) walks the rendered board at both densities and asserts no mark
-bound by the adjacency rule is followed by a printable non-space. It is scoped
-to the glyph vocabulary rather than to every ambiguous rune on the surface:
-ambiguity is a property of ordinary text — every accented Latin letter carries
-it — so the broader walk would fail on a legitimately spelled card title. What
-kb controls is the marks kb writes itself.
+test (#220, widened by #223) walks the rendered board at both densities and
+asserts no mark bound by the adjacency rule is followed by a printable
+non-space; it resolves the bound set by reflection over `theme.Glyphs`, taking
+every single-rune token that is East Asian Ambiguous or East Asian Wide, less
+the Block Elements carve-out. It is scoped to the glyph vocabulary rather than
+to every ambiguous rune on the surface: ambiguity is a property of ordinary
+text — every accented Latin letter carries it — so the broader walk would fail
+on a legitimately spelled card title. What kb controls is the marks kb writes
+itself. A fourth test (#223) is the emoji admission rule: it walks every
+`Glyphs` field and fails on any token carrying U+FE0E, U+FE0F, U+200D or
+U+1F3FB–U+1F3FF, and on any East Asian Wide token that is not exactly one rune
+measuring two cells. It checks the consequence rather than the property name,
+because `Emoji_Presentation` is not in the standard library and is not worth
+vendoring a table for: East Asian Wide is what the property guarantees under
+UAX #11 and is also the only part of it the layout arithmetic consumes. A
+pictograph smuggled in as a VS16 sequence fails the first clause; one smuggled
+in with its text presentation fails the second, because it is not Wide and
+cannot claim the two cells the table would owe it.
 
 The marker tokens are deliberately **out** of the walker's deny-list: `#`, `P` and
 `!` occur legitimately in format strings, identifiers and parse code, and a
