@@ -96,8 +96,11 @@ func titleLine(t Task) string {
 	if t.Emoji != "" {
 		s = t.Emoji + " " + s
 	}
-	if t.Prio != 3 {
-		s += " !" + strconv.Itoa(t.Prio)
+	// Normalize before writing so Serialize never emits a token Parse only
+	// tolerates for legacy input: a hand-built Task carrying the retired 4
+	// serializes as the low-priority card it is, which is the omitted default.
+	if prio := NormalizePrio(t.Prio); prio != PrioDefault {
+		s += " !" + strconv.Itoa(prio)
 	}
 	if t.Due != "" {
 		s += " @" + t.Due

@@ -7,7 +7,7 @@
   Confirm the loading dock slot.
   - [ ] pack boxes
   - [x] book truck
-- [ ] Write launch notes !4 ~S #docs
+- [ ] Write launch notes ~S #docs
 
 ## Doing
 

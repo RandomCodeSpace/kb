@@ -66,7 +66,7 @@ func TestMigrateV5FromV4PreservesData(t *testing.T) {
 	}
 	var version, model, externalKey, reason string
 	var key []byte
-	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&version); err != nil || version != "9" {
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&version); err != nil || version != "10" {
 		t.Fatalf("version=%q err=%v", version, err)
 	}
 	if err := s.db.QueryRow(`SELECT ai_model, ai_key_enc FROM settings WHERE user='alice'`).Scan(&model, &key); err != nil || model != "model" || !reflect.DeepEqual(key, []byte{1, 2, 3}) {
@@ -112,7 +112,7 @@ func TestConcurrentOpenSerializesMigration(t *testing.T) {
 	}
 	s := openStoreAt(t, path)
 	var version string
-	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&version); err != nil || version != "9" {
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k='schema_version'`).Scan(&version); err != nil || version != "10" {
 		t.Fatalf("version=%q err=%v", version, err)
 	}
 }
