@@ -966,9 +966,10 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 	focused := m.boardView.column == index
 	selected := m.boardView.rows[index]
 	frameHeight := max(m.height, 8)
-	titleLines := styles.Metrics.TitleRows(density)
+	titleLines := styles.Metrics.TitleRows(frameHeight, density)
 	descLines := styles.Metrics.DescLines(frameHeight, density)
 	labelRows := styles.Metrics.LabelRows(frameHeight, density)
+	padRows := styles.Metrics.InnerPadRows(frameHeight, density)
 	gap := styles.Metrics.CardGapRows(density)
 	metas := make([][]string, len(tasks))
 	for i, task := range tasks {
@@ -1005,6 +1006,7 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 			TitleLines: titleLines,
 			DescLines:  descLines,
 			LabelRows:  labelRows,
+			PadRows:    padRows,
 			Density:    density,
 			Hovered:    m.pointerState.IsHovered(boardCardControlID(task.ID)),
 			HoverTag:   m.hoveredCardTag(task.ID, ordered),
