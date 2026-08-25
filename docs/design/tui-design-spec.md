@@ -516,13 +516,22 @@ Cost: `width(text) + 2` columns. The scoped variant substitutes `Surface`/
 `FgSubtle` for the first cap and the key run.
 
 **Inactive variant** (added by #207 for toggleable pill sets — today the filter
-bar). A pill that is present but not selected withdraws the wheel hue:
-`ChipRunsDim` drops the fill to `Surface`, the body text to `FgSubtle`, and the
-scoped key run to `FgMuted`, preserving the two-tone split. Hue-against-dim is
-the toggle affordance in color; the equal-width two-cell marker inside the caps
-(`MarkFilterOff` `+ ` / `MarkFilterOn` `x `, §10.4.1) carries it where color
-cannot — at `FidelityFlat` (§10.7.5) hue does not survive and the marker is the
-entire toggle signal.
+bar; re-hued by #208). A pill that is present but not selected withdraws its
+*fill*, not its hue: `ChipRunsTint(fill, surface)` drops the fill to `Surface`
+so the pill cannot read as selected, and moves the wheel hue onto the body text
+as foreground in place of `FgOnAccent` — §1.9's rule that a variant which has
+lost its state still carries its identity as a tint on the resting surface. The
+scoped key run is `FgSubtle` on `Surface`, one step under the hue, preserving
+the two-tone split; it sits at the secondary rather than the tertiary role
+because it also carries the toggle marker, which is prose a user must read
+before acting and so takes the §1.9 AA floor with it. All five wheel hues clear
+AA 4.5:1 on `Surface` in truecolor and after 256-color quantization (worst 4.97
+and 5.19), which is what permits the hue on prose rather than on the end caps.
+Hue-on-fill against hue-on-surface is the toggle affordance in color; the
+equal-width two-cell marker inside the caps (`MarkFilterOff` `+ ` /
+`MarkFilterOn` `x `, §10.4.1) carries it where color cannot — at `FidelityFlat`
+(§10.7.5), and equally in the compact form, which has no fill and no cap to
+spend, the marker is the entire toggle signal.
 
 **Focused pill** (keyboard traversal over a pill set): the end caps thicken
 `▐`/`▌` → `█`/`█`, borrowing §2.4's rail-thickening vocabulary. Zero width
