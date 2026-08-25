@@ -681,7 +681,7 @@ underline + `ButtonGroup`).
 | Single-line text input | `bubbles/v2 textinput` | Already in use in 12 files. Feed it `theme.Styles.Input` (a `textinput.Styles` embedded in kb's Styles, crush's pattern). |
 | Multi-line text input | `bubbles/v2 textarea` | Already in use in 7 files. Same: embed `textarea.Styles`. |
 | Cursor | `bubbles/v2 cursor` | Adopt to replace the three hand-rolled `cursorViewport` helpers. |
-| Markdown | `glamour/v2` | Already in use. The `styles.DarkStyleConfig` clone at `carddetail/model.go:743` becomes `theme.Styles.Markdown ansi.StyleConfig`, derived from the palette, injected through the existing `markdownRenderer` func field. **Parity-grammar contract** (recorded by #211/#213, previously living only in `parityMarkdown`'s doc comment): (1) the grammar is per-line and starts at column zero — indentation is not syntax and is dropped as prose whitespace, matching the frozen web renderer; no construct spans two lines except a fence. (2) Neutralizing out-of-grammar syntax must be invisible, which bounds it to glamour's fixed eighteen-pair escape replacer (`ansi/baseelement.go`) — glamour does not run goldmark's unescaping, so any character outside that set must be neutralized through the character-reference channel (`~` → `&#126;`, `&` → `&amp;`, leading `:` → `&#58;`), never a backslash. A future renderer change that widens either side of this contract must re-run the leak audit (`TestRenderedMarkdownLeaksNoEscapes`). |
+| Markdown | `glamour/v2` | Already in use. The `styles.DarkStyleConfig` clone at `carddetail/model.go:743` becomes `theme.Styles.Markdown ansi.StyleConfig`, derived from the palette, injected through the existing `markdownRenderer` func field. **Parity-grammar contract** (recorded by #211/#213, previously living only in `parityMarkdown`'s doc comment): (1) the grammar is per-line and starts at column zero — indentation is not syntax and is dropped as prose whitespace, matching the frozen web renderer; no construct spans two lines except a fence. (2) Neutralizing out-of-grammar syntax must be invisible, which bounds it to glamour's fixed eighteen-pair escape replacer (`ansi/baseelement.go`) — glamour does not run goldmark's unescaping, so any character outside that set must be neutralized through the character-reference channel (`~` → `&#126;`, `&` → `&amp;`, leading `:` → `&#58;`), never a backslash. A future renderer change that widens either side of this contract must re-run the leak audit (`TestRenderedMarkdownLeaksNoEscapes`). One sanctioned divergence from the frozen web grammar: `kb://task/<seq>` is recognized as an autolink and rendered as an openable reference (#212) — TUI-side rendering and navigation only, wire format unchanged; a parity audit must not "fix" it. |
 | Keybinding registry | `bubbles/v2 key` | **Adopted** (#153) for the help pane: `helpKeys` in `help.go` is the registry, and an unavailable feature is a disabled binding rather than an omitted line, which is the self-managing keymap bubbles documents. The board's own footer ladder is still hint strings; it is not driven by the registry yet. |
 | Help pane | `bubbles/v2 help` | **Adopted** (#153) for the help overlay body: `FullHelpView` renders the two key columns, `help.Styles` is `theme.Styles.Help`. The overlay chrome around it stays kb's `Overlay` widget, and the footer band composes the dismissal ladder from the same registry rather than pulling the component's surface token into a band row. |
 | Overlay body scrolling | `bubbles/v2 viewport` | **Adopted** (#153) for the card detail body. The viewport owns the offset, the clamp and the content; the pane drives it programmatically (`ScrollUp` / `ScrollDown` / `GotoTop` / `SetYOffset`) because the frozen v1.0.1 deltas and focus-follow are kb's, not the component's defaults, and the wheel is routed through the pointer map. `viewport.View` is not used: a panel body row carries `OverlaySurf` edge to edge and the component pads plain. |
@@ -2541,6 +2541,7 @@ than one thing seen twice.
 | Column header band, unfocused | none — glyph only, see below | `BandRest` | `BandRest` |
 | Column header band, focused | none | column hue, solid | column hue, solid |
 | Chip / label pill | none — attribute only, see below | wheel or status hue | unchanged |
+| Inline reference (`kb://task/<seq>`) in overlay body prose (#212) | the reference run only | `OverlaySurf` | `OverlayBand` |
 
 **Card.** The rail cell's background steps to `Raised`; the rail glyph stays `Rail`
 and stays priority-hued, under the same rule §2.4 gives selection — the rail carries
@@ -2577,6 +2578,13 @@ one slot the band has spare:
 |---|---|---|
 | Unfocused | `Rail` `▌` in column hue on `BandRest` | `RailFull` `█` in column hue on `BandRest` |
 | Focused | `Focus` `▸` in `FgOnAccent` on column hue | unchanged |
+
+**Inline reference** (added by #212). The run already wears the §5.2 link color
+*and* glamour's underline, so the pill's underline cue and any re-hue are both
+spent; the one-tier ground raise scoped to the run is the only cue left, and it
+is the §10.5.1 rule applied at its smallest span. Costs one cached seam,
+`Styles.HoverRun(surface, raised, content)`, beside `PressedRun`/`BandRun`/
+`SurfaceRun`. Zero cells, like everything else in this table.
 
 The focused band is already the acting column; there is nothing for hover to
 promise. Cost: zero cells, both states are one glyph. Any future tab strip is built
@@ -2644,6 +2652,7 @@ those only.
 | Board cards | rows 1-6 only | affordance cue only — the board cursor does not follow the pointer |
 | Column header bands | rows 1-6 only | affordance cue only — focus does not follow the pointer |
 | Label pills, chips | rows 1-6 only | affordance cue only |
+| Inline references (`kb://task/<seq>`) in overlay body prose | rows 1-6 only — a prose run has no cursor to adopt | affordance cue only; activation opens the referenced card (#212) |
 
 The board is excluded on purpose. Its cursor is not just a highlight: it is the drag
 source, the anchor every board keybinding resolves against, and the card the detail
@@ -2687,6 +2696,7 @@ sees motion while an overlay is up, and cannot light a card under a dimmed backd
 |---|---|---|
 | Recorded bounds | cards and label pills (`widget.CardSpan` already emits them), bands, panel rows, every scrolled row via `pointer.Viewport.Row` | the render already computes the span; recording it is free, and it is kb's established mechanism (crush does the same for chips, `attachments/attachments.go:130-135`) |
 | `lipgloss.Compositor` hit-test | the overlay action row's `ButtonGroup` | the row is a join of variable-width rendered runs whose individual widths the caller does not otherwise need; one compositor of space layers at the group's coordinates beats re-measuring each button (crush `common/button.go:82-117`) |
+| Rendered-text scan | inline references in the overlay body (#212) | the renderer, not the caller, decides where the run lands — glamour wraps and repositions the reference — so the span is recovered from the rendered row by an ANSI-aware walk (skipping OSC 8 hyperlink parameters, which repeat the reference at zero width) and projected through `pointer.Viewport` so it tracks scroll and clips at the pane |
 
 Whichever a site picks, one rule binds both: **the region set must be
 byte-for-byte identical between the hovered and unhovered render of the same
