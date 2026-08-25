@@ -257,7 +257,7 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	text := plain(content)
 	for _, want := range []string{
 		"▸● 1 TO DO", "▌● 2 DOING", "● 3 DONE", "● 4 CANCELLED", "2 cards · 1 blocked",
-		"🚀 Ship terminal board", "#7", "new", "P1", "▐blocked▌", "▐today▌", "◇ M", "▐#backend▌", "▐type:feature▌",
+		"🚀 Ship terminal board", "#7", "new", "P1", "▐blocked▌", "▐today▌", "🟨 M", "▐#backend▌", "▐type:feature▌",
 		"3h here", "shipped", "1d old", "c cancelled:on",
 	} {
 		if !strings.Contains(text, want) {
@@ -265,9 +265,13 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 		}
 	}
 	// Compaction drops the description, the meta line and the pill end caps.
+	// The flat row also runs out one label earlier than it did with the
+	// three-cell diamond chip: the effort square is two cells rather than one,
+	// metaRowWidth measures it, and the last label is what the survival order of
+	// spec section 3.4 spends the extra column on.
 	m.height = 22
 	compact := plain(m.render())
-	for _, want := range []string{"P1 new ⛔ !today ◇ M #backend feature", "P2 3h here !tomorrow"} {
+	for _, want := range []string{"P1 new ⛔ !today 🟨 M #backend", "P2 3h here !tomorrow"} {
 		if !strings.Contains(compact, want) {
 			t.Errorf("compact render missing %q:\n%s", want, compact)
 		}
