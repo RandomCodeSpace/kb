@@ -108,12 +108,63 @@ func TestLabelForms(t *testing.T) {
 		{"scoped compact", "type::feature", true, "feature"},
 		{"empty key falls back to plain", "::feature", false, " #::feature "},
 		{"empty value falls back to plain", "type::", false, " #type:: "},
+		// Spec section 3.5 cuts on "::" and nothing else. A single colon is an
+		// ordinary character in an ordinary tag, so the pill is plain and keeps
+		// the section 10.4.1 MarkTag prefix - which is what a hand-written
+		// "scope:value" reads as on a card (issue #229).
+		{"single colon is a plain tag", "scope:terminal", false, " #scope:terminal "},
+		{"single colon compact", "scope:terminal", true, "#scope:terminal"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			got := ansi.Strip(Label(styles, testCase.tag, theme.Card, testCase.flat, false))
 			if got != testCase.want {
 				t.Errorf("Label(%q, flat=%v) = %q, want %q", testCase.tag, testCase.flat, got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestScopedLabelColonRidesTheKeyRun pins the half of issue #229 that turned out
+// not to be a defect, so a future reader does not have to re-derive it: the
+// source "key::value" spends exactly one colon, it is the last cell of the dark
+// key run, and no colon reaches the hue half or the padding at either end. It
+// holds in all three forms the report named - the filled board pill, the
+// withdrawn filter pill, and the pill on the detail overlay's surface.
+func TestScopedLabelColonRidesTheKeyRun(t *testing.T) {
+	styles := theme.New(true)
+	const tag = "type::feature"
+	fill := theme.LabelSlot(LabelWheel(tag))
+	cases := []struct {
+		name     string
+		rendered string
+		key      string
+	}{
+		{
+			name:     "filled",
+			rendered: Label(styles, tag, theme.Card, false, false),
+			key:      styles.ChipRuns(fill, theme.Card).ScopedKey.Render("type:"),
+		},
+		{
+			name:     "inactive",
+			rendered: FilterLabel(styles, tag, theme.Canvas, false, false, false),
+			key:      styles.ChipRunsTint(fill, theme.Canvas).ScopedKey.Render(styles.Glyph.MarkFilterOff + "type:"),
+		},
+		{
+			name:     "detail overlay",
+			rendered: Label(styles, tag, theme.OverlaySurf, false, false),
+			key:      styles.ChipRuns(fill, theme.OverlaySurf).ScopedKey.Render("type:"),
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := strings.Count(ansi.Strip(testCase.rendered), ":"); got != 1 {
+				t.Errorf("pill %q spends %d colons, spec section 3.5 spends one",
+					ansi.Strip(testCase.rendered), got)
+			}
+			if !strings.Contains(testCase.rendered, testCase.key) {
+				t.Errorf("pill %q does not carry the colon on its key run %q",
+					testCase.rendered, testCase.key)
 			}
 		})
 	}

@@ -105,3 +105,89 @@ func TestDensityAliasesTheThemeTokens(t *testing.T) {
 		t.Error("the widget density aliases must be the theme tokens")
 	}
 }
+
+// markRunSegments splits rendered content at its SGR sequences, which is where a
+// terminal restarts shaping and places the next glyph on the cell the grid gave
+// it rather than on the pen the last glyph left behind.
+func markRunSegments(rendered string) []string {
+	out := make([]string, 0, 4)
+	for _, part := range strings.Split(rendered, "\x1b[") {
+		if index := strings.IndexByte(part, 'm'); index >= 0 {
+			part = part[index+1:]
+		}
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// TestMarkRunSplitsAWidePictographOffTheTextBesideIt is issue #229. A two-cell
+// mark is a color pictograph whose advance is wider than the two columns the
+// cell grid gives it; a terminal shapes one styled run as a unit, so text left
+// inside that run is drawn pushed right by the excess and its last glyph is then
+// clipped by the run after it. The mark and the column spec section 10.4.1 gives
+// it are their own run, and the text beside them starts a fresh one.
+func TestMarkRunSplitsAWidePictographOffTheTextBesideIt(t *testing.T) {
+	styles := theme.New(true)
+	style := styles.On(theme.FgSubtle, theme.Card)
+	square := styles.Glyph.EffortM
+	got := MarkRun(styles, square, square+" M", style, theme.Card)
+	if want := []string{square + " ", "M"}; !equalStrings(markRunSegments(got), want) {
+		t.Errorf("wide mark runs = %q, want %q", markRunSegments(got), want)
+	}
+	if plain := ansi.Strip(got); plain != square+" M" {
+		t.Errorf("wide mark content = %q, want %q", plain, square+" M")
+	}
+	if width := ansi.StringWidth(ansi.Strip(got)); width != 4 {
+		t.Errorf("wide mark run is %d cells, want 4", width)
+	}
+}
+
+// TestMarkRunKeepsOneRunWhereTheSplitBuysNothing covers the arms that must not
+// split: a one-cell mark has a real foreground and an advance that fits, an empty
+// mark has no column to own, and a run the caller already truncated past its own
+// mark no longer starts with it.
+func TestMarkRunKeepsOneRunWhereTheSplitBuysNothing(t *testing.T) {
+	styles := theme.New(true)
+	style := styles.On(theme.FgSubtle, theme.Card)
+	cases := []struct {
+		name    string
+		mark    string
+		content string
+	}{
+		{"one cell", styles.Glyph.Diamond, styles.Glyph.Diamond + " XL"},
+		{"no mark", "", "3d old"},
+		{"truncated past the mark", styles.Glyph.EffortM, "…"},
+	}
+	for _, testCase := range cases {
+		got := MarkRun(styles, testCase.mark, testCase.content, style, theme.Card)
+		if segments := markRunSegments(got); len(segments) != 1 || segments[0] != testCase.content {
+			t.Errorf("%s: runs = %q, want one run %q", testCase.name, segments, testCase.content)
+		}
+	}
+}
+
+// TestMarkRunDropsAnEmptyTailRun pins the truncation edge where a wide mark and
+// its column are all that survived the field: the mark run is emitted and no
+// empty run is spent behind it.
+func TestMarkRunDropsAnEmptyTailRun(t *testing.T) {
+	styles := theme.New(true)
+	square := styles.Glyph.EffortS
+	got := MarkRun(styles, square, square+" ", styles.On(theme.FgSubtle, theme.Card), theme.Card)
+	if segments := markRunSegments(got); len(segments) != 1 || segments[0] != square+" " {
+		t.Errorf("runs = %q, want the mark and its column alone", segments)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
+}

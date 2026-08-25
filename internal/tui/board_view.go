@@ -1194,7 +1194,15 @@ func (m Model) cardMeta(styles *theme.Styles, task board.Task, surface theme.Slo
 		// metaRowWidth arithmetic measures it rather than assuming it, so the
 		// survival order and the column-wide drop of metaDepth carry the cost
 		// without a constant to maintain.
-		meta[4] = styles.On(theme.FgSubtle, surface).Render(styles.Glyph.Effort(effort) + " " + effort)
+		//
+		// The square and the column it owns are their own styled run: a terminal
+		// shapes a styled run as a unit, so a letter left inside the square's run
+		// is drawn pushed right by the pictograph's excess advance and then
+		// clipped by the run after it, which lands on the cell the grid gave it.
+		// That is what halved the letter in issue #229.
+		mark := styles.Glyph.Effort(effort)
+		meta[4] = widget.MarkRun(styles, mark, mark+" "+effort,
+			styles.On(theme.FgSubtle, surface), surface)
 	}
 	return meta
 }

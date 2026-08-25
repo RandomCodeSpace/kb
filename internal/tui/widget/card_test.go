@@ -289,3 +289,45 @@ func TestClipTrimsOverrunContent(t *testing.T) {
 		t.Errorf("clip rewrote fitting content to %q", got)
 	}
 }
+
+// TestCardTitleSplitsItsEmojiOffTheTitle is the title arm of issue #229. The
+// card's emoji is a wide pictograph and the row ends in a padding run, so a title
+// left inside the emoji's run was drawn pushed right by the pictograph's excess
+// advance and lost its last character under that padding. The emoji and the
+// column beside it are their own run.
+func TestCardTitleSplitsItsEmojiOffTheTitle(t *testing.T) {
+	styles := theme.New(true)
+	opts := cardFixture(styles, DensityNormal, 1)
+	opts.Emoji = styles.Glyph.EffortM
+	opts.Seq = ""
+	row := cardTitle(styles, opts, theme.Card, 40)
+	segments := markRunSegments(row)
+	if len(segments) == 0 || segments[0] != opts.Emoji+" " {
+		t.Fatalf("title runs = %q, want the emoji and its column first", segments)
+	}
+	if len(segments) < 2 || !strings.HasPrefix(segments[1], opts.Title) {
+		t.Errorf("title runs = %q, want the title in a run of its own", segments)
+	}
+	if got, want := ansi.StringWidth(ansi.Strip(row)), 40; got != want {
+		t.Errorf("title row is %d cells, want %d", got, want)
+	}
+}
+
+// TestCardTitleWithoutAWideEmojiKeepsOneRun is the other arm: a title with no
+// emoji, or with a one-cell one, has no pictograph advance to escape.
+func TestCardTitleWithoutAWideEmojiKeepsOneRun(t *testing.T) {
+	styles := theme.New(true)
+	opts := cardFixture(styles, DensityNormal, 1)
+	opts.Seq = ""
+	for _, emoji := range []string{"", "*"} {
+		opts.Emoji = emoji
+		head := opts.Title
+		if emoji != "" {
+			head = emoji + " " + opts.Title
+		}
+		row := cardTitle(styles, opts, theme.Card, 40)
+		if segments := markRunSegments(row); len(segments) == 0 || !strings.HasPrefix(segments[0], head) {
+			t.Errorf("emoji %q: title runs = %q, want the head in one run", emoji, segments)
+		}
+	}
+}

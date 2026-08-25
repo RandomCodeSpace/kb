@@ -2,6 +2,7 @@ package tui
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -196,5 +197,83 @@ func TestEffortChipIsEmptyWithoutAValue(t *testing.T) {
 		if got := plain(meta[4]); got != "" {
 			t.Errorf("effort %q: chip = %q, want empty", effort, got)
 		}
+	}
+}
+
+// sgrRun matches one SGR sequence, the boundary a terminal shapes and places a
+// run of text at.
+var sgrRun = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// styledRuns splits rendered content into the text segments its SGR sequences
+// delimit, dropping the empty ones a reset leaves behind.
+func styledRuns(rendered string) []string {
+	out := make([]string, 0, 4)
+	for _, part := range sgrRun.Split(rendered, -1) {
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// TestEffortSquareDoesNotShareItsRunWithTheLetter is issue #229. The chip kept
+// its four cells and its owned column throughout, and every width kb measures
+// agreed with the render, but the square and the letter were emitted as one
+// styled run. A terminal shapes a styled run as a unit: the square's advance is
+// wider than the two columns the cell grid gives it, so the letter inside that
+// run was drawn pushed right by the excess and then clipped by the run after it,
+// which lands on the cell the grid gave it. Half an M is what reached the user's
+// terminal.
+//
+// The mark and the column section 10.4.1's adjacency rule gives it are therefore
+// one run and the letter is another. This test holds that split at the render
+// site, which no width assertion can see.
+func TestEffortSquareDoesNotShareItsRunWithTheLetter(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	fixture := boardViewFixture(now)
+	m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
+	m.loading = false
+	m.board = fixture
+	m.now = func() time.Time { return now }
+	m.renderedAt = now
+	styles := m.themeStyles()
+	for _, effort := range []string{"S", "M", "L"} {
+		mark := styles.Glyph.Effort(effort)
+		for _, density := range []theme.Density{theme.DensityNormal, theme.DensityCompact} {
+			task := fixture.Tasks[0]
+			task.Effort = effort
+			chip := m.cardMeta(styles, task, theme.Card, density)[4]
+			if got, want := plain(chip), mark+" "+effort; got != want {
+				t.Fatalf("effort %s density %v: chip = %q, want %q", effort, density, got, want)
+			}
+			if got := ansi.StringWidth(plain(chip)); got != 4 {
+				t.Errorf("effort %s density %v: chip is %d cells, spec section 3.4 says 4", effort, density, got)
+			}
+			runs := styledRuns(chip)
+			if len(runs) != 2 || runs[0] != mark+" " || runs[1] != effort {
+				t.Errorf("effort %s density %v: runs = %q, want the mark with its owned column in one run and the letter in another",
+					effort, density, runs)
+			}
+		}
+	}
+}
+
+// TestEffortDiamondKeepsOneRun is the other arm of the rule: the off-scale
+// fallback is one East Asian Ambiguous cell carrying a real foreground, so it has
+// nothing to gain from the split and a color to lose. It keeps the single run.
+func TestEffortDiamondKeepsOneRun(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	fixture := boardViewFixture(now)
+	fixture.Tasks[0].Effort = "XL"
+	m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
+	m.loading = false
+	m.board = fixture
+	m.now = func() time.Time { return now }
+	m.renderedAt = now
+	styles := m.themeStyles()
+	chip := m.cardMeta(styles, fixture.Tasks[0], theme.Card, theme.DensityNormal)[4]
+	runs := styledRuns(chip)
+	if want := styles.Glyph.Diamond + " XL"; len(runs) != 1 || runs[0] != want {
+		t.Errorf("off-scale effort chip runs = %q, want one run %q", runs, want)
 	}
 }
