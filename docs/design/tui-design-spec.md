@@ -95,25 +95,33 @@ collision.
 | `Prio1` | `#ff5a48` | 203 | Priority 1, high — rail hue and meta digit fill |
 | `Prio2` | `#ffb020` | 214 | Priority 2, medium — rail hue and meta digit fill |
 | `Prio3` | `#4f8ef7` | 69 | Priority 3, low — rail hue and meta digit fill, and the fallback for any unknown priority |
-| `Prio4` | `#b8bdc7` | 7 | — unreferenced since #232; see the amendment below |
 
-Mapping is exact-match on 1/2/4, everything else falls to `Prio3`
-(prototype `prioSlot`).
+Mapping is exact-match on 1 and 2; everything else falls to `Prio3`.
 
-**Amended by [#232](https://github.com/RandomCodeSpace/kb/issues/232).** The
-scale is three values — 1 high, 2 medium, 3 low. `PrioritySlot` matches 1 and 2
-exactly and resolves everything else to `Prio3`, hue and digit alike.
+**Amended by [#234](https://github.com/RandomCodeSpace/kb/issues/234).** The
+scale is three values — 1 high, 2 medium, 3 low — in the store as well as at the
+render seam. `Prio4` is deleted. Its index 7 was uncontested and it belonged to
+no alias group, so no other slot moved and §1.7's alias set is unchanged.
 
-This is the render seam and it is deliberately tolerant of the four-value data
-the store still holds until the priority migration lands: a stored `4` arrives
-here and reads as low, which is what it always meant. Nothing at this seam
-writes a task.
+The stored representation stays the integer `tasks.prio` has always held. The
+card renders the digit (§3.4) and both frozen wires carry the number, so names
+are a surface vocabulary — CLI flag, tool schemas, editor field — and not a
+storage change. `board.PrioHigh/PrioMedium/PrioLow`, `ValidPrio` and
+`NormalizePrio` are the one place the scale is spelled.
 
-`Prio4` `#b8bdc7` stays in the palette and stays unreferenced. Removing a slot
-moves every index after it and rewrites §1.7's audit tables, which belongs to
-the migration rather than to the card; a hue nothing renders is dead weight, but
-it is not a wrong color on a card. **The follow-up issue owns deleting it and
-re-running the §1.7 audit against a three-hue ramp.**
+`PrioritySlot` keeps its `default` arm, and this is totality rather than
+tolerance of legacy data: schema v10 folds every stored 4 onto 3, `migrate` runs
+inside `store.Open` before any caller can read a task, and the write paths
+refuse a value off the scale — so a stored 4 can no longer reach this seam. What
+the arm still serves is a zero-valued `board.Task` that never reached the store,
+which must render something; low is what an unset priority means everywhere
+else. `priorityLabel` carries the same obligation and additionally indexes
+`Styles.Rail`, now sized `[4]`.
+
+One asymmetry is deliberate: the frozen markdown reader still accepts a legacy
+`!4` and normalizes it to 3. Narrowing the pattern would demote the token to a
+title word rather than reading it as the low priority it always meant. The
+writer normalizes first, so it never emits a token the reader only tolerates.
 
 ### 1.5 Status colors
 
@@ -159,11 +167,10 @@ Card            #252f3d -> 236     HueCancelled #7b8494 -> 102
 Raised/BandRest #35404f -> 238     Prio1        #ff5a48 -> 203
 OverlaySurf     #3c495c -> 239     Prio2        #ffb020 -> 214
 OverlayBand     #4a5970 ->  59     Prio3        #4f8ef7 ->  69
-FgBase          #e3e9f2 -> 255     Prio4        #b8bdc7 ->   7
-FgSubtle        #9aa5b6 -> 248     StatusOK     #3fbf7f ->  72
-FgMuted         #6b7686 -> 243     StatusWarn   #ffb020 -> 214
-FgOnAccent      #0b0e14 -> 233     StatusDanger #ff5a48 -> 203
-                                   StatusInfo   #4f8ef7 ->  69
+FgBase          #e3e9f2 -> 255     StatusOK     #3fbf7f ->  72
+FgSubtle        #9aa5b6 -> 248     StatusWarn   #ffb020 -> 214
+FgMuted         #6b7686 -> 243     StatusDanger #ff5a48 -> 203
+FgOnAccent      #0b0e14 -> 233     StatusInfo   #4f8ef7 ->  69
                                    StatusAlarm  #b31f14 -> 124
                                    Label1..5    209 / 69 / 71 / 141 / 214
 
@@ -174,6 +181,12 @@ TintDanger      #ffa7a0 -> 217
 The four slots added for the button variants of §1.9 are audited by the same
 test as every other: they occupy 124, 147, 115 and 217, all previously free, so
 the real-collision set is still empty and the alias set is unchanged.
+
+**Amended by [#234](https://github.com/RandomCodeSpace/kb/issues/234).** `Prio4`
+`#b8bdc7` is deleted with the four-value scale and its index 7 is released. It
+was in no alias group and nothing else quantized to 7, so the real-collision set
+is still empty and the alias set below is unchanged. The ramp is three hues:
+`Prio1` 203, `Prio2` 214, `Prio3` 69.
 
 **Same-hex aliases** (intended, not collisions):
 `Canvas`/`FgOnAccent` (233); `Raised`/`BandRest` (238);
@@ -199,7 +212,7 @@ the real-collision set is **empty**, with the alias set exactly as listed above.
 A new slot that lands on an occupied index with a different hex fails the build
 until it is re-hued, or until the alias is justified in writing here. This is the
 mechanism that keeps 256 honest; the audit is not a one-time exercise. It is
-cheap — a pure function over ~34 colors, no terminal involved.
+cheap — a pure function over ~33 colors, no terminal involved.
 
 ### 1.8 Dimmed variant
 
