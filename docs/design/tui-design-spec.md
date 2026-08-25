@@ -339,6 +339,7 @@ density (§2.6).
 | Selected card | Background steps `Card` → `Raised`; left rail glyph thickens `▌` (U+258C) → `█` (U+2588); title renders bold |
 | Rail hue | The card's priority hue, **always** — including when selected |
 | Pressed / active pointer target | Reverse video (SGR 7), unchanged from today's `pointer.State.Render`, but promoted into the theme as `Styles.Pressed` |
+| Focused pill (traversal over a pill set) | End caps thicken `▐`/`▌` → `█`/`█` — the rail-thickening vocabulary applied to §3.6's caps; zero width change (added by #207) |
 
 The rail keeps the priority hue on selection. The wildcard prototype re-hued it
 to `Brand`, which erases the P1 signal on the exact card the user is looking at.
@@ -514,6 +515,21 @@ runs = [ "▐" fg=Fill  bg=On ]   U+2590 right half block
 Cost: `width(text) + 2` columns. The scoped variant substitutes `Surface`/
 `FgSubtle` for the first cap and the key run.
 
+**Inactive variant** (added by #207 for toggleable pill sets — today the filter
+bar). A pill that is present but not selected withdraws the wheel hue:
+`ChipRunsDim` drops the fill to `Surface`, the body text to `FgSubtle`, and the
+scoped key run to `FgMuted`, preserving the two-tone split. Hue-against-dim is
+the toggle affordance in color; the equal-width two-cell marker inside the caps
+(`MarkFilterOff` `+ ` / `MarkFilterOn` `x `, §10.4.1) carries it where color
+cannot — at `FidelityFlat` (§10.7.5) hue does not survive and the marker is the
+entire toggle signal.
+
+**Focused pill** (keyboard traversal over a pill set): the end caps thicken
+`▐`/`▌` → `█`/`█`, borrowing §2.4's rail-thickening vocabulary. Zero width
+change — the old `>label<` bracket form cost two cells and reflowed the row on
+every cursor move, a §10.4.4 violation the plain-text form carried. Toggle,
+focus and hover are three orthogonal axes; none moves a cell.
+
 **Known risk, carried consciously (map #136):** the entire accent vocabulary is
 U+2588 / U+258C / U+2590. On fonts without block glyphs this degrades worse than
 a border would and has no ASCII analogue. Shade tiers survive that failure; pills
@@ -640,7 +656,7 @@ underline + `ButtonGroup`).
 | Priority marker | kb `widget` | `Priority(p int, on theme.Slot) string` |
 | Button / action | kb `widget` | `Button(o ButtonOpts) string` + `ButtonGroup(gap int, bs ...string) string` — `ButtonOpts{Text string, Variant theme.ButtonVariant, Selected, Hovered, Armed bool, UnderlineIndex int, Padding [2]int}`; `Armed` is kb's addition for the purge/remove two-step, and `Variant` is the semantic role of §1.9, assigned per surface in §5.4. A rendered button is `Padding{1,1}` and a group's gap is 1, so an action reads as a filled surface wider than its label. `UnderlineIndex` marks the hotkey where the label spells it; where it does not, the caller appends the key in parentheses and underlines that. This is a display convention, never a keymap change |
 | Status line / footer | kb `widget` | `StatusBar(o StatusOpts) string` — `StatusOpts{Dot theme.Slot, State string, Hints []string, Width int}`; responsive hint ladder is the caller's |
-| Filter bar | kb `widget` | `FilterBar(o FilterOpts) string` — `FilterOpts{Field string, Chips []string, Count string, Width int}` |
+| Filter bar | kb `widget` | `FilterBar(o FilterOpts) string` — `FilterOpts{Field string, Chips []string, Count string, Width int}`. Status note (#207): the bar's *content* now matches this shape (pill chips via `widget.Chip`), but the bar itself remains inline in `board_view.go` because it builds pointer hit regions as it renders — this row is a target shape, not a shipped widget |
 | Top bar | kb `widget` | `TopBar(o TopBarOpts) string` — brand pill, title, user, right-aligned counters |
 | Overlay panel | kb `widget` | `Overlay(o OverlayOpts) string` — `OverlayOpts{Title, Seq string, Sections []Section, Footer string, W, H int}`; owns the shadow, bands and section breaks of §4 |
 | Overlay shadow | kb `widget` | folded into `Overlay`; not separately callable |
@@ -2189,15 +2205,19 @@ mark, where §10.6.1 argues the case.
 | `MarkSeq` | `#` | 1 | Card reference prefix, `#142` (§3.2) |
 | `MarkTag` | `#` | 1 | Plain label pill prefix, `#tag` (§3.5) |
 | `MarkDue` | `!` | 1 | Compact due prefix, `!2d` (§3.4 position 4) |
+| `MarkFilterOff` | `+ ` | 2 | Unselected filter pill marker, inside the caps (§3.6 inactive variant; #207) |
+| `MarkFilterOn` | `x ` | 2 | Selected filter pill marker, inside the caps (§3.6 inactive variant; #207) |
 
 `MarkSeq` and `MarkTag` are a same-text alias, deliberate and not a collision — the
 §1.7 convention applied to glyphs. They are separate tokens because they answer to
 different sections and either may be re-spelled without the other.
 
 **Width rule.** Every token is one cell wide except `HintSep` and `PathSep` (3
-each) and `Blocked` (2). `Blocked` is the only glyph in the vocabulary wider than
-one cell, which makes it ineligible as a state alternative to any one-cell mark
-(§10.4.4).
+each), `Blocked` (2), and the filter marks `MarkFilterOff`/`MarkFilterOn` (2
+each). A token wider than one cell is ineligible as a state alternative to any
+one-cell mark (§10.4.4); the two filter marks are deliberately equal-width so
+they are eligible as alternatives to *each other* — the toggle never moves a
+cell.
 
 **Guard.** `theme/seam_test.go` gains a walk over `internal/tui`. It fails on any
 non-test `.go` file outside `theme/` containing a **string literal** with a rune at
@@ -2327,6 +2347,7 @@ anything that appears.
 | Column header band (§2.2) | `Rail` + `Dot` + `" i "` = 5 | `Focus` + `" i "` = 4 | **Violated today** — see below |
 | Branded engine row (§10.2.5) | label + `EllipsisField` + `SuffixField` | same | Both fields are reserved whether or not their content is present |
 | Scroll affordance (§10.3.4) | column reserved | column reserved | Tint changes; geometry does not |
+| Filter pill (§3.6, #207) | `CapL` `▐` + mark + text + `CapR` `▌` | `RailFull` `█` caps, same interior | Caps swap for same-width glyphs; toggle marks are equal-width (`MarkFilterOff`/`MarkFilterOn`, 2 each); the retired `>label<` form violated this rule |
 
 **The band exception.** The band's *total* width is identical in both states — both
 fill the panel width — but its interior is not: the label starts at column 5
