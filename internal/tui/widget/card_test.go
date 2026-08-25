@@ -1,6 +1,7 @@
 package widget
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -520,5 +521,170 @@ func TestCardTitleAndDescriptionShareOneBlock(t *testing.T) {
 	if len(strings.Fields(shortBody)) <= len(strings.Fields(longBody)) {
 		t.Errorf("the short title did not hand its spare row to the description:\n%q\n%q",
 			shortBody, longBody)
+	}
+}
+
+// TestCardInteriorPaddingSitsOnTheSectionBoundaries is issue #240's rhythm. One
+// blank row separates the shared title/description block from the meta row and
+// a second separates the meta row from the label rows, so the card reads as
+// prose, then data, then navigation rather than as one packed slab of text.
+func TestCardInteriorPaddingSitsOnTheSectionBoundaries(t *testing.T) {
+	styles := theme.New(true)
+	opts := cardFixture(styles, DensityNormal, 2)
+	opts.Width = 40
+	opts.Title = "short"
+	opts.Desc = "one two three four five six seven eight nine ten"
+	opts.LabelRows = 2
+	opts.PadRows = 2
+	rows := Card(styles, opts)
+	// title(2) + description(2) + pad + meta + pad + labels(2).
+	if got := len(rows); got != 9 {
+		t.Fatalf("card rendered %d rows, want 9", got)
+	}
+	for _, row := range []int{4, 6} {
+		if plain := strings.TrimSpace(ansi.Strip(rows[row])); plain != "▌" {
+			t.Errorf("row %d = %q, want a blank interior separator carrying the rail only", row, plain)
+		}
+	}
+	if got := ansi.Strip(rows[5]); !strings.Contains(got, " 1 ") {
+		t.Errorf("row 5 = %q, want the meta chip row between the two separators", got)
+	}
+	if got := ansi.Strip(rows[7]); !strings.Contains(got, "feature") {
+		t.Errorf("row 7 = %q, want the first label row under the second separator", got)
+	}
+}
+
+// TestCardInteriorPaddingIsCardSurface is the constraint that keeps the card one
+// slab: a separator row is blank content on the card's own fill, not a gap in
+// it. It takes the surface every other row of the card takes, so selection,
+// hover and the zebra stripe reach it without the row knowing they exist.
+func TestCardInteriorPaddingIsCardSurface(t *testing.T) {
+	styles := theme.New(true)
+	base := cardFixture(styles, DensityNormal, 1)
+	base.Width = 40
+	base.PadRows = 2
+	base.LabelRows = 1
+	grounds := map[string]string{}
+	for _, testCase := range []struct {
+		name     string
+		selected bool
+		alt      bool
+	}{
+		{"plain", false, false},
+		{"selected", true, false},
+		{"striped", false, true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			opts := base
+			opts.Selected, opts.Alt = testCase.selected, testCase.alt
+			rows := Card(styles, opts)
+			surface := styles.Surface(opts.Selected, opts.Alt)
+			want := rowBackgrounds(styles.On(theme.FgBase, surface).Render(" "))
+			// The separators are rows 3 and 5, either side of the meta row. Each
+			// paints one ground and it is the card's, so the row highlights and
+			// stripes with everything else on the card.
+			for _, row := range []int{3, 5} {
+				if got := rowBackgrounds(rows[row]); got != want {
+					t.Errorf("separator row %d ground = %q, want the card's own %q", row, got, want)
+				}
+			}
+			grounds[testCase.name] = want
+		})
+	}
+	if grounds["plain"] == grounds["selected"] || grounds["plain"] == grounds["striped"] {
+		t.Errorf("the card's three grounds are not distinct: %v; the case asserts nothing", grounds)
+	}
+}
+
+// rowBackgrounds is the sorted set of background colors a rendered row paints.
+// Two rows of the same card must agree on it: the depth model is background
+// color, so a row that painted a ground the rest of the card did not is a row
+// that left the card.
+//
+// The walk follows the SGR parameter grammar rather than matching substrings,
+// because an extended color's own components are parameters too and a naive
+// scan would read a blue channel of 48 as a background introducer.
+func rowBackgrounds(row string) string {
+	seen := map[string]bool{}
+	for _, segment := range strings.Split(row, "\x1b[")[1:] {
+		body, _, found := strings.Cut(segment, "m")
+		if !found {
+			continue
+		}
+		params := strings.Split(body, ";")
+		for index := 0; index < len(params); index++ {
+			switch params[index] {
+			case "38", "48":
+				span := 0
+				if index+1 < len(params) {
+					switch params[index+1] {
+					case "5":
+						span = 2
+					case "2":
+						span = 4
+					}
+				}
+				if span == 0 || index+span >= len(params) {
+					index = len(params)
+					break
+				}
+				if params[index] == "48" {
+					seen[strings.Join(params[index+1:index+span+1], ";")] = true
+				}
+				index += span
+			case "49":
+				seen["default"] = true
+			}
+		}
+	}
+	keys := make([]string, 0, len(seen))
+	for key := range seen {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+
+// TestCardCompactCarriesNoInteriorPadding is the other half of issue #240:
+// compact exists to be dense (section 2.6), so it ignores the rhythm outright
+// even when a caller hands it one. Two rows, edge to edge, as before.
+func TestCardCompactCarriesNoInteriorPadding(t *testing.T) {
+	styles := theme.New(true)
+	opts := cardFixture(styles, DensityCompact, 0)
+	opts.PadRows = 2
+	rows := Card(styles, opts)
+	if got := len(rows); got != 2 {
+		t.Fatalf("compact card rendered %d rows, want 2", got)
+	}
+	for index, row := range rows {
+		if plain := strings.TrimSpace(ansi.Strip(row)); plain == "▌" || plain == "" {
+			t.Errorf("compact row %d is blank: %q", index, plain)
+		}
+	}
+}
+
+// TestCardLabelSpansClearTheInteriorPadding keeps the pointer honest about the
+// rhythm. The label rows moved down by the separator between them and the meta
+// row, and a hit region resolved against the old offset would put the filter
+// click on a blank row.
+func TestCardLabelSpansClearTheInteriorPadding(t *testing.T) {
+	styles := theme.New(true)
+	opts := cardFixture(styles, DensityNormal, 1)
+	opts.Width = 40
+	opts.LabelRows = 1
+	opts.Labels = []string{"alpha"}
+	for pads := range 3 {
+		opts.PadRows = pads
+		rows, spans := CardWithSpans(styles, opts)
+		if len(spans) != 1 {
+			t.Fatalf("pads %d: card recorded %d label spans, want 1", pads, len(spans))
+		}
+		span := spans[0]
+		if span.Row < 0 || span.Row >= len(rows) {
+			t.Fatalf("pads %d: span row %d is outside the card's %d rows", pads, span.Row, len(rows))
+		}
+		if got := ansi.Strip(rows[span.Row]); !strings.Contains(got, "alpha") {
+			t.Errorf("pads %d: span points at row %d = %q, want the row carrying the pill", pads, span.Row, got)
+		}
 	}
 }

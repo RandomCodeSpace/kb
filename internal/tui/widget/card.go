@@ -42,6 +42,13 @@ type CardOpts struct {
 	DescLines  int
 	LabelRows  int
 
+	// PadRows is the interior vertical rhythm of issue #240: blank rows carrying
+	// the card's own fill, spent on the boundaries between its sections. One row
+	// separates the shared title/description block from the meta row; a second,
+	// on a frame tall enough to afford it, separates the meta row from the label
+	// rows. Compact ignores this outright.
+	PadRows int
+
 	// Hovered raises the card's rail cell one tier, per spec section 10.5.1.
 	// It is an affordance cue and nothing more: ratified call 9 keeps the board
 	// cursor off the pointer, so a hovered card is never the acting selection.
@@ -84,11 +91,12 @@ func CardWithSpans(styles *theme.Styles, opts CardOpts) ([]string, []CardSpan) {
 	surfaceStyle := styles.On(theme.FgBase, surface)
 	inner := metrics.CardInner(opts.Width, opts.Density)
 	titleLines, descLines, labelRows := max(opts.TitleLines, 1), opts.DescLines, opts.LabelRows
+	padRows := max(opts.PadRows, 0)
 	if opts.Density.Compact() {
-		titleLines, descLines, labelRows = 1, 0, 0
+		titleLines, descLines, labelRows, padRows = 1, 0, 0, 0
 	}
 
-	rows := titleLines + descLines + 1 + labelRows
+	rows := titleLines + descLines + padRows + 1 + labelRows
 	content := make([]string, 0, rows)
 	var spans []CardSpan
 	if inner >= metrics.CardMinInner {
@@ -102,9 +110,29 @@ func CardWithSpans(styles *theme.Styles, opts CardOpts) ([]string, []CardSpan) {
 		title := cardTitle(styles, opts, surface, inner, titleLines)
 		content = append(content, title...)
 		content = append(content, cardDesc(styles, opts, surface, inner, titleLines+descLines-len(title))...)
-		meta, labels, labelSpans := cardChips(styles, opts, surface, inner, labelRows)
-		spans = offsetSpans(labelSpans, len(content), metrics.CardRail+metrics.CardPad(opts.Density), inner)
+		// The interior separators of issue #240. They are emitted as empty
+		// content and picked up by the same surface fill every other row of the
+		// card takes, so a blank row is card ground rather than a hole in it:
+		// selection, hover and the zebra stripe reach it because they are the
+		// card's surface and not a per-row decoration.
+		//
+		// The block above them is always exactly titleLines+descLines rows -
+		// the title takes what it needs and cardDesc fills the rest of the
+		// allotment whether or not there is description left to draw into it -
+		// so the first separator lands at the same offset on every card.
+		if padRows >= 1 {
+			content = append(content, "")
+		}
+		meta, labels, chipSpans := cardChips(styles, opts, surface, inner, labelRows)
+		base := len(content)
 		content = append(content, meta)
+		if padRows >= 2 {
+			content = append(content, "")
+		}
+		if !opts.Density.Compact() {
+			base = len(content)
+		}
+		spans = offsetSpans(chipSpans, base, metrics.CardRail+metrics.CardPad(opts.Density), inner)
 		content = append(content, labels...)
 	}
 	for len(content) < rows {
@@ -268,6 +296,11 @@ func cardDesc(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner, li
 // cardChips is the meta chip row of spec section 3.4 and the label rows of
 // section 3.5. Compact merges the labels onto the meta row and flattens the
 // pills, which is step 5 of the section 2.6 drop order.
+//
+// Span rows are relative to the block the pills landed in - the meta row when
+// compact merged them onto it, the first label row otherwise - because the
+// interior padding of issue #240 sits between the two and only the caller knows
+// how many rows of it there are.
 func cardChips(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner, labelRows int) (string, []string, []CardSpan) {
 	surfaceStyle := styles.On(theme.FgBase, surface)
 	flat := opts.Density.Compact()
@@ -287,7 +320,7 @@ func cardChips(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner, l
 			continue
 		}
 		spans = append(spans, CardSpan{
-			Row: 1 + start.row, X0: start.column,
+			Row: start.row, X0: start.column,
 			X1:    start.column + ansi.StringWidth(labels[index]),
 			Index: index,
 			Tag:   opts.Labels[index],

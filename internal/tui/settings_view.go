@@ -609,6 +609,32 @@ func sanitizeTerminal(value string) string {
 	}, value)
 }
 
+// sanitizeTerminalText is sanitizeTerminal for a value whose line structure is
+// content rather than an accident of storage. Issue #241: a description's
+// newlines are part of what the author wrote, and the frozen grammar of spec
+// section 3.3 reads them - every source line is its own block, on the card and
+// in the detail pane alike. Stripping them as control characters joined the
+// author's separate lines into one paragraph on the card while the pane, which
+// never ran them through this, kept them: a fork of the product contract over
+// the same bytes.
+//
+// Every other control character still goes, because a description is drawn into
+// a composed frame and an escape or a bare carriage return in it would move the
+// cursor off the cell the grid gave it. A CRLF source collapses to the newline
+// the grammar splits on rather than losing the break with its carriage return.
+func sanitizeTerminalText(value string) string {
+	value = strings.ReplaceAll(ansi.Strip(value), "\r\n", "\n")
+	return strings.Map(func(r rune) rune {
+		if r == '\n' {
+			return r
+		}
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, value)
+}
+
 func isSettingsMessage(message tea.Msg) bool {
 	if pointer.IsMessage(message) {
 		return true

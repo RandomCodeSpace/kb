@@ -207,14 +207,17 @@ type Metrics struct {
 	CompactInnerW int // column inner width below which density compacts
 	DescTwoLines  int // frame height at or above which the snippet gets a second line
 
-	// The card row grid of spec section 3.1, rewritten by issue #232. Every
-	// allotment here is a function of density and frame height and never of
-	// content, which is the invariant that lets columnStackHeight resolve a
-	// column's height before the cards in it are rendered.
-	CardTitleLines int // title rows a card carries at normal density
-	CardDescMax    int // description rows a card may carry at its tallest
-	CardDescStep   int // frame rows that buy one more description line
-	CardLabelRows  int // label rows a card carries on a frame tall enough for them
+	// The card row grid of spec section 3.1, rewritten by issue #232 and given
+	// interior vertical rhythm by issue #240. Every allotment here is a function
+	// of density and frame height and never of content, which is the invariant
+	// that lets columnStackHeight resolve a column's height before the cards in
+	// it are rendered.
+	CardTitleLines   int // title rows a card carries on a frame at or above DescTwoLines
+	CardDescMax      int // description rows a card may carry at its tallest
+	CardDescStep     int // frame rows that buy one more description line
+	CardLabelRows    int // label rows a card carries on a frame tall enough for them
+	CardInnerPadRows int // interior blank rows a card carries at its tallest
+	CardInnerPadTwo  int // frame height at or above which the card carries both
 
 	Overlay OverlayMetrics
 }
@@ -287,10 +290,12 @@ var defaultMetrics = Metrics{
 	CompactInnerW: 22,
 	DescTwoLines:  45,
 
-	CardTitleLines: 2,
-	CardDescMax:    5,
-	CardDescStep:   10,
-	CardLabelRows:  2,
+	CardTitleLines:   2,
+	CardDescMax:      5,
+	CardDescStep:     10,
+	CardLabelRows:    2,
+	CardInnerPadRows: 2,
+	CardInnerPadTwo:  55,
 
 	Overlay: OverlayMetrics{
 		WidthPct:     85,
@@ -465,11 +470,44 @@ func (m Metrics) DescLines(frameHeight int, density Density) int {
 // issue #232 rewrote it: the title wraps rather than being ellipsized to one
 // line, and it is the last allotted row that carries the ellipsis when the
 // title still does not fit. Compact keeps the single row it always had.
-func (m Metrics) TitleRows(density Density) int {
-	if density.Compact() {
+//
+// Amended by issue #240. The short normal rung - a frame below DescTwoLines -
+// now keeps a single title row too, and spends the continuation row it gives up
+// on the interior separator of InnerPadRows. That is step 3 of the section 2.6
+// drop order applied one rung early, and it is the cheapest row on the card to
+// spend: the spec already ranks a wrapped title's second line below the
+// description, the first row still carries the whole of what a scan reads, and
+// the ellipsis says the rest exists. The trade is exact - one row out, one row
+// in - so the shortest normal frame keeps the card count it had before the
+// rhythm arrived.
+func (m Metrics) TitleRows(frameHeight int, density Density) int {
+	if density.Compact() || frameHeight < m.DescTwoLines {
 		return 1
 	}
 	return m.CardTitleLines
+}
+
+// InnerPadRows is the number of blank interior rows a card carries: the
+// vertical rhythm of spec section 3.1 as issue #240 added it. The rows carry the
+// card's own fill rather than the panel's, so the card still reads as one slab
+// and the blank rows highlight, stripe and take a click with every other row of
+// it.
+//
+// The count is a rung of its own. Compact carries none - compact exists to be
+// dense (section 2.6). Below CardInnerPadTwo the card affords exactly one, and
+// it goes between the shared title/description block and the meta row, which is
+// the boundary that carries the grouping: title and description are one unit of
+// prose, and everything under them is chips. At or above CardInnerPadTwo the
+// frame has the surplus for the second, which goes between the meta row and the
+// label rows - data above it, navigation below.
+func (m Metrics) InnerPadRows(frameHeight int, density Density) int {
+	if density.Compact() {
+		return 0
+	}
+	if frameHeight < m.CardInnerPadTwo {
+		return 1
+	}
+	return m.CardInnerPadRows
 }
 
 // LabelRows is the number of label rows a card carries. Spec section 3.5 as
@@ -490,10 +528,15 @@ func (m Metrics) LabelRows(frameHeight int, density Density) int {
 // CardRows is the content row count of one card: the whole of spec section
 // 3.1's grid in one place, so the panel that reserves a column's height and the
 // widget that draws the card can never disagree about it.
+//
+// Issue #240 added the interior padding rows to the sum. They are rows like any
+// other here, which is what keeps the count a pure function of density and
+// frame height: the card cannot decide it has nothing worth separating and give
+// a row back, any more than a short description can pull the meta row up.
 func (m Metrics) CardRows(frameHeight int, density Density) int {
 	if density.Compact() {
 		return 2
 	}
-	return m.TitleRows(density) + m.DescLines(frameHeight, density) + 1 +
-		m.LabelRows(frameHeight, density)
+	return m.TitleRows(frameHeight, density) + m.DescLines(frameHeight, density) +
+		m.InnerPadRows(frameHeight, density) + 1 + m.LabelRows(frameHeight, density)
 }

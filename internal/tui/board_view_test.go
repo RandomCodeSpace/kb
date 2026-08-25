@@ -986,3 +986,116 @@ func colorSequence(value color.Color) string {
 	r, g, b, _ := value.RGBA()
 	return fmt.Sprintf("48;2;%d;%d;%d", r>>8, g>>8, b>>8)
 }
+
+// descriptionCardModel is a one-task board sized for the description ladder's
+// upper rungs, so a card has rows to spend on the line structure under test.
+func descriptionCardModel(t *testing.T, desc string) (Model, []board.Task) {
+	t.Helper()
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	fixture := board.Board{Title: "Roadmap", Tasks: []board.Task{{
+		ID: "todo-1", Seq: 7, Title: "Ship", Status: board.StatusTodo, Prio: 1,
+		Desc: desc, CreatedAt: now, MovedAt: now,
+	}}}
+	m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
+	m.loading = false
+	m.board = fixture
+	m.now = func() time.Time { return now }
+	m.renderedAt = now
+	m.width, m.height = 120, 60
+	return m, fixture.Tasks
+}
+
+// TestCardDescriptionKeepsSourceLineStructure is issue #241. The frozen grammar
+// of spec section 3.3 reduces every source line to its own block, and the detail
+// pane renders it that way, so a newline in a description is a line break on
+// both surfaces. The card used to lose them before the grammar ever saw them:
+// the description went through the single-line terminal sanitizer, which strips
+// every control character, and the author's separate lines arrived welded into
+// one paragraph.
+//
+// The blank-line rule of section 3.3 stands alongside it: a blank source line
+// still yields no row. It is the single newline that has to break.
+func TestCardDescriptionKeepsSourceLineStructure(t *testing.T) {
+	m, tasks := descriptionCardModel(t, "alpha one\n\nbravo two\ncharlie three")
+	rows, _, _ := m.renderTaskLines(tasks, board.StatusTodo, 40, theme.DensityNormal)
+	var carried []int
+	for index, row := range rows {
+		if strings.Contains(plain(row), "alpha") || strings.Contains(plain(row), "bravo") ||
+			strings.Contains(plain(row), "charlie") {
+			carried = append(carried, index)
+		}
+	}
+	if len(carried) != 3 {
+		t.Fatalf("the three source lines landed on %d rows, want 3:\n%s",
+			len(carried), strings.Join(mapPlain(rows), "\n"))
+	}
+	for offset, index := range carried {
+		if offset > 0 && index != carried[offset-1]+1 {
+			t.Fatalf("source lines landed on rows %v, want consecutive rows", carried)
+		}
+	}
+	want := []string{"alpha one", "bravo two", "charlie three"}
+	for offset, index := range carried {
+		if got := strings.Trim(plain(rows[index]), " ▌█"); got != want[offset] {
+			t.Errorf("row %d = %q, want exactly the source line %q", index, got, want[offset])
+		}
+	}
+}
+
+// TestCardDescriptionWrapsWithinASourceLine is the other half of the rule: a
+// source line starts a rendered line, and then it word-wraps inside the card's
+// allotment like any prose. The allotment still binds - the last row the ladder
+// gave the description carries the ellipsis and nothing runs past the card.
+func TestCardDescriptionWrapsWithinASourceLine(t *testing.T) {
+	long := strings.Repeat("wrapping ", 24)
+	m, tasks := descriptionCardModel(t, "head line\n"+long)
+	rows, _, _ := m.renderTaskLines(tasks, board.StatusTodo, 40, theme.DensityNormal)
+	styles := m.themeStyles()
+	descLines := styles.Metrics.DescLines(m.height, theme.DensityNormal)
+	block := styles.Metrics.TitleRows(m.height, theme.DensityNormal) + descLines
+	if got := plain(rows[1]); !strings.Contains(got, "head line") || strings.Contains(got, "wrapping") {
+		t.Errorf("row 1 = %q, want the first source line alone on its own row", got)
+	}
+	last := plain(rows[block-1])
+	if !strings.Contains(last, styles.Glyph.Ellipsis) {
+		t.Errorf("last description row %d = %q, want the ellipsis the allotment ran out on", block-1, last)
+	}
+	for index, row := range rows[:block] {
+		if got := ansi.StringWidth(row); got != 40 {
+			t.Errorf("row %d is %d cells, want 40", index, got)
+		}
+	}
+}
+
+// TestSanitizeTerminalTextKeepsNewlinesOnly is the narrow contract issue #241
+// turns on. A description's line structure is content and survives; everything
+// else that could move the cursor off the cell the grid gave it does not.
+func TestSanitizeTerminalTextKeepsNewlinesOnly(t *testing.T) {
+	cases := map[string]string{
+		"alpha\nbravo":   "alpha\nbravo",
+		"alpha\r\nbravo": "alpha\nbravo",
+		"alpha\rbravo":   "alphabravo",
+		"alpha\tbravo":   "alphabravo",
+		"alpha\x1b[31mb": "alphab",
+		"alpha\x07bravo": "alphabravo",
+		"alphabrav":     "alphabrav",
+	}
+	for source, want := range cases {
+		if got := sanitizeTerminalText(source); got != want {
+			t.Errorf("sanitizeTerminalText(%q) = %q, want %q", source, got, want)
+		}
+	}
+	if got := sanitizeTerminal("alpha\nbravo"); got != "alphabravo" {
+		t.Errorf("the single-line sanitizer kept a newline: %q", got)
+	}
+}
+
+// mapPlain strips every row of a rendered stack, for a failure message that can
+// be read.
+func mapPlain(rows []string) []string {
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, plain(row))
+	}
+	return out
+}
