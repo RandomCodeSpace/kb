@@ -154,11 +154,45 @@ func sameRuns(left, right ChipStyles) bool {
 	const probe = "chip"
 	return left.CapLeft.Render(probe) == right.CapLeft.Render(probe) &&
 		left.CapRight.Render(probe) == right.CapRight.Render(probe) &&
+		left.ScopedCap.Render(probe) == right.ScopedCap.Render(probe) &&
 		left.Body.Render(probe) == right.Body.Render(probe) &&
 		left.BodyHover.Render(probe) == right.BodyHover.Render(probe) &&
 		left.ScopedKey.Render(probe) == right.ScopedKey.Render(probe) &&
 		left.Flat.Render(probe) == right.Flat.Render(probe) &&
 		left.FlatHover.Render(probe) == right.FlatHover.Render(probe)
+}
+
+// TestChipRunsDimWithdrawTheHue is the inactive pill of the filter bar: the
+// section 3.6 anatomy with the wheel hue taken out of it. The fill drops to
+// Surface, the text drops to the section 1.2 secondary and tertiary roles, and
+// the scoped pill's two-tone split survives the withdrawal rather than
+// collapsing into one gray.
+func TestChipRunsDimWithdrawTheHue(t *testing.T) {
+	styles := New(true)
+	const probe = "feature"
+	for _, surface := range []Slot{Canvas, Card, OverlaySurf} {
+		dim := styles.ChipRunsDim(surface)
+		for index := range styles.Label {
+			if sameRuns(dim, styles.ChipRuns(LabelSlot(index), surface)) {
+				t.Errorf("the dim runs on surface %d match wheel slot %d", surface, index)
+			}
+		}
+		// Both caps are the same tier, which is what makes the dim pill read as
+		// one flat chip rather than as a scoped pill with a lit half.
+		if dim.CapLeft.Render(probe) != dim.ScopedCap.Render(probe) ||
+			dim.CapRight.Render(probe) != dim.ScopedCap.Render(probe) {
+			t.Errorf("surface %d: the dim caps are not all Surface", surface)
+		}
+		if dim.Body.Render(probe) == dim.ScopedKey.Render(probe) {
+			t.Errorf("surface %d: the dim key and body runs collapsed into one role", surface)
+		}
+		if ansi.Strip(dim.Body.Render(probe)) != probe {
+			t.Errorf("surface %d: the dim body run changed the text it draws", surface)
+		}
+	}
+	if sameRuns(styles.ChipRunsDim(Canvas), styles.ChipRunsDim(Card)) {
+		t.Error("the dim runs on a different surface must render differently")
+	}
 }
 
 // TestChipHoverRunsUnderlineAndChangeNothingElse is spec section 10.5.1: a pill
@@ -168,7 +202,9 @@ func sameRuns(left, right ChipStyles) bool {
 func TestChipHoverRunsUnderlineAndChangeNothingElse(t *testing.T) {
 	styles := New(true)
 	const probe = "feature"
-	for _, runs := range []ChipStyles{styles.Chip, styles.ChipRuns(StatusWarn, OverlaySurf)} {
+	for _, runs := range []ChipStyles{
+		styles.Chip, styles.ChipRuns(StatusWarn, OverlaySurf), styles.ChipRunsDim(Canvas),
+	} {
 		pairs := [][2]string{
 			{runs.Body.Render(probe), runs.BodyHover.Render(probe)},
 			{runs.Flat.Render(probe), runs.FlatHover.Render(probe)},
