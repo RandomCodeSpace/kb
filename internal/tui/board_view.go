@@ -995,7 +995,7 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 			Title:      sanitizeTerminal(task.Title),
 			Emoji:      sanitizeTerminal(task.Emoji),
 			Seq:        seqLabel(task),
-			Desc:       sanitizeTerminal(task.Desc),
+			Desc:       sanitizeTerminalText(task.Desc),
 			Meta:       metas[i][:depth],
 			Labels:     tags,
 			Priority:   task.Prio,
