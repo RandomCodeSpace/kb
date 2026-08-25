@@ -622,8 +622,9 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 		focusTag = labels[min(max(m.filter.labelIndex, 0), len(labels)-1)]
 	}
 	// A filter label is a pill with three orthogonal states: the toggle is the
-	// hue against the dim form, keyboard focus thickens the end caps, and the
-	// pointer underlines the body. None of the three changes a cell count, so
+	// hue-filled pill against the hue-tinted one, keyboard focus thickens the
+	// end caps, and the pointer underlines the body. None of the three changes
+	// a cell count, so
 	// toggling or traversing the row never reflows the toolbar (section 10.4.4).
 	appendLabel := func(row int, tag string) {
 		hit := boardHit{kind: boardHitFilterLabel, tag: tag}

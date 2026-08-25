@@ -162,36 +162,54 @@ func sameRuns(left, right ChipStyles) bool {
 		left.FlatHover.Render(probe) == right.FlatHover.Render(probe)
 }
 
-// TestChipRunsDimWithdrawTheHue is the inactive pill of the filter bar: the
-// section 3.6 anatomy with the wheel hue taken out of it. The fill drops to
-// Surface, the text drops to the section 1.2 secondary and tertiary roles, and
-// the scoped pill's two-tone split survives the withdrawal rather than
-// collapsing into one gray.
-func TestChipRunsDimWithdrawTheHue(t *testing.T) {
+// TestChipRunsTintWithdrawTheFillAndKeepTheHue is the inactive pill of the
+// filter bar: the section 3.6 anatomy with the wheel hue taken off the fill and
+// left on the body text, the section 1.9 blurred-button pattern. The fill drops
+// to Surface so the pill cannot read as selected, the hue survives so the pill
+// can still be matched by eye to the card's label pill (issue #208), and the
+// scoped pill's two-tone split survives the withdrawal rather than collapsing
+// into one run.
+func TestChipRunsTintWithdrawTheFillAndKeepTheHue(t *testing.T) {
 	styles := New(true)
 	const probe = "feature"
 	for _, surface := range []Slot{Canvas, Card, OverlaySurf} {
-		dim := styles.ChipRunsDim(surface)
 		for index := range styles.Label {
-			if sameRuns(dim, styles.ChipRuns(LabelSlot(index), surface)) {
-				t.Errorf("the dim runs on surface %d match wheel slot %d", surface, index)
+			slot := LabelSlot(index)
+			tint := styles.ChipRunsTint(slot, surface)
+			filled := styles.ChipRuns(slot, surface)
+			if sameRuns(tint, filled) {
+				t.Errorf("the tinted runs on surface %d match the filled wheel slot %d", surface, index)
+			}
+			// Both caps are the same tier, which is what makes the tinted pill
+			// read as one withdrawn chip rather than as a lit half.
+			if tint.CapLeft.Render(probe) != tint.ScopedCap.Render(probe) ||
+				tint.CapRight.Render(probe) != tint.ScopedCap.Render(probe) {
+				t.Errorf("surface %d slot %d: the tinted caps are not all Surface", surface, index)
+			}
+			if tint.CapLeft.Render(probe) == filled.CapLeft.Render(probe) {
+				t.Errorf("surface %d slot %d: the tinted cap still carries the fill hue", surface, index)
+			}
+			// The hue lives on the body run now, which is the whole point: the
+			// tinted body must differ from every other wheel slot's tinted body.
+			for other := range styles.Label {
+				if other == index {
+					continue
+				}
+				if styles.ChipRunsTint(LabelSlot(other), surface).Body.Render(probe) ==
+					tint.Body.Render(probe) {
+					t.Errorf("surface %d: tinted slots %d and %d render the same body", surface, index, other)
+				}
+			}
+			if tint.Body.Render(probe) == tint.ScopedKey.Render(probe) {
+				t.Errorf("surface %d slot %d: the tinted key and body runs collapsed", surface, index)
+			}
+			if ansi.Strip(tint.Body.Render(probe)) != probe {
+				t.Errorf("surface %d slot %d: the tinted body run changed the text it draws", surface, index)
 			}
 		}
-		// Both caps are the same tier, which is what makes the dim pill read as
-		// one flat chip rather than as a scoped pill with a lit half.
-		if dim.CapLeft.Render(probe) != dim.ScopedCap.Render(probe) ||
-			dim.CapRight.Render(probe) != dim.ScopedCap.Render(probe) {
-			t.Errorf("surface %d: the dim caps are not all Surface", surface)
-		}
-		if dim.Body.Render(probe) == dim.ScopedKey.Render(probe) {
-			t.Errorf("surface %d: the dim key and body runs collapsed into one role", surface)
-		}
-		if ansi.Strip(dim.Body.Render(probe)) != probe {
-			t.Errorf("surface %d: the dim body run changed the text it draws", surface)
-		}
 	}
-	if sameRuns(styles.ChipRunsDim(Canvas), styles.ChipRunsDim(Card)) {
-		t.Error("the dim runs on a different surface must render differently")
+	if sameRuns(styles.ChipRunsTint(Label1, Canvas), styles.ChipRunsTint(Label1, Card)) {
+		t.Error("the tinted runs on a different surface must render differently")
 	}
 }
 
@@ -203,7 +221,7 @@ func TestChipHoverRunsUnderlineAndChangeNothingElse(t *testing.T) {
 	styles := New(true)
 	const probe = "feature"
 	for _, runs := range []ChipStyles{
-		styles.Chip, styles.ChipRuns(StatusWarn, OverlaySurf), styles.ChipRunsDim(Canvas),
+		styles.Chip, styles.ChipRuns(StatusWarn, OverlaySurf), styles.ChipRunsTint(Label3, Canvas),
 	} {
 		pairs := [][2]string{
 			{runs.Body.Render(probe), runs.BodyHover.Render(probe)},
