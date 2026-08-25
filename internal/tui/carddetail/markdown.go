@@ -4,7 +4,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -34,8 +33,15 @@ var (
 
 // parityMarkdown reduces a description to the frozen web renderer's grammar
 // before Glamour sees it. Glamour deliberately understands much more
-// Markdown; escaping everything outside this allowlist keeps that extra syntax
-// literal instead of quietly widening the product contract.
+// Markdown; neutralizing everything outside this allowlist keeps that extra
+// syntax literal instead of quietly widening the product contract.
+//
+// The grammar is per line and starts at column zero: a heading, a bullet or an
+// ordinal is only ever the first thing on a line, indentation carries no
+// meaning of its own, and no construct spans two lines except a fence. Every
+// other line is prose. Neutralizing has to be invisible, which rules out the
+// backslash for characters Glamour does not strip one from - see
+// escapeMarkdown.
 func parityMarkdown(source string) string {
 	lines := strings.Split(source, "\n")
 	out := make([]string, 0, len(lines)*2)
@@ -71,7 +77,25 @@ func parityLine(raw string) (line string, listItem bool) {
 		// list items, while the frozen web renderer preserves every marker.
 		return escapeMarkdown(raw[:markerEnd]) + " " + inlineMarkdown(raw[textStart:], false), false
 	}
-	return inlineMarkdown(raw, false), false
+	// Indentation is not syntax. The frozen renderer matched its bullet,
+	// heading and ordinal markers at column zero only - every other line went
+	// out as prose in a block that collapsed the leading run away - so the
+	// three branches above read the raw line and this one drops the indent.
+	// Dropping it also closes the last context where Glamour parsed a source
+	// line as an indented code block and printed the escapes below verbatim.
+	return escapeLeadingColon(inlineMarkdown(strings.TrimLeft(raw, " \t"), false)), false
+}
+
+// escapeLeadingColon guards the one construct a backslash cannot. Glamour
+// enables definition lists, which turn a leading ": " into a description of the
+// line above even across the blank line parityMarkdown inserts, and "\:" is not
+// an escape pair Glamour strips. A character reference is, so the colon travels
+// as one and arrives as itself.
+func escapeLeadingColon(line string) string {
+	if after, found := strings.CutPrefix(line, ":"); found {
+		return "&#58;" + after
+	}
+	return line
 }
 
 func heading(raw string) (int, string, bool) {
@@ -156,7 +180,7 @@ func inlineMarkdown(line string, insideHeading bool) string {
 			out.WriteByte('*')
 		case inlineLink:
 			out.WriteByte('[')
-			out.WriteString(escapeLinkLabel(match.text))
+			out.WriteString(escapeMarkdown(match.text))
 			out.WriteString("](")
 			out.WriteString(match.href)
 			out.WriteByte(')')
@@ -168,18 +192,6 @@ func inlineMarkdown(line string, insideHeading bool) string {
 		last = match.end
 	}
 	out.WriteString(escapeMarkdown(line[last:]))
-	return out.String()
-}
-
-func escapeLinkLabel(text string) string {
-	var out strings.Builder
-	for _, r := range text {
-		switch r {
-		case '\\', '[', ']', '*', '_', '~', '<', '>', 0x60:
-			out.WriteByte('\\')
-		}
-		out.WriteRune(r)
-	}
 	return out.String()
 }
 
@@ -346,13 +358,35 @@ func nextURLStart(line string, cursor int) int {
 	}
 }
 
+// escapableRunes are the characters a backslash can neutralize. Glamour strips
+// a fixed set of eighteen escape pairs and passes every other backslash through
+// to the terminal as text, so escaping the whole of ASCII punctuation printed
+// "key \= value" for any line Glamour did not run inline parsing over. Listed
+// here are the members of that set which are also syntactic under the GFM
+// superset Glamour parses: the inline delimiters, the leaf-block markers a line
+// can start with, and the backslash itself.
+const escapableRunes = "\\`*_[]!<>#-+.)|"
+
+// escapeMarkdown reduces a run of source text to inert prose. Anything outside
+// the frozen grammar has to arrive as itself, and the two characters that carry
+// meaning but sit outside Glamour's escape set travel as character references,
+// which Glamour resolves: '~' opens a tilde fence and delimits strikethrough,
+// and '&' has to follow it so a reference the author typed stays their text
+// rather than becoming the character it names.
 func escapeMarkdown(text string) string {
 	var out strings.Builder
 	for _, r := range text {
-		if r >= '!' && r <= '~' && (unicode.IsPunct(r) || unicode.IsSymbol(r)) {
+		switch {
+		case r == '&':
+			out.WriteString("&amp;")
+		case r == '~':
+			out.WriteString("&#126;")
+		case strings.ContainsRune(escapableRunes, r):
 			out.WriteByte('\\')
+			out.WriteRune(r)
+		default:
+			out.WriteRune(r)
 		}
-		out.WriteRune(r)
 	}
 	return out.String()
 }
