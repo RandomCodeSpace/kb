@@ -105,12 +105,16 @@ func coerceDraftMap(m map[string]any) Draft {
 
 func CoerceDraft(m map[string]any) Draft { return coerceDraftMap(m) }
 
+// clampPrio pins a model-proposed priority onto the three-value scale
+// (issue #234). A draft is untrusted generated JSON, so this clamps rather
+// than rejects: a model that overshoots the scale still produces a usable
+// card. Overshooting low now lands on 3 rather than the retired 4.
 func clampPrio(p int) int {
-	if p < 1 {
-		return 1
+	if p < board.PrioHigh {
+		return board.PrioHigh
 	}
-	if p > 4 {
-		return 4
+	if p > board.PrioLow {
+		return board.PrioLow
 	}
 	return p
 }
