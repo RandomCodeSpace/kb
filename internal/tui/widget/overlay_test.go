@@ -150,6 +150,55 @@ func TestFieldRowUsesTheLabelGutter(t *testing.T) {
 	}
 }
 
+// TestFieldWrapKeepsTheGutterAndBreaksBetweenPills covers the label pill row of
+// the card-detail pane: the first row carries the field's label, continuation
+// rows repeat the gutter, and a pill never straddles two rows.
+func TestFieldWrapKeepsTheGutterAndBreaksBetweenPills(t *testing.T) {
+	styles := theme.New(true)
+	pills := []string{
+		Label(styles, "backend", theme.OverlaySurf, false, false),
+		Label(styles, "type::feature", theme.OverlaySurf, false, false),
+		Label(styles, "area::terminal", theme.OverlaySurf, false, false),
+	}
+	rows := FieldWrap(styles, "labels", pills, 44)
+	if len(rows) != 2 {
+		t.Fatalf("three pills in a 44-cell panel wrapped to %d rows", len(rows))
+	}
+	first, second := ansi.Strip(rows[0]), ansi.Strip(rows[1])
+	if !strings.HasPrefix(first, "  labels      ▐#backend▌") {
+		t.Errorf("first row = %q", first)
+	}
+	if !strings.HasPrefix(second, "              ▐area:terminal▌") {
+		t.Errorf("continuation row did not repeat the gutter: %q", second)
+	}
+	for index, row := range rows {
+		if got := ansi.StringWidth(row); got != 44 {
+			t.Errorf("row %d is %d cells, want 44", index, got)
+		}
+		if strings.Count(row, "▐") != strings.Count(row, "▌") {
+			t.Errorf("row %d split a pill across the break: %q", index, ansi.Strip(row))
+		}
+	}
+}
+
+func TestFieldWrapDegradesWithoutRoom(t *testing.T) {
+	styles := theme.New(true)
+	pill := Label(styles, "a-label-longer-than-the-field", theme.OverlaySurf, false, false)
+	rows := FieldWrap(styles, "labels", []string{"", pill}, 30)
+	if len(rows) != 1 {
+		t.Fatalf("an oversized pill produced %d rows, want 1", len(rows))
+	}
+	if got := ansi.StringWidth(rows[0]); got != 30 {
+		t.Errorf("truncated row is %d cells, want 30", got)
+	}
+	if rows := FieldWrap(styles, "labels", []string{pill}, 8); rows != nil {
+		t.Errorf("a panel with no value field rendered %d rows", len(rows))
+	}
+	if rows := FieldWrap(styles, "labels", nil, 44); rows != nil {
+		t.Errorf("no pills rendered %d rows", len(rows))
+	}
+}
+
 func TestCheckMarksEveryChecklistState(t *testing.T) {
 	styles := theme.New(true)
 	for state, want := range map[CheckState]string{

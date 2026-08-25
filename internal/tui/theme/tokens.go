@@ -59,12 +59,22 @@ type Glyphs struct {
 	MarkSeq  string // card reference prefix, "#142" (section 3.2)
 	MarkTag  string // plain label pill prefix, "#tag" (section 3.5)
 	MarkDue  string // compact due prefix, "!2d" (section 3.4)
+
+	// The filter bar's toggle marks. A filter label pill is the section 3.6
+	// pill plus one of these inside its caps, so the toggle survives the flat
+	// fidelity floor of section 10.7.5, where the dim/hue distinction that
+	// carries the state everywhere else has no color to carry it with. Both are
+	// two cells - the mark and the column that separates it from the pill body -
+	// so the pill's width is the same in both states (section 10.4.4).
+	MarkFilterOff string // unselected filter label pill, "+ #tag"
+	MarkFilterOn  string // selected filter label pill, "x #tag"
 }
 
 // defaultGlyphs is the vocabulary of spec sections 2.2, 2.4, 3.4, 3.6 and
-// 10.4.1. Every token is one cell wide except Blocked, which is two; the width
-// table of section 10.4.1 is asserted in tokens_test.go so a re-spelling that
-// silently changes a mark's width fails the build rather than the layout.
+// 10.4.1. Every token is one cell wide except Blocked and the two filter marks,
+// which are two, and HintSep, which is three; the width table of section 10.4.1
+// is asserted in tokens_test.go so a re-spelling that silently changes a mark's
+// width fails the build rather than the layout.
 var defaultGlyphs = Glyphs{
 	Rail:     "▌",
 	RailFull: "█",
@@ -91,6 +101,9 @@ var defaultGlyphs = Glyphs{
 	MarkSeq:  "#",
 	MarkTag:  "#",
 	MarkDue:  "!",
+
+	MarkFilterOff: "+ ",
+	MarkFilterOn:  "x ",
 }
 
 // Metrics are the gutter, padding and threshold tokens of spec section 2.5,

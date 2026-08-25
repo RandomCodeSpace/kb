@@ -184,6 +184,37 @@ func TestMeterGeometryIsStateInvariant(t *testing.T) {
 	}
 }
 
+// TestFilterLabelWidthIsStateInvariant covers the filter bar's pill, whose three
+// state axes are the toggle (wheel hue against the dim form), keyboard focus
+// (half-block end caps against full blocks) and hover (an underline on the body).
+// None of them may move a cell, or toggling one label would shuffle every label
+// behind it and the row's hit regions with them.
+func TestFilterLabelWidthIsStateInvariant(t *testing.T) {
+	styles := theme.New(true)
+	for _, tag := range []string{"bug", "type::feature", "数", "::feature"} {
+		want := -1
+		for _, selected := range []bool{false, true} {
+			for _, focused := range []bool{false, true} {
+				for _, hovered := range []bool{false, true} {
+					got := ansi.StringWidth(FilterLabel(styles, tag, theme.Canvas, selected, focused, hovered))
+					if want < 0 {
+						want = got
+						continue
+					}
+					if got != want {
+						t.Errorf("%q selected=%v focused=%v hovered=%v is %d cells, want %d",
+							tag, selected, focused, hovered, got, want)
+					}
+				}
+			}
+		}
+		if plain := ansi.StringWidth(Label(styles, tag, theme.Canvas, false, false)); want != plain+2 {
+			t.Errorf("%q filter pill is %d cells, want the board pill's %d plus the toggle mark",
+				tag, want, plain)
+		}
+	}
+}
+
 // TestGradientCostsNoCells keeps the one rule that makes a ramp safe on chrome
 // that shares a row with anything else: it recolors, it never reflows.
 func TestGradientCostsNoCells(t *testing.T) {
