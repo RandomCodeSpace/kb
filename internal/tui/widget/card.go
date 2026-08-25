@@ -1,8 +1,7 @@
 package widget
 
 import (
-	"strings"
-
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
@@ -17,18 +16,31 @@ import (
 // effort marker are not pills). Labels arrive as raw tags because the wheel
 // hue, the surface and the compact degradation are all card-local knowledge.
 type CardOpts struct {
-	Title     string
-	Emoji     string
-	Seq       string
-	Desc      string
-	Meta      []string
-	Labels    []string
-	Priority  int
-	Selected  bool
-	Alt       bool
-	Width     int
-	DescLines int
-	Density   Density
+	Title    string
+	Emoji    string
+	Seq      string
+	Desc     string
+	Meta     []string
+	Labels   []string
+	Priority int
+	Selected bool
+	Alt      bool
+	Width    int
+	Density  Density
+
+	// Blocked draws the section 3.2 alarm beside the sequence number. Issue
+	// #232 moved it off the meta chip row: the fact is about the card's
+	// identity rather than about its schedule, and a two-cell mark beside the
+	// reference costs the meta row nothing.
+	Blocked bool
+
+	// The row grid of spec section 3.1, resolved by the caller from
+	// theme.Metrics so the panel that reserved the column's height and the card
+	// that fills it cannot disagree. Every one is a function of density and
+	// frame height and never of this card's content.
+	TitleLines int
+	DescLines  int
+	LabelRows  int
 
 	// Hovered raises the card's rail cell one tier, per spec section 10.5.1.
 	// It is an affordance cue and nothing more: ratified call 9 keeps the board
@@ -51,8 +63,9 @@ type CardSpan struct {
 }
 
 // Card renders one card as its content rows, without the inter-card gutter:
-// stacking and gutters belong to the panel. Spec section 3.1: four content rows
-// normally, five on a tall frame, two when compact.
+// stacking and gutters belong to the panel. Spec section 3.1 as issue #232
+// rewrote it: title rows, description rows, one meta row and label rows at
+// normal density, two rows when compact.
 func Card(styles *theme.Styles, opts CardOpts) []string {
 	rows, _ := CardWithSpans(styles, opts)
 	return rows
@@ -70,23 +83,29 @@ func CardWithSpans(styles *theme.Styles, opts CardOpts) ([]string, []CardSpan) {
 	surface := styles.Surface(opts.Selected, opts.Alt)
 	surfaceStyle := styles.On(theme.FgBase, surface)
 	inner := metrics.CardInner(opts.Width, opts.Density)
-	descLines := opts.DescLines
+	titleLines, descLines, labelRows := max(opts.TitleLines, 1), opts.DescLines, opts.LabelRows
 	if opts.Density.Compact() {
-		descLines = 0
+		titleLines, descLines, labelRows = 1, 0, 0
 	}
 
-	rows := 2
-	if !opts.Density.Compact() {
-		rows = 3 + descLines
-	}
+	rows := titleLines + descLines + 1 + labelRows
 	content := make([]string, 0, rows)
 	var spans []CardSpan
 	if inner >= metrics.CardMinInner {
-		content = append(content, cardTitle(styles, opts, surface, inner))
-		content = append(content, cardDesc(styles, opts, surface, inner, descLines)...)
-		chips, chipSpans := cardChips(styles, opts, surface, inner)
-		spans = offsetSpans(chipSpans, len(content), metrics.CardRail+metrics.CardPad(opts.Density), inner)
-		content = append(content, chips...)
+		// The title and the description share one fixed block of rows. The card's
+		// total height stays a pure function of density and frame height - which
+		// is what lets the panel reserve a column's height before its cards are
+		// rendered - while a title short enough to fit one row hands its spare row
+		// to the description instead of spending it on blank surface. The meta and
+		// label rows below sit at a fixed offset from the card's top either way,
+		// so a long title never pushes them down.
+		title := cardTitle(styles, opts, surface, inner, titleLines)
+		content = append(content, title...)
+		content = append(content, cardDesc(styles, opts, surface, inner, titleLines+descLines-len(title))...)
+		meta, labels, labelSpans := cardChips(styles, opts, surface, inner, labelRows)
+		spans = offsetSpans(labelSpans, len(content), metrics.CardRail+metrics.CardPad(opts.Density), inner)
+		content = append(content, meta)
+		content = append(content, labels...)
 	}
 	for len(content) < rows {
 		content = append(content, "")
@@ -138,101 +157,118 @@ func clip(content string, width int) string {
 	return ansi.Truncate(content, width, "")
 }
 
-// cardTitle is row 0 of spec section 3.2: emoji, title, and a right-aligned
-// sequence number that is never truncated.
-func cardTitle(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner int) string {
+// cardTitle is the title rows of spec section 3.2 as issue #232 rewrote it: the
+// title wraps across its whole allotment instead of being ellipsized to one
+// line, and only the last allotted row carries the ellipsis.
+//
+// The trailer - the blocked alarm and the sequence number - sits at the right
+// end of the first row and is never truncated. It narrows the first row's field
+// alone; the rows under it take the full content width, which is where a
+// wrapped title gets the space a one-line title never had.
+func cardTitle(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner, lines int) []string {
 	titleStyle := styles.On(theme.FgBase, surface)
 	if opts.Selected {
 		titleStyle = styles.OnBold(theme.FgBase, surface)
 	}
+	surfaceStyle := styles.On(theme.FgBase, surface)
 	head := opts.Title
 	if opts.Emoji != "" {
 		head = opts.Emoji + " " + opts.Title
 	}
-	surfaceStyle := styles.On(theme.FgBase, surface)
-	sequence := ansi.StringWidth(opts.Seq)
+
+	trailer, trailerWidth := cardTrailer(styles, opts, surface)
 	field := inner
-	if sequence > 0 {
-		field = inner - sequence - 1
+	if trailerWidth > 0 {
+		field = max(inner-trailerWidth-1, 0)
 	}
-	if field < 0 {
-		field = 0
+	fields := make([]int, lines)
+	for index := range fields {
+		fields[index] = inner
 	}
-	// The emoji and the column beside it are their own run (issue #229): a
-	// terminal shapes a styled run as a unit, so a title left inside the emoji's
-	// run is drawn pushed right by the pictograph's excess advance and its last
-	// character is then clipped by the padding run, which lands on the cell the
-	// grid gave it.
-	text := truncate(styles, head, field)
-	row := fill(surfaceStyle, MarkRun(styles, opts.Emoji, text, titleStyle, surface), field)
-	if sequence == 0 {
-		return row
+	fields[0] = field
+
+	// Trailing rows the title did not need are not emitted at all: the block
+	// they belong to is shared with the description, which takes whatever the
+	// title leaves. The first row is always emitted, because it carries the
+	// trailer even for an empty title.
+	wrapped := wrapFields(styles, head, fields)
+	for len(wrapped) > 1 && wrapped[len(wrapped)-1] == "" {
+		wrapped = wrapped[:len(wrapped)-1]
 	}
-	return row + pad(surfaceStyle, inner-field-sequence) +
-		styles.On(theme.FgMuted, surface).Render(opts.Seq)
+
+	out := make([]string, 0, len(wrapped))
+	for index, text := range wrapped {
+		style := titleStyle
+		if index > 0 {
+			// A continuation row is the same title, one step quieter: the first
+			// row is what a scan reads, and bolding the whole wrap would make a
+			// long title shout louder than a short one.
+			style = styles.On(theme.FgMuted, surface)
+		}
+		if index > 0 {
+			out = append(out, style.Render(text))
+			continue
+		}
+		// The emoji and the column beside it are their own run (issue #229): a
+		// terminal shapes a styled run as a unit, so a title left inside the
+		// emoji's run is drawn pushed right by the pictograph's excess advance
+		// and its last character is then clipped by the padding run, which lands
+		// on the cell the grid gave it.
+		row := fill(surfaceStyle, MarkRun(styles, opts.Emoji, text, style, surface), field)
+		if trailerWidth > 0 {
+			row += pad(surfaceStyle, inner-field-trailerWidth) + trailer
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
-// cardDesc is the description snippet of spec section 3.3. A description
-// shorter than its allotment leaves its remaining rows blank.
+// cardTrailer is the right end of the title row: the blocked alarm of spec
+// section 3.2 and the sequence number, with the alarm owning the column after
+// it under the section 10.4.1 adjacency rule.
+//
+// The alarm is the one pictograph left in the vocabulary (issue #232). It sits
+// here rather than in the meta chip row because being blocked is a fact about
+// the card rather than about its schedule, and because a binary alarm is the
+// one thing a substituted glyph cannot garble: tofu beside a sequence number
+// still says this card is flagged, where a substituted effort square lost which
+// of three values it carried.
+func cardTrailer(styles *theme.Styles, opts CardOpts, surface theme.Slot) (string, int) {
+	trailer, width := "", 0
+	if opts.Blocked {
+		mark := styles.Glyph.Blocked
+		trailer = MarkRun(styles, mark, mark+" ", styles.OnBold(theme.StatusWarn, surface), surface)
+		width = ansi.StringWidth(mark) + 1
+	}
+	if sequence := ansi.StringWidth(opts.Seq); sequence > 0 {
+		trailer += styles.On(theme.FgMuted, surface).Render(opts.Seq)
+		width += sequence
+	}
+	return trailer, width
+}
+
+// cardDesc is the description of spec section 3.3 as issue #232 rewrote it: the
+// frozen markdown grammar of the mdparity package, rendered at card scale
+// across the card's whole description allotment. A description shorter than
+// that allotment leaves its remaining rows blank and the rows under it do not
+// move up.
+//
+// The grammar is the card-detail pane's grammar and not a second one. What
+// differs is the output stage: the pane hands the reduced source to glamour,
+// which owns a document's margins and blank lines; a card has neither the rows
+// nor the width for either, so it takes the runs and wraps them itself.
 func cardDesc(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner, lines int) []string {
 	if lines <= 0 {
 		return nil
 	}
-	style := styles.On(theme.FgMuted, surface)
-	out := make([]string, 0, lines)
-	for _, line := range wrap(styles, opts.Desc, inner, lines) {
-		if line == "" {
-			out = append(out, "")
-			continue
-		}
-		out = append(out, style.Render(line))
-	}
-	return out
+	base := styles.On(theme.FgMuted, surface)
+	return wrapWords(styles, descWords(styles, opts.Desc, surface), base, inner, lines)
 }
 
-// wrap is the greedy word wrap of spec section 3.3: a word longer than the
-// field is hard-truncated rather than overflowing, and the last allotted line
-// carries the ellipsis when text remains.
-func wrap(styles *theme.Styles, text string, width, lines int) []string {
-	out := make([]string, 0, lines)
-	if width <= 0 {
-		for len(out) < lines {
-			out = append(out, "")
-		}
-		return out
-	}
-	words := strings.Fields(text)
-	index := 0
-	for len(out) < lines {
-		line := ""
-		for index < len(words) {
-			candidate := words[index]
-			if line != "" {
-				candidate = line + " " + words[index]
-			}
-			if ansi.StringWidth(candidate) <= width {
-				line = candidate
-				index++
-				continue
-			}
-			if line == "" {
-				line = truncate(styles, words[index], width)
-				index++
-			}
-			break
-		}
-		if len(out) == lines-1 && index < len(words) {
-			line = truncate(styles, strings.TrimSpace(line+" "+strings.Join(words[index:], " ")), width)
-			index = len(words)
-		}
-		out = append(out, line)
-	}
-	return out
-}
-
-// cardChips is the meta chip row and the label pill row of spec sections 3.4
-// and 3.5. Compact merges the labels onto the meta row and flattens the pills.
-func cardChips(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner int) ([]string, []CardSpan) {
+// cardChips is the meta chip row of spec section 3.4 and the label rows of
+// section 3.5. Compact merges the labels onto the meta row and flattens the
+// pills, which is step 5 of the section 2.6 drop order.
+func cardChips(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner, labelRows int) (string, []string, []CardSpan) {
 	surfaceStyle := styles.On(theme.FgBase, surface)
 	flat := opts.Density.Compact()
 	labels := make([]string, 0, len(opts.Labels))
@@ -242,13 +278,87 @@ func cardChips(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner in
 	if flat {
 		entries := append(append([]string{}, opts.Meta...), labels...)
 		line, starts := joinAt(surfaceStyle, entries, inner)
-		return []string{line}, labelSpans(opts.Labels, labels, starts[len(opts.Meta):], 0)
+		return line, nil, labelSpans(opts.Labels, labels, starts[len(opts.Meta):], 0)
 	}
-	line, starts := joinAt(surfaceStyle, labels, inner)
-	return []string{
-		join(surfaceStyle, opts.Meta, inner),
-		line,
-	}, labelSpans(opts.Labels, labels, starts, 1)
+	rows, starts := wrapLabels(surfaceStyle, labels, inner, labelRows)
+	spans := make([]CardSpan, 0, len(labels))
+	for index, start := range starts {
+		if start.column < 0 {
+			continue
+		}
+		spans = append(spans, CardSpan{
+			Row: 1 + start.row, X0: start.column,
+			X1:    start.column + ansi.StringWidth(labels[index]),
+			Index: index,
+			Tag:   opts.Labels[index],
+		})
+	}
+	return join(surfaceStyle, opts.Meta, inner), rows, spans
+}
+
+// labelStart is where one label pill landed: which of the allotted label rows,
+// and the column it starts at inside that row. A pill that did not fit reports
+// a negative column.
+type labelStart struct {
+	row    int
+	column int
+}
+
+// wrapLabels lays the label pills out across the card's label rows. Spec
+// section 3.5 as issue #232 rewrote it.
+//
+// Spacing is a fixed one-cell gutter, which is what "equally spaced" resolves
+// to on a cell grid: every gap is the same cell whatever the row holds, so a
+// label that changes, appears or disappears moves the pills after it and
+// nothing else. Distributing slack between pills instead would make the gutter
+// a function of the row's contents, so the same label would sit at a different
+// column on two cards and every gap would move whenever any pill changed width
+// - a reflow section 10.4.4 spends real effort avoiding elsewhere.
+//
+// The wrap is greedy in the order the caller supplied, which is the survival
+// order of section 3.5: a pill that does not fit the rest of the current row
+// starts the next one, and a pill too wide for a row of its own is skipped
+// rather than truncated into an unreadable stub. Pills still unplaced when the
+// allotment runs out are dropped, the same rule section 3.4 applies to a chip
+// that does not fit.
+func wrapLabels(style lipgloss.Style, labels []string, inner, rows int) ([]string, []labelStart) {
+	starts := make([]labelStart, len(labels))
+	for index := range starts {
+		starts[index] = labelStart{column: -1}
+	}
+	if rows <= 0 || inner <= 0 {
+		return nil, starts
+	}
+	out := make([]string, 0, rows)
+	line, used, row := "", 0, 0
+	for index, label := range labels {
+		width := ansi.StringWidth(label)
+		if label == "" || width > inner {
+			continue
+		}
+		separator := 0
+		if used > 0 {
+			separator = 1
+		}
+		if used+separator+width > inner {
+			if row+1 >= rows {
+				break
+			}
+			out = append(out, line)
+			line, used, separator, row = "", 0, 0, row+1
+		}
+		if separator == 1 {
+			line += pad(style, 1)
+		}
+		starts[index] = labelStart{row: row, column: used + separator}
+		line += label
+		used += separator + width
+	}
+	out = append(out, line)
+	for len(out) < rows {
+		out = append(out, "")
+	}
+	return out, starts
 }
 
 // labelSpans pairs the emitted label pills with the tags they carry.

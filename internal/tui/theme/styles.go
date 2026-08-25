@@ -53,14 +53,15 @@ type Styles struct {
 	Timing   Timing
 	Fidelity Fidelity
 
-	blank      lipgloss.Style
-	blankBold  lipgloss.Style
-	pressedOn  string
-	pressedOff string
-	surfaceOn  [numSlots]string
-	bandOn     [numBands]string
-	grad       [numRamps][GradSteps]lipgloss.Style
-	gradBold   [numRamps][GradSteps]lipgloss.Style
+	blank       lipgloss.Style
+	blankBold   lipgloss.Style
+	blankItalic lipgloss.Style
+	pressedOn   string
+	pressedOff  string
+	surfaceOn   [numSlots]string
+	bandOn      [numBands]string
+	grad        [numRamps][GradSteps]lipgloss.Style
+	gradBold    [numRamps][GradSteps]lipgloss.Style
 }
 
 // TableStyles are the cell styles of an adopted lipgloss/v2 table. They carry
@@ -437,6 +438,14 @@ func (s *Styles) OnBold(foreground, background Slot) lipgloss.Style {
 	return s.blankBold.Foreground(s.Pal[foreground]).Background(s.Pal[background])
 }
 
+// OnItalic is On with the italic attribute already set, for the emphasis run of
+// the card description's markdown (spec section 3.3, issue #232). Italic is an
+// attribute and costs no cell, so a description that carries emphasis wraps to
+// the same rows as one that does not.
+func (s *Styles) OnItalic(foreground, background Slot) lipgloss.Style {
+	return s.blankItalic.Foreground(s.Pal[foreground]).Background(s.Pal[background])
+}
+
 // Fg returns the cached blank style carrying a foreground slot only, for runs
 // that inherit the surface they are composed onto.
 func (s *Styles) Fg(foreground Slot) lipgloss.Style {
@@ -477,15 +486,16 @@ func build(table paletteRGB, isDark bool, timing Timing, fidelity Fidelity) *Sty
 	pal := table.colors()
 	blank := lipgloss.NewStyle()
 	built := &Styles{
-		Pal:        pal,
-		Metrics:    defaultMetrics,
-		Glyph:      defaultGlyphs,
-		Timing:     timing,
-		Fidelity:   fidelity,
-		blank:      blank,
-		blankBold:  blank.Bold(true),
-		pressedOn:  ansi.Style{}.Reverse(true).String(),
-		pressedOff: ansi.Style{}.Reverse(false).String(),
+		Pal:         pal,
+		Metrics:     defaultMetrics,
+		Glyph:       defaultGlyphs,
+		Timing:      timing,
+		Fidelity:    fidelity,
+		blank:       blank,
+		blankBold:   blank.Bold(true),
+		blankItalic: blank.Italic(true),
+		pressedOn:   ansi.Style{}.Reverse(true).String(),
+		pressedOff:  ansi.Style{}.Reverse(false).String(),
 	}
 	for slot := Slot(0); slot < numSlots; slot++ {
 		built.surfaceOn[slot] = ansi.Style{}.BackgroundColor(pal[slot]).String()

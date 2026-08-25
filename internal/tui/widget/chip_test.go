@@ -343,26 +343,43 @@ func TestFilterLabelHoverUnderlinesWithoutRecoloring(t *testing.T) {
 	}
 }
 
-func TestPriorityMarkerIsTwoCells(t *testing.T) {
+// TestPriorityDigitSitsOnItsFill is the section 3.4 priority marker as issue
+// #232 rewrote it: the digit alone on a fill of the priority hue, the
+// one-character pill of section 3.6. Three cells padded, one flat, and the
+// digit is what a terminal with no color still shows.
+//
+// The scale is three values - 1 high, 2 medium, 3 low - and the seam is
+// tolerant of the four-value data the store holds until the migration lands: a
+// stored 4 renders as low, which is what it always meant. Digits rather than
+// H/M/L, because the effort marker on the same row is already a letter on a
+// fill and renders an M of its own.
+func TestPriorityDigitSitsOnItsFill(t *testing.T) {
 	styles := theme.New(true)
-	cases := map[int]string{1: "P1", 2: "P2", 3: "P3", 4: "P4", 0: "P3", 7: "P3"}
+	cases := map[int]string{1: "1", 2: "2", 3: "3", 4: "3", 0: "3", 7: "3", -1: "3"}
 	for priority, want := range cases {
-		rendered := Priority(styles, priority, theme.Card)
-		if got := ansi.Strip(rendered); got != want {
-			t.Errorf("Priority(%d) = %q, want %q", priority, got, want)
+		padded := Priority(styles, priority, theme.Card, false)
+		if got := ansi.Strip(padded); got != " "+want+" " {
+			t.Errorf("Priority(%d) = %q, want %q", priority, got, " "+want+" ")
 		}
-		if got := ansi.StringWidth(rendered); got != 2 {
-			t.Errorf("Priority(%d) is %d cells, want 2", priority, got)
+		if got := ansi.StringWidth(padded); got != 3 {
+			t.Errorf("Priority(%d) is %d cells, want 3", priority, got)
+		}
+		flat := Priority(styles, priority, theme.Card, true)
+		if got := ansi.Strip(flat); got != want {
+			t.Errorf("flat Priority(%d) = %q, want %q", priority, got, want)
+		}
+		if got := ansi.StringWidth(flat); got != 1 {
+			t.Errorf("flat Priority(%d) is %d cells, want 1", priority, got)
 		}
 	}
 }
 
 func TestPriorityUsesTheHueOfItsSlot(t *testing.T) {
 	styles := theme.New(true)
-	if Priority(styles, 1, theme.Card) == Priority(styles, 2, theme.Card) {
+	if Priority(styles, 1, theme.Card, false) == Priority(styles, 2, theme.Card, false) {
 		t.Error("P1 and P2 must not render identically")
 	}
-	if Priority(styles, 9, theme.Card) != Priority(styles, 3, theme.Card) {
+	if Priority(styles, 9, theme.Card, false) != Priority(styles, 3, theme.Card, false) {
 		t.Error("an unknown priority must fall back to P3 exactly")
 	}
 }

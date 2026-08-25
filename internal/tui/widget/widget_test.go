@@ -131,16 +131,19 @@ func markRunSegments(rendered string) []string {
 func TestMarkRunSplitsAWidePictographOffTheTextBesideIt(t *testing.T) {
 	styles := theme.New(true)
 	style := styles.On(theme.FgSubtle, theme.Card)
-	square := styles.Glyph.EffortM
-	got := MarkRun(styles, square, square+" M", style, theme.Card)
-	if want := []string{square + " ", "M"}; !equalStrings(markRunSegments(got), want) {
+	// The blocked alarm is the vocabulary's one remaining pictograph after
+	// issue #232 retired the effort squares; the defect class is the mark's,
+	// not the chip's, so the guard follows it onto the title row.
+	square := styles.Glyph.Blocked
+	got := MarkRun(styles, square, square+" #7", style, theme.Card)
+	if want := []string{square + " ", "#7"}; !equalStrings(markRunSegments(got), want) {
 		t.Errorf("wide mark runs = %q, want %q", markRunSegments(got), want)
 	}
-	if plain := ansi.Strip(got); plain != square+" M" {
-		t.Errorf("wide mark content = %q, want %q", plain, square+" M")
+	if plain := ansi.Strip(got); plain != square+" #7" {
+		t.Errorf("wide mark content = %q, want %q", plain, square+" #7")
 	}
-	if width := ansi.StringWidth(ansi.Strip(got)); width != 4 {
-		t.Errorf("wide mark run is %d cells, want 4", width)
+	if width := ansi.StringWidth(ansi.Strip(got)); width != 5 {
+		t.Errorf("wide mark run is %d cells, want 5", width)
 	}
 }
 
@@ -157,8 +160,8 @@ func TestMarkRunKeepsOneRunWhereTheSplitBuysNothing(t *testing.T) {
 		content string
 	}{
 		{"one cell", styles.Glyph.Diamond, styles.Glyph.Diamond + " XL"},
-		{"no mark", "", "3d old"},
-		{"truncated past the mark", styles.Glyph.EffortM, "…"},
+		{"no mark", "", "3d"},
+		{"truncated past the mark", styles.Glyph.Blocked, "…"},
 	}
 	for _, testCase := range cases {
 		got := MarkRun(styles, testCase.mark, testCase.content, style, theme.Card)
@@ -173,7 +176,7 @@ func TestMarkRunKeepsOneRunWhereTheSplitBuysNothing(t *testing.T) {
 // empty run is spent behind it.
 func TestMarkRunDropsAnEmptyTailRun(t *testing.T) {
 	styles := theme.New(true)
-	square := styles.Glyph.EffortS
+	square := styles.Glyph.Blocked
 	got := MarkRun(styles, square, square+" ", styles.On(theme.FgSubtle, theme.Card), theme.Card)
 	if segments := markRunSegments(got); len(segments) != 1 || segments[0] != square+" " {
 		t.Errorf("runs = %q, want the mark and its column alone", segments)

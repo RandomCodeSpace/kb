@@ -50,13 +50,18 @@ func TestRailComposesUncachedSurfaces(t *testing.T) {
 func TestRailHuesFollowPriority(t *testing.T) {
 	styles := theme.New(true)
 	seen := map[string]bool{}
-	for _, priority := range []int{1, 2, 3, 4} {
+	for _, priority := range []int{1, 2, 3} {
 		seen[Rail(styles, priority, theme.Card, false)] = true
 	}
-	if len(seen) != 4 {
-		t.Errorf("four priorities produced %d distinct rails", len(seen))
+	if len(seen) != 3 {
+		t.Errorf("three priorities produced %d distinct rails", len(seen))
 	}
-	if Rail(styles, 9, theme.Card, false) != Rail(styles, 3, theme.Card, false) {
-		t.Error("an unknown priority must fall back to the P3 rail")
+	// Issue #232 collapsed the scale to three values at the render seam. The
+	// stored 4 the migration has not reached yet reads as the low rail, which is
+	// what it always meant, and every value off the scale does the same.
+	for _, legacy := range []int{4, 9, 0, -1} {
+		if Rail(styles, legacy, theme.Card, false) != Rail(styles, 3, theme.Card, false) {
+			t.Errorf("priority %d did not fall back to the low rail", legacy)
+		}
 	}
 }

@@ -144,24 +144,82 @@ func FilterLabel(styles *theme.Styles, tag string, on theme.Slot, selected, focu
 	})
 }
 
+// Effort renders the effort marker of spec section 3.4. Issue #232 replaced the
+// colored square the marker wore between #223 and #230 with the effort letter
+// on a colored fill: a one-letter pill in the section 3.6 anatomy, pad, letter,
+// pad, three cells at normal density.
+//
+// The pill form is the anatomy verbatim rather than a tighter one because the
+// tighter one already means something. A colored letter with no padding is the
+// flat chip of section 2.6 step 7, the compact degradation of a pill, and
+// spending it at normal density would say the row had run out of width when it
+// had not. The compact row does spend it, and the marker is one cell there.
+//
+// ASCII on background color is the whole of it: the letter carries the value,
+// the hue reinforces it, and neither depends on a terminal font drawing a
+// pictograph. That is the trade #232 recorded - the squares carried one of
+// three values and lost which one whenever a font substituted or clipped them.
+//
+// A value the S/M/L scale does not name keeps the Diamond fallback the marker
+// wore before the squares: the mark, the column section 10.4.1's adjacency rule
+// gives it, and the value as the board spells it.
+func Effort(styles *theme.Styles, value string, on theme.Slot, flat bool) string {
+	if value == "" {
+		return ""
+	}
+	fill, onScale := theme.EffortSlot(value)
+	if !onScale {
+		mark := styles.Glyph.Diamond
+		return MarkRun(styles, mark, mark+" "+value, styles.On(theme.FgSubtle, on), on)
+	}
+	return Chip(styles, ChipOpts{Text: value, Fill: fill, On: on, Flat: flat})
+}
+
 // LabelWheel is the label color hash of spec section 1.6, unchanged. It lives
 // beside the palette now, because the per-board accent of section 10.7.2
 // derives from the same wheel and the two must not fork.
 func LabelWheel(tag string) int { return theme.WheelIndex(tag) }
 
-// Priority renders the priority marker of spec section 3.4: bold, in the
-// priority hue, never a pill, and only two cells, which is why it survives
-// longest when the chip row runs out of width.
-func Priority(styles *theme.Styles, priority int, on theme.Slot) string {
-	return styles.OnBold(theme.PrioritySlot(priority), on).
-		Render(styles.Glyph.MarkPrio + strconv.Itoa(priorityLabel(priority)))
+// Priority renders the priority marker of spec section 3.4. Issue #232 replaced
+// the "P1" text treatment with the digit alone on a fill of the priority hue:
+// the one-character pill of section 3.6, the same anatomy the effort marker now
+// wears, so the meta row reads as one grammar rather than as four unrelated
+// treatments that happen to share a line.
+//
+// The digit carries the fact and the hue reinforces it, which is section 1.9's
+// floor: the four priority hues are all readable against FgOnAccent, and a
+// terminal that renders no color at all still shows a numeral. The "P" the
+// marker used to carry said nothing the column and the digit did not - the rail
+// beside the card is already the priority hue - and it cost a cell on the row
+// section 3.4 spends the most effort keeping short.
+//
+// Cost is three cells padded and one flat, against the two the old marker spent
+// in both densities. It is still the chip that survives longest: nothing on the
+// row is shorter.
+func Priority(styles *theme.Styles, priority int, on theme.Slot, flat bool) string {
+	return Chip(styles, ChipOpts{
+		Text: strconv.Itoa(priorityLabel(priority)),
+		Fill: theme.PrioritySlot(priority),
+		On:   on,
+		Flat: flat,
+	})
 }
 
-// priorityLabel is the number the marker prints. Spec section 1.4 maps anything
-// that is not 1, 2 or 4 onto P3, hue and label alike.
+// priorityLabel is the digit the marker prints. Spec section 1.4 as issue #232
+// rewrote it: the scale is three values - 1 high, 2 medium, 3 low - and
+// anything else is low, digit and hue alike.
+//
+// Digits and not H/M/L letters, because the effort marker on the same meta row
+// is already a letter on a fill and renders an M of its own. Two letter-on-fill
+// Ms a few cells apart would be one grammar saying two unrelated things; a
+// digit and a letter are two.
+//
+// The mapping is tolerant of the four-value data the store still holds until
+// the priority migration lands: a stored 4 reads as low, which is what it
+// always meant. This is display only - nothing here writes a task.
 func priorityLabel(priority int) int {
 	switch priority {
-	case 1, 2, 4:
+	case 1, 2:
 		return priority
 	default:
 		return 3

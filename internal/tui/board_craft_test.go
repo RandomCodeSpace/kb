@@ -453,8 +453,8 @@ func TestBoardMetaDropIsUniformAcrossCards(t *testing.T) {
 // column drops a category the widest card cannot hold even though a shorter
 // card in the same column could.
 func TestBoardMetaDropTakesTheWidestCardInTheColumn(t *testing.T) {
-	narrow := []string{"P1", "new", "", "", ""}
-	wide := []string{"P2", "400d old", "blocked", "overdue 20d", "M"}
+	narrow := []string{" 1 ", "new", "", ""}
+	wide := []string{" 2 ", "400d", " !20d ", " M "}
 	metas := [][]string{narrow, append([]string{}, wide...)}
 	inner := metaRowWidth(wide) - 1
 	depth := metaDepth(metas, inner)
@@ -550,5 +550,91 @@ func TestBoardHoverIdsAreStableAndScoped(t *testing.T) {
 	}
 	if hoverOnly(pointer.Point{}) != nil {
 		t.Fatal("a hover-only region delivered a message")
+	}
+}
+
+// TestBoardRowsAreExactlyFrameWidthAtEveryPinnedSize is the determinism
+// obligation of spec section 10.2.2 applied to the card anatomy issue #232
+// rewrote. Every row the board composes is exactly the frame width, at every
+// pinned size and in both densities: a card whose title now wraps, whose
+// description now renders markdown and whose labels now wrap onto a second row
+// has three new ways to compose a row one cell wrong, and a golden only catches
+// the sizes it happens to pin.
+func TestBoardRowsAreExactlyFrameWidthAtEveryPinnedSize(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	fixture := boardViewFixture(now)
+	// A description that exercises every branch of the frozen grammar at card
+	// scale, and a title long enough to wrap and then still ellipsize.
+	fixture.Tasks[0].Title = "Pointer capture leaks when the column scrolls under the drag ghost on resize"
+	fixture.Tasks[0].Desc = "## Plan\n**bold** and *slant* and `mono`\n- a bullet item\n7. an ordinal\nhttps://example.test/x kb://task/9"
+	fixture.Tasks[0].Tags = []string{"type::feature", "area::tui", "#backend", "regression", "needs-review"}
+	fixture.Tasks[1].Due = "2026-08-01"
+
+	sizes := []struct{ width, height int }{
+		{120, 40}, // normal density, four columns
+		{116, 40}, // the compaction width axis
+		{100, 28}, // the compaction height axis
+		{60, 50},  // single column, tall: three description rows
+		{60, 80},  // single column, taller: the description ladder's cap
+		{40, 20},  // single column, compact
+		{24, 12},  // below the readable floor, chips dropping
+	}
+	for _, size := range sizes {
+		m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
+		m.loading = false
+		m.board = fixture
+		m.now = func() time.Time { return now }
+		m.renderedAt = now
+		m.boardView.showCancelled = true
+		sized, _ := m.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
+		m = sized.(Model)
+		for row, line := range strings.Split(m.render(), "\n") {
+			if got := ansi.StringWidth(line); got != size.width {
+				t.Errorf("%dx%d row %d is %d cells, want %d: %q",
+					size.width, size.height, row, got, size.width, plain(line))
+			}
+		}
+	}
+}
+
+// TestBoardCardHeightMatchesTheReservedStackHeight is the other half of the
+// same contract. The panel reserves a column's scroll affordance and its
+// overflow cue from columnStackHeight before any card is rendered, so a card
+// that drew a row more or less than the metrics promised would put the "+N
+// more" cue on a row that belongs to a card. Issue #232 made the title and the
+// description share a block, which is exactly the kind of change that can
+// silently break the promise.
+func TestBoardCardHeightMatchesTheReservedStackHeight(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	fixture := boardViewFixture(now)
+	fixture.Tasks[0].Title = "a title long enough to wrap onto the second allotted row and beyond it"
+	fixture.Tasks[0].Desc = strings.Repeat("description ", 40)
+	for _, size := range []struct{ width, height int }{{120, 40}, {60, 50}, {60, 80}, {40, 20}} {
+		m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
+		m.loading = false
+		m.board = fixture
+		m.now = func() time.Time { return now }
+		m.renderedAt = now
+		sized, _ := m.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
+		m = sized.(Model)
+		metrics := m.themeStyles().Metrics
+		layout := boardColumnLayout(metrics, size.width, len(m.boardView.visibleStatuses()))
+		density := metrics.DensityFor(size.height, layout.inner)
+		want := metrics.CardRows(max(m.height, 8), density)
+
+		tasks := tasksInStatus(m.filteredBoard(), board.StatusTodo)
+		width := max(layout.widths[0]-2*metrics.ColumnPad(density), 0)
+		_, owners, _ := m.renderTaskLines(tasks, board.StatusTodo, width, density)
+		rows, previous := 0, owners[0]
+		for _, owner := range owners {
+			if owner != previous {
+				break
+			}
+			rows++
+		}
+		if rows != want {
+			t.Errorf("%dx%d: the first card drew %d rows, the column reserved %d",
+				size.width, size.height, rows, want)
+		}
 	}
 }

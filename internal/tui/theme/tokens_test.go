@@ -174,6 +174,56 @@ func TestDescLinesFollowTheFrameHeight(t *testing.T) {
 	}
 }
 
+// TestDescLinesClimbTheHeightLadder is the section 3.3 allotment as issue #232
+// rewrote it: one line on a short normal frame, and one more for every
+// CardDescStep rows above DescTwoLines, capped at CardDescMax. The ladder
+// spends height the frame actually has, so a terminal buys a longer description
+// only where it can afford one without losing a card off the bottom.
+func TestDescLinesClimbTheHeightLadder(t *testing.T) {
+	metrics := defaultMetrics
+	cases := map[int]int{30: 1, 44: 1, 45: 2, 54: 2, 55: 3, 64: 3, 65: 4, 74: 4, 75: 5, 200: 5}
+	for height, want := range cases {
+		if got := metrics.DescLines(height, DensityNormal); got != want {
+			t.Errorf("DescLines(%d) = %d, want %d", height, got, want)
+		}
+	}
+}
+
+// TestCardRowGridIsAFunctionOfDensityAndHeight is the invariant the whole of
+// section 3.1 rests on: a card's height is decided before its content is, which
+// is what lets a column reserve its scroll affordance and its overflow cue
+// before the cards in it are rendered. Nothing here takes a card.
+func TestCardRowGridIsAFunctionOfDensityAndHeight(t *testing.T) {
+	metrics := defaultMetrics
+	if got := metrics.TitleRows(DensityCompact); got != 1 {
+		t.Errorf("compact title rows = %d, want 1", got)
+	}
+	if got := metrics.TitleRows(DensityNormal); got != metrics.CardTitleLines {
+		t.Errorf("normal title rows = %d, want %d", got, metrics.CardTitleLines)
+	}
+	labels := map[int]int{30: 1, 44: 1, 45: 2, 100: 2}
+	for height, want := range labels {
+		if got := metrics.LabelRows(height, DensityNormal); got != want {
+			t.Errorf("LabelRows(%d) = %d, want %d", height, got, want)
+		}
+	}
+	if got := metrics.LabelRows(100, DensityCompact); got != 0 {
+		t.Errorf("compact label rows = %d, want 0; step 5 merges them onto the meta row", got)
+	}
+	// Total rows: title + description + the one meta row + labels.
+	rows := map[int]int{30: 5, 44: 5, 45: 7, 55: 8, 75: 10}
+	for height, want := range rows {
+		if got := metrics.CardRows(height, DensityNormal); got != want {
+			t.Errorf("CardRows(%d) = %d, want %d", height, got, want)
+		}
+	}
+	for _, height := range []int{12, 30, 45, 100} {
+		if got := metrics.CardRows(height, DensityCompact); got != 2 {
+			t.Errorf("compact CardRows(%d) = %d, want 2", height, got)
+		}
+	}
+}
+
 func TestMetricsCarrySpecNumbers(t *testing.T) {
 	metrics := New(true).Metrics
 	cases := map[string][2]int{
@@ -230,19 +280,15 @@ func TestGlyphsCarryTheAccentVocabulary(t *testing.T) {
 		"Track":    {glyphs.Track, "░"},
 		"Empty":    {glyphs.Empty, "○"},
 		"Alert":    {glyphs.Alert, "▲"},
+		"Bullet":   {glyphs.Bullet, "·"},
 		"HintSep":  {glyphs.HintSep, " | "},
-
-		"EffortS": {glyphs.EffortS, "🟦"},
-		"EffortM": {glyphs.EffortM, "🟨"},
-		"EffortL": {glyphs.EffortL, "🟧"},
 
 		"HalfTop":    {glyphs.HalfTop, "▀"},
 		"HalfBottom": {glyphs.HalfBottom, "▄"},
 
-		"MarkPrio": {glyphs.MarkPrio, "P"},
-		"MarkSeq":  {glyphs.MarkSeq, "#"},
-		"MarkTag":  {glyphs.MarkTag, "#"},
-		"MarkDue":  {glyphs.MarkDue, "!"},
+		"MarkSeq": {glyphs.MarkSeq, "#"},
+		"MarkTag": {glyphs.MarkTag, "#"},
+		"MarkDue": {glyphs.MarkDue, "!"},
 
 		"MarkFilterOff": {glyphs.MarkFilterOff, "+ "},
 		"MarkFilterOn":  {glyphs.MarkFilterOn, "x "},
@@ -281,23 +327,15 @@ func TestGlyphWidthsMatchTheSpecTable(t *testing.T) {
 		"Track":    {ansi.StringWidth(glyphs.Track), 1},
 		"Empty":    {ansi.StringWidth(glyphs.Empty), 1},
 		"Alert":    {ansi.StringWidth(glyphs.Alert), 1},
+		"Bullet":   {ansi.StringWidth(glyphs.Bullet), 1},
 		"HintSep":  {ansi.StringWidth(glyphs.HintSep), 3},
-
-		// The effort squares are East Asian Wide and so two cells each, the
-		// Cells value section 10.4.1 declares for them. They are equal to one
-		// another, which is what lets the effort chip change value without
-		// moving a column under section 10.4.4.
-		"EffortS": {ansi.StringWidth(glyphs.EffortS), 2},
-		"EffortM": {ansi.StringWidth(glyphs.EffortM), 2},
-		"EffortL": {ansi.StringWidth(glyphs.EffortL), 2},
 
 		"HalfTop":    {ansi.StringWidth(glyphs.HalfTop), 1},
 		"HalfBottom": {ansi.StringWidth(glyphs.HalfBottom), 1},
 
-		"MarkPrio": {ansi.StringWidth(glyphs.MarkPrio), 1},
-		"MarkSeq":  {ansi.StringWidth(glyphs.MarkSeq), 1},
-		"MarkTag":  {ansi.StringWidth(glyphs.MarkTag), 1},
-		"MarkDue":  {ansi.StringWidth(glyphs.MarkDue), 1},
+		"MarkSeq": {ansi.StringWidth(glyphs.MarkSeq), 1},
+		"MarkTag": {ansi.StringWidth(glyphs.MarkTag), 1},
+		"MarkDue": {ansi.StringWidth(glyphs.MarkDue), 1},
 
 		// The filter marks are two cells each - the mark and its separating
 		// column - and equal to each other, which is what lets a filter label
@@ -388,24 +426,43 @@ func TestEmojiGlyphsAreSingleWideCodePoints(t *testing.T) {
 	}
 }
 
-// TestEffortResolvesTheScale pins the section 3.4 effort marker: one square per
-// value of the S/M/L scale, the diamond for a value a hand-edited board carries
-// that is not on it, and nothing at all for no value - the empty case renders no
-// chip and must not acquire a marker here.
+// TestEffortResolvesTheScale pins the section 3.4 effort marker as issue #232
+// rewrote it: one palette fill per value of the S/M/L scale for the letter to
+// sit on, and no fill at all for a value a hand-edited board carries that the
+// scale does not name - the render site draws the Diamond fallback for those,
+// and nothing here invents a hue it could be mistaken for a scale value in.
 func TestEffortResolvesTheScale(t *testing.T) {
-	glyphs := New(true).Glyph
-	cases := map[string]string{
-		"S":  glyphs.EffortS,
-		"M":  glyphs.EffortM,
-		"L":  glyphs.EffortL,
-		"XL": glyphs.Diamond,
-		"s":  glyphs.Diamond,
-		"":   "",
+	cases := map[string]struct {
+		slot    Slot
+		onScale bool
+	}{
+		"S":  {slot: StatusInfo, onScale: true},
+		"M":  {slot: StatusWarn, onScale: true},
+		"L":  {slot: Label1, onScale: true},
+		"XL": {onScale: false},
+		"s":  {onScale: false},
+		"":   {onScale: false},
 	}
 	for value, want := range cases {
-		if got := glyphs.Effort(value); got != want {
-			t.Errorf("Effort(%q) = %q, want %q", value, got, want)
+		slot, onScale := EffortSlot(value)
+		if onScale != want.onScale {
+			t.Errorf("EffortSlot(%q) on-scale = %v, want %v", value, onScale, want.onScale)
+			continue
 		}
+		if onScale && slot != want.slot {
+			t.Errorf("EffortSlot(%q) = slot %d, want %d", value, slot, want.slot)
+		}
+	}
+	// The ramp runs cool to warm and no two values share a fill: the letter
+	// carries the value, but a scale whose hues collided would say the two were
+	// the same thing at a glance.
+	seen := map[Slot]string{}
+	for _, value := range []string{"S", "M", "L"} {
+		slot, _ := EffortSlot(value)
+		if other, found := seen[slot]; found {
+			t.Errorf("effort %q and %q share fill slot %d", other, value, slot)
+		}
+		seen[slot] = value
 	}
 }
 

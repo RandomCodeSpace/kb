@@ -12,6 +12,7 @@ import (
 	"golang.org/x/text/width"
 
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
+	"github.com/RandomCodeSpace/kb/internal/tui/widget"
 )
 
 // The Block Elements range. Spec section 10.4.1 classifies these as East Asian
@@ -39,8 +40,9 @@ var unpromotedMarks = []rune{'·', '×', '—'}
 // Wide, less the Block Elements carve-out above.
 //
 // Ambiguous marks are bound because a font may draw them wider than the one
-// cell every width calculation gives them. Wide marks - the compact blocked
-// mark and the effort squares of issue #223 - are bound for the mirror reason:
+// cell every width calculation gives them. The wide mark - the blocked alarm,
+// the vocabulary's only pictograph since issue #232 retired the effort squares
+// - is bound for the mirror reason:
 // the width is honest at two cells, but a pictograph is drawn by a font that
 // frequently ignores the cell grid entirely, and an emoji-less font substitutes
 // tofu of whatever width it has. Either way the column after the mark is the
@@ -134,10 +136,12 @@ func TestBoundGlyphsAreNeverAbutted(t *testing.T) {
 	}
 }
 
-// TestEffortChipKeepsItsColumn pins the fix issue #218 asked for at the render
-// site, so the chip cannot lose its column to a refactor that leaves the walk
-// above passing because the surface happened not to carry an effort chip.
-func TestEffortChipKeepsItsColumn(t *testing.T) {
+// TestEffortMarkerIsALetterOnItsFill is the section 3.4 effort marker as issue
+// #232 rewrote it: the letter on a colored fill, three cells padded and one
+// flat, with no pictograph anywhere in it. The value the marker carries is the
+// letter, so a terminal that draws no emoji and a terminal that draws no color
+// both still show which of S, M and L the card is.
+func TestEffortMarkerIsALetterOnItsFill(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	fixture := boardViewFixture(now)
 	m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
@@ -146,22 +150,58 @@ func TestEffortChipKeepsItsColumn(t *testing.T) {
 	m.now = func() time.Time { return now }
 	m.renderedAt = now
 	styles := m.themeStyles()
-	want := styles.Glyph.EffortM + " M"
-	for _, density := range []theme.Density{theme.DensityNormal, theme.DensityCompact} {
+	widths := map[theme.Density]string{
+		theme.DensityNormal:  " M ",
+		theme.DensityCompact: "M",
+	}
+	for density, want := range widths {
 		meta := m.cardMeta(styles, fixture.Tasks[0], theme.Card, density)
-		if got := plain(meta[4]); got != want {
-			t.Errorf("density %v: effort chip = %q, want %q", density, got, want)
+		if got := plain(meta[3]); got != want {
+			t.Errorf("density %v: effort marker = %q, want %q", density, got, want)
 		}
-		if got := ansi.StringWidth(plain(meta[4])); got != 4 {
-			t.Errorf("density %v: effort chip is %d cells, spec section 3.4 says 4", density, got)
+		if got := ansi.StringWidth(plain(meta[3])); got != len(want) {
+			t.Errorf("density %v: effort marker is %d cells, want %d", density, got, len(want))
+		}
+		for _, r := range plain(meta[3]) {
+			if r > 0x7f {
+				t.Errorf("density %v: effort marker carries a non-ASCII rune U+%04X", density, r)
+			}
 		}
 	}
 }
 
+// TestEffortMarkerHuesTheScale pins the other half: three values, three fills,
+// no two alike. The letter carries the value and the hue reinforces it, so a
+// scale whose hues collided would say two values were the same at a glance.
+func TestEffortMarkerHuesTheScale(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	fixture := boardViewFixture(now)
+	m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
+	m.loading = false
+	m.board = fixture
+	m.now = func() time.Time { return now }
+	m.renderedAt = now
+	styles := m.themeStyles()
+	seen := map[string]string{}
+	for _, effort := range []string{"S", "M", "L"} {
+		task := fixture.Tasks[0]
+		task.Effort = effort
+		rendered := m.cardMeta(styles, task, theme.Card, theme.DensityNormal)[3]
+		if got := plain(rendered); got != " "+effort+" " {
+			t.Errorf("effort %s: marker = %q", effort, got)
+		}
+		key := sgrRun.FindString(rendered)
+		if other, found := seen[key]; found {
+			t.Errorf("effort %s and %s render the same fill", other, effort)
+		}
+		seen[key] = effort
+	}
+}
+
 // TestEffortChipKeepsItsLetterOffTheScale pins the fallback: a hand-edited board
-// may carry an effort value the S/M/L scale does not name, and the chip stays a
-// chip - the diamond it wore before the squares, its own column after it, and
-// the value beside it.
+// may carry an effort value the S/M/L scale does not name, and the marker stays
+// a marker - the diamond it wore before the squares, its own column after it,
+// and the value beside it.
 func TestEffortChipKeepsItsLetterOffTheScale(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	fixture := boardViewFixture(now)
@@ -173,7 +213,7 @@ func TestEffortChipKeepsItsLetterOffTheScale(t *testing.T) {
 	m.renderedAt = now
 	styles := m.themeStyles()
 	meta := m.cardMeta(styles, fixture.Tasks[0], theme.Card, theme.DensityNormal)
-	if got, want := plain(meta[4]), styles.Glyph.Diamond+" XL"; got != want {
+	if got, want := plain(meta[3]), styles.Glyph.Diamond+" XL"; got != want {
 		t.Errorf("off-scale effort chip = %q, want %q", got, want)
 	}
 }
@@ -194,7 +234,7 @@ func TestEffortChipIsEmptyWithoutAValue(t *testing.T) {
 		task := fixture.Tasks[0]
 		task.Effort = effort
 		meta := m.cardMeta(styles, task, theme.Card, theme.DensityNormal)
-		if got := plain(meta[4]); got != "" {
+		if got := plain(meta[3]); got != "" {
 			t.Errorf("effort %q: chip = %q, want empty", effort, got)
 		}
 	}
@@ -216,44 +256,46 @@ func styledRuns(rendered string) []string {
 	return out
 }
 
-// TestEffortSquareDoesNotShareItsRunWithTheLetter is issue #229. The chip kept
-// its four cells and its owned column throughout, and every width kb measures
-// agreed with the render, but the square and the letter were emitted as one
-// styled run. A terminal shapes a styled run as a unit: the square's advance is
-// wider than the two columns the cell grid gives it, so the letter inside that
-// run was drawn pushed right by the excess and then clipped by the run after it,
-// which lands on the cell the grid gave it. Half an M is what reached the user's
-// terminal.
+// TestBlockedAlarmDoesNotShareItsRunWithTheSequence is issue #229's defect
+// class, following the mark that still carries it. The effort chip kept its
+// four cells and its owned column throughout and every width kb measured agreed
+// with the render, but the square and the letter were emitted as one styled
+// run. A terminal shapes a styled run as a unit: the square's advance is wider
+// than the two columns the cell grid gives it, so the letter inside that run
+// was drawn pushed right by the excess and then clipped by the run after it,
+// which lands on the cell the grid gave it. Half an M is what reached the
+// user's terminal.
 //
-// The mark and the column section 10.4.1's adjacency rule gives it are therefore
-// one run and the letter is another. This test holds that split at the render
-// site, which no width assertion can see.
-func TestEffortSquareDoesNotShareItsRunWithTheLetter(t *testing.T) {
-	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
-	fixture := boardViewFixture(now)
-	m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
-	m.loading = false
-	m.board = fixture
-	m.now = func() time.Time { return now }
-	m.renderedAt = now
-	styles := m.themeStyles()
-	for _, effort := range []string{"S", "M", "L"} {
-		mark := styles.Glyph.Effort(effort)
-		for _, density := range []theme.Density{theme.DensityNormal, theme.DensityCompact} {
-			task := fixture.Tasks[0]
-			task.Effort = effort
-			chip := m.cardMeta(styles, task, theme.Card, density)[4]
-			if got, want := plain(chip), mark+" "+effort; got != want {
-				t.Fatalf("effort %s density %v: chip = %q, want %q", effort, density, got, want)
+// Issue #232 retired the squares, so the effort marker no longer carries a
+// pictograph at all and cannot reproduce the defect. The blocked alarm can: it
+// is the vocabulary's one remaining wide mark, and it now sits on the title row
+// with the sequence number immediately after its owned column. The mark and
+// that column are one run and the sequence is another, which is the split no
+// width assertion can see.
+func TestBlockedAlarmDoesNotShareItsRunWithTheSequence(t *testing.T) {
+	styles := theme.New(true)
+	mark := styles.Glyph.Blocked
+	for _, density := range []theme.Density{theme.DensityNormal, theme.DensityCompact} {
+		row := widget.Card(styles, widget.CardOpts{
+			Title: "blocked card", Seq: "#7", Blocked: true,
+			Width: 40, TitleLines: 1, Density: density,
+		})[0]
+		if !strings.Contains(plain(row), mark+" #7") {
+			t.Fatalf("density %v: title row lost the alarm beside the sequence: %q", density, plain(row))
+		}
+		runs := styledRuns(row)
+		owned := -1
+		for index, run := range runs {
+			if run == mark+" " {
+				owned = index
 			}
-			if got := ansi.StringWidth(plain(chip)); got != 4 {
-				t.Errorf("effort %s density %v: chip is %d cells, spec section 3.4 says 4", effort, density, got)
-			}
-			runs := styledRuns(chip)
-			if len(runs) != 2 || runs[0] != mark+" " || runs[1] != effort {
-				t.Errorf("effort %s density %v: runs = %q, want the mark with its owned column in one run and the letter in another",
-					effort, density, runs)
-			}
+		}
+		if owned < 0 {
+			t.Errorf("density %v: runs = %q, want the alarm and its owned column in a run of their own", density, runs)
+			continue
+		}
+		if owned+1 >= len(runs) || runs[owned+1] != "#7" {
+			t.Errorf("density %v: runs = %q, want the sequence in the run after the alarm", density, runs)
 		}
 	}
 }
@@ -271,7 +313,7 @@ func TestEffortDiamondKeepsOneRun(t *testing.T) {
 	m.now = func() time.Time { return now }
 	m.renderedAt = now
 	styles := m.themeStyles()
-	chip := m.cardMeta(styles, fixture.Tasks[0], theme.Card, theme.DensityNormal)[4]
+	chip := m.cardMeta(styles, fixture.Tasks[0], theme.Card, theme.DensityNormal)[3]
 	runs := styledRuns(chip)
 	if want := styles.Glyph.Diamond + " XL"; len(runs) != 1 || runs[0] != want {
 		t.Errorf("off-scale effort chip runs = %q, want one run %q", runs, want)

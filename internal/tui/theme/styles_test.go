@@ -79,8 +79,13 @@ func TestColorsCoverEverySlot(t *testing.T) {
 	}
 }
 
-func TestPrioritySlotFallsBackToPrio3(t *testing.T) {
-	cases := map[int]Slot{1: Prio1, 2: Prio2, 3: Prio3, 4: Prio4, 0: Prio3, 9: Prio3, -1: Prio3}
+// TestPrioritySlotCollapsesToThreeValues is the section 1.4 scale as issue #232
+// rewrote it: high, medium and low, with everything off the scale reading low.
+// The legacy stored 4 is included deliberately - the render seam has to be
+// correct on the databases that exist the day the card lands, and a 4 there
+// always meant the bottom of the scale.
+func TestPrioritySlotCollapsesToThreeValues(t *testing.T) {
+	cases := map[int]Slot{1: Prio1, 2: Prio2, 3: Prio3, 4: Prio3, 0: Prio3, 9: Prio3, -1: Prio3}
 	for priority, want := range cases {
 		if got := PrioritySlot(priority); got != want {
 			t.Errorf("PrioritySlot(%d) = %d, want %d", priority, got, want)

@@ -28,10 +28,10 @@ func hoverCases(styles *theme.Styles) map[string][2][]string {
 	card := func(hovered, selected, alt bool, density Density) []string {
 		return Card(styles, CardOpts{
 			Title: "ship the pointer slice", Seq: "#42", Desc: "hover is a recolor",
-			Meta:     []string{Priority(styles, 1, styles.Surface(selected, alt))},
+			Meta:     []string{Priority(styles, 1, styles.Surface(selected, alt), false)},
 			Labels:   []string{"type::feature", "urgent"},
 			Priority: 1, Selected: selected, Alt: alt, Hovered: hovered,
-			Width: 34, DescLines: 1, Density: density,
+			Width: 34, TitleLines: 2, DescLines: 1, LabelRows: 1, Density: density,
 		})
 	}
 	pill := func(hovered, flat bool, tag string) []string {
@@ -186,10 +186,10 @@ func TestHoverLeavesTheRegionSetByteForByteIdentical(t *testing.T) {
 	for _, density := range []Density{DensityNormal, DensityCompact} {
 		opts := CardOpts{
 			Title: "spans do not move", Seq: "#7", Desc: "region-set stability",
-			Meta:   []string{Priority(styles, 2, theme.Card)},
+			Meta:   []string{Priority(styles, 2, theme.Card, false)},
 			Labels: []string{"type::feature", "urgent", "area::tui"},
 			// Priority 2 and a normal density card so both chip rows render.
-			Priority: 2, Width: 36, DescLines: 1, Density: density,
+			Priority: 2, Width: 36, TitleLines: 2, DescLines: 1, LabelRows: 1, Density: density,
 		}
 		_, rest := CardWithSpans(styles, opts)
 		if len(rest) == 0 {
@@ -213,7 +213,7 @@ func TestHoverTagUnderlinesOnlyTheHoveredPill(t *testing.T) {
 	styles := theme.New(true)
 	opts := CardOpts{
 		Title: "one pill at a time", Labels: []string{"type::feature", "urgent"},
-		Priority: 3, Width: 36, DescLines: 1, Density: DensityNormal,
+		Priority: 3, Width: 36, TitleLines: 2, DescLines: 1, LabelRows: 1, Density: DensityNormal,
 	}
 	rest := Card(styles, opts)
 	opts.HoverTag = "urgent"
