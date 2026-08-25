@@ -795,7 +795,7 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 	meta := ""
 	metaRows := 0
 	if !density.Compact() {
-		if meta = columnMetaLine(tasks); meta != "" {
+		if meta = columnMetaLine(styles, tasks); meta != "" {
 			metaRows = 1
 		}
 	}
@@ -889,10 +889,7 @@ func (m Model) columnStackHeight(count int, density theme.Density) int {
 	if count <= 0 {
 		return 1 // the empty or busy row of spec section 10.8
 	}
-	rows := 2
-	if !density.Compact() {
-		rows = 3 + metrics.DescLines(max(m.height, 8), density)
-	}
+	rows := metrics.CardRows(max(m.height, 8), density)
 	return count*rows + metrics.CardGapRows(density)*(count-1)
 }
 
@@ -928,8 +925,10 @@ func boardCardControlID(taskID string) pointer.ControlID {
 }
 
 // columnMetaLine is the row under the band (spec section 2.3). The blocked
-// segment appears only when the count is non-zero.
-func columnMetaLine(tasks []board.Task) string {
+// segment appears only when the count is non-zero. The separator is the
+// section 10.4.1 Bullet token rather than a literal: the mark is vocabulary,
+// and the card description's list marker is now spelled from the same field.
+func columnMetaLine(styles *theme.Styles, tasks []board.Task) string {
 	blocked := 0
 	for _, task := range tasks {
 		if task.Blocked {
@@ -941,7 +940,7 @@ func columnMetaLine(tasks []board.Task) string {
 		line = "1 card"
 	}
 	if blocked > 0 {
-		line += fmt.Sprintf(" · %d blocked", blocked)
+		line += fmt.Sprintf(" %s %d blocked", styles.Glyph.Bullet, blocked)
 	}
 	return line
 }
@@ -966,7 +965,10 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 	index := statusIndex(status)
 	focused := m.boardView.column == index
 	selected := m.boardView.rows[index]
-	descLines := styles.Metrics.DescLines(max(m.height, 8), density)
+	frameHeight := max(m.height, 8)
+	titleLines := styles.Metrics.TitleRows(density)
+	descLines := styles.Metrics.DescLines(frameHeight, density)
+	labelRows := styles.Metrics.LabelRows(frameHeight, density)
 	gap := styles.Metrics.CardGapRows(density)
 	metas := make([][]string, len(tasks))
 	for i, task := range tasks {
@@ -989,20 +991,23 @@ func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width in
 			tags = append(tags, sanitizeTerminal(tag))
 		}
 		rows, cardSpans := widget.CardWithSpans(styles, widget.CardOpts{
-			Title:     sanitizeTerminal(task.Title),
-			Emoji:     sanitizeTerminal(task.Emoji),
-			Seq:       seqLabel(task),
-			Desc:      sanitizeTerminal(task.Desc),
-			Meta:      metas[i][:depth],
-			Labels:    tags,
-			Priority:  task.Prio,
-			Selected:  isSelected,
-			Alt:       alternate,
-			Width:     width,
-			DescLines: descLines,
-			Density:   density,
-			Hovered:   m.pointerState.IsHovered(boardCardControlID(task.ID)),
-			HoverTag:  m.hoveredCardTag(task.ID, ordered),
+			Title:      sanitizeTerminal(task.Title),
+			Emoji:      sanitizeTerminal(task.Emoji),
+			Seq:        seqLabel(task),
+			Desc:       sanitizeTerminal(task.Desc),
+			Meta:       metas[i][:depth],
+			Labels:     tags,
+			Priority:   task.Prio,
+			Blocked:    task.Blocked,
+			Selected:   isSelected,
+			Alt:        alternate,
+			Width:      width,
+			TitleLines: titleLines,
+			DescLines:  descLines,
+			LabelRows:  labelRows,
+			Density:    density,
+			Hovered:    m.pointerState.IsHovered(boardCardControlID(task.ID)),
+			HoverTag:   m.hoveredCardTag(task.ID, ordered),
 		})
 		rowSpans := make([][]labelSpan, len(rows))
 		for _, span := range cardSpans {
@@ -1096,8 +1101,10 @@ func (m Model) hoveredCardTag(taskID string, tags []string) string {
 	return ""
 }
 
-// cardMetaSlots is the number of chip categories in spec section 3.4's row.
-const cardMetaSlots = 5
+// cardMetaSlots is the number of chip categories in spec section 3.4's row:
+// priority, age, due and effort. Issue #232 moved blocked out of it and onto
+// the title row beside the sequence number.
+const cardMetaSlots = 4
 
 // metaDepth is how many of section 3.4's chip categories every card in one
 // column renders. The drop is a property of the column rather than of a card:
@@ -1158,61 +1165,41 @@ func seqLabel(task board.Task) string {
 func (m Model) cardMeta(styles *theme.Styles, task board.Task, surface theme.Slot, density theme.Density) []string {
 	flat := density.Compact()
 	meta := make([]string, cardMetaSlots)
-	meta[0] = widget.Priority(styles, task.Prio, surface)
+	meta[0] = widget.Priority(styles, task.Prio, surface, flat)
 	meta[1] = styles.On(theme.FgMuted, surface).Render(ageChip(task, m.renderedAt))
-	if task.Blocked {
-		if flat {
-			meta[2] = styles.OnBold(theme.StatusWarn, surface).Render(styles.Glyph.Blocked)
-		} else {
-			meta[2] = widget.Chip(styles, widget.ChipOpts{Text: "blocked", Fill: theme.StatusWarn, On: surface})
-		}
-	}
 	if task.Due != "" {
+		// Issue #232 split the due chip in two. A deadline still ahead is plain
+		// muted text - "today", "in 2d" - because a card that is merely
+		// scheduled is not an alarm and does not earn a fill on a row that has
+		// three other things to say. A deadline behind is the compact MarkDue
+		// form on the danger fill: the mark and the bare elapsed count, which
+		// is the whole of what the seven-cell word "overdue" and the two pill
+		// padding cells used to spell.
+		//
+		// The mark and not the color is what carries the fact, which is section
+		// 1.9's floor: "!" says the deadline has passed on a terminal with no
+		// hue at all, and the two forms are different strings before they are
+		// different colors.
 		label, overdue := dueChip(sanitizeTerminal(task.Due), m.renderedAt)
-		fill := theme.StatusInfo
 		if overdue {
-			fill = theme.StatusDanger
-		}
-		if flat {
-			meta[3] = styles.OnBold(fill, surface).Render(styles.Glyph.MarkDue + compactDue(label))
+			meta[2] = widget.Chip(styles, widget.ChipOpts{
+				Text: styles.Glyph.MarkDue + label,
+				Fill: theme.StatusDanger,
+				On:   surface,
+				Flat: flat,
+			})
 		} else {
-			meta[3] = widget.Chip(styles, widget.ChipOpts{Text: label, Fill: fill, On: surface})
+			meta[2] = styles.On(theme.FgMuted, surface).Render(label)
 		}
 	}
-	if effort := sanitizeTerminal(task.Effort); effort != "" {
-		// The marker is the colored square of the effort scale, and the letter
-		// beside it is not decoration: color alone must not carry the value, and
-		// the letter is what survives a font with no pictograph in it.
-		//
-		// The space between them is the section 10.4.1 adjacency rule, not the
-		// chip separator. A square is East Asian Wide and a diamond is East
-		// Asian Ambiguous, and either way a glyph terminal fonts draw wider than
-		// the cell the cursor was advanced past will have the next column
-		// written on top of it. One column of its own is what keeps the mark and
-		// its letter both legible. The chip is four cells with a square and
-		// three with the diamond fallback, in every density, and the
-		// metaRowWidth arithmetic measures it rather than assuming it, so the
-		// survival order and the column-wide drop of metaDepth carry the cost
-		// without a constant to maintain.
-		//
-		// The square and the column it owns are their own styled run: a terminal
-		// shapes a styled run as a unit, so a letter left inside the square's run
-		// is drawn pushed right by the pictograph's excess advance and then
-		// clipped by the run after it, which lands on the cell the grid gave it.
-		// That is what halved the letter in issue #229.
-		mark := styles.Glyph.Effort(effort)
-		meta[4] = widget.MarkRun(styles, mark, mark+" "+effort,
-			styles.On(theme.FgSubtle, surface), surface)
-	}
+	// The effort marker is the letter on its own fill (issue #232), three cells
+	// padded and one cell flat, or the Diamond fallback and the column section
+	// 10.4.1's adjacency rule gives it for a value off the S/M/L scale.
+	// metaRowWidth measures the chip rather than assuming a width, so the
+	// survival order and the column-wide drop of metaDepth carry whichever form
+	// it took without a constant to maintain.
+	meta[3] = widget.Effort(styles, sanitizeTerminal(task.Effort), surface, flat)
 	return meta
-}
-
-// compactDue drops the "overdue · " prefix the pill spells out in full.
-func compactDue(label string) string {
-	if _, rest, found := strings.Cut(label, "· "); found {
-		return rest
-	}
-	return label
 }
 
 func visibleCardStart(lines, owners []string, selected, height int) int {
@@ -1487,6 +1474,12 @@ func statusLabel(status board.Status) string {
 
 const day = 24 * time.Hour
 
+// ageChip is position 2 of the section 3.4 meta row. Issue #232 cut the word
+// off it: "3d old" and "6h here" spent four and five cells saying which clock
+// the number came from, on a row whose whole job is to be scannable. The column
+// the card sits in already says it - a card in DOING is measured from when it
+// arrived there and a card anywhere else from when it was made - so the number
+// and its unit are the whole chip.
 func ageChip(task board.Task, now time.Time) string {
 	if task.Status == board.StatusDone {
 		return "shipped"
@@ -1501,15 +1494,11 @@ func ageChip(task board.Task, now time.Time) string {
 	}
 	if elapsed < day {
 		if task.Status == board.StatusDoing {
-			return fmt.Sprintf("%dh here", max(1, int(elapsed/time.Hour)))
+			return fmt.Sprintf("%dh", max(1, int(elapsed/time.Hour)))
 		}
 		return "new"
 	}
-	suffix := "old"
-	if task.Status == board.StatusDoing {
-		suffix = "here"
-	}
-	return fmt.Sprintf("%dd %s", int(elapsed/day), suffix)
+	return fmt.Sprintf("%dd", int(elapsed/day))
 }
 
 func dueChip(due string, now time.Time) (string, bool) {
@@ -1527,7 +1516,11 @@ func dueChip(due string, now time.Time) (string, bool) {
 	case days > 1:
 		return fmt.Sprintf("in %dd", days), false
 	default:
-		return fmt.Sprintf("overdue · %dd", -days), true
+		// Issue #232: the word "overdue" is gone. A bare elapsed count behind
+		// the "!" mark is the overdue form, and the three readings stay
+		// distinguishable as text - "today", "in 2d", "5d" - so the hue is
+		// reinforcement rather than the only carrier of the fact.
+		return fmt.Sprintf("%dd", -days), true
 	}
 }
 

@@ -45,12 +45,12 @@ func TestAgeChipParity(t *testing.T) {
 		want    string
 	}{
 		{"todo new", board.StatusTodo, now.Add(-23 * time.Hour), now, "new"},
-		{"todo old", board.StatusTodo, now.Add(-49 * time.Hour), now, "2d old"},
-		{"doing minimum hour", board.StatusDoing, now.Add(-10 * day), now.Add(-10 * time.Minute), "1h here"},
-		{"doing hours", board.StatusDoing, now.Add(-10 * day), now.Add(-23 * time.Hour), "23h here"},
-		{"doing days", board.StatusDoing, now.Add(-10 * day), now.Add(-49 * time.Hour), "2d here"},
+		{"todo old", board.StatusTodo, now.Add(-49 * time.Hour), now, "2d"},
+		{"doing minimum hour", board.StatusDoing, now.Add(-10 * day), now.Add(-10 * time.Minute), "1h"},
+		{"doing hours", board.StatusDoing, now.Add(-10 * day), now.Add(-23 * time.Hour), "23h"},
+		{"doing days", board.StatusDoing, now.Add(-10 * day), now.Add(-49 * time.Hour), "2d"},
 		{"done", board.StatusDone, now.Add(-10 * day), now, "shipped"},
-		{"cancelled uses created", board.StatusCancelled, now.Add(-24 * time.Hour), now, "1d old"},
+		{"cancelled uses created", board.StatusCancelled, now.Add(-24 * time.Hour), now, "1d"},
 		{"future clamps", board.StatusTodo, now.Add(time.Hour), now, "new"},
 	}
 	for _, test := range tests {
@@ -70,7 +70,7 @@ func TestDueChipParity(t *testing.T) {
 		label   string
 		overdue bool
 	}{
-		{"2026-08-15", "overdue · 2d", true},
+		{"2026-08-15", "2d", true},
 		{"2026-08-17", "today", false},
 		{"2026-08-18", "tomorrow", false},
 		{"2026-08-20", "in 3d", false},
@@ -257,8 +257,11 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	text := plain(content)
 	for _, want := range []string{
 		"▸● 1 TO DO", "▌● 2 DOING", "● 3 DONE", "● 4 CANCELLED", "2 cards · 1 blocked",
-		"🚀 Ship terminal board", "#7", "new", "P1", " blocked ", " today ", "🟨 M", " #backend ", " type:feature ",
-		"3h here", "shipped", "1d old", "c cancelled:on",
+		// The blocked alarm sits beside the sequence number now (issue #232),
+		// and the meta row is the digit on its fill, the bare elapsed count,
+		// the due text and the effort letter on its fill.
+		"🚀 Ship terminal board", "⛔ #7", " 1  new today  M ", " #backend ", " type:feature ",
+		"3h", "shipped", "1d", "c cancelled:on",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("wide render missing %q:\n%s", want, text)
@@ -271,7 +274,11 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	// spec section 3.4 spends the extra column on.
 	m.height = 22
 	compact := plain(m.render())
-	for _, want := range []string{"P1 new ⛔ !today 🟨 M #backend", "P2 3h here !tomorrow"} {
+	// The compact row is denser than it was: the priority marker, the age and
+	// the effort marker each gave back a cell or two under issue #232, and the
+	// blocked alarm moved to the title row, so the flat row reaches two labels
+	// at a width that used to hold one.
+	for _, want := range []string{"1 new today M #backend feature", "2 3h tomorrow"} {
 		if !strings.Contains(compact, want) {
 			t.Errorf("compact render missing %q:\n%s", want, compact)
 		}
@@ -546,8 +553,9 @@ func TestPollTickRefreshesRenderTimeAtRolloverBoundary(t *testing.T) {
 	}
 
 	rolled := plain(m.View().Content)
-	// The frame is short, so the due pill is the compact "!" mark.
-	for _, want := range []string{"1d old", "!1d"} {
+	// The age is the bare elapsed count and the passed deadline is the "!"
+	// mark and its own bare count, at both densities (issue #232).
+	for _, want := range []string{"3 1d !1d"} {
 		if !strings.Contains(rolled, want) {
 			t.Fatalf("post-tick render missing %q:\n%s", want, rolled)
 		}
@@ -650,16 +658,13 @@ func TestBoardViewSmallHelpers(t *testing.T) {
 	if got := columnHue("unknown"); got != theme.HueTodo {
 		t.Fatalf("unknown column hue = %v", got)
 	}
-	if got := plain(widget.Priority(theme.New(true), 99, theme.Card)); got != "P3" {
+	if got := plain(widget.Priority(theme.New(true), 99, theme.Card, true)); got != "3" {
 		t.Fatalf("invalid priority fallback = %q", got)
 	}
 	if got := padLine("abcdef", 3, "-"); got != "abc" {
 		t.Fatalf("truncated pad = %q", got)
 	}
-	if got := compactDue("overdue · 2d"); got != "2d" {
-		t.Fatalf("compact due = %q", got)
-	}
-	if got := columnMetaLine([]board.Task{{}}); got != "1 card" {
+	if got := columnMetaLine(theme.New(true), []board.Task{{}}); got != "1 card" {
 		t.Fatalf("single card meta = %q", got)
 	}
 	if got := hiddenCards([]string{"a", "a", "", "b"}, 2); got != 1 {

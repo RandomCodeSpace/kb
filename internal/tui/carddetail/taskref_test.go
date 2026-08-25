@@ -10,6 +10,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/mdparity"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
@@ -250,8 +251,8 @@ func TestTaskReferenceScanIgnoresWhatIsNotAReference(t *testing.T) {
 	if hits := taskRefHits([]string{overflow}); len(hits) != 0 {
 		t.Fatalf("an unparseable sequence number was anchored: %#v", hits)
 	}
-	if !strings.Contains(parityMarkdown(overflow), "<"+overflow+">") {
-		t.Fatalf("an unparseable sequence number lost its link form: %q", parityMarkdown(overflow))
+	if !strings.Contains(mdparity.Parity(overflow), "<"+overflow+">") {
+		t.Fatalf("an unparseable sequence number lost its link form: %q", mdparity.Parity(overflow))
 	}
 	if hits := taskRefHits([]string{"plain row"}); len(hits) != 0 {
 		t.Fatalf("a row with no reference was scanned: %#v", hits)

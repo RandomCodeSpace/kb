@@ -1,4 +1,14 @@
-package carddetail
+// Package mdparity is the one grammar kb reduces a card description to before
+// anything renders it. The web UI the TUI is at parity with froze a small
+// Markdown subset, and both TUI surfaces that show a description - the card
+// detail pane, which hands the reduced source to glamour, and the board card,
+// which draws it at card scale itself - read that subset here rather than each
+// carrying a recognizer of its own.
+//
+// Two consumers, one grammar: a construct the pane understands and the card
+// does not, or the reverse, is a fork of the product contract, which is what
+// this package exists to make impossible.
+package mdparity
 
 import (
 	"regexp"
@@ -35,10 +45,17 @@ var (
 	taskRefPattern = regexp.MustCompile(`kb://task/[0-9]+`)
 )
 
-// parityMarkdown reduces a description to the frozen web renderer's grammar
-// before Glamour sees it. Glamour deliberately understands much more
-// Markdown; neutralizing everything outside this allowlist keeps that extra
-// syntax literal instead of quietly widening the product contract.
+// TaskRefPattern is the in-board reference matcher, exported for the pointer
+// map that anchors a hit region on every rendered reference. The matcher and
+// the grammar that decides a reference is an autolink are the same expression
+// on purpose: a pane that linked a reference the map could not find, or found
+// one the pane did not link, would be a fork.
+func TaskRefPattern() *regexp.Regexp { return taskRefPattern }
+
+// Parity reduces a description to the frozen web renderer's grammar before
+// Glamour sees it. Glamour deliberately understands much more Markdown;
+// neutralizing everything outside this allowlist keeps that extra syntax
+// literal instead of quietly widening the product contract.
 //
 // The grammar is per line and starts at column zero: a heading, a bullet or an
 // ordinal is only ever the first thing on a line, indentation carries no
@@ -46,7 +63,7 @@ var (
 // other line is prose. Neutralizing has to be invisible, which rules out the
 // backslash for characters Glamour does not strip one from - see
 // escapeMarkdown.
-func parityMarkdown(source string) string {
+func Parity(source string) string {
 	lines := strings.Split(source, "\n")
 	out := make([]string, 0, len(lines)*2)
 	for i := 0; i < len(lines); i++ {
@@ -92,7 +109,7 @@ func parityLine(raw string) (line string, listItem bool) {
 
 // escapeLeadingColon guards the one construct a backslash cannot. Glamour
 // enables definition lists, which turn a leading ": " into a description of the
-// line above even across the blank line parityMarkdown inserts, and "\:" is not
+// line above even across the blank line Parity inserts, and "\:" is not
 // an escape pair Glamour strips. A character reference is, so the colon travels
 // as one and arrives as itself.
 func escapeLeadingColon(line string) string {

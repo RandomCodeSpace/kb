@@ -81,16 +81,25 @@ const (
 // can never share a column.
 const BandRest = Raised
 
-// PrioritySlot maps a task priority onto its palette slot. Spec section 1.4:
-// exact match on 1, 2 and 4; everything else falls back to Prio3.
+// PrioritySlot maps a task priority onto its palette slot. Spec section 1.4 as
+// issue #232 rewrote it: the scale is three values - high, medium, low - so
+// exact match on 1 and 2, and everything else is low.
+//
+// This is the render seam, and it is deliberately tolerant of the four-value
+// data the store still holds until the migration lands: a stored 4 arrives here
+// and reads as low, which is what it always meant. Nothing here writes, and the
+// collapse costs the caller no branch of its own.
+//
+// Prio4 stays in the palette and stays unreferenced. Removing a slot moves
+// every index after it and rewrites the section 1.7 audit tables, which is the
+// migration's work rather than the card's; a hue nothing renders is dead weight
+// but it is not a wrong color on a card.
 func PrioritySlot(priority int) Slot {
 	switch priority {
 	case 1:
 		return Prio1
 	case 2:
 		return Prio2
-	case 4:
-		return Prio4
 	default:
 		return Prio3
 	}

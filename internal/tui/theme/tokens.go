@@ -38,26 +38,26 @@ type Glyphs struct {
 	Focus    string // U+25B8, focused band caret
 	More     string // overflow cue prefix, rendered as "+N more"
 	Ellipsis string // U+2026, the truncation tail of spec section 3.3
-	Blocked  string // U+26D4, the compact blocked mark of spec section 3.4
-	Track    string // U+2591, progress meter and scrollbar track (section 10.1.3)
-	Empty    string // U+25CB, empty-state mark (section 10.8.3)
-	Alert    string // U+25B2, failure mark (section 10.8.5)
-	HintSep  string // hint ladder separator, three cells (section 10.4.6)
-
-	// The effort scale of spec section 3.4, one colored square per value. They
-	// are the vocabulary's only pictographs besides Blocked and they answer to
-	// the emoji admission rule of section 10.4.1: a single code point with
+	// Blocked is the card's blocked alarm, drawn beside the sequence number of
+	// spec section 3.2. It is the vocabulary's only pictograph, and it answers
+	// to the emoji admission rule of section 10.4.1: a single code point with
 	// Emoji_Presentation=Yes, no variation selector, no zero-width joiner and no
 	// modifier, so the terminal has one rune to draw and the width every layout
-	// calculation assumes is the width it takes. Each is East Asian Wide and so
-	// two cells, and each is bound by the adjacency rule - the render site
-	// writes a space after it. The letter is rendered beside the square and
-	// never replaced by it: color alone does not carry the value, which is also
-	// what keeps the chip readable when a font has no pictograph and draws tofu,
-	// the section 3.6 font risk extended rather than a new one.
-	EffortS string // U+1F7E6 blue square, effort S
-	EffortM string // U+1F7E8 yellow square, effort M
-	EffortL string // U+1F7E7 orange square, effort L
+	// calculation assumes is the width it takes. It is East Asian Wide and so
+	// two cells, and it is bound by the adjacency rule - the render site writes
+	// a space after it.
+	//
+	// It is admitted where the three effort squares were retired (issue #232)
+	// because it carries a binary alarm rather than a value: a font with no
+	// pictograph draws tofu beside the sequence number, and tofu beside a
+	// sequence number still says this card is flagged. The squares carried one
+	// of three values, and a partial or substituted glyph there lost which.
+	Blocked string // U+26D4, the blocked alarm of spec section 3.2
+	Track   string // U+2591, progress meter and scrollbar track (section 10.1.3)
+	Empty   string // U+25CB, empty-state mark (section 10.8.3)
+	Alert   string // U+25B2, failure mark (section 10.8.5)
+	Bullet  string // U+00B7, meta separator and card description list marker
+	HintSep string // hint ladder separator, three cells (section 10.4.6)
 
 	// The half-block pair of spec section 10.6.1. These are the only glyphs in
 	// the vocabulary that widen the block-glyph risk section 3.6 records rather
@@ -71,10 +71,9 @@ type Glyphs struct {
 	// vocabulary rather than prose. MarkSeq and MarkTag are a same-text alias,
 	// deliberate and not a collision: they answer to different sections and
 	// either may be re-spelled without the other.
-	MarkPrio string // priority chip prefix, "P1" (section 3.4)
-	MarkSeq  string // card reference prefix, "#142" (section 3.2)
-	MarkTag  string // plain label pill prefix, "#tag" (section 3.5)
-	MarkDue  string // compact due prefix, "!2d" (section 3.4)
+	MarkSeq string // card reference prefix, "#142" (section 3.2)
+	MarkTag string // plain label pill prefix, "#tag" (section 3.5)
+	MarkDue string // compact due prefix, "!2d" (section 3.4)
 
 	// The filter bar's toggle marks. A filter label pill is the section 3.6
 	// pill plus one of these inside its caps, so the toggle survives the flat
@@ -87,10 +86,10 @@ type Glyphs struct {
 }
 
 // defaultGlyphs is the vocabulary of spec sections 2.2, 2.4, 3.4, 3.6 and
-// 10.4.1. Every token is one cell wide except Blocked, the three effort squares
-// and the two filter marks, which are two, and HintSep, which is three; the
-// width table of section 10.4.1 is asserted in tokens_test.go so a re-spelling
-// that silently changes a mark's width fails the build rather than the layout.
+// 10.4.1. Every token is one cell wide except Blocked and the two filter marks,
+// which are two, and HintSep, which is three; the width table of section 10.4.1
+// is asserted in tokens_test.go so a re-spelling that silently changes a mark's
+// width fails the build rather than the layout.
 var defaultGlyphs = Glyphs{
 	Rail:     "▌",
 	RailFull: "█",
@@ -109,42 +108,46 @@ var defaultGlyphs = Glyphs{
 	Track:    "░",
 	Empty:    "○",
 	Alert:    "▲",
+	Bullet:   "·",
 	HintSep:  " | ",
-
-	EffortS: "🟦",
-	EffortM: "🟨",
-	EffortL: "🟧",
 
 	HalfTop:    "▀",
 	HalfBottom: "▄",
 
-	MarkPrio: "P",
-	MarkSeq:  "#",
-	MarkTag:  "#",
-	MarkDue:  "!",
+	MarkSeq: "#",
+	MarkTag: "#",
+	MarkDue: "!",
 
 	MarkFilterOff: "+ ",
 	MarkFilterOn:  "x ",
 }
 
-// Effort resolves the marker of the section 3.4 effort chip for one effort
-// value. The scale is S, M and L; anything else a hand-edited board carries
-// falls back to Diamond, which is what the chip wore for every value before the
-// squares, so an out-of-scale value still reads as an effort chip rather than
-// as two loose letters in the meta row. An empty value has no marker at all:
-// the render site draws no chip, and nothing here invents one.
-func (g Glyphs) Effort(value string) string {
+// EffortSlot resolves the fill hue of the section 3.4 effort pill for one
+// effort value: the scale is S, M and L, and the ramp runs cool to warm.
+//
+// Issue #232 retired the three colored squares the chip wore between #223 and
+// #230. A pictograph proved font-dependent on real terminals however carefully
+// its width was pinned, and the value it carried was one of three rather than a
+// yes or no, so a substituted or clipped glyph lost information. The letter now
+// sits on the fill instead of beside a square: ASCII on background color, which
+// is the one thing section 3.6 says a pill owes a terminal font.
+//
+// The three hues are palette slots that already exist and are already audited
+// against FgOnAccent as pill fills. No new hex enters section 1.7's table for a
+// three-value scale, and the letter - not the hue - is what carries the value.
+//
+// An effort value the scale does not name resolves false, and the render site
+// falls back to the Diamond mark it wore before the squares.
+func EffortSlot(value string) (Slot, bool) {
 	switch value {
-	case "":
-		return ""
 	case "S":
-		return g.EffortS
+		return StatusInfo, true
 	case "M":
-		return g.EffortM
+		return StatusWarn, true
 	case "L":
-		return g.EffortL
+		return Label1, true
 	default:
-		return g.Diamond
+		return StatusInfo, false
 	}
 }
 
@@ -203,7 +206,17 @@ type Metrics struct {
 	CompactBelow  int // frame height below which density compacts
 	CompactInnerW int // column inner width below which density compacts
 	DescTwoLines  int // frame height at or above which the snippet gets a second line
-	Overlay       OverlayMetrics
+
+	// The card row grid of spec section 3.1, rewritten by issue #232. Every
+	// allotment here is a function of density and frame height and never of
+	// content, which is the invariant that lets columnStackHeight resolve a
+	// column's height before the cards in it are rendered.
+	CardTitleLines int // title rows a card carries at normal density
+	CardDescMax    int // description rows a card may carry at its tallest
+	CardDescStep   int // frame rows that buy one more description line
+	CardLabelRows  int // label rows a card carries on a frame tall enough for them
+
+	Overlay OverlayMetrics
 }
 
 // OverlayMetrics is the proportional panel geometry of spec section 4: every
@@ -273,6 +286,12 @@ var defaultMetrics = Metrics{
 	CompactBelow:  30,
 	CompactInnerW: 22,
 	DescTwoLines:  45,
+
+	CardTitleLines: 2,
+	CardDescMax:    5,
+	CardDescStep:   10,
+	CardLabelRows:  2,
+
 	Overlay: OverlayMetrics{
 		WidthPct:     85,
 		HeightPct:    88,
@@ -422,14 +441,59 @@ func clampPane(frame, percent, slack, floor int) int {
 	return max(min(pane, frame-slack), 1)
 }
 
-// DescLines is the number of description snippet rows a card carries. Spec
-// section 3.3: none when compact, one normally, two on a tall frame.
+// DescLines is the number of description rows a card carries. Spec section 3.3
+// as issue #232 rewrote it: none when compact, one on a short normal frame, and
+// one more for every CardDescStep rows above DescTwoLines up to CardDescMax.
+//
+// The ladder spends height the frame has rather than height it might have: a
+// 45-row terminal buys the second line the original rule bought, and only a
+// terminal tall enough to keep the same number of cards on screen buys the
+// third, fourth and fifth. The allotment is a frame property and never a
+// content one, so a one-line description leaves its remaining rows blank and
+// the rows under it do not move up.
 func (m Metrics) DescLines(frameHeight int, density Density) int {
 	if density.Compact() {
 		return 0
 	}
+	if frameHeight < m.DescTwoLines {
+		return 1
+	}
+	return min(2+(frameHeight-m.DescTwoLines)/m.CardDescStep, m.CardDescMax)
+}
+
+// TitleRows is the number of title rows a card carries. Spec section 3.2 as
+// issue #232 rewrote it: the title wraps rather than being ellipsized to one
+// line, and it is the last allotted row that carries the ellipsis when the
+// title still does not fit. Compact keeps the single row it always had.
+func (m Metrics) TitleRows(density Density) int {
+	if density.Compact() {
+		return 1
+	}
+	return m.CardTitleLines
+}
+
+// LabelRows is the number of label rows a card carries. Spec section 3.5 as
+// issue #232 rewrote it: labels own rows of their own below the meta line and
+// wrap onto the second when one row does not hold them. Compact reports zero,
+// because step 5 of the section 2.6 drop order merges the labels onto the meta
+// row instead of giving them one.
+func (m Metrics) LabelRows(frameHeight int, density Density) int {
+	if density.Compact() {
+		return 0
+	}
 	if frameHeight >= m.DescTwoLines {
-		return 2
+		return m.CardLabelRows
 	}
 	return 1
+}
+
+// CardRows is the content row count of one card: the whole of spec section
+// 3.1's grid in one place, so the panel that reserves a column's height and the
+// widget that draws the card can never disagree about it.
+func (m Metrics) CardRows(frameHeight int, density Density) int {
+	if density.Compact() {
+		return 2
+	}
+	return m.TitleRows(density) + m.DescLines(frameHeight, density) + 1 +
+		m.LabelRows(frameHeight, density)
 }

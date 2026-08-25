@@ -23,6 +23,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
+	"github.com/RandomCodeSpace/kb/internal/tui/mdparity"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 	"github.com/RandomCodeSpace/kb/internal/tui/widget"
@@ -1337,7 +1338,7 @@ func markdownWith(styles *theme.Styles) markdownRenderer {
 		if err != nil {
 			return safeText(source, true)
 		}
-		rendered, err := renderer.Render(parityMarkdown(safeText(source, true)))
+		rendered, err := renderer.Render(mdparity.Parity(safeText(source, true)))
 		if err != nil {
 			return safeText(source, true)
 		}

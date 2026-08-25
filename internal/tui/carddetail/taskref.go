@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/RandomCodeSpace/kb/internal/tui/mdparity"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
@@ -68,7 +69,7 @@ func taskRefHits(lines []string) []taskRefHit {
 // an escape sequence that occupies no cells.
 func appendTaskRefHits(hits []taskRefHit, row int, line string) []taskRefHit {
 	text, offsets, columns := visibleRow(line)
-	for _, index := range taskRefPattern.FindAllStringIndex(text, -1) {
+	for _, index := range mdparity.TaskRefPattern().FindAllStringIndex(text, -1) {
 		start, end := index[0], index[1]
 		// A sequence number too large to be a card is not one, and skipping it
 		// here is the only place that decision is cheap: the reference still
