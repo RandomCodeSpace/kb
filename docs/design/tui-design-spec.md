@@ -486,9 +486,15 @@ fit are skipped individually and shorter chips behind them are still attempted
 | 2 | Age | `3d old` / `6h here` / `new` / `shipped`, `FgMuted` | same |
 | 3 | Blocked | pill `blocked` on `StatusWarn` | `⛔` in `StatusWarn` |
 | 4 | Due | pill `today` / `in 2d` / `overdue · 2d` on `StatusInfo`, or `StatusDanger` when overdue | `!today` / `!in 2d` / `!2d`, same hue |
-| 5 | Effort | `◇M`, `FgSubtle` | same |
+| 5 | Effort | `◇ M`, `FgSubtle` | same |
 
 Priority survives longest because it is never a pill and is only two cells.
+
+The effort chip's own interior space is not the chip separator: it is the
+§10.4.1 adjacency rule, and the chip is three cells in both densities.
+`metaRowWidth` measures each chip rather than assuming a width, so the survival
+order and the column-wide drop of `metaDepth` carry the cost without a constant
+to maintain.
 
 ### 3.5 Label pill row
 
@@ -2228,13 +2234,35 @@ one-cell mark (§10.4.4); the two filter marks are deliberately equal-width so
 they are eligible as alternatives to *each other* — the toggle never moves a
 cell.
 
+**Adjacency rule** (added by #218/#220). An ambiguous-width mark owns the column
+after it: the cell following it is a space, or the row ends. East Asian
+Ambiguous glyphs measure one cell to `ansi.StringWidth` and to every width
+calculation kb makes, but many terminal fonts draw them wider than the cell the
+cursor was advanced past, so anything written in the next column is drawn on top
+of the mark. The rule binds `Dot`, `Diamond`, `Ellipsis`, `Empty`, `Alert`,
+`Bullet`, `Times` and `EmDash`. It does not bind the Block Elements — `Rail`,
+`RailFull`, `CapR`, `Track`, `HalfTop`, `HalfBottom` — whose adjacency to their
+neighbour *is* the primitive: a rail that does not touch its card and a cap that
+does not touch its text are a different widget, and their cell alignment is the
+block-glyph risk §3.6 already accepts. It does not bind `Check`, `CheckOn`,
+`CheckOff`, `Focus`, `CapL` or `Chevron`, which are Neutral width, though those
+are written with a following space anyway. The rule is about the column a mark
+occupies, not about its token: the space belongs to the render site, and every
+`Cells` value in the table above is unchanged.
+
 **Guard.** `theme/seam_test.go` gains a walk over `internal/tui`. It fails on any
 non-test `.go` file outside `theme/` containing a **string literal** with a rune at
 or above U+00A0, or with either of the token-owned separator strings `" | "` and
 `" / "`. Comments are not literals and are not scanned; the guard is about what is
 rendered, not what is explained. A second test asserts every `Glyphs` field's
 `ansi.StringWidth` matches the cells column above, so a future re-spelling that
-silently changes a mark's width fails the build rather than the layout.
+silently changes a mark's width fails the build rather than the layout. A third
+test (#220) walks the rendered board at both densities and asserts no mark
+bound by the adjacency rule is followed by a printable non-space. It is scoped
+to the glyph vocabulary rather than to every ambiguous rune on the surface:
+ambiguity is a property of ordinary text — every accented Latin letter carries
+it — so the broader walk would fail on a legitimately spelled card title. What
+kb controls is the marks kb writes itself.
 
 The marker tokens are deliberately **out** of the walker's deny-list: `#`, `P` and
 `!` occur legitimately in format strings, identifiers and parse code, and a
