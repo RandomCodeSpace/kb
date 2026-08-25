@@ -77,7 +77,7 @@ func TestModelLoadsAndRendersFullDetail(t *testing.T) {
 		"DETAIL", "status      cancelled  blocked", "priority    1", "due         2026-08-19",
 		"effort      M", "labels      ▐type:feature▌", "links       [github#86]",
 		"killed 17 Aug 2026", "superseded", "Plan", "first",
-		"CHECKLIST", "1/2", "☑ done", "☐ left", "blocks      [#9 todo]", "blocked by  [legacy done]",
+		"CHECKLIST", "1/2", "☑ done", "☐ left", "blocks      [#9 todo]", "blocked by  [✓ legacy done]",
 		"COMMENTS", "c3  alice  17 Aug 2026", "looks", "good",
 	} {
 		if !strings.Contains(body, want) {
@@ -320,7 +320,7 @@ func TestNilReaderAndRenderingHelpers(t *testing.T) {
 	if got := killedContext(store.Tombstone{Reason: "why", KilledAt: "bad"}); got != "killed bad\nwhy" {
 		t.Fatalf("killedContext invalid date = %q", got)
 	}
-	if got := taskChips([]board.Task{{ID: "id", Status: board.StatusDoing}}); got != "[id doing]" {
+	if got := taskChips(testStyles(), []board.Task{{ID: "id", Status: board.StatusDoing}}); got != "[id doing]" {
 		t.Fatalf("fallback task chip = %q", got)
 	}
 	m.comments = []store.Comment{{ID: 1, Author: "a", Body: "body"}}

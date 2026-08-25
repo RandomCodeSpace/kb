@@ -555,7 +555,7 @@ func (m Model) actionBody(width int) string {
 			if !choice.blocks {
 				direction = "blocked by"
 			}
-			lines = append(lines, marker+direction+" "+taskChips([]board.Task{choice.task}))
+			lines = append(lines, marker+direction+" "+taskChips(m.styles, []board.Task{choice.task}))
 		}
 		if end < len(choices) {
 			lines = append(lines, fmt.Sprintf("  ... %d later", len(choices)-end))

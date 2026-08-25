@@ -150,6 +150,42 @@ func TestFieldRowUsesTheLabelGutter(t *testing.T) {
 	}
 }
 
+// TestFieldRunPlacesAnAlreadyStyledValueWhereFieldWould is the recorded-bounds
+// half of spec section 10.5.3: the row a caller anchors hit regions on is laid
+// out exactly as Field lays out the same text, and the column and cell count it
+// reports are where that value actually landed.
+func TestFieldRunPlacesAnAlreadyStyledValueWhereFieldWould(t *testing.T) {
+	styles := theme.New(true)
+	value := styles.Overlay.FieldValue.Render("[#31 todo]")
+	row, column, cells := FieldRun(styles, "blocked by", value, 40)
+	if got := ansi.Strip(row); got != ansi.Strip(Field(styles, "blocked by", "[#31 todo]", 40)) {
+		t.Errorf("field run row = %q, want Field's layout", got)
+	}
+	plain := ansi.Strip(row)
+	if got := strings.Index(plain, "[#31 todo]"); got != column {
+		t.Errorf("value starts at column %d, reported %d: %q", got, column, plain)
+	}
+	if want := 40 - 2*styles.Metrics.OverlayInsetX - styles.Metrics.OverlayLabelW; cells != want {
+		t.Errorf("value field = %d cells, want %d", cells, want)
+	}
+	// A value wider than its field is truncated to it, tail included, and the
+	// row still measures its width argument.
+	long := styles.Overlay.FieldValue.Render(strings.Repeat("wide ", 20))
+	narrow, _, few := FieldRun(styles, "blocked by more", long, 30)
+	if got := ansi.StringWidth(ansi.Strip(narrow)); got != 30 {
+		t.Errorf("truncated field run is %d cells, want 30", got)
+	}
+	if !strings.HasSuffix(strings.TrimRight(ansi.Strip(narrow), " "), styles.Glyph.Ellipsis) {
+		t.Errorf("truncated field run lost its tail: %q", ansi.Strip(narrow))
+	}
+	if few <= 0 {
+		t.Errorf("truncated field run reported %d cells", few)
+	}
+	if _, _, none := FieldRun(styles, "blocked by", value, 4); none != 0 {
+		t.Errorf("a row with no value field reported %d cells", none)
+	}
+}
+
 // TestFieldWrapKeepsTheGutterAndBreaksBetweenPills covers the label pill row of
 // the card-detail pane: the first row carries the field's label, continuation
 // rows repeat the gutter, and a pill never straddles two rows.

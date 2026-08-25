@@ -365,6 +365,13 @@ func TestCardDetailActionGolden(t *testing.T) {
 	golden.RequireEqual(t, strings.Trim(strings.Join(lines, "\n"), "\n")+"\n")
 }
 
+// renderCompletionGate is the gate as one line, the form it had before its
+// chips became activatable: head, the chips between them, and the tail.
+func renderCompletionGate(task board.Task, links store.TaskLinks, loading bool, linksErr error) (string, theme.Slot) {
+	head, chips, tail, state := completionGate(task, links, loading, linksErr)
+	return head + taskChips(testStyles(), chips) + tail, state
+}
+
 func TestCompletionGateAndActionViewsAreTerminalSafe(t *testing.T) {
 	gate, gateSlot := renderCompletionGate(
 		board.Task{Blocked: true, Checks: []board.Check{{Text: "open"}}},

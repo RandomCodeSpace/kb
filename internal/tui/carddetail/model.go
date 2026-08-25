@@ -91,6 +91,10 @@ type Model struct {
 	styles         *theme.Styles
 	renderMarkdown markdownRenderer
 	bodyLines      []string
+	// chipHits are the blocker chips the last body render drew, recorded at
+	// their rendered positions rather than recovered from the rendered rows
+	// (issue #222, spec section 10.5.3).
+	chipHits       []taskChipHit
 	bodyWidth      int
 	pointerSession uint64
 	pointerState   pointer.State
@@ -629,6 +633,23 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 			message := wrap(OpenTaskRefMsg{Seq: hit.seq})
 			hitMap.AddControl(detailTaskRefControlID(hit), rect, func(pointer.Point) tea.Msg { return message })
 		}
+		// The blocker chips of issue #222 take the same viewport and the same
+		// activation, so a chip and a reference to the same card are one
+		// mechanism seen twice. Their bounds were recorded by the rows that drew
+		// them rather than scanned back out of the rendered text: they are
+		// widget output at a known position, which is the case section 10.5.3
+		// reserves recorded bounds for.
+		for _, hit := range m.chipHits {
+			if hit.row >= len(m.bodyLines) {
+				continue
+			}
+			rect, ok := viewport.Row(hit.row, hit.column, hit.column+hit.width)
+			if !ok {
+				continue
+			}
+			message := wrap(OpenTaskRefMsg{Seq: hit.seq})
+			hitMap.AddControl(hit.id, rect, func(pointer.Point) tea.Msg { return message })
+		}
 	}
 	// Rows 6 and 9 of the machine of spec section 10.5.2: the pointer can stand
 	// still while the content moves under it, so hover is re-derived from the
@@ -844,13 +865,15 @@ func (m *Model) ensureBody(width, height int) {
 func (m *Model) rebuildBody() {
 	if !m.open {
 		m.bodyLines = nil
+		m.chipHits = nil
 		m.bodyWidth = 0
 		m.body.SetYOffset(0)
 		return
 	}
 	paneWidth, _, _ := m.paneSize(m.width, m.height)
-	body := m.renderBody(paneWidth)
-	m.bodyLines = strings.Split(strings.TrimRight(body, "\n"), "\n")
+	rows, chips := m.renderBodyRows(paneWidth)
+	m.bodyLines = strings.Split(strings.TrimRight(strings.Join(rows, "\n"), "\n"), "\n")
+	m.chipHits = chips
 	m.markTaskRefs()
 	m.bodyWidth = paneWidth
 	m.syncScroll()
@@ -909,17 +932,27 @@ func fitTerminal(rendered string, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderBody renders the scrollable body as panel-width rows. Spec section 4:
-// the section breaks are OverlayBand rows, the key/value lines are field rows,
-// and every other row carries the panel surface to both edges.
-func (m Model) renderBody(width int) string {
+// renderBodyRows renders the scrollable body as panel-width rows. Spec section
+// 4: the section breaks are OverlayBand rows, the key/value lines are field
+// rows, and every other row carries the panel surface to both edges.
+//
+// It also reports the recorded bounds of the activatable blocker chips (issue
+// #222). An action or drift pane replaces the card's rows with its own and
+// draws no chip, so neither records one.
+func (m Model) renderBodyRows(width int) ([]string, []taskChipHit) {
 	if m.driftMode != driftNone {
-		return strings.Join(m.paneRows(m.driftBody(m.contentWidth(width)), width), "\n")
+		return m.paneRows(m.driftBody(m.contentWidth(width)), width), nil
 	}
 	if m.action != actionNone {
-		return strings.Join(m.paneRows(m.actionBody(m.contentWidth(width)), width), "\n")
+		return m.paneRows(m.actionBody(m.contentWidth(width)), width), nil
 	}
-	return strings.Join(m.detailRows(width), "\n")
+	return m.detailRows(width)
+}
+
+// renderBody is renderBodyRows joined, for the callers that only want the text.
+func (m Model) renderBody(width int) string {
+	rows, _ := m.renderBodyRows(width)
+	return strings.Join(rows, "\n")
 }
 
 // paneRows turns an action or drift pane into panel rows: its first line is its
@@ -1030,7 +1063,7 @@ func (m Model) errorTextRows(message, key string, width int) []string {
 // blank is one empty body row: a section separator that is not a break.
 func (m Model) blank(width int) string { return m.row("", width) }
 
-func (m Model) detailRows(width int) []string {
+func (m Model) detailRows(width int) ([]string, []taskChipHit) {
 	content := m.contentWidth(width)
 	rows := []string{m.section("DETAIL", "", width)}
 	rows = append(rows, m.fieldRows(width)...)
@@ -1041,7 +1074,14 @@ func (m Model) detailRows(width int) []string {
 	if len(m.task.Checks) > 0 {
 		rows = append(rows, m.checklistRows(width)...)
 	}
-	rows = append(rows, m.contextRows(width)...)
+	// Every row above is exactly one line, so the count so far is the logical
+	// body row the context block starts at, and the chips it recorded relative
+	// to itself become body rows by the same addition.
+	context, hits := m.contextRows(width)
+	for index := range hits {
+		hits[index].row += len(rows)
+	}
+	rows = append(rows, context...)
 	rows = append(rows, m.commentRows(content, width)...)
 	// A failure is not a body row: spec section 10.8.5 pins it directly above
 	// the action row so the error and the control that will retry it are
@@ -1049,7 +1089,7 @@ func (m Model) detailRows(width int) []string {
 	if m.statusMessage != "" && !m.statusIsError {
 		rows = append(rows, m.blank(width), m.row("status: "+m.statusMessage, width))
 	}
-	return rows
+	return rows, hits
 }
 
 // pinnedErrorRows is the panel-level failure block of spec section 10.8.5,
@@ -1156,23 +1196,48 @@ func (m Model) checklistRows(width int) []string {
 }
 
 // contextRows are the blocker links and the completion gate, the two rows that
-// answer whether this card can move.
-func (m Model) contextRows(width int) []string {
+// answer whether this card can move. Every #<seq> chip in them is activatable
+// (issue #222), so the rows come back with the chips' recorded bounds: the row
+// each landed on, counted from the first of these rows, and the cell column it
+// starts at, counted from the panel's left edge.
+func (m Model) contextRows(width int) ([]string, []taskChipHit) {
 	var rows []string
+	var hits []taskChipHit
 	if len(m.links.Blocks) > 0 {
-		rows = append(rows, widget.Field(m.styles, "blocks", taskChips(m.links.Blocks), width))
+		row, placed := m.chipFieldRow(chipSectionBlocks, "blocks", m.links.Blocks, len(rows), width)
+		rows, hits = append(rows, row), append(hits, placed...)
 	}
 	if len(m.links.BlockedBy) > 0 {
-		rows = append(rows, widget.Field(m.styles, "blocked by", taskChips(m.links.BlockedBy), width))
+		row, placed := m.chipFieldRow(chipSectionBlockedBy, "blocked by", m.links.BlockedBy, len(rows), width)
+		rows, hits = append(rows, row), append(hits, placed...)
 	}
-	gate, state := renderCompletionGate(m.task, m.links, m.loading, m.linksErr)
-	rows = append(rows, widget.OverlayRow(m.styles, m.styles.On(state, theme.OverlaySurf).Render(gate), width))
+	head, chips, tail, state := completionGate(m.task, m.links, m.loading, m.linksErr)
+	base := m.styles.On(state, theme.OverlaySurf)
+	run, spans := m.chipRun(state, chipSectionGate, chips)
+	gate := base.Render(head) + run
+	if tail != "" {
+		gate += base.Render(tail)
+	}
+	// OverlayRow insets the content and clips it at the panel's other inset, so
+	// a chip pushed past that edge by a long reason clause is not registered.
+	inset := m.styles.Metrics.OverlayInsetX
+	field := max(width-2*inset, 0)
+	column := inset + ansi.StringWidth(head)
+	hits = appendChipHits(hits, spans, len(rows), column, inset+field)
+	rows = append(rows, widget.OverlayRow(m.styles, gate, width))
 	// The gate is a tri-state indicator rather than a busy state, so it keeps
 	// its FgSubtle "unknown" form and takes no spinner (spec section 10.8.7).
 	if m.linksErr != nil {
 		rows = append(rows, m.errorRows(m.linksErr, "Link", width)...)
 	}
-	return rows
+	return rows, hits
+}
+
+// chipFieldRow renders one blocker field row and resolves its chips against it.
+func (m Model) chipFieldRow(section, label string, tasks []board.Task, row, width int) (string, []taskChipHit) {
+	run, spans := m.chipRun(theme.FgBase, section, tasks)
+	line, column, cells := widget.FieldRun(m.styles, label, run, width)
+	return line, appendChipHits(nil, spans, row, column, column+visibleCells(run, cells))
 }
 
 func (m Model) commentRows(content, width int) []string {
@@ -1280,9 +1345,15 @@ func markdownWith(styles *theme.Styles) markdownRenderer {
 	}
 }
 
-// renderCompletionGate reports whether the card can finish, and the status
-// slot that says so at a glance.
-func renderCompletionGate(task board.Task, links store.TaskLinks, loading bool, linksErr error) (string, theme.Slot) {
+// completionGate reports whether the card can finish, the status slot that says
+// so at a glance, and the blockers named in the reason clause.
+//
+// The text arrives in three parts rather than as one string because the chips
+// inside it are activatable (issue #222): the caller draws head and tail in the
+// slot's own style and the chips as their own runs, so a hovered chip raises its
+// own ground without the row losing the color that says the gate is blocked.
+// The chips are empty in every other outcome, and head is then the whole line.
+func completionGate(task board.Task, links store.TaskLinks, loading bool, linksErr error) (head string, chips []board.Task, tail string, state theme.Slot) {
 	var reasons []string
 	if warning := store.CompletionWarning(task); warning != "" {
 		reasons = append(reasons, warning)
@@ -1293,41 +1364,37 @@ func renderCompletionGate(task board.Task, links store.TaskLinks, loading bool, 
 			open = append(open, blocker)
 		}
 	}
-	if len(open) > 0 {
-		noun := "open linked blocker"
-		if len(open) != 1 {
-			noun += "s"
-		}
-		reasons = append(reasons, fmt.Sprintf("%d %s %s", len(open), noun, taskChips(open)))
-	}
 	unknown := ""
 	if loading {
 		unknown = "linked blockers loading"
 	} else if linksErr != nil {
 		unknown = "linked blockers unavailable"
 	}
+	if len(open) > 0 {
+		noun := "open linked blocker"
+		if len(open) != 1 {
+			noun += "s"
+		}
+		head = "completion gate  blocked: "
+		if len(reasons) > 0 {
+			head += strings.Join(reasons, "; ") + "; "
+		}
+		head += fmt.Sprintf("%d %s ", len(open), noun)
+		if unknown != "" {
+			tail = "; " + unknown
+		}
+		return head, open, tail, theme.StatusDanger
+	}
 	if len(reasons) > 0 {
 		if unknown != "" {
 			reasons = append(reasons, unknown)
 		}
-		return "completion gate  blocked: " + strings.Join(reasons, "; "), theme.StatusDanger
+		return "completion gate  blocked: " + strings.Join(reasons, "; "), nil, "", theme.StatusDanger
 	}
 	if unknown != "" {
-		return "completion gate  unknown: " + unknown, theme.FgSubtle
+		return "completion gate  unknown: " + unknown, nil, "", theme.FgSubtle
 	}
-	return "completion gate  clear", theme.StatusOK
-}
-
-func taskChips(tasks []board.Task) string {
-	chips := make([]string, 0, len(tasks))
-	for _, task := range tasks {
-		ref := task.ID
-		if task.Seq > 0 {
-			ref = fmt.Sprintf("#%d", task.Seq)
-		}
-		chips = append(chips, fmt.Sprintf("[%s %s]", ref, task.Status))
-	}
-	return strings.Join(chips, "  ")
+	return "completion gate  clear", nil, "", theme.StatusOK
 }
 
 func safeText(text string, keepNewlines bool) string {
