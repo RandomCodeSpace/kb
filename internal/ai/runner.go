@@ -60,6 +60,13 @@ const (
 // server's SSRF-guarded aiClient; rig owns the ambient credential scrub and
 // the response size cap.
 func (r *Runner) rigClient(cfg Config) (*rig.Client, error) {
+	return r.rigClientWith(cfg, r.loopClient(cfg.Model))
+}
+
+// rigClientWith is rigClient over a caller-supplied transport carrier, so the
+// probe can observe its own round trip without duplicating the configuration
+// checks every run shares.
+func (r *Runner) rigClientWith(cfg Config, httpClient *http.Client) (*rig.Client, error) {
 	if strings.TrimSpace(cfg.BaseURL) == "" {
 		return nil, &Error{Code: http.StatusBadRequest, Message: "AI base URL not configured"}
 	}
@@ -67,7 +74,7 @@ func (r *Runner) rigClient(cfg Config) (*rig.Client, error) {
 	if err != nil {
 		return nil, &Error{Code: http.StatusBadRequest, Message: err.Error()}
 	}
-	client, err := rig.NewClient(base, cfg.Key, rig.WithHTTPClient(r.loopClient(cfg.Model)))
+	client, err := rig.NewClient(base, cfg.Key, rig.WithHTTPClient(httpClient))
 	if err != nil {
 		return nil, &Error{Code: http.StatusBadRequest, Message: err.Error()}
 	}

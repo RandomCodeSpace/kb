@@ -56,6 +56,13 @@ func normalizeGuardHost(host string) string {
 	return host
 }
 
+// ErrPrivateAddress is the SSRF guard refusing a dial. It is a sentinel rather
+// than an anonymous error because the message is the single most actionable
+// thing the connection test can say - a local model server is the common case -
+// and by the time the failure reaches the probe it has been through the dialer,
+// the transport and rig, none of which preserve error text.
+var ErrPrivateAddress = errors.New("AI endpoint resolves to a private address (set KB_AI_ALLOW_PRIVATE=1 for local model servers)")
+
 func rejectPrivateAddress(_, address string, _ syscall.RawConn) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
@@ -66,7 +73,7 @@ func rejectPrivateAddress(_, address string, _ syscall.RawConn) error {
 		return fmt.Errorf("non-IP dial address %q", address)
 	}
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-		return errors.New("AI endpoint resolves to a private address (set KB_AI_ALLOW_PRIVATE=1 for local model servers)")
+		return ErrPrivateAddress
 	}
 	return nil
 }

@@ -12,8 +12,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/RandomCodeSpace/rig"
-
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -100,24 +98,20 @@ func (r *Runner) Probe(ctx context.Context, user string, supplied Config) error 
 	if key := strings.TrimSpace(supplied.Key); key != "" {
 		cfg.Key = key
 	}
-	client, err := r.rigClient(cfg)
+	client, recorder, err := r.probeClient(cfg)
 	if err != nil {
 		return err
 	}
-	return probeError(client.ProbeToolCalling(ctx, cfg.Model))
-}
-
-func probeError(err error) error {
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, rig.ErrNoToolCalling):
-		return &Error{Code: http.StatusBadRequest, Message: ToolCallRequiredMessage, Cause: err}
-	case errors.Is(err, rig.ErrOutputLimit):
-		return &Error{Code: http.StatusUnprocessableEntity, Message: TruncatedReplyMessage, Cause: err}
-	default:
-		return &Error{Code: http.StatusBadGateway, Message: "upstream request failed", Cause: err}
+	// A blank model is caught here rather than upstream: rig rejects it with an
+	// error that carries no sentinel and no round trip, which would leave the
+	// probe unable to tell it from an unreachable host. It is checked after the
+	// client is built so that a malformed base URL - the more structural of the
+	// two mistakes, and the one that would fail whatever the model said - is
+	// still the cause reported.
+	if strings.TrimSpace(cfg.Model) == "" {
+		return &Error{Code: http.StatusBadRequest, Message: ProbeModelMissingMessage}
 	}
+	return probeError(client.ProbeToolCalling(ctx, cfg.Model), recorder)
 }
 
 func endpoint(base string) (string, error) {

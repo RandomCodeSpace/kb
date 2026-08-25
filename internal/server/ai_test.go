@@ -1228,7 +1228,10 @@ func TestAITestSuppliedURLKeepsGuards(t *testing.T) {
 	t.Setenv("KB_AI_ALLOW_PRIVATE", "")
 	h, _ := newTestServer(t, Config{})
 
-	res := postAITest(t, h, fmt.Sprintf(`{"ai_base_url":%q}`, blockedUp.URL))
+	// The model is supplied so the request gets as far as the dial: the subject
+	// here is the URL guard, and an unconfigured model is now reported as
+	// itself rather than as a connection failure.
+	res := postAITest(t, h, fmt.Sprintf(`{"ai_base_url":%q,"ai_model":"probe-model"}`, blockedUp.URL))
 	if res.OK {
 		t.Fatal("a supplied private upstream must be refused")
 	}
