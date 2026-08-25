@@ -423,16 +423,27 @@ whole of §3.1's grid in one place:
 
 | Token | Value | Applies to |
 |---|---|---|
-| `CardTitleLines` | `2` | Title rows at normal density; compact takes 1 |
+| `CardTitleLines` | `2` | Title rows on a frame at or above `DescTwoLines`; below it, and compact, take 1 |
 | `CardDescMax` | `5` | Ceiling on description rows |
 | `CardDescStep` | `10` | Frame rows that buy one more description line |
 | `CardLabelRows` | `2` | Label rows on a frame at or above `DescTwoLines` |
+| `CardInnerPadRows` | `2` | Interior blank rows a card carries at its tallest |
+| `CardInnerPadTwo` | `55` | Frame height at or above which the card carries both |
 
 `CardRows` is a function of density and frame height and never of content. That
 is the invariant the column depends on: `columnStackHeight` reserves the scroll
 affordance and the `+N more` row before any card in the column is rendered, and
 a card that drew a row more or less than the metric promised would put the
 overflow cue on a row that belongs to a card.
+
+**Amended by [#240](https://github.com/RandomCodeSpace/kb/issues/240).** The sum
+gained the interior padding rows of §3.1. They are rows like any other here,
+which is what keeps the count pure: the card cannot decide it has nothing worth
+separating and give a row back, any more than a short description can pull the
+meta row up. `CardInnerPadTwo` is a rung of its own and not derived from
+`DescTwoLines`, because the second separator and the third description line are
+bought at different heights and coupling them would make one of the two arrive
+where the frame cannot afford it.
 
 ### 2.6 Compact density
 
@@ -453,43 +464,75 @@ normal density produces a wall of dropped chips instead of a denser board. See
 single 45-row step with a ladder. `DescLines` is `1` below `DescTwoLines`, then
 `2 + (frameHeight - DescTwoLines) / CardDescStep`, capped at `CardDescMax`:
 
-| Frame height | Description rows | Label rows | Card content rows |
-|---|---|---|---|
-| 30-44 | 1 | 1 | 5 |
-| 45-54 | 2 | 2 | 7 |
-| 55-64 | 3 | 2 | 8 |
-| 65-74 | 4 | 2 | 9 |
-| 75+ | 5 | 2 | 10 |
+**Re-cut by [#240](https://github.com/RandomCodeSpace/kb/issues/240)** to absorb
+the interior padding rows of §3.1. `InnerPadRows` is `0` when compact, `1` below
+`CardInnerPadTwo` and `CardInnerPadRows` at or above it.
+
+| Frame height | Title rows | Description rows | Padding rows | Label rows | Card content rows |
+|---|---|---|---|---|---|
+| 30-44 | 1 | 1 | 1 | 1 | 5 |
+| 45-54 | 2 | 2 | 1 | 2 | 8 |
+| 55-64 | 2 | 3 | 2 | 2 | 10 |
+| 65-74 | 2 | 4 | 2 | 2 | 11 |
+| 75+ | 2 | 5 | 2 | 2 | 12 |
 
 The ladder spends height the frame actually has rather than height it might
 have: a 45-row terminal buys the second line the original rule bought, and only
 a terminal tall enough to keep the same number of cards on screen buys the
 third, fourth and fifth. Compact is unchanged at 2 content rows.
 
+**What each rung traded for its separators.** The rule is that the lower rungs
+keep the number of cards they put on screen and the taller rungs spend their
+surplus, because a short terminal has no surplus to spend and losing a card off
+a four-card column is a worse failure than a denser card.
+
+- **30-44** buys its one separator with the title's continuation row — step 3 of
+  the drop order below, applied one rung early. The card is still 5 rows, so the
+  rung keeps its card count exactly. The spec already ranks that row as the
+  cheapest thing on the card, and the trade is exact: one row out, one row in.
+  The shared block of §3.1 therefore falls from 3 rows to 2, which also means a
+  one-line title no longer hands the description a second row by accident — the
+  description is the one row this table has always allotted it.
+- **45-54** keeps the description at 2 and takes one separator, 7 rows to 8. This
+  is the reference hardware of §2.5, and it holds four cards at `h = 45` where it
+  held four. A second separator here would cost `CardRows` 9 and drop it to
+  three, which is below the floor every other normal frame holds.
+- **55 and above** take both separators out of surplus: 8, 9 and 10 content rows
+  become 10, 11 and 12. Cards on screen fall from five or six to four or five.
+
+Across every normal frame the floor is four cards on screen, which is where the
+pre-#240 ladder left it.
+
 **Drop order.** Compaction is not gradual — crossing the threshold applies all of
 it at once. The order below is normative for any future partial-compaction work
 and matches the map's decision that the description goes first.
 
-1. **Description rows** — dropped entirely, however many the ladder allotted.
-2. **Title continuation rows** — `TitleRows` `CardTitleLines` → 1. The title is
+1. **Interior padding rows** — `InnerPadRows` → 0. Spacing dies before content:
+   a card that has lost its separators is still the same card, and a card that
+   has lost its description is not.
+2. **Description rows** — dropped entirely, however many the ladder allotted.
+3. **Title continuation rows** — `TitleRows` `CardTitleLines` → 1. The title is
    ellipsized on its single row, which is the one place the compact card still
    spends §3.3's truncation primitive on a title.
-3. **Page padding row** — `PagePadTop` 1 → 0.
-4. **Column meta line** — the `N cards · N blocked` row.
-5. **Inter-card gutter** — `CardGap` 1 → 0, replaced by `Zebra` striping on
+4. **Page padding row** — `PagePadTop` 1 → 0.
+5. **Column meta line** — the `N cards · N blocked` row.
+6. **Inter-card gutter** — `CardGap` 1 → 0, replaced by `Zebra` striping on
    alternate cards so the stack still separates.
-6. **Card label rows** — `LabelRows` → 0; labels merge onto the meta chip row
+7. **Card label rows** — `LabelRows` → 0; labels merge onto the meta chip row
    instead of owning rows of their own.
-7. **Inner paddings** — `CardPadLeft` 1 → 0 and `ColumnPadX` 1 → 0.
-8. **Pill padding** — chips degrade to flat colored bold text (`flatChip`),
+8. **Inner paddings** — `CardPadLeft` 1 → 0 and `ColumnPadX` 1 → 0.
+9. **Pill padding** — chips degrade to flat colored bold text (`flatChip`),
    dropping the cell of padding §3.6 spends at each end; scoped labels keep
    only their value half, the priority digit and the effort letter keep only
    themselves. This is the last thing to go because it is the only step that
    changes the vocabulary rather than the spacing.
 
-Step 2 is new with #232 and sits second because a wrapped title is the item
-whose absence costs the least: the first row still carries the whole of what a
-scan reads, and the ellipsis says the rest exists.
+Step 1 is new with #240 and sits first because it is the only step that removes
+nothing the card was saying. Step 3 was step 2 under #232 and still sits above
+the rest of the ladder because a wrapped title is the content item whose absence
+costs the least: the first row still carries the whole of what a scan reads, and
+the ellipsis says the rest exists. It is a no-op when compaction is crossed from
+the 30-44 rung, which has already spent that row on its separator.
 
 ---
 
@@ -502,17 +545,33 @@ title rows, description rows, one meta row and label rows. The count of each is
 `Metrics.CardRows`'s business (§2.5) and is a function of density and frame
 height alone.
 
+**Amended by [#240](https://github.com/RandomCodeSpace/kb/issues/240).** The card
+also carries `InnerPadRows` blank interior rows, on the boundaries between its
+sections.
+
 **Normal** (`30 <= h < 45`) — 5 content rows + 1 gutter = 6 rows per card:
 
 ```
-▌🐛 Drag ghost sticks on resize     ⛔ #142    rows 0-1  title, wrapping
-▌Pointer capture leaks when the column…        row 2    description
+▌🐛 Drag ghost sticks on res…       ⛔ #142    row 0    title, one row
+▌Pointer capture leaks when the column…        row 1    description
+▌                                              row 2    interior separator
 ▌ 1  3d !5d  M                                 row 3    meta
 ▌ type:feature   #area:tui                     row 4    labels
                                                gutter (Canvas-free: Surface)
 ```
 
-**Tall** (`h >= 45`) — 7 to 10 content rows by the §2.6 ladder, + 1 gutter.
+**Tall** (`h >= 45`) — 8 to 12 content rows by the §2.6 ladder, + 1 gutter. At
+`h >= CardInnerPadTwo` the second separator arrives:
+
+```
+▌🐛 Drag ghost sticks on resize     ⛔ #142    rows 0-1  title, wrapping
+▌Pointer capture leaks when the column…        rows 2-4  description
+▌                                              row 5     interior separator
+▌ 1  3d !5d  M                                 row 6     meta
+▌                                              row 7     interior separator
+▌ type:feature   #area:tui                     rows 8-9  labels
+                                               gutter (Canvas-free: Surface)
+```
 
 **Compact** (`h < 30` or `innerW < 22`) — 2 content rows, no gutter:
 
@@ -520,6 +579,25 @@ height alone.
 ▌🐛 Drag ghost stic…            ⛔ #142    row 0  title
 ▌1 3d !5d M bug                            row 1  meta + labels, flat chips
 ```
+
+**The interior separators.** They are blank rows carrying the card's *own* fill —
+`Card`, or `Zebra` where the stack's striping puts the card on it, or `Raised`
+when the card is selected — and never the panel's. The card is one slab and a
+separator is ground inside it rather than a gap in it: it takes the surface every
+other row of the card takes, so selection, hover and the zebra stripe reach it
+without the row knowing they exist, and it belongs to the card's mouse hit region
+like any other row. The inter-card gutter is the row that carries panel surface,
+and that difference is the whole of how a reader tells "inside this card" from
+"between two cards".
+
+The rhythm expresses grouping and is not uniform dilution. The title and the
+description are one unit of prose, the meta row is data and the label rows are
+navigation, so the first separator goes under the shared block — the prose/chips
+boundary, the one a card of any height can afford — and the second, where the
+frame affords it, between the meta row and the label rows. There is no third
+separator under the title: the shared block is exactly `TitleRows + DescLines`,
+so a row inside it would cost a description line at every rung. It is not free
+and it is not taken.
 
 **The shared block.** The title rows and the description rows are one fixed
 block of `TitleRows + DescLines` rows, and the title takes only what it needs
@@ -543,7 +621,10 @@ handed still leaves its remaining rows blank, and nothing below moves up.
 title wraps across its allotment instead of being ellipsized to one line. It is
 greedily word-wrapped over `TitleRows` rows, and only the **last** allotted row
 carries the ellipsis when text remains — §3.3's rule, applied to the title.
-Compact keeps the single ellipsized row it always had.
+Compact keeps the single ellipsized row it always had, and
+[#240](https://github.com/RandomCodeSpace/kb/issues/240) gave the same single row
+to a normal frame below `DescTwoLines`, which spends the continuation row on its
+interior separator instead.
 
 **The trailer** is the right end of row 0: the blocked alarm, then `#seq` in
 `FgMuted`. Row 0's field is `inner - width(trailer) - 1`; the rows under it take
@@ -599,7 +680,16 @@ carrying markdown wraps to exactly the rows the same text would without it.
 
 - A word longer than `inner` is hard-truncated with an ellipsis rather than
   overflowing.
-- A block starts a line.
+- **Every source line starts a rendered line.** The frozen grammar reduces each
+  source line to its own block, so a newline in a description is a line break on
+  the card exactly as it is in the pane that opens from it, and the line then
+  word-wraps inside the card's allotment like any prose. Amended by
+  [#241](https://github.com/RandomCodeSpace/kb/issues/241), which found the card
+  losing them before the grammar ever saw them: the description was passing
+  through the single-line terminal sanitizer, which strips every control
+  character, and separate source lines arrived welded into one paragraph. Only
+  the newline survives that sanitizer now; every other control character and
+  escape still goes, because a description is drawn into a composed frame.
 - A blank source line yields no row: the card's budget is small enough that
   spending a row on nothing is a row of description the reader does not get.
 - The **last** allotted line carries the ellipsis when text remains, so the
@@ -607,7 +697,10 @@ carrying markdown wraps to exactly the rows the same text would without it.
 - A description shorter than its allotment leaves its remaining rows blank; the
   rows below it do not move up.
 - Line count: `DescLines` per the §2.6 ladder — `0` compact, `1` below
-  `DescTwoLines`, rising to `CardDescMax` by `CardDescStep`.
+  `DescTwoLines`, rising to `CardDescMax` by `CardDescStep`. Below
+  `DescTwoLines` the allotment is now exact rather than a floor: #240 holds the
+  shared block of §3.1 at two rows there, so a one-line title no longer hands the
+  description a second row it was never allotted.
 
 Truncation primitive: `ansi.Truncate(s, w-1, "") + "…"` — width-aware, not byte-
 or rune-aware. The ellipsis is rendered in the description's own style, because
@@ -684,8 +777,13 @@ by [#232](https://github.com/RandomCodeSpace/kb/issues/232); what changed is
 where the pills sit and how they run out of room.
 
 **Rows.** Labels own `LabelRows` rows of their own below the meta line — 2 on a
-frame at or above `DescTwoLines`, 1 below it, 0 when compact, where §2.6 step 6
+frame at or above `DescTwoLines`, 1 below it, 0 when compact, where §2.6 step 7
 merges them onto the meta row instead.
+[#240](https://github.com/RandomCodeSpace/kb/issues/240) put a blank interior row
+between the meta line and the first label row on a frame at or above
+`CardInnerPadTwo`. It carries the card's own fill and belongs to the card, not to
+the label block: the pills' own hit regions still start on the first label row,
+and the separator takes a click as card surface like every other row.
 
 **Spacing** is a fixed one-cell gutter, which is what "equally spaced" resolves
 to on a cell grid: every gap is the same cell whatever the row holds, so a label
@@ -730,7 +828,7 @@ no junction glyph.
 and the effort letter are the pill anatomy at its minimum: pad, one character,
 pad — three cells. They are the anatomy verbatim and not a tighter form, because
 the tighter form already means something: a colored character with no padding is
-the flat chip of §2.6 step 8, the compact degradation of a pill, and spending it
+the flat chip of §2.6 step 9, the compact degradation of a pill, and spending it
 at normal density would say the row had run out of width when it had not. The
 compact row does spend it, and both markers are one cell there.
 
@@ -769,7 +867,7 @@ signal.
 
 **Focused pill** (keyboard traversal over a pill set): the body run bolds. Zero
 width change. Bold is available to the pill for the same reason §10.4.2's
-hotkey underline is available to the button: §2.6 step 7 spends bold on the
+hotkey underline is available to the button: §2.6 step 9 spends bold on the
 *compact flat* chip, a form that has no focus state and is never traversed, so
 the two boldings can never be read in one place. Hover keeps its underline
 (§10.5.1) and the two compose. The cue replaced #207's cap thickening, which
@@ -2938,7 +3036,7 @@ and one padding cell at each end; there is no tier left to raise and no cell to
 spend on anything larger. The cue is **underline on the body run** — zero cells,
 survives 256-color quantization, survives the ASCII structure profile, and does
 not touch the pair's contrast because it changes no color. Bold is unavailable to
-*hover*: §2.6 step 7 already spends bold on the compact flat chip, so bold on a
+*hover*: §2.6 step 9 already spends bold on the compact flat chip, so bold on a
 hovered pill would mean "compact" at one density and "hovered" at the other, and
 since #227 bold is additionally spent on the focused pill, which shares the
 widget. A hue swap would break the label wheel's identity (§1.6). The hotkey
