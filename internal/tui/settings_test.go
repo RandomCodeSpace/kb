@@ -1119,4 +1119,74 @@ func TestSafeSettingsErrorBoundsAndNormalizes(t *testing.T) {
 	if settingsTestTimeout <= 0 {
 		t.Fatal("test timeout must be positive")
 	}
+	// A message cut at the cap says so, so a truncated cause is not read as a
+	// complete one.
+	cut := safeSettingsError(errors.New(strings.Repeat("y", 300)))
+	if !strings.HasSuffix(cut, "...") || len([]rune(cut)) != 160 {
+		t.Fatalf("truncated error = %q (%d runes)", cut, len([]rune(cut)))
+	}
+}
+
+// TestSettingsAITestReportsTheActualCause is issue 231: the connection test's
+// failure row has to name what failed. The prober's message is the only thing
+// the operator has to work from, so it must survive to the rendered pane
+// unaltered except for redaction, and the row must still name the control that
+// runs the test again.
+func TestSettingsAITestReportsTheActualCause(t *testing.T) {
+	for _, message := range []string{
+		"the AI endpoint rejected the API key (HTTP 401) - check the key",
+		"AI endpoint resolves to a private address (set KB_AI_ALLOW_PRIVATE=1 for local model servers)",
+		"the AI endpoint did not answer before the test timed out",
+		kbai.ProbeModelMissingMessage,
+	} {
+		t.Run(message, func(t *testing.T) {
+			st := newSettingsTestStore(t)
+			base, modelName := "https://api.example/v1", "gpt-example"
+			if _, err := st.SetAISettings("alice", &base, &modelName, stringPointer(settingsStoredAIKey)); err != nil {
+				t.Fatal(err)
+			}
+			prober := &recordingAIProber{err: &kbai.Error{Code: 400, Message: message}}
+			model := newSettingsModelWithBackends(st, prober, &recordingForgeProber{}, "alice", context.Background())
+			loadSettingsForTest(t, model)
+			model.focus = "ai:test"
+			runSettingsCommand(t, model, model.activateFocus())
+
+			if !model.statusIsError || model.status != message {
+				t.Fatalf("status = %q (error:%v), want %q", model.status, model.statusIsError, message)
+			}
+			if model.statusTail != "Test connection" {
+				t.Fatalf("status tail = %q, want the control that reruns the test", model.statusTail)
+			}
+			if model.busy != "" {
+				t.Fatalf("failed test left the pane busy: %q", model.busy)
+			}
+			rendered := ansi.Strip(model.View(120, 30))
+			if !strings.Contains(rendered, message) {
+				t.Fatalf("pane does not show the cause:\n%s", rendered)
+			}
+		})
+	}
+}
+
+// TestSettingsAITestRedactsTheTypedKey keeps the new detail from becoming a
+// leak: an upstream that echoes the key back is still redacted on the way in.
+func TestSettingsAITestRedactsTheTypedKey(t *testing.T) {
+	st := newSettingsTestStore(t)
+	base, modelName := "https://api.example/v1", "gpt-example"
+	if _, err := st.SetAISettings("alice", &base, &modelName, stringPointer(settingsStoredAIKey)); err != nil {
+		t.Fatal(err)
+	}
+	typed := "sk-typed-secret"
+	prober := &recordingAIProber{err: &kbai.Error{Code: 400, Message: "endpoint rejected " + typed + " (HTTP 401)"}}
+	model := newSettingsModelWithBackends(st, prober, &recordingForgeProber{}, "alice", context.Background())
+	loadSettingsForTest(t, model)
+	model.aiKey.SetValue(typed)
+	model.focus = "ai:test"
+	runSettingsCommand(t, model, model.activateFocus())
+	if strings.Contains(model.status, typed) || !strings.Contains(model.status, "[redacted]") {
+		t.Fatalf("status = %q, want the typed key redacted", model.status)
+	}
+	if !strings.Contains(model.status, "HTTP 401") {
+		t.Fatalf("status = %q, want the cause kept alongside the redaction", model.status)
+	}
 }

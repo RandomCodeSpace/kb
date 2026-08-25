@@ -423,9 +423,9 @@ func TestProbeUsesDirectStoreConfiguration(t *testing.T) {
 	})
 
 	t.Run("maps output and upstream errors", func(t *testing.T) {
-		assertAIError(t, probeError(rig.ErrOutputLimit), http.StatusUnprocessableEntity, TruncatedReplyMessage)
-		assertAIError(t, probeError(errors.New("network")), http.StatusBadGateway, "upstream request failed")
-		if err := probeError(nil); err != nil {
+		assertAIError(t, probeError(rig.ErrOutputLimit, nil), http.StatusUnprocessableEntity, TruncatedReplyMessage)
+		assertAIError(t, probeError(errors.New("network"), nil), http.StatusBadGateway, ProbeOpaqueMessage)
+		if err := probeError(nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	})

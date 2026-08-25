@@ -856,8 +856,10 @@ func safeSettingsError(err error, secrets ...string) string {
 	if message == "" {
 		message = "operation failed"
 	}
+	// A cut that leaves no mark reads as the whole message, which is how a
+	// truncated cause becomes a wrong one. The ellipsis stays inside the cap.
 	if utf8.RuneCountInString(message) > 160 {
-		message = string([]rune(message)[:160])
+		message = strings.TrimRight(string([]rune(message)[:157]), " ") + "..."
 	}
 	return message
 }
