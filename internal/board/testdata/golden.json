@@ -22,7 +22,7 @@
       "desc": "",
       "status": "todo",
       "blocked": false,
-      "prio": 4,
+      "prio": 3,
       "due": "",
       "effort": "S",
       "tags": ["docs"],

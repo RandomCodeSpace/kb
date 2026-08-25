@@ -16,7 +16,7 @@
 
 ## Done
 
-- [x] ⚙️ Ship crates !4
+- [x] ⚙️ Ship crates
 - [x] \#hashtag \!2 \~S \@2026-01-01 \\raw
 
 ## Cancelled

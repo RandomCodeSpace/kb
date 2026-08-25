@@ -14,7 +14,12 @@ import (
 // contracts.
 
 var (
-	dateRe   = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	dateRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	// prioRe still admits !4 even though issue #234 collapsed the scale to
+	// three values. The wire format is frozen and legacy boards on disk carry
+	// the token; narrowing the pattern would silently demote a !4 to a title
+	// word rather than reading it as the low priority it always meant.
+	// parseTitleLine normalizes the value; titleLine never writes a 4.
 	prioRe   = regexp.MustCompile(`^![1-4]$`)
 	effortRe = regexp.MustCompile(`^~[SML]$`)
 	// descCheckboxRe matches description lines that would re-parse as
@@ -91,8 +96,11 @@ func titleLine(t Task) string {
 	if t.Emoji != "" {
 		s = t.Emoji + " " + s
 	}
-	if t.Prio != 3 {
-		s += " !" + strconv.Itoa(t.Prio)
+	// Normalize before writing so Serialize never emits a token Parse only
+	// tolerates for legacy input: a hand-built Task carrying the retired 4
+	// serializes as the low-priority card it is, which is the omitted default.
+	if prio := NormalizePrio(t.Prio); prio != PrioDefault {
+		s += " !" + strconv.Itoa(prio)
 	}
 	if t.Due != "" {
 		s += " @" + t.Due
@@ -238,7 +246,7 @@ func stripCheckbox(s string) (done bool, rest string, ok bool) {
 
 // parseTitleLine decodes a task title line: optional leading
 // extended-pictographic emoji (with optional VS16), then whitespace-split
-// tokens where !1..!4 sets priority, @YYYY-MM-DD sets due, ~S/~M/~L sets
+// tokens where !1..!3 sets priority (a legacy !4 is read as !3), @YYYY-MM-DD sets due, ~S/~M/~L sets
 // effort, %blocked sets blocked, #x adds a tag, and everything else stays in
 // the title.
 // A "- [x]" checkbox forces status done regardless of section.
@@ -260,7 +268,7 @@ func parseTitleLine(raw string, status Status, done bool, now time.Time) Task {
 			// Escaped word: strip one backslash, keep it as title text.
 			words = append(words, tok[1:])
 		case prioRe.MatchString(tok):
-			t.Prio = int(tok[1] - '0')
+			t.Prio = NormalizePrio(int(tok[1] - '0'))
 		case strings.HasPrefix(tok, "@") && dateRe.MatchString(tok[1:]):
 			t.Due = tok[1:]
 		case effortRe.MatchString(tok):

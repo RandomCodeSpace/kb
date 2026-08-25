@@ -90,7 +90,7 @@ card flags (add and update):
   -p, --project  project for this task (see "projects" above)
   --desc text    description
   --status s     todo, doing, done, or cancelled
-  --prio n       priority 1-4 (default 3)
+  --prio p       high, medium, or low (default low). 1, 2, and 3 also work
   --due date     due date, YYYY-MM-DD
   --effort e     effort: S, M, or L
   --emoji e      leading emoji
@@ -290,10 +290,9 @@ func (a *app) newFlagSet(name string) (fs *flag.FlagSet, data *string) {
 
 // cardFlags holds the card-field flags shared by add and update.
 type cardFlags struct {
-	title, desc, status, due, effort, emoji string
-	prio                                    int
-	blocked, noBlocked                      bool
-	tags, checks                            stringList
+	title, desc, status, due, effort, emoji, prio string
+	blocked, noBlocked                            bool
+	tags, checks                                  stringList
 }
 
 // registerCardFlags wires the card-field flags. withTitle additionally
@@ -304,7 +303,7 @@ func registerCardFlags(fs *flag.FlagSet, c *cardFlags, withTitle bool) {
 	}
 	fs.StringVar(&c.desc, "desc", "", "description")
 	fs.StringVar(&c.status, "status", "", "todo|doing|done|cancelled")
-	fs.IntVar(&c.prio, "prio", 0, "priority 1-4")
+	fs.StringVar(&c.prio, "prio", "", "priority high|medium|low (1|2|3)")
 	fs.StringVar(&c.due, "due", "", "due date YYYY-MM-DD")
 	fs.StringVar(&c.effort, "effort", "", "effort S|M|L")
 	fs.StringVar(&c.emoji, "emoji", "", "leading emoji")
@@ -415,6 +414,23 @@ func parseDue(s string) (string, error) {
 	return s, nil
 }
 
+// parsePrio decodes a priority. The scale is three values and they have names
+// (issue #234); the digits stay accepted as aliases because they are what the
+// card prints (spec section 3.4), what the markdown wire carries, and what
+// every existing script and muscle memory already types. Refusing them would
+// break callers to teach a vocabulary the card does not itself display.
+func parsePrio(s string) (int, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "high", "1":
+		return board.PrioHigh, nil
+	case "medium", "med", "2":
+		return board.PrioMedium, nil
+	case "low", "3":
+		return board.PrioLow, nil
+	}
+	return 0, fmt.Errorf("invalid prio %q (want high, medium, or low; 1, 2, and 3 are accepted)", s)
+}
+
 // parseEffort validates and uppercases an effort; empty is allowed.
 func parseEffort(s string) (string, error) {
 	if s == "" {
@@ -439,10 +455,11 @@ func taskFromAddFlags(title string, cf cardFlags, set map[string]bool) (board.Ta
 		t.Status = st
 	}
 	if set["prio"] {
-		if cf.prio < 1 || cf.prio > 4 {
-			return board.Task{}, fmt.Errorf("invalid prio %d (want 1-4)", cf.prio)
+		p, err := parsePrio(cf.prio)
+		if err != nil {
+			return board.Task{}, err
 		}
-		t.Prio = cf.prio
+		t.Prio = p
 	}
 	var err error
 	if t.Due, err = parseDue(cf.due); err != nil {
@@ -617,10 +634,11 @@ func setUpdateTextFields(p *store.TaskPatch, cf *cardFlags, set map[string]bool)
 		p.Emoji = &cf.emoji
 	}
 	if set["prio"] {
-		if cf.prio < 1 || cf.prio > 4 {
-			return fmt.Errorf("invalid prio %d (want 1-4)", cf.prio)
+		prio, err := parsePrio(cf.prio)
+		if err != nil {
+			return err
 		}
-		p.Prio = &cf.prio
+		p.Prio = &prio
 	}
 	return nil
 }

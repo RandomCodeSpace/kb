@@ -468,10 +468,7 @@ func (m *Model) applyTask(task board.Task) {
 	m.emoji.SetValue(task.Emoji)
 	m.desc.SetValue(task.Desc)
 	m.due.SetValue(task.Due)
-	m.prio = task.Prio
-	if m.prio < 1 || m.prio > 4 {
-		m.prio = 3
-	}
+	m.prio = board.NormalizePrio(task.Prio)
 	m.effort = task.Effort
 	m.blocked = task.Blocked
 	// The project rides in the tags but is edited in its own mandatory field,
@@ -867,7 +864,11 @@ func (m *Model) updatePriority(key string) tea.Cmd {
 		delta = 1
 	}
 	if delta != 0 {
-		m.prio = (m.prio-1+delta+4)%4 + 1
+		// Cycle within the three-value scale (issue #234). The modulus is the
+		// number of priorities, so the field wraps low to high and never
+		// reaches the retired fourth value.
+		n := board.PrioLow
+		m.prio = (m.prio-1+delta+n)%n + 1
 	}
 	return nil
 }

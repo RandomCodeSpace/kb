@@ -606,7 +606,7 @@ func (m *Model) updateReviewKey(key string, msg tea.KeyPressMsg) tea.Cmd {
 			row.err = ""
 			return command
 		case "prio":
-			row.prio = cycleInt(row.prio, 1, 4, key)
+			row.prio = cycleInt(row.prio, board.PrioHigh, board.PrioLow, key)
 		case "effort":
 			row.effort = cycleEffort(row.effort, key)
 		}

@@ -91,7 +91,7 @@ func proposeCardTool(c *cardCollector) rig.Tool {
 			"title":  schemaString("short imperative card title"),
 			"emoji":  schemaString("single emoji that suits the work, or an empty string"),
 			"desc":   schemaString("markdown description: context and rationale"),
-			"prio":   schemaInt("priority 1 (highest) to 4 (lowest); 3 is the default"),
+			"prio":   schemaInt("priority 1 high, 2 medium, 3 low; 3 is the default"),
 			"due":    schemaString("due date as YYYY-MM-DD, or an empty string"),
 			"effort": schemaEnum("effort estimate", "S", "M", "L", ""),
 			"tags":   schemaStrings("labels, single words with no spaces and no leading '#'"),
@@ -351,7 +351,7 @@ func (r *Runner) updateTaskTool(user string) rig.Tool {
 			"title":   schemaString("new title"),
 			"desc":    schemaString("new markdown description (empty string clears it)"),
 			"emoji":   schemaString("new emoji (empty string clears it)"),
-			"prio":    schemaInt("new priority 1 (highest) to 4 (lowest)"),
+			"prio":    schemaInt("new priority 1 high, 2 medium, 3 low"),
 			"due":     schemaString("new due date as YYYY-MM-DD (empty string clears it)"),
 			"effort":  schemaEnum("new effort estimate", "S", "M", "L", ""),
 			"tags":    schemaStrings("replacement label list"),
@@ -400,8 +400,8 @@ func (a toolUpdateArgs) patch() (store.TaskPatch, error) {
 		patch.Emoji = &emoji
 	}
 	if a.Prio != nil {
-		if *a.Prio < 1 || *a.Prio > 4 {
-			return store.TaskPatch{}, fmt.Errorf("invalid prio %d: must be 1 (highest) to 4 (lowest)", *a.Prio)
+		if !board.ValidPrio(*a.Prio) {
+			return store.TaskPatch{}, fmt.Errorf("invalid prio %d: must be 1 high, 2 medium, or 3 low", *a.Prio)
 		}
 		prio := *a.Prio
 		patch.Prio = &prio

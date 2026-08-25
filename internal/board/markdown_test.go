@@ -365,6 +365,44 @@ func TestLegacyThreeSectionBoardIsByteIdentical(t *testing.T) {
 	}
 }
 
+// TestLegacyPrioTokenReadsAsLow pins the one asymmetry issue #234 leaves in
+// the frozen wire format. The scale is three values, but boards written before
+// the collapse carry a !4 token, and the shared fixtures no longer do because
+// a !4 cannot round-trip: it reads as low and low is the omitted default.
+// Narrowing prioRe instead would turn the token into a title word, which is a
+// worse answer than reading it as the low priority it always meant.
+func TestLegacyPrioTokenReadsAsLow(t *testing.T) {
+	got := Parse("# B\n\n## To Do\n\n- [ ] legacy card !4\n")
+	if len(got.Tasks) != 1 {
+		t.Fatalf("len(tasks) = %d, want 1", len(got.Tasks))
+	}
+	task := got.Tasks[0]
+	if task.Title != "legacy card" {
+		t.Errorf("title = %q, want %q (the !4 token must not survive as text)", task.Title, "legacy card")
+	}
+	if task.Prio != PrioLow {
+		t.Errorf("prio = %d, want %d", task.Prio, PrioLow)
+	}
+	// Re-serializing drops the token, because low is the omitted default.
+	if line := Serialize(got); strings.Contains(line, "!4") {
+		t.Errorf("Serialize re-emitted the retired token:\n%s", line)
+	}
+}
+
+// TestSerializeNormalizesRetiredPrio proves the writer never emits a token the
+// reader only tolerates for legacy input.
+func TestSerializeNormalizesRetiredPrio(t *testing.T) {
+	for _, prio := range []int{0, 4, 9, -1} {
+		out := Serialize(Board{Title: "B", Tasks: []Task{{Title: "card", Status: StatusTodo, Prio: prio}}})
+		if strings.Contains(out, "!") {
+			t.Errorf("prio %d serialized a priority token:\n%s", prio, out)
+		}
+		if got := Parse(out).Tasks[0].Prio; got != PrioLow {
+			t.Errorf("prio %d round-tripped to %d, want %d", prio, got, PrioLow)
+		}
+	}
+}
+
 // TestEveryTaskLineParsesBack is the codec side of the empty-title fix
 // (store.ValidateTaskFields): as long as a task's title is not blank, its
 // serialized line is one Parse reads back as a task rather than as
@@ -372,7 +410,7 @@ func TestLegacyThreeSectionBoardIsByteIdentical(t *testing.T) {
 func TestEveryTaskLineParsesBack(t *testing.T) {
 	tasks := []Task{
 		{Title: "plain", Status: StatusTodo, Prio: 3},
-		{Title: "0", Status: StatusTodo, Prio: 4},
+		{Title: "0", Status: StatusTodo, Prio: 3},
 		{Title: `\`, Status: StatusTodo, Prio: 3},
 		{Title: "%blocked", Status: StatusTodo, Prio: 3, Blocked: true},
 		{Title: "- [x] forged", Status: StatusTodo, Prio: 3},

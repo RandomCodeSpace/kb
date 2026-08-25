@@ -537,7 +537,10 @@ func inlineWidth(choices []string) int {
 
 func sourceChoices() []string { return []string{"paste", "file"} }
 
-func priorityChoices() []string { return []string{"1", "2", "3", "4"} }
+// priorityChoices lists the scale in the row's choice control. Digits, not
+// names: the column is one cell wide beside the effort column and the card
+// itself prints the digit (spec section 3.4).
+func priorityChoices() []string { return []string{"1", "2", "3"} }
 
 func effortChoices() []string {
 	values := effortValues()

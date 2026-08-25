@@ -270,7 +270,7 @@ func TestAIStoryHappyPath(t *testing.T) {
 		Title:  "Ship it",
 		Emoji:  "🛠️",
 		Desc:   "Do the thing",
-		Prio:   4,   // clamped from 9
+		Prio:   3,   // clamped from 9 onto the three-value scale
 		Due:    "",  // invalid date dropped
 		Effort: "M", // uppercased
 		Tags:   []string{"backend"},

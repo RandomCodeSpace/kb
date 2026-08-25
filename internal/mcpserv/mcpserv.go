@@ -114,7 +114,7 @@ func newServer(st *store.Store, user, dataDir string) *mcp.Server {
 	}, k.listTasks)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "add_task",
-		Description: "Add a new task to the kanban board. Only title is required; status defaults to \"todo\", prio to 3, and blocked to false. Every task belongs to exactly one project: pass project to choose it, or omit it to use the active project (kb project use / KB_PROJECT); the call fails when neither names one. Returns the created task including its id.",
+		Description: "Add a new task to the kanban board. Only title is required; status defaults to \"todo\", prio to 3 (low), and blocked to false. Every task belongs to exactly one project: pass project to choose it, or omit it to use the active project (kb project use / KB_PROJECT); the call fails when neither names one. Returns the created task including its id.",
 	}, k.addTask)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "update_task",
@@ -238,7 +238,7 @@ type addTaskInput struct {
 	Desc    string   `json:"desc,omitempty" jsonschema:"longer markdown description"`
 	Status  string   `json:"status,omitempty" jsonschema:"column: todo, doing, done, or cancelled (default todo)"`
 	Blocked bool     `json:"blocked,omitempty" jsonschema:"true when the task is blocked by something else; default false"`
-	Prio    int      `json:"prio,omitempty" jsonschema:"priority 1 (highest) to 4 (lowest); default 3"`
+	Prio    int      `json:"prio,omitempty" jsonschema:"priority 1 high, 2 medium, 3 low; default 3"`
 	Due     string   `json:"due,omitempty" jsonschema:"due date as YYYY-MM-DD"`
 	Effort  string   `json:"effort,omitempty" jsonschema:"effort estimate: S, M, or L"`
 	Tags    []string `json:"tags,omitempty" jsonschema:"labels, plain (backend) or scoped (type::bug)"`
@@ -253,7 +253,7 @@ type updateTaskInput struct {
 	Desc    *string   `json:"desc,omitempty" jsonschema:"new markdown description (empty string clears it)"`
 	Status  *string   `json:"status,omitempty" jsonschema:"new column: todo, doing, done, or cancelled"`
 	Blocked *bool     `json:"blocked,omitempty" jsonschema:"true to flag the task as blocked, false to clear the flag"`
-	Prio    *int      `json:"prio,omitempty" jsonschema:"new priority 1 (highest) to 4 (lowest)"`
+	Prio    *int      `json:"prio,omitempty" jsonschema:"new priority 1 high, 2 medium, 3 low"`
 	Due     *string   `json:"due,omitempty" jsonschema:"new due date as YYYY-MM-DD (empty string clears it)"`
 	Effort  *string   `json:"effort,omitempty" jsonschema:"new effort estimate: S, M, or L (empty string clears it)"`
 	Tags    *[]string `json:"tags,omitempty" jsonschema:"replacement label list"`
@@ -414,8 +414,8 @@ func (k *kb) addTask(_ context.Context, _ *mcp.CallToolRequest, in addTaskInput)
 		}
 		t.Status = st
 	}
-	if in.Prio != 0 && (in.Prio < 1 || in.Prio > 4) {
-		return nil, taskJSON{}, fmt.Errorf("invalid prio %d: must be 1 (highest) to 4 (lowest)", in.Prio)
+	if in.Prio != 0 && !board.ValidPrio(in.Prio) {
+		return nil, taskJSON{}, fmt.Errorf("invalid prio %d: must be 1 high, 2 medium, or 3 low", in.Prio)
 	}
 	// Every task carries exactly one project:: label, resolved the way the
 	// CLI resolves it: the project argument beats KB_PROJECT, which beats the
@@ -444,8 +444,8 @@ func (k *kb) updateTask(_ context.Context, _ *mcp.CallToolRequest, in updateTask
 		Prio:    in.Prio,
 		Tags:    in.Tags,
 	}
-	if in.Prio != nil && (*in.Prio < 1 || *in.Prio > 4) {
-		return nil, taskJSON{}, fmt.Errorf("invalid prio %d: must be 1 (highest) to 4 (lowest)", *in.Prio)
+	if in.Prio != nil && !board.ValidPrio(*in.Prio) {
+		return nil, taskJSON{}, fmt.Errorf("invalid prio %d: must be 1 high, 2 medium, or 3 low", *in.Prio)
 	}
 	if in.Checks != nil {
 		bc := toBoardChecks(*in.Checks)

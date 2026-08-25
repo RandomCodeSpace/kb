@@ -269,6 +269,22 @@ CREATE TABLE task_links (
 );
 CREATE INDEX task_links_blocked ON task_links (scope, blocked_id);
 `,
+	// v10: the priority scale collapses to three values - 1 high, 2 medium,
+	// 3 low (issue #234). P4 always meant "lowest", and the three-value scale
+	// has one bottom, so every 4 folds onto 3. The same statement catches any
+	// value outside the scale: prio is a plain INTEGER column, so a 0 from a
+	// zero-valued struct written by an older path lands on the same default a
+	// task with no priority takes.
+	//
+	// Idempotent by construction - the predicate is false for every row the
+	// statement has already rewritten, so a second run updates nothing. The
+	// migration ledger in meta makes it run once anyway; this holds even if a
+	// database is replayed. There is no CHECK constraint on the column because
+	// adding one to an existing SQLite table requires a full table rebuild;
+	// the write paths in store.go are the enforcement point.
+	`
+UPDATE tasks SET prio = 3 WHERE prio < 1 OR prio > 3;
+`,
 }
 
 // migrate creates the meta table and applies any pending schema versions.
