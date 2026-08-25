@@ -15,6 +15,11 @@ import (
 
 var (
 	dateRe   = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	// prioRe still admits !4 even though issue #234 collapsed the scale to
+	// three values. The wire format is frozen and legacy boards on disk carry
+	// the token; narrowing the pattern would silently demote a !4 to a title
+	// word rather than reading it as the low priority it always meant.
+	// parseTitleLine normalizes the value; titleLine never writes a 4.
 	prioRe   = regexp.MustCompile(`^![1-4]$`)
 	effortRe = regexp.MustCompile(`^~[SML]$`)
 	// descCheckboxRe matches description lines that would re-parse as
@@ -260,7 +265,7 @@ func parseTitleLine(raw string, status Status, done bool, now time.Time) Task {
 			// Escaped word: strip one backslash, keep it as title text.
 			words = append(words, tok[1:])
 		case prioRe.MatchString(tok):
-			t.Prio = int(tok[1] - '0')
+			t.Prio = NormalizePrio(int(tok[1] - '0'))
 		case strings.HasPrefix(tok, "@") && dateRe.MatchString(tok[1:]):
 			t.Due = tok[1:]
 		case effortRe.MatchString(tok):

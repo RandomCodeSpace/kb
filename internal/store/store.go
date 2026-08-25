@@ -834,9 +834,7 @@ func prepareReplacementTask(task board.Task, match *exTask, positions map[board.
 	if err := validateTaskLines(task); err != nil {
 		return board.Task{}, err
 	}
-	if task.Prio < 1 || task.Prio > 4 {
-		task.Prio = 3
-	}
+	task.Prio = board.NormalizePrio(task.Prio)
 	task.Position = positions[task.Status]
 	positions[task.Status]++
 	if match == nil {
@@ -944,8 +942,8 @@ func loadExistingByID(tx *sql.Tx, user string) (map[string]*exTask, error) {
 }
 
 // AddTask inserts t for user, assigning a fresh UUID and timestamps and
-// appending it to its column. An empty status defaults to todo; an
-// out-of-range Prio defaults to 3. Field values the markdown wire cannot
+// appending it to its column. An empty status defaults to todo; a Prio
+// outside the three-value scale defaults to 3 (low). Field values the markdown wire cannot
 // represent are rejected (see ValidateTaskFields). Labels are upserted from
 // t.Tags.
 func (s *Store) AddTask(user string, t board.Task) (board.Task, error) {
@@ -992,9 +990,7 @@ func prepareNewTask(t board.Task) (board.Task, error) {
 	if !t.Status.Valid() {
 		return board.Task{}, fmt.Errorf("store: invalid status %q", t.Status)
 	}
-	if t.Prio < 1 || t.Prio > 4 {
-		t.Prio = 3
-	}
+	t.Prio = board.NormalizePrio(t.Prio)
 	if err := ValidateTaskFields(t); err != nil {
 		return board.Task{}, err
 	}
@@ -1273,8 +1269,8 @@ func (s *Store) patchTask(tx *sql.Tx, user, id string, patch TaskPatch) (board.T
 		t.Blocked = *patch.Blocked
 	}
 	if patch.Prio != nil {
-		if *patch.Prio < 1 || *patch.Prio > 4 {
-			return board.Task{}, fmt.Errorf("store: invalid prio %d", *patch.Prio)
+		if !board.ValidPrio(*patch.Prio) {
+			return board.Task{}, fmt.Errorf("store: invalid prio %d (want 1 high, 2 medium, or 3 low)", *patch.Prio)
 		}
 		t.Prio = *patch.Prio
 	}
