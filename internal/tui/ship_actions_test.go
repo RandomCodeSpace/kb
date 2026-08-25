@@ -142,7 +142,7 @@ func TestShipPromptTickAllAndShipAnywayAreExplicitForcedChoices(t *testing.T) {
 			if err != nil || len(links.BlockedBy) != 1 {
 				t.Fatalf("forced ship changed blocker link = %+v, %v", links, err)
 			}
-			if m.shippedCount() != 1 || !strings.Contains(ansi.Strip(m.View().Content), "×1 shipped today") ||
+			if m.shippedCount() != 1 || !strings.Contains(ansi.Strip(m.View().Content), "× 1 shipped today") ||
 				m.actionStatus != "Shipped Warned card" {
 				t.Fatalf("ship feedback = count %d status %q\n%s", m.shippedCount(), m.actionStatus, m.View().Content)
 			}
