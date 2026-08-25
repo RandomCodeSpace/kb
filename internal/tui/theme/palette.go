@@ -48,8 +48,7 @@ const (
 	// Priority scale (section 1.4).
 	Prio1 // #ff5a48 x256 203
 	Prio2 // #ffb020 x256 214
-	Prio3 // #4f8ef7 x256  69 P3 and the fallback for any unknown priority
-	Prio4 // #b8bdc7 x256   7
+	Prio3 // #4f8ef7 x256  69 low, and the fallback for any unknown priority
 
 	// Status colors (section 1.5).
 	StatusOK     // #3fbf7f x256  72
@@ -81,19 +80,17 @@ const (
 // can never share a column.
 const BandRest = Raised
 
-// PrioritySlot maps a task priority onto its palette slot. Spec section 1.4 as
-// issue #232 rewrote it: the scale is three values - high, medium, low - so
-// exact match on 1 and 2, and everything else is low.
+// PrioritySlot maps a task priority onto its palette slot. Spec section 1.4:
+// the scale is three values - high, medium, low - so exact match on 1 and 2,
+// and everything else is low.
 //
-// This is the render seam, and it is deliberately tolerant of the four-value
-// data the store still holds until the migration lands: a stored 4 arrives here
-// and reads as low, which is what it always meant. Nothing here writes, and the
-// collapse costs the caller no branch of its own.
-//
-// Prio4 stays in the palette and stays unreferenced. Removing a slot moves
-// every index after it and rewrites the section 1.7 audit tables, which is the
-// migration's work rather than the card's; a hue nothing renders is dead weight
-// but it is not a wrong color on a card.
+// Issue #234 migrated the store onto the same three values, so the fourth hue
+// is gone from the palette and the four-value data this seam was written to
+// tolerate no longer reaches it: migrate runs inside store.Open before any
+// caller can read a task, and the write paths reject a value off the scale.
+// The default arm stays because Slot must be total - a zero-valued struct that
+// never reached the store still has to render something, and low is what an
+// unset priority means everywhere else.
 func PrioritySlot(priority int) Slot {
 	switch priority {
 	case 1:
@@ -190,7 +187,6 @@ var darkPalette = paletteRGB{
 	Prio1:        {0xff, 0x5a, 0x48},
 	Prio2:        {0xff, 0xb0, 0x20},
 	Prio3:        {0x4f, 0x8e, 0xf7},
-	Prio4:        {0xb8, 0xbd, 0xc7},
 	StatusOK:     {0x3f, 0xbf, 0x7f},
 	StatusWarn:   {0xff, 0xb0, 0x20},
 	StatusDanger: {0xff, 0x5a, 0x48},

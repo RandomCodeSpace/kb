@@ -6,6 +6,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
@@ -214,14 +215,11 @@ func Priority(styles *theme.Styles, priority int, on theme.Slot, flat bool) stri
 // Ms a few cells apart would be one grammar saying two unrelated things; a
 // digit and a letter are two.
 //
-// The mapping is tolerant of the four-value data the store still holds until
-// the priority migration lands: a stored 4 reads as low, which is what it
-// always meant. This is display only - nothing here writes a task.
+// Issue #234 migrated the store onto the same three values, so the legacy 4
+// this mapping was written to absorb no longer reaches it. The default arm
+// stays because the digit must be total: it also indexes the rail styles, and
+// an unset priority on a struct that never reached the store still has to
+// print something. Low is what an unset priority means everywhere else.
 func priorityLabel(priority int) int {
-	switch priority {
-	case 1, 2:
-		return priority
-	default:
-		return 3
-	}
+	return board.NormalizePrio(priority)
 }

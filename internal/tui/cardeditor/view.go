@@ -712,8 +712,13 @@ func cursorViewport(value string, position, width int) string {
 	return visibleBefore + "|" + ansi.Truncate(after, remaining, "")
 }
 
+// priorityName is the editor's word for a priority. The scale is three values
+// and the names are the scale's own (issue #234), so the field, the CLI flag,
+// and the tool schemas all say the same three words. The old four-word
+// vocabulary - urgent, high, normal, low - named a fourth value that no longer
+// exists and disagreed with every other surface about what "high" meant.
 func priorityName(priority int) string {
-	return map[int]string{1: "urgent", 2: "high", 3: "normal", 4: "low"}[priority]
+	return board.PrioName(priority)
 }
 
 func effortName(effort string) string {

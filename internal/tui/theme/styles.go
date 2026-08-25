@@ -28,8 +28,8 @@ type Styles struct {
 	Board   BoardStyles
 	Column  ColumnStyles
 	Card    CardStyles
-	Rail    [5]lipgloss.Style // resting card rail by priority; index 0 unused
-	RailSel [5]lipgloss.Style // the same rail on a selected card's Raised surface
+	Rail    [4]lipgloss.Style // resting card rail by priority 1..3; index 0 unused
+	RailSel [4]lipgloss.Style // the same rail on a selected card's Raised surface
 	Chip    ChipStyles
 	Label   [5]ChipStyles // the section 1.6 wheel
 	Status  StatusStyles
