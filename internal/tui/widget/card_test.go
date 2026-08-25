@@ -151,8 +151,14 @@ func TestCardCompactMergesLabelsOntoTheChipRow(t *testing.T) {
 	if !strings.Contains(merged, "P1") || !strings.Contains(merged, "feature") {
 		t.Errorf("compact chip row = %q, want the meta chips and the labels merged", merged)
 	}
-	if strings.Contains(merged, "▐") {
-		t.Errorf("compact chip row = %q, the pill end caps are dropped", merged)
+	// Spec section 2.6 step 7: the compact chip is flat colored bold text, so it
+	// drops the padding cell the normal-density pill spends at each end (issue
+	// #227 replaced the end caps with that padding and left the drop step alone).
+	if !strings.Contains(rows[1], Label(styles, "type::feature", theme.Card, true, false)) {
+		t.Errorf("compact chip row = %q, want the flat label run", merged)
+	}
+	if strings.Contains(rows[1], Label(styles, "type::feature", theme.Card, false, false)) {
+		t.Errorf("compact chip row = %q, the pill padding is dropped", merged)
 	}
 }
 

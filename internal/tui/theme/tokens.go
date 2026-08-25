@@ -27,8 +27,8 @@ func (d Density) Compact() bool { return d == DensityCompact }
 type Glyphs struct {
 	Rail     string // U+258C, resting card rail, unfocused band rail, meter fill
 	RailFull string // U+2588, selected card rail, scrollbar thumb
-	CapL     string // U+2590, pill left end cap (spec section 3.6)
-	CapR     string // U+258C, pill right end cap
+	CapL     string // U+2590, meter left end cap (spec section 10.1.3; the pill lost its caps to issue #227)
+	CapR     string // U+258C, meter right end cap
 	Dot      string // U+25CF, column status dot
 	Check    string // U+2610, unchecked checklist row
 	CheckOn  string // U+2611, checked checklist row

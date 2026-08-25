@@ -1,14 +1,14 @@
 ▌[1mkb[m / Roadmap / alice·······································
 / Filter cards | [project: all]·····························
-▐+ #backend▌ | ▐+ type:feature▌·····························
+ + #backend  |  + type:feature······························
 ····························································
 [1m▸● 1 TO DO                                                2·
   2 cards · 1 blocked·······································
  █ [1m🚀[m [1m Ship terminal board[m                               #7··
  █ Pointer capture leaks when the column scrolls under the··
  █ drag ghost and the row grid stays fixed··················
- █ [1mP1[m new ▐blocked▌ ▐today▌ 🟨  M····························
- █ ▐#backend▌ ▐type:feature▌································
+ █ [1mP1[m new  blocked   today  🟨  M····························
+ █  #backend   type:feature·································
 ····························································
  ▌ Second                                               #8··
  ▌··························································

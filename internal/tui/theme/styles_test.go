@@ -148,20 +148,18 @@ func TestChipRunsMatchTheCachedDefaults(t *testing.T) {
 	}
 }
 
-// TestChipCapsCarryTheFillHue is issue #219: the end caps are the pill's own
-// hue over whatever ground it lands on, in both pill forms and in the scoped
-// variant's first cap too. The scoped cap was Surface from section 3.6 onwards,
-// which reads as a grey bar bolted to the left of the pill once the palette is
-// quantized; the hue brackets the pill instead and leaves the dark key half
-// inside the bracket.
-func TestChipCapsCarryTheFillHue(t *testing.T) {
+// TestChipPadsAreTheGroundTheyAbut is issue #227: the pill has no end caps, so
+// each end cell is padding drawn in the ground the run beside it already owns.
+// Pad is the body's ground and ScopedPad the Surface tier the scoped key half
+// sits on, which is what makes the pill a flat span of color rather than a fill
+// bracketed by two half-block glyphs that a font may or may not draw flush to
+// the cell edge.
+func TestChipPadsAreTheGroundTheyAbut(t *testing.T) {
 	styles := New(true)
 	const probe = "chip"
 	for _, surface := range []Slot{Canvas, Card, Zebra, Raised, OverlaySurf} {
 		for index := range styles.Label {
 			slot := LabelSlot(index)
-			hue := styles.On(slot, surface).Render(probe)
-			grey := styles.On(Surface, surface).Render(probe)
 			forms := []struct {
 				name string
 				runs ChipStyles
@@ -170,24 +168,51 @@ func TestChipCapsCarryTheFillHue(t *testing.T) {
 				{"tinted", styles.ChipRunsTint(slot, surface)},
 			}
 			for _, form := range forms {
-				caps := []struct {
-					name     string
-					rendered string
-				}{
-					{"CapLeft", form.runs.CapLeft.Render(probe)},
-					{"CapRight", form.runs.CapRight.Render(probe)},
-					{"ScopedCap", form.runs.ScopedCap.Render(probe)},
+				if form.runs.Pad.Render(probe) != form.runs.Body.Render(probe) {
+					t.Errorf("%s pad on surface %d slot %d is not the body's own ground",
+						form.name, surface, index)
 				}
-				for _, end := range caps {
-					if end.rendered != hue {
-						t.Errorf("%s %s on surface %d slot %d does not carry the fill hue",
-							form.name, end.name, surface, index)
-					}
-					if end.rendered == grey {
-						t.Errorf("%s %s on surface %d slot %d is still the grey cap",
-							form.name, end.name, surface, index)
-					}
+				if form.runs.ScopedPad.Render(probe) != form.runs.ScopedKey.Render(probe) {
+					t.Errorf("%s scoped pad on surface %d slot %d is not the key half's ground",
+						form.name, surface, index)
 				}
+				if form.runs.Pad.Render(probe) == styles.On(slot, surface).Render(probe) {
+					t.Errorf("%s pad on surface %d slot %d still draws the hue as a cap glyph",
+						form.name, surface, index)
+				}
+			}
+		}
+	}
+}
+
+// TestChipFocusRunsBoldTheBodyAndNothingElse is the keyboard-traversal cue that
+// replaced the thickened end caps (issue #227). It is bold on the body run, it
+// composes with hover's underline because focus and hover are orthogonal axes,
+// and like both it changes no color and draws no other text.
+func TestChipFocusRunsBoldTheBodyAndNothingElse(t *testing.T) {
+	styles := New(true)
+	const probe = "feature"
+	for _, runs := range []ChipStyles{
+		styles.Chip, styles.ChipRuns(StatusWarn, OverlaySurf), styles.ChipRunsTint(Label3, Canvas),
+	} {
+		rest := runs.Body.Render(probe)
+		focused := runs.BodyFocus.Render(probe)
+		both := runs.BodyFocusHover.Render(probe)
+		if focused == rest {
+			t.Error("the focused chip run renders no cue")
+		}
+		if !strings.Contains(focused, "1;") {
+			t.Errorf("the focused chip run is not bold: %q", focused)
+		}
+		if focused == runs.BodyHover.Render(probe) {
+			t.Error("the focused chip run is indistinguishable from the hovered one")
+		}
+		if both == focused || both == runs.BodyHover.Render(probe) {
+			t.Error("focus and hover must compose into a third run")
+		}
+		for _, rendered := range []string{focused, both} {
+			if ansi.Strip(rendered) != probe {
+				t.Errorf("a focused chip run changed the text it draws: %q", rendered)
 			}
 		}
 	}
@@ -197,11 +222,12 @@ func TestChipCapsCarryTheFillHue(t *testing.T) {
 // not comparable.
 func sameRuns(left, right ChipStyles) bool {
 	const probe = "chip"
-	return left.CapLeft.Render(probe) == right.CapLeft.Render(probe) &&
-		left.CapRight.Render(probe) == right.CapRight.Render(probe) &&
-		left.ScopedCap.Render(probe) == right.ScopedCap.Render(probe) &&
+	return left.Pad.Render(probe) == right.Pad.Render(probe) &&
+		left.ScopedPad.Render(probe) == right.ScopedPad.Render(probe) &&
 		left.Body.Render(probe) == right.Body.Render(probe) &&
 		left.BodyHover.Render(probe) == right.BodyHover.Render(probe) &&
+		left.BodyFocus.Render(probe) == right.BodyFocus.Render(probe) &&
+		left.BodyFocusHover.Render(probe) == right.BodyFocusHover.Render(probe) &&
 		left.ScopedKey.Render(probe) == right.ScopedKey.Render(probe) &&
 		left.Flat.Render(probe) == right.Flat.Render(probe) &&
 		left.FlatHover.Render(probe) == right.FlatHover.Render(probe)
@@ -225,17 +251,15 @@ func TestChipRunsTintWithdrawTheFillAndKeepTheHue(t *testing.T) {
 			if sameRuns(tint, filled) {
 				t.Errorf("the tinted runs on surface %d match the filled wheel slot %d", surface, index)
 			}
-			// Every cap is the same run, which is what makes the tinted pill read
-			// as one chip bracketed in its own hue rather than as a lit half.
-			if tint.CapLeft.Render(probe) != tint.ScopedCap.Render(probe) ||
-				tint.CapRight.Render(probe) != tint.ScopedCap.Render(probe) {
-				t.Errorf("surface %d slot %d: the tinted caps are not all one run", surface, index)
+			// Issue #227: the inactive pill is one flat Surface span, so both
+			// padding cells sit on the same withdrawn ground the body and key
+			// runs do. A padding cell that differed would be the colored bar the
+			// end caps drew by construction on a pill with no fill.
+			if tint.Pad.GetBackground() != tint.ScopedPad.GetBackground() {
+				t.Errorf("surface %d slot %d: the tinted pads are not one ground", surface, index)
 			}
-			// Issue #219: the withdrawal takes the fill, never the identity, so
-			// the caps carry the wheel hue in the tinted form exactly as the
-			// filled form carries it.
-			if tint.CapLeft.Render(probe) != filled.CapLeft.Render(probe) {
-				t.Errorf("surface %d slot %d: the tinted cap lost the fill hue", surface, index)
+			if tint.Pad.GetBackground() == filled.Pad.GetBackground() {
+				t.Errorf("surface %d slot %d: the tinted pad kept the filled ground", surface, index)
 			}
 			// The hue lives on the body run now, which is the whole point: the
 			// tinted body must differ from every other wheel slot's tinted body.

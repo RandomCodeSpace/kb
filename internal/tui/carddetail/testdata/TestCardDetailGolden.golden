@@ -4,7 +4,7 @@ status      doing  blocked
 priority    1
 due         2026-08-19
 effort      M
-labels      ▐type:feature▌
+labels       type:feature
 links       [github#86]
 
 Plan
