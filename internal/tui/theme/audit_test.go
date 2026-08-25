@@ -253,6 +253,85 @@ func TestArmedIsNotAFocusedDangerButton(t *testing.T) {
 	}
 }
 
+// TestInactivePillTextStaysReadable is the contrast half of the issue #208
+// audit, run the way section 1.9 runs the button audit: every text pair the
+// inactive pill of section 3.6 draws, in truecolor and again after 256-color
+// quantization, against the same AA floor. It is what decided the shipped form.
+// The wheel hue on Surface clears the floor on all five slots in both profiles,
+// so the hue rides the body text; had any slot failed, the hue would have had
+// to retreat to the end caps, where the floor does not bind decorative glyphs.
+//
+// Measured, dark palette, hue on Surface (#171d27):
+//
+//	slot            truecolor  256-color
+//	Label1 #ff7b54       6.62       7.21
+//	Label2 #4f8ef7       5.27       5.19
+//	Label3 #3f9d58       4.97       6.32
+//	Label4 #b98af7       6.48       6.28
+//	Label5 #ffb020       9.25       9.24
+//	FgSubtle #9aa5b6     6.79       7.17
+func TestInactivePillTextStaysReadable(t *testing.T) {
+	type pillPair struct {
+		name             string
+		foreground, back Slot
+	}
+	pairs := []pillPair{}
+	for index := 0; index < LabelWheel; index++ {
+		// The tinted body run: the wheel hue over the withdrawn fill.
+		pairs = append(pairs, pillPair{
+			name:       fmt.Sprintf("wheel slot %d body", index),
+			foreground: LabelSlot(index),
+			back:       Surface,
+		})
+	}
+	// The scoped key run of the tinted pill, which also carries the section
+	// 10.4.1 toggle marker and so must clear the floor as prose, not as glyph.
+	pairs = append(pairs, pillPair{name: "scoped key", foreground: FgSubtle, back: Surface})
+	for _, pair := range pairs {
+		name, foreground, background := pair.name, pair.foreground, pair.back
+		truecolor := contrastRatio(darkPalette[foreground], darkPalette[background])
+		if truecolor < buttonContrastFloor {
+			t.Errorf("inactive pill %s: truecolor contrast %.2f, floor is %.2f",
+				name, truecolor, buttonContrastFloor)
+		}
+		quantized := contrastRatio(
+			xterm256(int(index256(darkPalette[foreground]))),
+			xterm256(int(index256(darkPalette[background]))),
+		)
+		if quantized < buttonContrastFloor {
+			t.Errorf("inactive pill %s: 256-color contrast %.2f, floor is %.2f",
+				name, quantized, buttonContrastFloor)
+		}
+		t.Logf("%-18s %s on %s  truecolor %.2f  256-color %.2f",
+			name, darkPalette[foreground].hex(), darkPalette[background].hex(), truecolor, quantized)
+	}
+}
+
+// TestInactivePillKeepsItsWheelIdentity is the identity half of the issue #208
+// audit: an inactive pill that carries a hue is only worth the cell if the hue
+// still separates the wheel. Two slots that collapse onto one 256-color index
+// as body text would put two different labels in the same offer color on the
+// terminals least able to afford the confusion, exactly the section 1.7 rule
+// the palette audit already applies to the slots themselves.
+func TestInactivePillKeepsItsWheelIdentity(t *testing.T) {
+	seen := map[uint8]int{}
+	for index := 0; index < LabelWheel; index++ {
+		quantized := index256(darkPalette[LabelSlot(index)])
+		if other, ok := seen[quantized]; ok {
+			t.Errorf("wheel slots %d and %d read as index %d at 256 colors", other, index, quantized)
+		}
+		seen[quantized] = index
+		// The hue must also stay separable from the achromatic runs it sits
+		// beside, or the tinted pill degrades into the withdrawn form it
+		// replaced.
+		for _, role := range []Slot{FgSubtle, FgMuted} {
+			if index256(darkPalette[LabelSlot(index)]) == index256(darkPalette[role]) {
+				t.Errorf("wheel slot %d collapses onto an achromatic text role at 256 colors", index)
+			}
+		}
+	}
+}
+
 // contrastRatio is the WCAG 2.x contrast ratio of two colors.
 func contrastRatio(left, right rgb) float64 {
 	lighter, darker := left.luminance(), right.luminance()

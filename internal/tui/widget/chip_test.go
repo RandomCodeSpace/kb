@@ -150,11 +150,13 @@ func TestFilterLabelIsEmptyWithoutATag(t *testing.T) {
 	}
 }
 
-// TestFilterLabelWithdrawsTheHueWhenUnselected is the toggle affordance the
-// filter bar spends the hue on: a selected pill wears its wheel fill, an
-// unselected one the dim form of spec section 1.2, and the two are not the same
-// bytes at the same width.
-func TestFilterLabelWithdrawsTheHueWhenUnselected(t *testing.T) {
+// TestFilterLabelWithdrawsTheFillAndKeepsTheHue is the toggle affordance the
+// filter bar spends the hue on, after issue #208: a selected pill wears its
+// wheel fill, an unselected one withdraws that fill to Surface but keeps the
+// same wheel hue on its body text, so the offer can still be matched by eye to
+// the label pill on the card it filters for. The two forms are not the same
+// bytes, and neither is a different width.
+func TestFilterLabelWithdrawsTheFillAndKeepsTheHue(t *testing.T) {
 	styles := theme.New(true)
 	for _, tag := range []string{"bug", "type::feature"} {
 		off := FilterLabel(styles, tag, theme.Canvas, false, false, false)
@@ -163,10 +165,17 @@ func TestFilterLabelWithdrawsTheHueWhenUnselected(t *testing.T) {
 			t.Errorf("%q renders identically selected and unselected", tag)
 		}
 		if strings.Contains(off, hueRun(styles, tag)) {
-			t.Errorf("the unselected %q pill kept its wheel hue: %q", tag, off)
+			t.Errorf("the unselected %q pill kept its wheel fill: %q", tag, off)
 		}
 		if !strings.Contains(on, hueRun(styles, tag)) {
-			t.Errorf("the selected %q pill lost its wheel hue: %q", tag, on)
+			t.Errorf("the selected %q pill lost its wheel fill: %q", tag, on)
+		}
+		if !strings.Contains(off, tintRun(styles, tag)) {
+			t.Errorf("the unselected %q pill lost its wheel hue: %q", tag, off)
+		}
+		if ansi.StringWidth(off) != ansi.StringWidth(on) {
+			t.Errorf("%q changed width across the toggle: %d then %d",
+				tag, ansi.StringWidth(off), ansi.StringWidth(on))
 		}
 	}
 }
@@ -178,6 +187,16 @@ func TestFilterLabelWithdrawsTheHueWhenUnselected(t *testing.T) {
 func hueRun(styles *theme.Styles, tag string) string {
 	fill := theme.LabelSlot(LabelWheel(tag))
 	return styles.ChipRuns(fill, theme.Canvas).CapRight.Render(styles.Glyph.CapR)
+}
+
+// tintRun is the same wheel hue as the inactive pill writes it: foreground over
+// the withdrawn Surface fill rather than a fill of its own. It is the sequence
+// that has to survive for an unselected offer to stay matchable to its card.
+func tintRun(styles *theme.Styles, tag string) string {
+	const probe = "probe"
+	fill := theme.LabelSlot(LabelWheel(tag))
+	rendered := styles.ChipRunsTint(fill, theme.Canvas).Body.Render(probe)
+	return rendered[:strings.Index(rendered, probe)]
 }
 
 func TestFilterLabelHoverUnderlinesWithoutRecoloring(t *testing.T) {

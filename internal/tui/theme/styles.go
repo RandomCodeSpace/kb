@@ -584,26 +584,38 @@ func (s *Styles) ChipRuns(fill, surface Slot) ChipStyles {
 	}
 }
 
-// ChipRunsDim returns the runs of one inactive pill over one surface: the same
-// section 3.6 anatomy with the wheel hue withdrawn. The fill drops to Surface -
-// the tier the scoped pill's dark half already uses - and the text drops from
-// FgOnAccent to the section 1.2 tertiary and secondary roles, so an unselected
-// filter label reads as an offer rather than as a state.
+// ChipRunsTint returns the runs of one inactive pill over one surface: the same
+// section 3.6 anatomy with the wheel hue withdrawn from the fill but kept on
+// the text. The fill drops to Surface - the tier the scoped pill's dark half
+// already uses - so the pill cannot be misread as selected, and the body run
+// takes the fill hue as its foreground instead of FgOnAccent, which is the
+// section 1.9 blurred-button pattern: a variant that has lost its state still
+// carries its identity as a tint on the resting surface. An unselected filter
+// label therefore reads as an offer, and still matches by eye the wheel-hued
+// label pill on the card it filters for (issue #208).
 //
-// The dim form keeps the two-tone split of the scoped pill: the key run stays
-// one step below the body, so the key/value hierarchy survives the withdrawal
-// of the hue rather than collapsing into one gray. No cell count changes, which
-// is what lets the filter bar toggle a pill in place (section 10.4.4).
-func (s *Styles) ChipRunsDim(surface Slot) ChipStyles {
-	body := s.On(FgSubtle, Surface)
-	flat := s.OnBold(FgMuted, surface)
+// The tint form keeps the two-tone split of the scoped pill: the key run stays
+// one step below the body - FgSubtle under the hue - so the key/value hierarchy
+// survives the withdrawal of the fill rather than collapsing into one run. That
+// run also carries the toggle marker (section 10.4.1), which is why it sits at
+// the secondary role rather than the tertiary one: the marker is the affordance
+// a user must read before acting, so it takes the section 1.9 AA floor with it.
+//
+// The compact run keeps the hue it already had: the flat form has no fill and
+// no cap to spend, so there the marker is the whole toggle affordance, the same
+// rule section 10.7.5 applies at FidelityFlat. No cell count changes in any
+// form, which is what lets the filter bar toggle a pill in place (section
+// 10.4.4).
+func (s *Styles) ChipRunsTint(fill, surface Slot) ChipStyles {
+	body := s.On(fill, Surface)
+	flat := s.OnBold(fill, surface)
 	return ChipStyles{
 		CapLeft:   s.On(Surface, surface),
 		CapRight:  s.On(Surface, surface),
 		ScopedCap: s.On(Surface, surface),
 		Body:      body,
 		BodyHover: body.Underline(true),
-		ScopedKey: s.On(FgMuted, Surface),
+		ScopedKey: s.On(FgSubtle, Surface),
 		Flat:      flat,
 		FlatHover: flat.Underline(true),
 	}

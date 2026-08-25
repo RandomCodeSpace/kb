@@ -62,7 +62,7 @@ type Glyphs struct {
 
 	// The filter bar's toggle marks. A filter label pill is the section 3.6
 	// pill plus one of these inside its caps, so the toggle survives the flat
-	// fidelity floor of section 10.7.5, where the dim/hue distinction that
+	// fidelity floor of section 10.7.5, where the filled/tinted distinction that
 	// carries the state everywhere else has no color to carry it with. Both are
 	// two cells - the mark and the column that separates it from the pill body -
 	// so the pill's width is the same in both states (section 10.4.4).

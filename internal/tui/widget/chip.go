@@ -18,7 +18,7 @@ type ChipOpts struct {
 	On      theme.Slot // the surface the pill is drawn onto
 	Flat    bool       // the compact degradation: flat colored bold text
 	Hovered bool       // the pointer rests on this pill
-	Dim     bool       // the inactive form: the wheel hue withdrawn to Surface
+	Dim     bool       // the inactive form: the fill withdrawn, the hue kept on the text
 	Focused bool       // the keyboard cursor rests on this pill
 }
 
@@ -34,7 +34,7 @@ func Chip(styles *theme.Styles, opts ChipOpts) string {
 	}
 	runs := styles.ChipRuns(opts.Fill, opts.On)
 	if opts.Dim {
-		runs = styles.ChipRunsDim(opts.On)
+		runs = styles.ChipRunsTint(opts.Fill, opts.On)
 	}
 	body := runs.Body
 	flat := runs.Flat
@@ -52,8 +52,8 @@ func Chip(styles *theme.Styles, opts ChipOpts) string {
 	}
 	// The scoped variant substitutes Surface and FgSubtle for the first cap
 	// and the key run (spec sections 1.6 and 3.6). The mark rides the key run:
-	// it belongs to the dark half, the half that is the same tier in both the
-	// hued and the dim form, so the mark's own contrast never moves.
+	// it belongs to the dark half, the half that is FgSubtle on Surface in both
+	// the filled and the tinted form, so the mark's own contrast never moves.
 	return runs.ScopedCap.Render(capLeft) +
 		runs.ScopedKey.Render(opts.Mark+opts.Key) +
 		body.Render(opts.Text) +
@@ -104,9 +104,11 @@ func Label(styles *theme.Styles, tag string, on theme.Slot, flat, hovered bool) 
 // FilterLabel renders one filter-bar label pill: the section 3.6 pill the board
 // cards already carry, plus the two states the toolbar needs on top of it.
 //
-// selected fills the pill with its wheel hue; unselected withdraws the hue to
-// the dim form of ChipRunsDim, so the row reads as a set of offers with the
-// active ones lit. focused thickens both end caps. Neither changes a cell count,
+// selected fills the pill with its wheel hue; unselected withdraws the fill to
+// the tinted form of ChipRunsTint, which keeps that same wheel hue on the body
+// text, so the row reads as a set of offers with the active ones lit and every
+// offer still matchable by eye to the label pills on the cards (issue #208).
+// focused thickens both end caps. Neither changes a cell count,
 // so toggling or traversing a label never reflows the toolbar (section 10.4.4),
 // and the leading toggle mark keeps both distinctions legible at the flat
 // fidelity floor, where neither hue nor tier survives.
