@@ -4,16 +4,18 @@ import (
 	"strconv"
 	"strings"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 // ChipOpts describes one pill. Spec section 3.6: the pill is the language's
-// chip primitive, half-block end caps carrying the fill color as foreground
-// over the surface behind, so it reads as rounded at half-cell resolution.
+// chip primitive, a flat span of colored cells with one padding cell at each
+// end, so it owes a terminal font nothing but the ability to paint a cell.
 type ChipOpts struct {
 	Text    string     // the pill body
 	Key     string     // non-empty selects the scoped two-tone form
-	Mark    string     // optional state mark drawn inside the left cap
+	Mark    string     // optional state mark drawn at the head of the body
 	Fill    theme.Slot // the pill fill
 	On      theme.Slot // the surface the pill is drawn onto
 	Flat    bool       // the compact degradation: flat colored bold text
@@ -22,12 +24,20 @@ type ChipOpts struct {
 	Focused bool       // the keyboard cursor rests on this pill
 }
 
+// chipPad is the pill's end padding: one cell of the pill's own ground, spent
+// where spec section 3.6 spent a half-block end cap until issue #227. The cap
+// was the one piece of the pill language that depended on font geometry rather
+// than on color cells, and it failed both ways - a seam on a filled pill wherever
+// the half block was not drawn flush to the cell edge, and a colored bar on an
+// inactive pill, which has no fill for it to fuse into.
+const chipPad = " "
+
 // Chip renders one pill. Cost is width(Mark)+width(Key)+width(Text)+2 columns
-// for the capped form and width(Mark)+width(Text) for the flat form, in every
-// state: spec section 10.5.1 spends an underline on the body run precisely
-// because a pill has no tier left to raise and no cell to spare on a bigger cap,
-// and section 2.4's selection cue is spent here on the end caps, which thicken
-// from half blocks to full blocks and stay one cell apiece.
+// for the padded form and width(Mark)+width(Text) for the flat form, in every
+// state (spec section 10.4.4): the padding is one cell per end whatever the
+// state, spec section 10.5.1 spends an underline on the body run for hover, and
+// keyboard focus bolds that same run. Both cues are attributes, so no state in
+// the widget moves a column.
 func Chip(styles *theme.Styles, opts ChipOpts) string {
 	if opts.Text == "" {
 		return ""
@@ -36,46 +46,50 @@ func Chip(styles *theme.Styles, opts ChipOpts) string {
 	if opts.Dim {
 		runs = styles.ChipRunsTint(opts.Fill, opts.On)
 	}
-	body := runs.Body
-	flat := runs.Flat
-	if opts.Hovered {
-		body, flat = runs.BodyHover, runs.FlatHover
-	}
+	body, flat := chipBody(runs, opts)
 	if opts.Flat {
 		return flat.Render(opts.Mark + opts.Text)
 	}
-	capLeft, capRight := chipCaps(styles, opts.Focused)
 	if opts.Key == "" {
-		return runs.CapLeft.Render(capLeft) +
+		return runs.Pad.Render(chipPad) +
 			body.Render(opts.Mark+opts.Text) +
-			runs.CapRight.Render(capRight)
+			runs.Pad.Render(chipPad)
 	}
 	// The scoped variant substitutes FgSubtle on Surface for the key run (spec
-	// sections 1.6 and 3.6); the first cap keeps the wheel hue every other cap
-	// carries, so the pill reads hue-bracketed with the dark key half inside it
-	// (issue #219). The mark rides the key run: it belongs to the dark half, the
-	// half that is FgSubtle on Surface in both the filled and the tinted form,
-	// so the mark's own contrast never moves.
-	return runs.ScopedCap.Render(capLeft) +
+	// sections 1.6 and 3.6). With the caps gone the two tones meet as a hard
+	// color boundary between two padded spans: the Surface span is the leading
+	// pad plus the key, the fill span is the body plus the trailing pad. The mark
+	// rides the key run - it belongs to the dark half, the half that is FgSubtle
+	// on Surface in both the filled and the tinted form, so the mark's own
+	// contrast never moves.
+	return runs.ScopedPad.Render(chipPad) +
 		runs.ScopedKey.Render(opts.Mark+opts.Key) +
 		body.Render(opts.Text) +
-		runs.CapRight.Render(capRight)
+		runs.Pad.Render(chipPad)
 }
 
-// chipCaps are the pill's two end glyphs. Focus thickens both from the half
-// blocks of spec section 3.6 to the full block section 2.4 already spends on a
-// selected card's rail, which is a cue the flat fidelity floor keeps and which
-// costs no cell in either state (section 10.4.4).
-func chipCaps(styles *theme.Styles, focused bool) (string, string) {
-	if focused {
-		return styles.Glyph.RailFull, styles.Glyph.RailFull
+// chipBody picks the body and flat runs for the pill's pointer and keyboard
+// state. Hover underlines and focus bolds, both on the body run only and both
+// costing zero cells (spec sections 10.4.4 and 10.5.1); they are orthogonal
+// axes, so the filter bar can carry the pair at once. The flat form has no
+// focus state - it is the compact degradation of section 2.6, which is already
+// bold and is never traversed - so focus leaves it alone.
+func chipBody(runs theme.ChipStyles, opts ChipOpts) (body, flat lipgloss.Style) {
+	switch {
+	case opts.Focused && opts.Hovered:
+		return runs.BodyFocusHover, runs.FlatHover
+	case opts.Focused:
+		return runs.BodyFocus, runs.Flat
+	case opts.Hovered:
+		return runs.BodyHover, runs.FlatHover
+	default:
+		return runs.Body, runs.Flat
 	}
-	return styles.Glyph.CapL, styles.Glyph.CapR
 }
 
 // labelParts splits one tag into the pill runs of spec section 3.5: a scoped
 // key::value tag becomes a two-tone pill, a plain tag a single-tone #tag pill,
-// and the compact form drops the caps, keeping only the value when scoped and
+// and the compact form drops the padding, keeping only the value when scoped and
 // the hash prefix when plain. It is the one place the wheel hue and the scoped
 // cut are decided, so the board pill and the filter pill cannot fork.
 func labelParts(styles *theme.Styles, tag string, flat bool) (text, key string, fill theme.Slot) {
@@ -110,7 +124,8 @@ func Label(styles *theme.Styles, tag string, on theme.Slot, flat, hovered bool) 
 // the tinted form of ChipRunsTint, which keeps that same wheel hue on the body
 // text, so the row reads as a set of offers with the active ones lit and every
 // offer still matchable by eye to the label pills on the cards (issue #208).
-// focused thickens both end caps. Neither changes a cell count,
+// focused bolds the body run, the zero-cell cue that replaced the thickened end
+// caps when issue #227 retired them. Neither changes a cell count,
 // so toggling or traversing a label never reflows the toolbar (section 10.4.4),
 // and the leading toggle mark keeps both distinctions legible at the flat
 // fidelity floor, where neither hue nor tier survives.

@@ -16,11 +16,11 @@ func TestChipIsEmptyWithoutText(t *testing.T) {
 	}
 }
 
-func TestChipCostsTextPlusTwoCaps(t *testing.T) {
+func TestChipCostsTextPlusTwoPadCells(t *testing.T) {
 	styles := theme.New(true)
 	rendered := Chip(styles, ChipOpts{Text: "blocked", Fill: theme.StatusWarn, On: theme.Card})
 	plain := ansi.Strip(rendered)
-	if want := "▐blocked▌"; plain != want {
+	if want := " blocked "; plain != want {
 		t.Errorf("chip = %q, want %q", plain, want)
 	}
 	if got, want := ansi.StringWidth(rendered), len("blocked")+2; got != want {
@@ -28,10 +28,30 @@ func TestChipCostsTextPlusTwoCaps(t *testing.T) {
 	}
 }
 
+// TestChipDrawsNoBlockGlyph is issue #227 at the widget: the pill's end cells
+// are padding on the pill's own ground, so nothing the widget writes depends on
+// a font drawing a half block flush to the cell edge.
+func TestChipDrawsNoBlockGlyph(t *testing.T) {
+	styles := theme.New(true)
+	for _, opts := range []ChipOpts{
+		{Text: "blocked", Fill: theme.StatusWarn, On: theme.Card},
+		{Text: "feature", Key: "type:", Fill: theme.Label1, On: theme.Card},
+		{Text: "bug", Mark: styles.Glyph.MarkFilterOn, Fill: theme.Label2, On: theme.Canvas, Dim: true},
+		{Text: "bug", Mark: styles.Glyph.MarkFilterOff, Fill: theme.Label2, On: theme.Canvas, Dim: true, Focused: true},
+	} {
+		plain := ansi.Strip(Chip(styles, opts))
+		for _, glyph := range []string{styles.Glyph.CapL, styles.Glyph.CapR, styles.Glyph.RailFull} {
+			if strings.Contains(plain, glyph) {
+				t.Errorf("chip %q still draws the block glyph %q", plain, glyph)
+			}
+		}
+	}
+}
+
 func TestChipScopedFormUsesADarkKeyHalf(t *testing.T) {
 	styles := theme.New(true)
 	rendered := Chip(styles, ChipOpts{Text: "feature", Key: "type:", Fill: theme.Label1, On: theme.Card})
-	if plain, want := ansi.Strip(rendered), "▐type:feature▌"; plain != want {
+	if plain, want := ansi.Strip(rendered), " type:feature "; plain != want {
 		t.Errorf("scoped chip = %q, want %q", plain, want)
 	}
 	unscoped := Chip(styles, ChipOpts{Text: "feature", Fill: theme.Label1, On: theme.Card})
@@ -40,7 +60,7 @@ func TestChipScopedFormUsesADarkKeyHalf(t *testing.T) {
 	}
 }
 
-func TestChipFlatFormDropsTheCaps(t *testing.T) {
+func TestChipFlatFormDropsThePadding(t *testing.T) {
 	styles := theme.New(true)
 	rendered := Chip(styles, ChipOpts{Text: "blocked", Fill: theme.StatusWarn, On: theme.Card, Flat: true})
 	if plain, want := ansi.Strip(rendered), "blocked"; plain != want {
@@ -82,12 +102,12 @@ func TestLabelForms(t *testing.T) {
 		flat bool
 		want string
 	}{
-		{"plain", "bug", false, "▐#bug▌"},
+		{"plain", "bug", false, " #bug "},
 		{"plain compact", "bug", true, "#bug"},
-		{"scoped", "type::feature", false, "▐type:feature▌"},
+		{"scoped", "type::feature", false, " type:feature "},
 		{"scoped compact", "type::feature", true, "feature"},
-		{"empty key falls back to plain", "::feature", false, "▐#::feature▌"},
-		{"empty value falls back to plain", "type::", false, "▐#type::▌"},
+		{"empty key falls back to plain", "::feature", false, " #::feature "},
+		{"empty value falls back to plain", "type::", false, " #type:: "},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -125,12 +145,12 @@ func TestFilterLabelForms(t *testing.T) {
 		focused  bool
 		want     string
 	}{
-		{"unselected plain", "bug", false, false, "▐+ #bug▌"},
-		{"selected plain", "bug", true, false, "▐x #bug▌"},
-		{"unselected scoped", "type::feature", false, false, "▐+ type:feature▌"},
-		{"selected scoped", "type::feature", true, false, "▐x type:feature▌"},
-		{"focused thickens both caps", "bug", false, true, "█+ #bug█"},
-		{"focused and selected", "type::feature", true, true, "█x type:feature█"},
+		{"unselected plain", "bug", false, false, " + #bug "},
+		{"selected plain", "bug", true, false, " x #bug "},
+		{"unselected scoped", "type::feature", false, false, " + type:feature "},
+		{"selected scoped", "type::feature", true, false, " x type:feature "},
+		{"focus draws no glyph", "bug", false, true, " + #bug "},
+		{"focused and selected", "type::feature", true, true, " x type:feature "},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -180,23 +200,58 @@ func TestFilterLabelWithdrawsTheFillAndKeepsTheHue(t *testing.T) {
 	}
 }
 
-// TestFilterLabelCapsCarryTheWheelHue is issue #219 at the call site: both end
-// caps of both toggle states, and the scoped pill's left cap with them, are the
-// tag's own wheel hue over the toolbar's Canvas tier. Surface caps drew a grey
-// half-block bar on either side of the offer, which is what the user saw.
-func TestFilterLabelCapsCarryTheWheelHue(t *testing.T) {
+// TestFilterLabelPadsAreTheSpanItself is issue #227 at the call site: the pill
+// ends in a padding cell drawn on the ground the run beside it owns, in both
+// toggle states and in the scoped form, so the offer reads as one flat span of
+// color. The end caps this replaced drew two hued half-blocks flanking an
+// inactive pill that had no fill for them to fuse into.
+func TestFilterLabelPadsAreTheSpanItself(t *testing.T) {
 	styles := theme.New(true)
 	for _, tag := range []string{"bug", "type::feature"} {
 		fill := theme.LabelSlot(LabelWheel(tag))
-		left := styles.ChipRuns(fill, theme.Canvas).CapLeft.Render(styles.Glyph.CapL)
-		right := styles.ChipRuns(fill, theme.Canvas).CapRight.Render(styles.Glyph.CapR)
 		for _, selected := range []bool{false, true} {
-			rendered := FilterLabel(styles, tag, theme.Canvas, selected, false, false)
-			if !strings.Contains(rendered, left) {
-				t.Errorf("%q selected=%v: the left cap is not the wheel hue: %q", tag, selected, rendered)
+			runs := styles.ChipRuns(fill, theme.Canvas)
+			if !selected {
+				runs = styles.ChipRunsTint(fill, theme.Canvas)
 			}
-			if !strings.Contains(rendered, right) {
-				t.Errorf("%q selected=%v: the right cap is not the wheel hue: %q", tag, selected, rendered)
+			rendered := FilterLabel(styles, tag, theme.Canvas, selected, false, false)
+			if !strings.HasSuffix(rendered, runs.Pad.Render(" ")) {
+				t.Errorf("%q selected=%v: the trailing pad is not the body ground: %q", tag, selected, rendered)
+			}
+			head := runs.Pad
+			if strings.Contains(tag, "::") {
+				head = runs.ScopedPad
+			}
+			if !strings.HasPrefix(rendered, head.Render(" ")) {
+				t.Errorf("%q selected=%v: the leading pad is not the run it abuts: %q", tag, selected, rendered)
+			}
+		}
+	}
+}
+
+// TestFilterLabelFocusBoldsWithoutMovingACell is the traversal cue that replaced
+// the thickened end caps (issue #227): bold on the body run, composing with
+// hover's underline, and costing nothing in either axis (spec section 10.4.4).
+func TestFilterLabelFocusBoldsWithoutMovingACell(t *testing.T) {
+	styles := theme.New(true)
+	for _, tag := range []string{"bug", "type::feature"} {
+		for _, selected := range []bool{false, true} {
+			rest := FilterLabel(styles, tag, theme.Canvas, selected, false, false)
+			focused := FilterLabel(styles, tag, theme.Canvas, selected, true, false)
+			both := FilterLabel(styles, tag, theme.Canvas, selected, true, true)
+			if rest == focused {
+				t.Fatalf("%q selected=%v: focus changed nothing", tag, selected)
+			}
+			if !strings.Contains(focused, "1;") {
+				t.Errorf("%q selected=%v: the focused pill is not bold: %q", tag, selected, focused)
+			}
+			if both == focused || both == FilterLabel(styles, tag, theme.Canvas, selected, false, true) {
+				t.Errorf("%q selected=%v: focus and hover did not compose", tag, selected)
+			}
+			for _, rendered := range []string{focused, both} {
+				if ansi.Strip(rendered) != ansi.Strip(rest) {
+					t.Errorf("%q selected=%v: a state changed the cells drawn: %q", tag, selected, rendered)
+				}
 			}
 		}
 	}
@@ -204,8 +259,8 @@ func TestFilterLabelCapsCarryTheWheelHue(t *testing.T) {
 
 // fillRun is the tag's own wheel slot as the *fill* behind a lit pill's body
 // text: the sequence that must be present when the pill is selected and absent
-// when it is not. The caps cannot tell the two forms apart since issue #219
-// hued every cap in both, so the withdrawal is readable on the body run alone.
+// when it is not. Since issue #227 the pill is that fill and its two padding
+// cells and nothing else, so the withdrawal is readable on the body run alone.
 func fillRun(styles *theme.Styles, tag string) string {
 	const probe = "probe"
 	fill := theme.LabelSlot(LabelWheel(tag))

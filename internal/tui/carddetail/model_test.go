@@ -75,7 +75,7 @@ func TestModelLoadsAndRendersFullDetail(t *testing.T) {
 	body := ansi.Strip(m.renderBody(72))
 	for _, want := range []string{
 		"DETAIL", "status      cancelled  blocked", "priority    1", "due         2026-08-19",
-		"effort      M", "labels      ▐type:feature▌", "links       [github#86]",
+		"effort      M", "labels       type:feature ", "links       [github#86]",
 		"killed 17 Aug 2026", "superseded", "Plan", "first",
 		"CHECKLIST", "1/2", "☑ done", "☐ left", "blocks      [#9 todo]", "blocked by  [✓ legacy done]",
 		"COMMENTS", "c3  alice  17 Aug 2026", "looks", "good",

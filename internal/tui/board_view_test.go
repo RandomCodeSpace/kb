@@ -104,9 +104,9 @@ func TestLabelColorUsesWebHash(t *testing.T) {
 		tag  string
 		want string
 	}{
-		{"type::feature", "▐type:feature▌"},
-		{"backend", "▐#backend▌"},
-		{"broken::", "▐#broken::▌"},
+		{"type::feature", " type:feature "},
+		{"backend", " #backend "},
+		{"broken::", " #broken:: "},
 	} {
 		if got := plain(widget.Label(styles, test.tag, theme.Card, false, false)); got != test.want {
 			t.Errorf("label pill(%q) = %q, want %q", test.tag, got, test.want)
@@ -257,14 +257,14 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	text := plain(content)
 	for _, want := range []string{
 		"▸● 1 TO DO", "▌● 2 DOING", "● 3 DONE", "● 4 CANCELLED", "2 cards · 1 blocked",
-		"🚀 Ship terminal board", "#7", "new", "P1", "▐blocked▌", "▐today▌", "🟨 M", "▐#backend▌", "▐type:feature▌",
+		"🚀 Ship terminal board", "#7", "new", "P1", " blocked ", " today ", "🟨 M", " #backend ", " type:feature ",
 		"3h here", "shipped", "1d old", "c cancelled:on",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("wide render missing %q:\n%s", want, text)
 		}
 	}
-	// Compaction drops the description, the meta line and the pill end caps.
+	// Compaction drops the description, the meta line and the pill padding.
 	// The flat row also runs out one label earlier than it did with the
 	// three-cell diamond chip: the effort square is two cells rather than one,
 	// metaRowWidth measures it, and the last label is what the survival order of
@@ -276,7 +276,7 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 			t.Errorf("compact render missing %q:\n%s", want, compact)
 		}
 	}
-	if strings.Contains(compact, "cards · ") || strings.Contains(compact, "▐blocked▌") {
+	if strings.Contains(compact, "cards · ") || strings.Contains(compact, " blocked ") {
 		t.Errorf("compact render kept normal-density chrome:\n%s", compact)
 	}
 	m.height = 40

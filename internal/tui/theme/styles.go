@@ -117,27 +117,37 @@ type CardStyles struct {
 	Seq      lipgloss.Style
 }
 
-// ChipStyles are the runs of one pill (spec section 3.6): two half-block end
-// caps carrying the fill color as foreground over the surface behind, the text
-// body on the fill, the dark half of a scoped pill, and the compact flat form.
+// ChipStyles are the runs of one pill (spec section 3.6): a padding cell on the
+// pill's own ground at each end, the text body on the fill, the dark half of a
+// scoped pill, and the compact flat form.
 //
-// BodyHover and FlatHover are the hovered forms of spec section 10.5.1. A pill
-// is a saturated fill with two half-block end caps: there is no tier left to
-// raise and the caps cannot grow without costing columns, so the cue is an
-// underline on the body run. It costs zero cells, survives 256-color
-// quantization and the ASCII structure profile, and changes no color, so it
-// cannot move the pair's contrast. Bold is unavailable because section 2.6
-// already spends it on the compact flat chip, and a hue swap would break the
-// label wheel's identity.
+// Pad and ScopedPad are the padding runs that replaced the half-block end caps
+// (issue #227). A cap drew the fill color as a *glyph* over the ground behind,
+// so it read as a colored bar wherever the font did not draw a half block flush
+// to the cell edge, and as a bar by construction on the inactive pill, which has
+// no fill for it to fuse into. The padding cell is the same column spent as a
+// colored cell instead of a glyph: Pad is the body's own ground, ScopedPad the
+// key half's, so the pill is a flat span of color that owes the font nothing.
+//
+// BodyHover and FlatHover are the hovered forms of spec section 10.5.1: an
+// underline on the body run, zero cells, no color moved. BodyFocus is the
+// keyboard-traversal cue that replaced the thickened caps - bold on the body
+// run, likewise zero cells. Bold is available here for the same reason the
+// underline of section 10.4.2 is: section 2.6 step 7 spends bold on the
+// *compact flat* chip, which has no focus state and never shares a widget with
+// a padded pill, so the two boldings can never be read in one place.
+// BodyFocusHover is the composition, because focus and hover are orthogonal
+// axes and the filter bar can hold both at once.
 type ChipStyles struct {
-	CapLeft   lipgloss.Style
-	CapRight  lipgloss.Style
-	ScopedCap lipgloss.Style
-	Body      lipgloss.Style
-	BodyHover lipgloss.Style
-	ScopedKey lipgloss.Style
-	Flat      lipgloss.Style
-	FlatHover lipgloss.Style
+	Pad            lipgloss.Style
+	ScopedPad      lipgloss.Style
+	Body           lipgloss.Style
+	BodyHover      lipgloss.Style
+	BodyFocus      lipgloss.Style
+	BodyFocusHover lipgloss.Style
+	ScopedKey      lipgloss.Style
+	Flat           lipgloss.Style
+	FlatHover      lipgloss.Style
 }
 
 // WorkStyles are the busy-state text roles of spec section 10.2. They are
@@ -592,27 +602,26 @@ type styleFunc func(foreground, background Slot) lipgloss.Style
 // any other surface resolves here, which costs struct copies and never a style
 // construction.
 //
-// Every cap carries the fill hue as foreground over the ground behind, the
-// scoped variant's first cap included (issue #219). The scoped cap was Surface
-// from section 3.6 onwards, which is near-invisible in truecolor and a grey bar
-// once quantized to 256 colors, so a scoped pill read as a grey half-block
-// bolted to the left of a colored one. Hueing it brackets the pill in its own
-// wheel slot and leaves the dark key half inside the bracket, where the
-// two-tone split belongs. The caps are glyph area, not prose, so no AA floor
-// binds them; what does bind them is section 1.7 separability, audited on cap
-// foregrounds against every ground a pill lands on.
+// The pill has no end caps since issue #227. Each end spends its column on a
+// padding cell filled with the ground that run already owns - Pad is the body's
+// fill, ScopedPad the Surface tier the scoped key half sits on - so the whole
+// pill is a run of colored cells and nothing in it depends on a font drawing a
+// half block flush to a cell edge. Width is unchanged: the space costs the cell
+// the cap used to.
 func (s *Styles) ChipRuns(fill, surface Slot) ChipStyles {
 	body := s.On(FgOnAccent, fill)
+	key := s.On(FgSubtle, Surface)
 	flat := s.OnBold(fill, surface)
 	return ChipStyles{
-		CapLeft:   s.On(fill, surface),
-		CapRight:  s.On(fill, surface),
-		ScopedCap: s.On(fill, surface),
-		Body:      body,
-		BodyHover: body.Underline(true),
-		ScopedKey: s.On(FgSubtle, Surface),
-		Flat:      flat,
-		FlatHover: flat.Underline(true),
+		Pad:            body,
+		ScopedPad:      key,
+		Body:           body,
+		BodyHover:      body.Underline(true),
+		BodyFocus:      body.Bold(true),
+		BodyFocusHover: body.Bold(true).Underline(true),
+		ScopedKey:      key,
+		Flat:           flat,
+		FlatHover:      flat.Underline(true),
 	}
 }
 
@@ -633,30 +642,33 @@ func (s *Styles) ChipRuns(fill, surface Slot) ChipStyles {
 // the secondary role rather than the tertiary one: the marker is the affordance
 // a user must read before acting, so it takes the section 1.9 AA floor with it.
 //
-// The caps carry the fill hue over the ground behind, exactly as the filled
-// form does (issue #219). Surface caps made the inactive pill a colored word
-// bracketed by grey half-blocks, which is the one reading the withdrawn fill
-// must not have: the tint form withdraws the fill, never the identity. The
-// toggle affordance is hue-on-fill against hue-on-surface plus the equal-width
-// marker, neither of which the cap was carrying.
+// Both padding cells are the withdrawn Surface ground the tinted body and key
+// runs already sit on (issue #227), so an inactive pill is one flat Surface span
+// carrying hued text. The end caps this replaced were the worst case of the cap
+// problem: an inactive pill has no fill for a hued half-block to fuse into, so
+// the caps rendered as two colored bars flanking the word by construction rather
+// than only on an unlucky font. The toggle affordance was never theirs - it is
+// hue-on-fill against hue-on-surface plus the equal-width marker.
 //
 // The compact run keeps the hue it already had: the flat form has no fill and
-// no cap to spend, so there the marker is the whole toggle affordance, the same
-// rule section 10.7.5 applies at FidelityFlat. No cell count changes in any
+// no padding to spend, so there the marker is the whole toggle affordance, the
+// same rule section 10.7.5 applies at FidelityFlat. No cell count changes in any
 // form, which is what lets the filter bar toggle a pill in place (section
 // 10.4.4).
 func (s *Styles) ChipRunsTint(fill, surface Slot) ChipStyles {
 	body := s.On(fill, Surface)
+	key := s.On(FgSubtle, Surface)
 	flat := s.OnBold(fill, surface)
 	return ChipStyles{
-		CapLeft:   s.On(fill, surface),
-		CapRight:  s.On(fill, surface),
-		ScopedCap: s.On(fill, surface),
-		Body:      body,
-		BodyHover: body.Underline(true),
-		ScopedKey: s.On(FgSubtle, Surface),
-		Flat:      flat,
-		FlatHover: flat.Underline(true),
+		Pad:            body,
+		ScopedPad:      key,
+		Body:           body,
+		BodyHover:      body.Underline(true),
+		BodyFocus:      body.Bold(true),
+		BodyFocusHover: body.Bold(true).Underline(true),
+		ScopedKey:      key,
+		Flat:           flat,
+		FlatHover:      flat.Underline(true),
 	}
 }
 

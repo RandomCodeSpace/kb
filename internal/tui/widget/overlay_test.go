@@ -201,18 +201,23 @@ func TestFieldWrapKeepsTheGutterAndBreaksBetweenPills(t *testing.T) {
 		t.Fatalf("three pills in a 44-cell panel wrapped to %d rows", len(rows))
 	}
 	first, second := ansi.Strip(rows[0]), ansi.Strip(rows[1])
-	if !strings.HasPrefix(first, "  labels      ▐#backend▌") {
+	if !strings.HasPrefix(first, "  labels       #backend ") {
 		t.Errorf("first row = %q", first)
 	}
-	if !strings.HasPrefix(second, "              ▐area:terminal▌") {
+	if !strings.HasPrefix(second, "               area:terminal ") {
 		t.Errorf("continuation row did not repeat the gutter: %q", second)
 	}
 	for index, row := range rows {
 		if got := ansi.StringWidth(row); got != 44 {
 			t.Errorf("row %d is %d cells, want 44", index, got)
 		}
-		if strings.Count(row, "▐") != strings.Count(row, "▌") {
-			t.Errorf("row %d split a pill across the break: %q", index, ansi.Strip(row))
+	}
+	// A pill is a run of styled cells with no glyph to count since issue #227, so
+	// the no-straddle assertion is that every pill survives whole in exactly one
+	// row.
+	for _, pill := range pills {
+		if strings.Count(rows[0], pill)+strings.Count(rows[1], pill) != 1 {
+			t.Errorf("pill %q was split across the break", ansi.Strip(pill))
 		}
 	}
 }
