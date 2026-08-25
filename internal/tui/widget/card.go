@@ -158,8 +158,13 @@ func cardTitle(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner in
 	if field < 0 {
 		field = 0
 	}
+	// The emoji and the column beside it are their own run (issue #229): a
+	// terminal shapes a styled run as a unit, so a title left inside the emoji's
+	// run is drawn pushed right by the pictograph's excess advance and its last
+	// character is then clipped by the padding run, which lands on the cell the
+	// grid gave it.
 	text := truncate(styles, head, field)
-	row := fill(surfaceStyle, titleStyle.Render(text), field)
+	row := fill(surfaceStyle, MarkRun(styles, opts.Emoji, text, titleStyle, surface), field)
 	if sequence == 0 {
 		return row
 	}

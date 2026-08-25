@@ -28,6 +28,39 @@ const (
 	DensityCompact = theme.DensityCompact
 )
 
+// MarkRun renders one composed run that may begin with a display mark and the
+// column spec section 10.4.1's adjacency rule gives that mark.
+//
+// A mark two cells wide is a color pictograph: section 10.4.1 admits a
+// pictograph only as a single East Asian Wide code point, and East Asian Wide is
+// exactly what Emoji_Presentation guarantees, so a two-cell mark paints its own
+// colors and has no foreground to lose. Such a mark is also drawn by font
+// machinery whose advance is wider than the two columns the cell grid gives it,
+// and a terminal draws one styled run as one shaped run: every glyph after the
+// pictograph inside that run is drawn pushed right by the excess, and the run
+// after it - placed by the cell grid rather than by the pen - is painted over
+// the tail of the last glyph. That is what cut the effort chip's letter in half
+// and the last character off an emoji-bearing card title in issue #229.
+//
+// The mark and the column it owns are therefore a run of their own, painted in
+// the ground they sit on: the overhang stays on the column the adjacency rule
+// bought for it, and the text beside it starts a fresh run on the cells the grid
+// gave it. A one-cell mark keeps the single run - it has a real foreground and
+// no advance to overrun - and so does a run the caller already truncated past
+// its own mark.
+func MarkRun(styles *theme.Styles, mark, content string, style lipgloss.Style, on theme.Slot) string {
+	owned := mark + " "
+	if mark == "" || ansi.StringWidth(mark) < 2 || !strings.HasPrefix(content, owned) {
+		return style.Render(content)
+	}
+	head := styles.On(on, on).Render(owned)
+	rest := strings.TrimPrefix(content, owned)
+	if rest == "" {
+		return head
+	}
+	return head + style.Render(rest)
+}
+
 // Truncate is the width-aware shortening primitive of spec section 3.3,
 // exported for the spin subpackage, which composes rows the same way the
 // widgets in this package do and must not carry a second copy of the rule.
