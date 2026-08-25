@@ -53,7 +53,13 @@ func Band(styles *theme.Styles, opts BandOpts) string {
 	}
 	head += styles.Glyph.Dot + " " + strconv.Itoa(opts.Index) + " "
 
-	count := strconv.Itoa(opts.Count) + " "
+	// The leading space is the section 10.4.1 adjacency rule. A label wide
+	// enough to truncate ends on the Ellipsis glyph, which is East Asian
+	// Ambiguous, and the label field is sized so the count starts in the very
+	// next column: without a reserved separator the count's first digit is
+	// written on top of a glyph the font drew wider than its cell. Reserving
+	// the column costs the label one cell in every state, so no band moves.
+	count := " " + strconv.Itoa(opts.Count) + " "
 	available := opts.Width - ansi.StringWidth(head)
 	field := min(available-ansi.StringWidth(count), opts.Width-styles.Metrics.BandHeadW)
 	if field < 0 {

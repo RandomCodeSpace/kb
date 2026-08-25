@@ -58,6 +58,12 @@ func TestBandEllipsizesALongLabel(t *testing.T) {
 	if !strings.HasSuffix(plain, "12 ") {
 		t.Errorf("band = %q, the count must survive a long label", plain)
 	}
+	// Issue #218: the ellipsis is East Asian Ambiguous, so the count may not
+	// start in the column straight after it or its first digit is drawn over a
+	// glyph the font took more than one cell to draw.
+	if !strings.Contains(plain, "… ") {
+		t.Errorf("band = %q, the ellipsized label must own the column after it", plain)
+	}
 	if ansi.StringWidth(rendered) != 24 {
 		t.Errorf("band width = %d, want 24", ansi.StringWidth(rendered))
 	}

@@ -257,7 +257,7 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	text := plain(content)
 	for _, want := range []string{
 		"▸● 1 TO DO", "▌● 2 DOING", "● 3 DONE", "● 4 CANCELLED", "2 cards · 1 blocked",
-		"🚀 Ship terminal board", "#7", "new", "P1", "▐blocked▌", "▐today▌", "◇M", "▐#backend▌", "▐type:feature▌",
+		"🚀 Ship terminal board", "#7", "new", "P1", "▐blocked▌", "▐today▌", "◇ M", "▐#backend▌", "▐type:feature▌",
 		"3h here", "shipped", "1d old", "c cancelled:on",
 	} {
 		if !strings.Contains(text, want) {
@@ -267,7 +267,7 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	// Compaction drops the description, the meta line and the pill end caps.
 	m.height = 22
 	compact := plain(m.render())
-	for _, want := range []string{"P1 new ⛔ !today ◇M #backend feature", "P2 3h here !tomorrow"} {
+	for _, want := range []string{"P1 new ⛔ !today ◇ M #backend feature", "P2 3h here !tomorrow"} {
 		if !strings.Contains(compact, want) {
 			t.Errorf("compact render missing %q:\n%s", want, compact)
 		}
@@ -528,7 +528,7 @@ func TestPollTickRefreshesRenderTimeAtRolloverBoundary(t *testing.T) {
 	}}}
 
 	initial := plain(m.View().Content)
-	for _, want := range []string{"new", "today", "×1 shipped today"} {
+	for _, want := range []string{"new", "today", "× 1 shipped today"} {
 		if !strings.Contains(initial, want) {
 			t.Fatalf("pre-tick render missing %q:\n%s", want, initial)
 		}

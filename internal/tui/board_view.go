@@ -454,7 +454,11 @@ func (m Model) renderTopBar(styles *theme.Styles, width int) string {
 		styles.OnBold(accent, theme.Canvas).Render("kb") +
 		styles.Board.TopBar.Render(" / "+title+" / "+sanitizeTerminal(m.user))
 	if shipped := m.shippedCount(); shipped > 0 {
-		line += styles.On(theme.StatusOK, theme.Canvas).Render(fmt.Sprintf(" / ×%d shipped today", shipped))
+		// The space after the multiplication sign is the section 10.4.1
+		// adjacency rule: U+00D7 is East Asian Ambiguous, so a digit written
+		// straight after it is drawn over a glyph the font took more than its
+		// advertised cell to draw.
+		line += styles.On(theme.StatusOK, theme.Canvas).Render(fmt.Sprintf(" / × %d shipped today", shipped))
 	}
 	return fillRow(styles.Board.Canvas, fitLine(line, width), width)
 }
@@ -1176,7 +1180,15 @@ func (m Model) cardMeta(styles *theme.Styles, task board.Task, surface theme.Slo
 		}
 	}
 	if task.Effort != "" {
-		meta[4] = styles.On(theme.FgSubtle, surface).Render(styles.Glyph.Diamond + sanitizeTerminal(task.Effort))
+		// The space is the section 10.4.1 adjacency rule, not decoration.
+		// Diamond is East Asian Ambiguous: ansi.StringWidth counts one cell and
+		// the layout arithmetic believes it, but many terminal fonts draw the
+		// glyph wider than the cell it was advanced past, so a letter written
+		// straight after it lands on top of the diamond. One column of its own
+		// is what keeps the mark and its letter both legible. The chip is three
+		// cells in every density and the metaRowWidth arithmetic measures it
+		// rather than assuming it, so the responsive drop inherits the cost.
+		meta[4] = styles.On(theme.FgSubtle, surface).Render(styles.Glyph.Diamond + " " + sanitizeTerminal(task.Effort))
 	}
 	return meta
 }
