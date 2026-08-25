@@ -518,21 +518,29 @@ runs = [ "▐" fg=Fill  bg=On ]   U+2590 right half block
        [ "▌" fg=Fill  bg=On ]   U+258C left half block
 ```
 
-Cost: `width(text) + 2` columns. The scoped variant substitutes `Surface`/
-`FgSubtle` for the first cap and the key run.
+Cost: `width(text) + 2` columns. Both caps carry the fill color as foreground;
+the scoped variant substitutes `FgSubtle` on `Surface` for the key run only, so
+the pill reads hue-bracketed with the dark key half inside the bracket. The
+first cap was `Surface` until #219, which is near-invisible in truecolor and a
+grey bar once quantized.
 
 **Inactive variant** (added by #207 for toggleable pill sets — today the filter
 bar; re-hued by #208). A pill that is present but not selected withdraws its
 *fill*, not its hue: `ChipRunsTint(fill, surface)` drops the fill to `Surface`
 so the pill cannot read as selected, and moves the wheel hue onto the body text
 as foreground in place of `FgOnAccent` — §1.9's rule that a variant which has
-lost its state still carries its identity as a tint on the resting surface. The
+lost its state still carries its identity as a tint on the resting surface —
+while the end caps keep the wheel hue they carry in the filled form (#219): the
+withdrawal takes the fill, never the identity. The
 scoped key run is `FgSubtle` on `Surface`, one step under the hue, preserving
 the two-tone split; it sits at the secondary rather than the tertiary role
 because it also carries the toggle marker, which is prose a user must read
 before acting and so takes the §1.9 AA floor with it. All five wheel hues clear
 AA 4.5:1 on `Surface` in truecolor and after 256-color quantization (worst 4.97
-and 5.19), which is what permits the hue on prose rather than on the end caps.
+and 5.19), which is what permits the hue on prose. The caps carry it too, but
+as glyph area they take no AA floor; what binds them is §1.7 separability,
+audited on cap foregrounds against every ground a pill lands on (`Card`,
+`Zebra`, `Raised`, `Canvas`, `OverlaySurf`).
 Hue-on-fill against hue-on-surface is the toggle affordance in color; the
 equal-width two-cell marker inside the caps (`MarkFilterOff` `+ ` /
 `MarkFilterOn` `x `, §10.4.1) carries it where color cannot — at `FidelityFlat`
