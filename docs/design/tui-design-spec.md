@@ -2192,7 +2192,8 @@ slice that adopts the rule that needs them.
 | `Dot` | `●` | U+25CF | 1 | Column status dot (§2.2) | present |
 | `Check` | `☐` | U+2610 | 1 | Unchecked checklist row | present |
 | `CheckOn` | `☑` | U+2611 | 1 | Checked checklist row | present |
-| `CheckOff` | `☒` | U+2612 | 1 | Dropped checklist row | present |
+| `CheckOff` | `☒` | U+2612 | 1 | Dropped checklist row; cancelled-blocker mark in a blocker chip (#224) | present |
+| `Tick` | `✓` | U+2713 | 1 | Resolved-blocker mark inside a blocker chip (#224) | new |
 | `Diamond` | `◇` | U+25C7 | 1 | Effort marker (§3.4) | present |
 | `Focus` | `▸` | U+25B8 | 1 | Focused band caret (§2.2) | present |
 | `More` | `+` | U+002B | 1 | Overflow cue prefix (§3.7) | present |
@@ -2248,7 +2249,7 @@ Ambiguous glyphs measure one cell to `ansi.StringWidth` and to every width
 calculation kb makes, but many terminal fonts draw them wider than the cell the
 cursor was advanced past, so anything written in the next column is drawn on top
 of the mark. The rule binds `Dot`, `Diamond`, `Ellipsis`, `Empty`, `Alert`,
-`Bullet`, `Times` and `EmDash`. It does not bind the Block Elements — `Rail`,
+`Bullet`, `Times`, `EmDash` and `Tick` (#224). It does not bind the Block Elements — `Rail`,
 `RailFull`, `CapR`, `Track`, `HalfTop`, `HalfBottom` — whose adjacency to their
 neighbour *is* the primitive: a rail that does not touch its card and a cap that
 does not touch its text are a different widget, and their cell alignment is the
@@ -2578,6 +2579,7 @@ than one thing seen twice.
 | Column header band, focused | none | column hue, solid | column hue, solid |
 | Chip / label pill | none — attribute only, see below | wheel or status hue | unchanged |
 | Inline reference (`kb://task/<seq>`) in overlay body prose (#212) | the reference run only | `OverlaySurf` | `OverlayBand` |
+| Blocker chip (`#<seq>`) in the overlay's link rows and completion gate (#222) | the chip run only — explicitly not the "Chip / label pill" row: this chip is bracketed text on the panel surface, not a §3.6 pill, so the tier step is available | `OverlaySurf` | `OverlayBand` |
 
 **Card.** The rail cell's background steps to `Raised`; the rail glyph stays `Rail`
 and stays priority-hued, under the same rule §2.4 gives selection — the rail carries
