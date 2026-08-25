@@ -148,6 +148,51 @@ func TestChipRunsMatchTheCachedDefaults(t *testing.T) {
 	}
 }
 
+// TestChipCapsCarryTheFillHue is issue #219: the end caps are the pill's own
+// hue over whatever ground it lands on, in both pill forms and in the scoped
+// variant's first cap too. The scoped cap was Surface from section 3.6 onwards,
+// which reads as a grey bar bolted to the left of the pill once the palette is
+// quantized; the hue brackets the pill instead and leaves the dark key half
+// inside the bracket.
+func TestChipCapsCarryTheFillHue(t *testing.T) {
+	styles := New(true)
+	const probe = "chip"
+	for _, surface := range []Slot{Canvas, Card, Zebra, Raised, OverlaySurf} {
+		for index := range styles.Label {
+			slot := LabelSlot(index)
+			hue := styles.On(slot, surface).Render(probe)
+			grey := styles.On(Surface, surface).Render(probe)
+			forms := []struct {
+				name string
+				runs ChipStyles
+			}{
+				{"filled", styles.ChipRuns(slot, surface)},
+				{"tinted", styles.ChipRunsTint(slot, surface)},
+			}
+			for _, form := range forms {
+				caps := []struct {
+					name     string
+					rendered string
+				}{
+					{"CapLeft", form.runs.CapLeft.Render(probe)},
+					{"CapRight", form.runs.CapRight.Render(probe)},
+					{"ScopedCap", form.runs.ScopedCap.Render(probe)},
+				}
+				for _, end := range caps {
+					if end.rendered != hue {
+						t.Errorf("%s %s on surface %d slot %d does not carry the fill hue",
+							form.name, end.name, surface, index)
+					}
+					if end.rendered == grey {
+						t.Errorf("%s %s on surface %d slot %d is still the grey cap",
+							form.name, end.name, surface, index)
+					}
+				}
+			}
+		}
+	}
+}
+
 // sameRuns compares chip runs by what they render, since lipgloss styles are
 // not comparable.
 func sameRuns(left, right ChipStyles) bool {
@@ -180,14 +225,17 @@ func TestChipRunsTintWithdrawTheFillAndKeepTheHue(t *testing.T) {
 			if sameRuns(tint, filled) {
 				t.Errorf("the tinted runs on surface %d match the filled wheel slot %d", surface, index)
 			}
-			// Both caps are the same tier, which is what makes the tinted pill
-			// read as one withdrawn chip rather than as a lit half.
+			// Every cap is the same run, which is what makes the tinted pill read
+			// as one chip bracketed in its own hue rather than as a lit half.
 			if tint.CapLeft.Render(probe) != tint.ScopedCap.Render(probe) ||
 				tint.CapRight.Render(probe) != tint.ScopedCap.Render(probe) {
-				t.Errorf("surface %d slot %d: the tinted caps are not all Surface", surface, index)
+				t.Errorf("surface %d slot %d: the tinted caps are not all one run", surface, index)
 			}
-			if tint.CapLeft.Render(probe) == filled.CapLeft.Render(probe) {
-				t.Errorf("surface %d slot %d: the tinted cap still carries the fill hue", surface, index)
+			// Issue #219: the withdrawal takes the fill, never the identity, so
+			// the caps carry the wheel hue in the tinted form exactly as the
+			// filled form carries it.
+			if tint.CapLeft.Render(probe) != filled.CapLeft.Render(probe) {
+				t.Errorf("surface %d slot %d: the tinted cap lost the fill hue", surface, index)
 			}
 			// The hue lives on the body run now, which is the whole point: the
 			// tinted body must differ from every other wheel slot's tinted body.

@@ -195,6 +195,45 @@ func TestCardWithoutLabelsOrMeta(t *testing.T) {
 	}
 }
 
+// TestCardLabelPillsAreComposedOnTheCardsOwnGround is the ground half of issue
+// #219. A pill's end caps carry the hue as foreground over the ground behind
+// them, so the surface a pill is composed against has to be the surface it
+// actually lands on: compose it against Card while the card is striped or
+// selected and each end cap paints one cell of the wrong tier, which is a seam
+// the eye reads as a bar. The card wears three tiers - Card, Zebra when striped
+// at compact density, Raised when selected - so this pins the pill the card
+// draws to the pill the card's own resolved surface draws.
+func TestCardLabelPillsAreComposedOnTheCardsOwnGround(t *testing.T) {
+	styles := theme.New(true)
+	cases := []struct {
+		name     string
+		density  Density
+		selected bool
+		alt      bool
+		hovered  bool
+	}{
+		{"resting card", theme.DensityNormal, false, false, false},
+		{"selected card", theme.DensityNormal, true, false, false},
+		{"hovered card", theme.DensityNormal, false, false, true},
+		{"striped compact card", theme.DensityCompact, false, true, false},
+		{"selected compact card", theme.DensityCompact, true, true, false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			opts := cardFixture(styles, testCase.density, 1)
+			opts.Selected, opts.Alt, opts.Hovered = testCase.selected, testCase.alt, testCase.hovered
+			rendered := strings.Join(Card(styles, opts), "\n")
+			ground := styles.Surface(testCase.selected, testCase.alt)
+			for _, tag := range opts.Labels {
+				pill := Label(styles, tag, ground, testCase.density.Compact(), false)
+				if !strings.Contains(rendered, pill) {
+					t.Errorf("the %q pill is not composed on the card's own ground %d", tag, ground)
+				}
+			}
+		})
+	}
+}
+
 func TestWrapGreedilyFillsEachLine(t *testing.T) {
 	styles := theme.New(true)
 	got := wrap(styles, "one two three four", 9, 2)

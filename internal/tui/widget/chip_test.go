@@ -164,10 +164,10 @@ func TestFilterLabelWithdrawsTheFillAndKeepsTheHue(t *testing.T) {
 		if off == on {
 			t.Errorf("%q renders identically selected and unselected", tag)
 		}
-		if strings.Contains(off, hueRun(styles, tag)) {
+		if strings.Contains(off, fillRun(styles, tag)) {
 			t.Errorf("the unselected %q pill kept its wheel fill: %q", tag, off)
 		}
-		if !strings.Contains(on, hueRun(styles, tag)) {
+		if !strings.Contains(on, fillRun(styles, tag)) {
 			t.Errorf("the selected %q pill lost its wheel fill: %q", tag, on)
 		}
 		if !strings.Contains(off, tintRun(styles, tag)) {
@@ -180,13 +180,37 @@ func TestFilterLabelWithdrawsTheFillAndKeepsTheHue(t *testing.T) {
 	}
 }
 
-// hueRun is the tag's own wheel fill as the pill's right cap writes it onto the
-// toolbar's Canvas tier. The right cap is the one run both pill forms carry: the
-// left cap of a scoped pill is Surface in the hued form too, so it cannot tell
-// the two apart.
-func hueRun(styles *theme.Styles, tag string) string {
+// TestFilterLabelCapsCarryTheWheelHue is issue #219 at the call site: both end
+// caps of both toggle states, and the scoped pill's left cap with them, are the
+// tag's own wheel hue over the toolbar's Canvas tier. Surface caps drew a grey
+// half-block bar on either side of the offer, which is what the user saw.
+func TestFilterLabelCapsCarryTheWheelHue(t *testing.T) {
+	styles := theme.New(true)
+	for _, tag := range []string{"bug", "type::feature"} {
+		fill := theme.LabelSlot(LabelWheel(tag))
+		left := styles.ChipRuns(fill, theme.Canvas).CapLeft.Render(styles.Glyph.CapL)
+		right := styles.ChipRuns(fill, theme.Canvas).CapRight.Render(styles.Glyph.CapR)
+		for _, selected := range []bool{false, true} {
+			rendered := FilterLabel(styles, tag, theme.Canvas, selected, false, false)
+			if !strings.Contains(rendered, left) {
+				t.Errorf("%q selected=%v: the left cap is not the wheel hue: %q", tag, selected, rendered)
+			}
+			if !strings.Contains(rendered, right) {
+				t.Errorf("%q selected=%v: the right cap is not the wheel hue: %q", tag, selected, rendered)
+			}
+		}
+	}
+}
+
+// fillRun is the tag's own wheel slot as the *fill* behind a lit pill's body
+// text: the sequence that must be present when the pill is selected and absent
+// when it is not. The caps cannot tell the two forms apart since issue #219
+// hued every cap in both, so the withdrawal is readable on the body run alone.
+func fillRun(styles *theme.Styles, tag string) string {
+	const probe = "probe"
 	fill := theme.LabelSlot(LabelWheel(tag))
-	return styles.ChipRuns(fill, theme.Canvas).CapRight.Render(styles.Glyph.CapR)
+	rendered := styles.ChipRuns(fill, theme.Canvas).Body.Render(probe)
+	return rendered[:strings.Index(rendered, probe)]
 }
 
 // tintRun is the same wheel hue as the inactive pill writes it: foreground over

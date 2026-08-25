@@ -50,10 +50,12 @@ func Chip(styles *theme.Styles, opts ChipOpts) string {
 			body.Render(opts.Mark+opts.Text) +
 			runs.CapRight.Render(capRight)
 	}
-	// The scoped variant substitutes Surface and FgSubtle for the first cap
-	// and the key run (spec sections 1.6 and 3.6). The mark rides the key run:
-	// it belongs to the dark half, the half that is FgSubtle on Surface in both
-	// the filled and the tinted form, so the mark's own contrast never moves.
+	// The scoped variant substitutes FgSubtle on Surface for the key run (spec
+	// sections 1.6 and 3.6); the first cap keeps the wheel hue every other cap
+	// carries, so the pill reads hue-bracketed with the dark key half inside it
+	// (issue #219). The mark rides the key run: it belongs to the dark half, the
+	// half that is FgSubtle on Surface in both the filled and the tinted form,
+	// so the mark's own contrast never moves.
 	return runs.ScopedCap.Render(capLeft) +
 		runs.ScopedKey.Render(opts.Mark+opts.Key) +
 		body.Render(opts.Text) +
