@@ -591,13 +591,23 @@ type styleFunc func(foreground, background Slot) lipgloss.Style
 // Styles.Label are this composition against the resting card surface; a chip on
 // any other surface resolves here, which costs struct copies and never a style
 // construction.
+//
+// Every cap carries the fill hue as foreground over the ground behind, the
+// scoped variant's first cap included (issue #219). The scoped cap was Surface
+// from section 3.6 onwards, which is near-invisible in truecolor and a grey bar
+// once quantized to 256 colors, so a scoped pill read as a grey half-block
+// bolted to the left of a colored one. Hueing it brackets the pill in its own
+// wheel slot and leaves the dark key half inside the bracket, where the
+// two-tone split belongs. The caps are glyph area, not prose, so no AA floor
+// binds them; what does bind them is section 1.7 separability, audited on cap
+// foregrounds against every ground a pill lands on.
 func (s *Styles) ChipRuns(fill, surface Slot) ChipStyles {
 	body := s.On(FgOnAccent, fill)
 	flat := s.OnBold(fill, surface)
 	return ChipStyles{
 		CapLeft:   s.On(fill, surface),
 		CapRight:  s.On(fill, surface),
-		ScopedCap: s.On(Surface, surface),
+		ScopedCap: s.On(fill, surface),
 		Body:      body,
 		BodyHover: body.Underline(true),
 		ScopedKey: s.On(FgSubtle, Surface),
@@ -623,6 +633,13 @@ func (s *Styles) ChipRuns(fill, surface Slot) ChipStyles {
 // the secondary role rather than the tertiary one: the marker is the affordance
 // a user must read before acting, so it takes the section 1.9 AA floor with it.
 //
+// The caps carry the fill hue over the ground behind, exactly as the filled
+// form does (issue #219). Surface caps made the inactive pill a colored word
+// bracketed by grey half-blocks, which is the one reading the withdrawn fill
+// must not have: the tint form withdraws the fill, never the identity. The
+// toggle affordance is hue-on-fill against hue-on-surface plus the equal-width
+// marker, neither of which the cap was carrying.
+//
 // The compact run keeps the hue it already had: the flat form has no fill and
 // no cap to spend, so there the marker is the whole toggle affordance, the same
 // rule section 10.7.5 applies at FidelityFlat. No cell count changes in any
@@ -632,9 +649,9 @@ func (s *Styles) ChipRunsTint(fill, surface Slot) ChipStyles {
 	body := s.On(fill, Surface)
 	flat := s.OnBold(fill, surface)
 	return ChipStyles{
-		CapLeft:   s.On(Surface, surface),
-		CapRight:  s.On(Surface, surface),
-		ScopedCap: s.On(Surface, surface),
+		CapLeft:   s.On(fill, surface),
+		CapRight:  s.On(fill, surface),
+		ScopedCap: s.On(fill, surface),
 		Body:      body,
 		BodyHover: body.Underline(true),
 		ScopedKey: s.On(FgSubtle, Surface),
