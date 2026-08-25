@@ -109,8 +109,8 @@ func TestProposeCardTool(t *testing.T) {
 		if card.Desc != "why it matters" {
 			t.Errorf("desc = %q, want the control character stripped", card.Desc)
 		}
-		if card.Prio != 4 {
-			t.Errorf("prio = %d, want 4 (clamped)", card.Prio)
+		if card.Prio != board.PrioLow {
+			t.Errorf("prio = %d, want %d (clamped onto the three-value scale)", card.Prio, board.PrioLow)
 		}
 		if card.Due != "" {
 			t.Errorf("due = %q, want the unparseable date dropped", card.Due)

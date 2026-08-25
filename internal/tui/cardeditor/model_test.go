@@ -1150,7 +1150,9 @@ func TestPointerChoicesActivateExistingKeyboardPaths(t *testing.T) {
 		check  func(Model) bool
 		value  string
 	}{
-		{target: "Priority:", value: "4", check: func(m Model) bool { return m.prio == 4 }},
+		// The field opens on low and the cycle is three values wide, so one
+		// activation wraps it to high.
+		{target: "Priority:", value: "1", check: func(m Model) bool { return m.prio == board.PrioHigh }},
 		{target: "Effort:", value: "S", check: func(m Model) bool { return m.effort == "S" }},
 		{target: "Blocked:", value: "yes", check: func(m Model) bool { return m.blocked }},
 	} {

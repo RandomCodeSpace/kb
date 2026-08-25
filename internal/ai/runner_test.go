@@ -269,7 +269,7 @@ func TestRunnerHelpers(t *testing.T) {
 		t.Fatal(err)
 	}
 	coerced := CoerceDraft(map[string]any{"title": " card ", "prio": float64(9)})
-	if coerced.Title != "card" || coerced.Prio != 4 || ClampPriority(0) != 1 || NormalizeStoryCount(0) != defaultStoryCount {
+	if coerced.Title != "card" || coerced.Prio != board.PrioLow || ClampPriority(0) != board.PrioHigh || NormalizeStoryCount(0) != defaultStoryCount {
 		t.Fatalf("public draft helpers = %+v", coerced)
 	}
 	for _, test := range []struct {
@@ -300,7 +300,7 @@ func TestRunnerHelpers(t *testing.T) {
 			t.Errorf("normalizeStoryCount(%d) = %d", input, got)
 		}
 	}
-	for input, want := range map[int]int{-1: 1, 2: 2, 9: 4} {
+	for input, want := range map[int]int{-1: board.PrioHigh, 2: board.PrioMedium, 9: board.PrioLow} {
 		if got := clampPrio(input); got != want {
 			t.Errorf("clampPrio(%d) = %d", input, got)
 		}
