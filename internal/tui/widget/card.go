@@ -7,9 +7,10 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
-// CardOpts describes one board card. Spec section 3: the row grid is fixed by
-// density, not by content, so a short description does not pull the chip rows
-// up.
+// CardOpts describes one board card. Spec section 3 as issue #243 re-cut it:
+// the row grid is a ceiling set by density, and every section takes only the
+// rows its content fills, so a card with no description is shorter than one
+// with five lines of it rather than carrying four blank rows.
 //
 // Meta entries arrive already rendered because the chip row of section 3.4
 // mixes pill and non-pill runs (the priority marker, the age text and the
@@ -34,19 +35,22 @@ type CardOpts struct {
 	// reference costs the meta row nothing.
 	Blocked bool
 
-	// The row grid of spec section 3.1, resolved by the caller from
-	// theme.Metrics so the panel that reserved the column's height and the card
-	// that fills it cannot disagree. Every one is a function of density and
-	// frame height and never of this card's content.
+	// The row ceilings of spec section 2.6, resolved by the caller from
+	// theme.Metrics. Issue #243 turned them from allotments into caps: the title
+	// takes one row or two as its text needs, the description takes the rows its
+	// rendered text fills and none at all when it is empty, and the labels take
+	// one row or two as the pills wrap. Each is a function of density and frame
+	// height; what the card draws inside it is a function of this card.
 	TitleLines int
 	DescLines  int
 	LabelRows  int
 
 	// PadRows is the interior vertical rhythm of issue #240: blank rows carrying
 	// the card's own fill, spent on the boundaries between its sections. One row
-	// separates the shared title/description block from the meta row; a second,
-	// on a frame tall enough to afford it, separates the meta row from the label
-	// rows. Compact ignores this outright.
+	// separates the prose block from the meta row; a second, on a frame tall
+	// enough to afford it, separates the meta row from the label rows. Issue
+	// #243 made them conditional on both neighbours existing, so a separator
+	// never abuts a section the card did not draw. Compact ignores this outright.
 	PadRows int
 
 	// Hovered raises the card's rail cell one tier, per spec section 10.5.1.
@@ -69,10 +73,104 @@ type CardSpan struct {
 	Tag    string // the label as the card rendered it
 }
 
+// cardPlan is one card's resolved row plan: every section already broken into
+// the rows its content fills, under the section 2.6 ceilings. It is the single
+// answer to "how tall is this card", and both paths read it - CardHeight takes
+// nothing but the row count, CardWithSpans draws the content it carries - so a
+// column that packed against a measured height and the card that lands in it
+// cannot disagree about a row. Issue #243 replaced the reserve-before-render
+// invariant with that one.
+//
+// The plan carries content rather than counts alone because the count *is* the
+// wrap: the only way to know a description fills three rows is to break it into
+// three. Rendering from the plan is what keeps the wrap done once per drawn
+// card rather than once to measure and once to draw.
+type cardPlan struct {
+	inner        int
+	blank        bool     // inner below CardMinInner: rail and surface only
+	compact      bool     // two fixed rows, labels merged onto the meta row
+	title        []string // wrapped title text, unstyled, one entry per row
+	trailer      string
+	trailerWidth int
+	desc         [][]styledWord
+	descMore     bool // description text remained, so the last row ellipsizes
+	pills        []string
+	labelRows    []string
+	labelStarts  []labelStart
+	proseSep     int // separator between the prose block and the meta row
+	metaSep      int // separator between the meta row and the label rows
+	rows         int
+}
+
+// planCard resolves one card's rows without drawing any of them. Spec section
+// 2.6 as issue #243 re-cut it: the ladder values are ceilings, and each section
+// takes only what its content needs under its own cap.
+//
+// The separators of issue #240 are conditional on both their neighbours: the
+// prose block is always at least the title row and the meta row is always
+// drawn, so the first separator survives an absent description, but a card with
+// no labels loses the second rather than stacking a blank row against the blank
+// space where the label rows would have been.
+func planCard(styles *theme.Styles, opts CardOpts) cardPlan {
+	metrics := styles.Metrics
+	plan := cardPlan{compact: opts.Density.Compact()}
+	if opts.Width <= 0 {
+		return plan
+	}
+	surface := styles.Surface(opts.Selected, opts.Alt)
+	plan.inner = metrics.CardInner(opts.Width, opts.Density)
+	plan.blank = plan.inner < metrics.CardMinInner
+	if plan.compact {
+		// Compact is unchanged by issue #243 and stays two fixed rows: it exists
+		// to be dense, and a card that gave a row back there would be trading a
+		// row of content for nothing (section 2.6).
+		plan.rows = 2
+		if !plan.blank {
+			plan.trailer, plan.trailerWidth = cardTrailer(styles, opts, surface)
+			plan.title = cardTitleText(styles, opts, plan.inner, plan.trailerWidth, 1)
+			plan.pills = cardPills(styles, opts, surface, true)
+		}
+		return plan
+	}
+	if plan.blank {
+		// A card with no room for content is one row of rail and surface. There
+		// is no grid left to hold open: every row under the first would be blank
+		// space the reader cannot tell from the gutter.
+		plan.rows = 1
+		return plan
+	}
+
+	plan.trailer, plan.trailerWidth = cardTrailer(styles, opts, surface)
+	plan.title = cardTitleText(styles, opts, plan.inner, plan.trailerWidth, max(opts.TitleLines, 1))
+	plan.desc, plan.descMore = layoutWords(descWords(styles, opts.Desc, surface), plan.inner, max(opts.DescLines, 0))
+	plan.pills = cardPills(styles, opts, surface, false)
+	plan.labelRows, plan.labelStarts = wrapLabels(styles.On(theme.FgBase, surface),
+		plan.pills, plan.inner, max(opts.LabelRows, 0))
+
+	padRows := max(opts.PadRows, 0)
+	if padRows >= 1 {
+		plan.proseSep = 1
+	}
+	if padRows >= 2 && len(plan.labelRows) > 0 {
+		plan.metaSep = 1
+	}
+	plan.rows = len(plan.title) + len(plan.desc) + plan.proseSep + 1 + plan.metaSep + len(plan.labelRows)
+	return plan
+}
+
+// CardHeight is the number of rows Card will draw for these options. It is the
+// measure half of the measure-before-render rule of spec section 2.5: the
+// column packs its stack against this and the card then draws exactly it,
+// because both come out of the same plan.
+func CardHeight(styles *theme.Styles, opts CardOpts) int {
+	return planCard(styles, opts).rows
+}
+
 // Card renders one card as its content rows, without the inter-card gutter:
-// stacking and gutters belong to the panel. Spec section 3.1 as issue #232
-// rewrote it: title rows, description rows, one meta row and label rows at
-// normal density, two rows when compact.
+// stacking and gutters belong to the panel. Spec section 3.1 as issue #243
+// re-cut it: title rows, description rows when there is a description, one meta
+// row and label rows when there are labels, each taking what it needs under the
+// section 2.6 ceiling; two rows when compact.
 func Card(styles *theme.Styles, opts CardOpts) []string {
 	rows, _ := CardWithSpans(styles, opts)
 	return rows
@@ -89,61 +187,43 @@ func CardWithSpans(styles *theme.Styles, opts CardOpts) ([]string, []CardSpan) {
 	metrics := styles.Metrics
 	surface := styles.Surface(opts.Selected, opts.Alt)
 	surfaceStyle := styles.On(theme.FgBase, surface)
-	inner := metrics.CardInner(opts.Width, opts.Density)
-	titleLines, descLines, labelRows := max(opts.TitleLines, 1), opts.DescLines, opts.LabelRows
-	padRows := max(opts.PadRows, 0)
-	if opts.Density.Compact() {
-		titleLines, descLines, labelRows, padRows = 1, 0, 0, 0
-	}
+	plan := planCard(styles, opts)
+	inner := plan.inner
 
-	rows := titleLines + descLines + padRows + 1 + labelRows
-	content := make([]string, 0, rows)
+	content := make([]string, 0, plan.rows)
 	var spans []CardSpan
-	if inner >= metrics.CardMinInner {
-		// The title and the description share one fixed block of rows. The card's
-		// total height stays a pure function of density and frame height - which
-		// is what lets the panel reserve a column's height before its cards are
-		// rendered - while a title short enough to fit one row hands its spare row
-		// to the description instead of spending it on blank surface. The meta and
-		// label rows below sit at a fixed offset from the card's top either way,
-		// so a long title never pushes them down.
-		title := cardTitle(styles, opts, surface, inner, titleLines)
-		content = append(content, title...)
-		content = append(content, cardDesc(styles, opts, surface, inner, titleLines+descLines-len(title))...)
+	if !plan.blank {
+		content = append(content, cardTitle(styles, opts, surface, inner, plan)...)
+		content = append(content, cardDesc(styles, surface, inner, plan)...)
 		// The interior separators of issue #240. They are emitted as empty
 		// content and picked up by the same surface fill every other row of the
 		// card takes, so a blank row is card ground rather than a hole in it:
 		// selection, hover and the zebra stripe reach it because they are the
 		// card's surface and not a per-row decoration.
-		//
-		// The block above them is always exactly titleLines+descLines rows -
-		// the title takes what it needs and cardDesc fills the rest of the
-		// allotment whether or not there is description left to draw into it -
-		// so the first separator lands at the same offset on every card.
-		if padRows >= 1 {
+		for range plan.proseSep {
 			content = append(content, "")
 		}
-		meta, labels, chipSpans := cardChips(styles, opts, surface, inner, labelRows)
+		meta, labels, chipSpans := cardChips(styles, opts, surfaceStyle, inner, plan)
 		base := len(content)
 		content = append(content, meta)
-		if padRows >= 2 {
+		for range plan.metaSep {
 			content = append(content, "")
 		}
-		if !opts.Density.Compact() {
+		if !plan.compact {
 			base = len(content)
 		}
 		spans = offsetSpans(chipSpans, base, metrics.CardRail+metrics.CardPad(opts.Density), inner)
 		content = append(content, labels...)
 	}
-	for len(content) < rows {
+	for len(content) < plan.rows {
 		content = append(content, "")
 	}
 
 	rail := Rail(styles, opts.Priority, railSurface(opts, surface), opts.Selected)
 	left := pad(surfaceStyle, metrics.CardPad(opts.Density))
 	right := pad(surfaceStyle, metrics.CardPadRight)
-	out := make([]string, 0, rows)
-	for _, line := range content[:rows] {
+	out := make([]string, 0, plan.rows)
+	for _, line := range content[:plan.rows] {
 		out = append(out, rail+left+fill(surfaceStyle, clip(line, inner), inner)+right)
 	}
 	return out, spans
@@ -185,47 +265,57 @@ func clip(content string, width int) string {
 	return ansi.Truncate(content, width, "")
 }
 
-// cardTitle is the title rows of spec section 3.2 as issue #232 rewrote it: the
-// title wraps across its whole allotment instead of being ellipsized to one
-// line, and only the last allotted row carries the ellipsis.
+// cardTitleText is the title wrap of spec section 3.2, in plain text and with
+// no styling yet: the row count is the plan's business and the styling is the
+// render's, and separating them is what lets a card be measured without being
+// drawn.
+//
+// The title wraps across its ceiling instead of being ellipsized to one line,
+// and only the last allotted row carries the ellipsis. Rows the title did not
+// need are not emitted at all - issue #243 gives them back to the column rather
+// than holding them open - but the first row is always emitted, because it
+// carries the trailer even for an empty title.
 //
 // The trailer - the blocked alarm and the sequence number - sits at the right
 // end of the first row and is never truncated. It narrows the first row's field
 // alone; the rows under it take the full content width, which is where a
 // wrapped title gets the space a one-line title never had.
-func cardTitle(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner, lines int) []string {
+func cardTitleText(styles *theme.Styles, opts CardOpts, inner, trailerWidth, lines int) []string {
+	head := opts.Title
+	if opts.Emoji != "" {
+		head = opts.Emoji + " " + opts.Title
+	}
+	fields := make([]int, max(lines, 1))
+	for index := range fields {
+		fields[index] = inner
+	}
+	if trailerWidth > 0 {
+		fields[0] = max(inner-trailerWidth-1, 0)
+	}
+	wrapped := wrapFields(styles, head, fields)
+	for len(wrapped) > 1 && wrapped[len(wrapped)-1] == "" {
+		wrapped = wrapped[:len(wrapped)-1]
+	}
+	return wrapped
+}
+
+// cardTitle styles the title rows the plan already wrapped. The first row is
+// the one that carries the trailer and the emoji's own run; the rows under it
+// are the same title one step quieter.
+func cardTitle(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner int, plan cardPlan) []string {
 	titleStyle := styles.On(theme.FgBase, surface)
 	if opts.Selected {
 		titleStyle = styles.OnBold(theme.FgBase, surface)
 	}
 	surfaceStyle := styles.On(theme.FgBase, surface)
-	head := opts.Title
-	if opts.Emoji != "" {
-		head = opts.Emoji + " " + opts.Title
-	}
-
-	trailer, trailerWidth := cardTrailer(styles, opts, surface)
+	trailer, trailerWidth := plan.trailer, plan.trailerWidth
 	field := inner
 	if trailerWidth > 0 {
 		field = max(inner-trailerWidth-1, 0)
 	}
-	fields := make([]int, lines)
-	for index := range fields {
-		fields[index] = inner
-	}
-	fields[0] = field
 
-	// Trailing rows the title did not need are not emitted at all: the block
-	// they belong to is shared with the description, which takes whatever the
-	// title leaves. The first row is always emitted, because it carries the
-	// trailer even for an empty title.
-	wrapped := wrapFields(styles, head, fields)
-	for len(wrapped) > 1 && wrapped[len(wrapped)-1] == "" {
-		wrapped = wrapped[:len(wrapped)-1]
-	}
-
-	out := make([]string, 0, len(wrapped))
-	for index, text := range wrapped {
+	out := make([]string, 0, len(plan.title))
+	for index, text := range plan.title {
 		style := titleStyle
 		if index > 0 {
 			// A continuation row is the same title, one step quieter: the first
@@ -275,58 +365,65 @@ func cardTrailer(styles *theme.Styles, opts CardOpts, surface theme.Slot) (strin
 	return trailer, width
 }
 
-// cardDesc is the description of spec section 3.3 as issue #232 rewrote it: the
-// frozen markdown grammar of the mdparity package, rendered at card scale
-// across the card's whole description allotment. A description shorter than
-// that allotment leaves its remaining rows blank and the rows under it do not
-// move up.
+// cardDesc is the description of spec section 3.3 as issue #232 rewrote it and
+// issue #243 re-cut it: the frozen markdown grammar of the mdparity package,
+// rendered at card scale over the rows its text actually fills. A description
+// shorter than its ceiling takes fewer rows; an empty one takes none, and the
+// meta row moves up onto the row it would have wasted.
 //
 // The grammar is the card-detail pane's grammar and not a second one. What
 // differs is the output stage: the pane hands the reduced source to glamour,
 // which owns a document's margins and blank lines; a card has neither the rows
 // nor the width for either, so it takes the runs and wraps them itself.
-func cardDesc(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner, lines int) []string {
-	if lines <= 0 {
+func cardDesc(styles *theme.Styles, surface theme.Slot, inner int, plan cardPlan) []string {
+	if len(plan.desc) == 0 {
 		return nil
 	}
-	base := styles.On(theme.FgMuted, surface)
-	return wrapWords(styles, descWords(styles, opts.Desc, surface), base, inner, lines)
+	return renderWordRows(styles, plan.desc, styles.On(theme.FgMuted, surface), inner, plan.descMore)
+}
+
+// cardPills renders one pill per label, on the card's own resolved ground. The
+// plan needs them because their widths decide how many label rows the card
+// takes, and the render needs the same strings back rather than a second set.
+func cardPills(styles *theme.Styles, opts CardOpts, surface theme.Slot, flat bool) []string {
+	pills := make([]string, 0, len(opts.Labels))
+	for _, tag := range opts.Labels {
+		pills = append(pills, Label(styles, tag, surface, flat, tag != "" && tag == opts.HoverTag))
+	}
+	return pills
 }
 
 // cardChips is the meta chip row of spec section 3.4 and the label rows of
 // section 3.5. Compact merges the labels onto the meta row and flattens the
 // pills, which is step 5 of the section 2.6 drop order.
 //
+// The pills and their wrap come off the plan: they are what decided the card's
+// height, and rendering a second set could disagree with the height the column
+// packed against.
+//
 // Span rows are relative to the block the pills landed in - the meta row when
 // compact merged them onto it, the first label row otherwise - because the
 // interior padding of issue #240 sits between the two and only the caller knows
 // how many rows of it there are.
-func cardChips(styles *theme.Styles, opts CardOpts, surface theme.Slot, inner, labelRows int) (string, []string, []CardSpan) {
-	surfaceStyle := styles.On(theme.FgBase, surface)
-	flat := opts.Density.Compact()
-	labels := make([]string, 0, len(opts.Labels))
-	for _, tag := range opts.Labels {
-		labels = append(labels, Label(styles, tag, surface, flat, tag != "" && tag == opts.HoverTag))
-	}
-	if flat {
-		entries := append(append([]string{}, opts.Meta...), labels...)
+func cardChips(styles *theme.Styles, opts CardOpts, surfaceStyle lipgloss.Style, inner int, plan cardPlan) (string, []string, []CardSpan) {
+	if plan.compact {
+		entries := append(append([]string{}, opts.Meta...), plan.pills...)
 		line, starts := joinAt(surfaceStyle, entries, inner)
-		return line, nil, labelSpans(opts.Labels, labels, starts[len(opts.Meta):], 0)
+		return line, nil, labelSpans(opts.Labels, plan.pills, starts[len(opts.Meta):], 0)
 	}
-	rows, starts := wrapLabels(surfaceStyle, labels, inner, labelRows)
-	spans := make([]CardSpan, 0, len(labels))
-	for index, start := range starts {
+	spans := make([]CardSpan, 0, len(plan.pills))
+	for index, start := range plan.labelStarts {
 		if start.column < 0 {
 			continue
 		}
 		spans = append(spans, CardSpan{
 			Row: start.row, X0: start.column,
-			X1:    start.column + ansi.StringWidth(labels[index]),
+			X1:    start.column + ansi.StringWidth(plan.pills[index]),
 			Index: index,
 			Tag:   opts.Labels[index],
 		})
 	}
-	return join(surfaceStyle, opts.Meta, inner), rows, spans
+	return join(surfaceStyle, opts.Meta, inner), plan.labelRows, spans
 }
 
 // labelStart is where one label pill landed: which of the allotted label rows,
@@ -354,6 +451,11 @@ type labelStart struct {
 // rather than truncated into an unreadable stub. Pills still unplaced when the
 // allotment runs out are dropped, the same rule section 3.4 applies to a chip
 // that does not fit.
+//
+// Issue #243 made the return the rows the pills actually filled rather than the
+// whole allotment: a card with one row of labels is one row shorter than a card
+// with two, and a card with no labels at all draws no label row and loses the
+// separator above it.
 func wrapLabels(style lipgloss.Style, labels []string, inner, rows int) ([]string, []labelStart) {
 	starts := make([]labelStart, len(labels))
 	for index := range starts {
@@ -387,9 +489,8 @@ func wrapLabels(style lipgloss.Style, labels []string, inner, rows int) ([]strin
 		line += label
 		used += separator + width
 	}
-	out = append(out, line)
-	for len(out) < rows {
-		out = append(out, "")
+	if used > 0 {
+		out = append(out, line)
 	}
 	return out, starts
 }

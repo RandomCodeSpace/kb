@@ -1044,23 +1044,29 @@ func TestCardDescriptionKeepsSourceLineStructure(t *testing.T) {
 
 // TestCardDescriptionWrapsWithinASourceLine is the other half of the rule: a
 // source line starts a rendered line, and then it word-wraps inside the card's
-// allotment like any prose. The allotment still binds - the last row the ladder
-// gave the description carries the ellipsis and nothing runs past the card.
+// ceiling like any prose. The ceiling still binds - the last row the ladder
+// allows the description carries the ellipsis and nothing runs past the card.
+//
+// Issue #243 moved that row. The title is "Ship" and takes one row of its
+// two-row ceiling rather than holding the second open for a block it shares, so
+// the description starts on row 1 and the ceiling runs out on row DescLines.
 func TestCardDescriptionWrapsWithinASourceLine(t *testing.T) {
 	long := strings.Repeat("wrapping ", 24)
 	m, tasks := descriptionCardModel(t, "head line\n"+long)
 	rows, _, _ := m.renderTaskLines(tasks, board.StatusTodo, 40, theme.DensityNormal)
 	styles := m.themeStyles()
 	descLines := styles.Metrics.DescLines(m.height, theme.DensityNormal)
-	block := styles.Metrics.TitleRows(m.height, theme.DensityNormal) + descLines
 	if got := plain(rows[1]); !strings.Contains(got, "head line") || strings.Contains(got, "wrapping") {
 		t.Errorf("row 1 = %q, want the first source line alone on its own row", got)
 	}
-	last := plain(rows[block-1])
+	last := plain(rows[descLines])
 	if !strings.Contains(last, styles.Glyph.Ellipsis) {
-		t.Errorf("last description row %d = %q, want the ellipsis the allotment ran out on", block-1, last)
+		t.Errorf("last description row %d = %q, want the ellipsis the ceiling ran out on", descLines, last)
 	}
-	for index, row := range rows[:block] {
+	if got := plain(rows[descLines+1]); strings.Contains(got, "wrapping") {
+		t.Errorf("row %d = %q, want the description to stop at its ceiling", descLines+1, got)
+	}
+	for index, row := range rows[:descLines+1] {
 		if got := ansi.StringWidth(row); got != 40 {
 			t.Errorf("row %d is %d cells, want 40", index, got)
 		}
