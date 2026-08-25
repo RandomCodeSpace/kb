@@ -29,6 +29,10 @@ type inlineMatch struct {
 var (
 	codePattern = regexp.MustCompile("\\x60([^\\x60\\r\\n]+)\\x60")
 	boldPattern = regexp.MustCompile("\\*\\*([^*\\r\\n]+)\\*\\*")
+	// taskRefPattern is the in-board reference of issue #212. The scheme is
+	// kb's own, so the sequence number is the whole payload: a reference
+	// carrying no digits addresses no card and is not one.
+	taskRefPattern = regexp.MustCompile(`kb://task/[0-9]+`)
 )
 
 // parityMarkdown reduces a description to the frozen web renderer's grammar
@@ -203,6 +207,7 @@ func inlineMatches(line string) []inlineMatch {
 	found = append(found, underscoreMatches(line)...)
 	found = append(found, linkMatches(line)...)
 	found = append(found, bareURLMatches(line)...)
+	found = append(found, taskRefMatches(line)...)
 	slices.SortFunc(found, func(left, right inlineMatch) int {
 		if left.start != right.start {
 			return left.start - right.start
@@ -339,6 +344,28 @@ func bareURLMatches(line string) []inlineMatch {
 			kind: inlineAutoLink, text: url, href: url,
 		})
 		cursor = max(end, start+1)
+	}
+	return found
+}
+
+// taskRefMatches recognizes kb's own scheme the way bareURLMatches recognizes
+// http and https: as an autolink, which is what keeps escapeMarkdown off the
+// reference's slashes and hands glamour a link node it renders in the section
+// 5.2 link color. The rendered run stays the literal reference text, which is
+// what the pointer map anchors its hit region on.
+//
+// A reference glued to a preceding word is not one: the scheme there belongs to
+// that word, not to kb.
+func taskRefMatches(line string) []inlineMatch {
+	var found []inlineMatch
+	for _, index := range taskRefPattern.FindAllStringIndex(line, -1) {
+		if wordBefore(line, index[0]) {
+			continue
+		}
+		found = append(found, inlineMatch{
+			start: index[0], end: index[1], priority: 4, kind: inlineAutoLink,
+			text: line[index[0]:index[1]], href: line[index[0]:index[1]],
+		})
 	}
 	return found
 }

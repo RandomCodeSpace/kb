@@ -101,6 +101,10 @@ management, checklist toggles, shipping, cancellation, restore, and permanent
 delete. `Escape` closes an overlay or cancels the current operation. Editors
 use `Tab` to navigate, `Ctrl+S` to save, and protect unsaved work on close.
 
+A `kb://task/<seq>` reference in a description or a comment renders as a link
+and opens that card's detail when clicked. A reference to a card the board does
+not hold reports it in the pane.
+
 ## Data and identity
 
 The data directory contains:
