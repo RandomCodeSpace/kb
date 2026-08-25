@@ -1179,16 +1179,22 @@ func (m Model) cardMeta(styles *theme.Styles, task board.Task, surface theme.Slo
 			meta[3] = widget.Chip(styles, widget.ChipOpts{Text: label, Fill: fill, On: surface})
 		}
 	}
-	if task.Effort != "" {
-		// The space is the section 10.4.1 adjacency rule, not decoration.
-		// Diamond is East Asian Ambiguous: ansi.StringWidth counts one cell and
-		// the layout arithmetic believes it, but many terminal fonts draw the
-		// glyph wider than the cell it was advanced past, so a letter written
-		// straight after it lands on top of the diamond. One column of its own
-		// is what keeps the mark and its letter both legible. The chip is three
-		// cells in every density and the metaRowWidth arithmetic measures it
-		// rather than assuming it, so the responsive drop inherits the cost.
-		meta[4] = styles.On(theme.FgSubtle, surface).Render(styles.Glyph.Diamond + " " + sanitizeTerminal(task.Effort))
+	if effort := sanitizeTerminal(task.Effort); effort != "" {
+		// The marker is the colored square of the effort scale, and the letter
+		// beside it is not decoration: color alone must not carry the value, and
+		// the letter is what survives a font with no pictograph in it.
+		//
+		// The space between them is the section 10.4.1 adjacency rule, not the
+		// chip separator. A square is East Asian Wide and a diamond is East
+		// Asian Ambiguous, and either way a glyph terminal fonts draw wider than
+		// the cell the cursor was advanced past will have the next column
+		// written on top of it. One column of its own is what keeps the mark and
+		// its letter both legible. The chip is four cells with a square and
+		// three with the diamond fallback, in every density, and the
+		// metaRowWidth arithmetic measures it rather than assuming it, so the
+		// survival order and the column-wide drop of metaDepth carry the cost
+		// without a constant to maintain.
+		meta[4] = styles.On(theme.FgSubtle, surface).Render(styles.Glyph.Effort(effort) + " " + effort)
 	}
 	return meta
 }

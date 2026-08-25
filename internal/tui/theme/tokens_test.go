@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
+	"golang.org/x/text/width"
 )
 
 func TestDensityForBothAxes(t *testing.T) {
@@ -231,6 +232,10 @@ func TestGlyphsCarryTheAccentVocabulary(t *testing.T) {
 		"Alert":    {glyphs.Alert, "▲"},
 		"HintSep":  {glyphs.HintSep, " | "},
 
+		"EffortS": {glyphs.EffortS, "🟦"},
+		"EffortM": {glyphs.EffortM, "🟨"},
+		"EffortL": {glyphs.EffortL, "🟧"},
+
 		"HalfTop":    {glyphs.HalfTop, "▀"},
 		"HalfBottom": {glyphs.HalfBottom, "▄"},
 
@@ -278,6 +283,14 @@ func TestGlyphWidthsMatchTheSpecTable(t *testing.T) {
 		"Alert":    {ansi.StringWidth(glyphs.Alert), 1},
 		"HintSep":  {ansi.StringWidth(glyphs.HintSep), 3},
 
+		// The effort squares are East Asian Wide and so two cells each, the
+		// Cells value section 10.4.1 declares for them. They are equal to one
+		// another, which is what lets the effort chip change value without
+		// moving a column under section 10.4.4.
+		"EffortS": {ansi.StringWidth(glyphs.EffortS), 2},
+		"EffortM": {ansi.StringWidth(glyphs.EffortM), 2},
+		"EffortL": {ansi.StringWidth(glyphs.EffortL), 2},
+
 		"HalfTop":    {ansi.StringWidth(glyphs.HalfTop), 1},
 		"HalfBottom": {ansi.StringWidth(glyphs.HalfBottom), 1},
 
@@ -298,6 +311,100 @@ func TestGlyphWidthsMatchTheSpecTable(t *testing.T) {
 	for name, pair := range cases {
 		if pair[0] != pair[1] {
 			t.Errorf("glyph %s is %d cells, spec says %d", name, pair[0], pair[1])
+		}
+	}
+}
+
+// The code points a glyph token may never carry, whatever else it is made of.
+// A variation selector re-presents the rune before it, a zero-width joiner
+// welds two pictographs into one, and a skin-tone modifier recolors the one
+// before it - every one of them makes the token a sequence whose rendered width
+// is a property of the terminal's grapheme segmentation rather than of the
+// runes, which is exactly the thing the width table of spec section 10.4.1
+// promises kb has pinned.
+const (
+	variationSelector15 = 0xFE0E
+	variationSelector16 = 0xFE0F
+	zeroWidthJoiner     = 0x200D
+	skinToneLo          = 0x1F3FB
+	skinToneHi          = 0x1F3FF
+)
+
+// TestEmojiGlyphsAreSingleWideCodePoints is the emoji admission rule of spec
+// section 10.4.1, added by issue #223 with the effort squares. A pictograph in
+// the vocabulary must be one code point with Emoji_Presentation=Yes: no
+// variation-selector form, no zero-width-joiner sequence, no modifier. Such a
+// glyph is East Asian Wide by construction, so it is two cells to
+// ansi.StringWidth and two cells to every terminal that measures the same way,
+// and the width table can declare Cells = 2 and mean it.
+//
+// The walk checks the consequence rather than the property name, because
+// Emoji_Presentation is not in the standard library and is not worth vendoring
+// a table for: East Asian Wide is what Emoji_Presentation=Yes guarantees under
+// UAX #11, and it is also the only part of the property the layout arithmetic
+// actually consumes. So the rule enforced here is that every East Asian Wide
+// token is a lone rune measuring two cells, and that no token anywhere in the
+// vocabulary carries a selector, a joiner or a modifier. A pictograph smuggled
+// in as a VS16 sequence fails the second clause; one smuggled in with its text
+// presentation fails the first, because it is not Wide and so cannot claim the
+// two cells the table would have to give it.
+func TestEmojiGlyphsAreSingleWideCodePoints(t *testing.T) {
+	glyphs := reflect.ValueOf(New(true).Glyph)
+	wide := 0
+	for index := range glyphs.NumField() {
+		name := glyphs.Type().Field(index).Name
+		token := glyphs.Field(index).String()
+		for _, r := range token {
+			switch {
+			case r == variationSelector15 || r == variationSelector16:
+				t.Errorf("glyph %s carries a variation selector U+%04X; the vocabulary admits single code points only", name, r)
+			case r == zeroWidthJoiner:
+				t.Errorf("glyph %s carries a zero-width joiner; the vocabulary admits single code points only", name)
+			case r >= skinToneLo && r <= skinToneHi:
+				t.Errorf("glyph %s carries a skin-tone modifier U+%04X; the vocabulary admits single code points only", name, r)
+			}
+		}
+		runes := []rune(token)
+		isWide := false
+		for _, r := range runes {
+			if width.LookupRune(r).Kind() == width.EastAsianWide {
+				isWide = true
+			}
+		}
+		if !isWide {
+			continue
+		}
+		wide++
+		if len(runes) != 1 {
+			t.Errorf("glyph %s is %d code points; a wide pictograph must be exactly one", name, len(runes))
+			continue
+		}
+		if got := ansi.StringWidth(token); got != 2 {
+			t.Errorf("glyph %s is East Asian Wide but measures %d cells, not the 2 the width table declares", name, got)
+		}
+	}
+	if wide == 0 {
+		t.Fatal("no wide glyphs resolved; the walk would assert nothing")
+	}
+}
+
+// TestEffortResolvesTheScale pins the section 3.4 effort marker: one square per
+// value of the S/M/L scale, the diamond for a value a hand-edited board carries
+// that is not on it, and nothing at all for no value - the empty case renders no
+// chip and must not acquire a marker here.
+func TestEffortResolvesTheScale(t *testing.T) {
+	glyphs := New(true).Glyph
+	cases := map[string]string{
+		"S":  glyphs.EffortS,
+		"M":  glyphs.EffortM,
+		"L":  glyphs.EffortL,
+		"XL": glyphs.Diamond,
+		"s":  glyphs.Diamond,
+		"":   "",
+	}
+	for value, want := range cases {
+		if got := glyphs.Effort(value); got != want {
+			t.Errorf("Effort(%q) = %q, want %q", value, got, want)
 		}
 	}
 }

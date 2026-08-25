@@ -34,7 +34,7 @@ type Glyphs struct {
 	CheckOn  string // U+2611, checked checklist row
 	CheckOff string // U+2612, dropped checklist row
 	Tick     string // U+2713, resolved-blocker mark inside a blocker chip
-	Diamond  string // U+25C7, effort marker
+	Diamond  string // U+25C7, effort marker for a value outside the S/M/L scale
 	Focus    string // U+25B8, focused band caret
 	More     string // overflow cue prefix, rendered as "+N more"
 	Ellipsis string // U+2026, the truncation tail of spec section 3.3
@@ -43,6 +43,21 @@ type Glyphs struct {
 	Empty    string // U+25CB, empty-state mark (section 10.8.3)
 	Alert    string // U+25B2, failure mark (section 10.8.5)
 	HintSep  string // hint ladder separator, three cells (section 10.4.6)
+
+	// The effort scale of spec section 3.4, one colored square per value. They
+	// are the vocabulary's only pictographs besides Blocked and they answer to
+	// the emoji admission rule of section 10.4.1: a single code point with
+	// Emoji_Presentation=Yes, no variation selector, no zero-width joiner and no
+	// modifier, so the terminal has one rune to draw and the width every layout
+	// calculation assumes is the width it takes. Each is East Asian Wide and so
+	// two cells, and each is bound by the adjacency rule - the render site
+	// writes a space after it. The letter is rendered beside the square and
+	// never replaced by it: color alone does not carry the value, which is also
+	// what keeps the chip readable when a font has no pictograph and draws tofu,
+	// the section 3.6 font risk extended rather than a new one.
+	EffortS string // U+1F7E6 blue square, effort S
+	EffortM string // U+1F7E8 yellow square, effort M
+	EffortL string // U+1F7E7 orange square, effort L
 
 	// The half-block pair of spec section 10.6.1. These are the only glyphs in
 	// the vocabulary that widen the block-glyph risk section 3.6 records rather
@@ -72,10 +87,10 @@ type Glyphs struct {
 }
 
 // defaultGlyphs is the vocabulary of spec sections 2.2, 2.4, 3.4, 3.6 and
-// 10.4.1. Every token is one cell wide except Blocked and the two filter marks,
-// which are two, and HintSep, which is three; the width table of section 10.4.1
-// is asserted in tokens_test.go so a re-spelling that silently changes a mark's
-// width fails the build rather than the layout.
+// 10.4.1. Every token is one cell wide except Blocked, the three effort squares
+// and the two filter marks, which are two, and HintSep, which is three; the
+// width table of section 10.4.1 is asserted in tokens_test.go so a re-spelling
+// that silently changes a mark's width fails the build rather than the layout.
 var defaultGlyphs = Glyphs{
 	Rail:     "▌",
 	RailFull: "█",
@@ -96,6 +111,10 @@ var defaultGlyphs = Glyphs{
 	Alert:    "▲",
 	HintSep:  " | ",
 
+	EffortS: "🟦",
+	EffortM: "🟨",
+	EffortL: "🟧",
+
 	HalfTop:    "▀",
 	HalfBottom: "▄",
 
@@ -106,6 +125,27 @@ var defaultGlyphs = Glyphs{
 
 	MarkFilterOff: "+ ",
 	MarkFilterOn:  "x ",
+}
+
+// Effort resolves the marker of the section 3.4 effort chip for one effort
+// value. The scale is S, M and L; anything else a hand-edited board carries
+// falls back to Diamond, which is what the chip wore for every value before the
+// squares, so an out-of-scale value still reads as an effort chip rather than
+// as two loose letters in the meta row. An empty value has no marker at all:
+// the render site draws no chip, and nothing here invents one.
+func (g Glyphs) Effort(value string) string {
+	switch value {
+	case "":
+		return ""
+	case "S":
+		return g.EffortS
+	case "M":
+		return g.EffortM
+	case "L":
+		return g.EffortL
+	default:
+		return g.Diamond
+	}
 }
 
 // Metrics are the gutter, padding and threshold tokens of spec section 2.5,
