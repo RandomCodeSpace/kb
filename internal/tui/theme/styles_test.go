@@ -377,6 +377,30 @@ func TestSurfaceRunPaintsGapsAnAdoptedComponentLeaves(t *testing.T) {
 	}
 }
 
+// TestHoverRunRaisesOneRunAndRestoresTheRowsSurface is spec section 10.5.1 for
+// an inline hit region (issue #212): the raise spans the run's own cells, the
+// row's surface comes back at the end rather than a reset that would strip the
+// rest of the line, and the tier is re-armed past every reset the run carries.
+func TestHoverRunRaisesOneRunAndRestoresTheRowsSurface(t *testing.T) {
+	styles := New(true)
+	raised := styles.HoverRun(OverlaySurf, OverlayBand, "kb://task/7")
+	if !strings.Contains(raised, "kb://task/7") || strings.Contains(raised, "\x1b[m") {
+		t.Fatalf("HoverRun = %q", raised)
+	}
+	surface := styles.SurfaceRun(OverlaySurf, "")
+	if !strings.HasSuffix(raised, strings.TrimSuffix(surface, "\x1b[m")) {
+		t.Fatalf("HoverRun did not restore the row surface: %q", raised)
+	}
+	band := strings.TrimSuffix(styles.SurfaceRun(OverlayBand, ""), "\x1b[m")
+	composed := styles.HoverRun(OverlaySurf, OverlayBand, styles.Overlay.Surf.Render("a")+"\x1b[0m"+"b")
+	if got := strings.Count(composed, band); got != 3 {
+		t.Fatalf("re-armed %d times, want 3: %q", got, composed)
+	}
+	if styles.HoverRun(numSlots, OverlayBand, "x") != "x" || styles.HoverRun(OverlaySurf, numSlots, "x") != "x" {
+		t.Fatal("HoverRun accepted a slot outside the palette")
+	}
+}
+
 func distanceTo(from, to rgb) int {
 	return from.distance(to)
 }

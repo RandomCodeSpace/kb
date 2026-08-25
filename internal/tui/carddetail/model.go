@@ -374,6 +374,18 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	return nil
 }
 
+// NoticeUnknownTaskRef reports a reference that addresses no card the board
+// holds. Spec section 10.8.5: nothing was attempted and nothing failed, so this
+// is a notice in the body rather than the pinned failure block, and an
+// unresolvable reference costs the reader one line instead of a dismissed pane.
+func (m *Model) NoticeUnknownTaskRef(seq int) {
+	if !m.open {
+		return
+	}
+	m.setStatus(fmt.Sprintf("no card #%d on this board", seq), false)
+	m.rebuildBody()
+}
+
 // ResolvePointerMessage unwraps a message only while the exact rendered detail
 // session and nested action state are still current. A release queued from an
 // older pane cannot mutate a reopened task or a later confirmation.
@@ -599,6 +611,25 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 			}
 		}
 	}
+	if m.detailBody() {
+		// The references of issue #212 are anchored by scanning the rendered
+		// rows, which is why the viewport spans the panel rather than the
+		// content inset: a scanned column is a column of the whole row. The
+		// viewport subtracts the scroll offset and clips, so a reference
+		// scrolled out of the window registers nothing.
+		viewport := pointer.Viewport{
+			Rect:   pointer.Rect{X0: x, Y0: y + 1, X1: x + paneWidth, Y1: bodyBottom},
+			Scroll: m.scrollOffset(),
+		}
+		for _, hit := range taskRefHits(m.bodyLines) {
+			rect, ok := viewport.Row(hit.row, hit.column, hit.column+hit.width)
+			if !ok {
+				continue
+			}
+			message := wrap(OpenTaskRefMsg{Seq: hit.seq})
+			hitMap.AddControl(detailTaskRefControlID(hit), rect, func(pointer.Point) tea.Msg { return message })
+		}
+	}
 	// Rows 6 and 9 of the machine of spec section 10.5.2: the pointer can stand
 	// still while the content moves under it, so hover is re-derived from the
 	// retained point against this frame's map. The map is byte-for-byte
@@ -820,8 +851,51 @@ func (m *Model) rebuildBody() {
 	paneWidth, _, _ := m.paneSize(m.width, m.height)
 	body := m.renderBody(paneWidth)
 	m.bodyLines = strings.Split(strings.TrimRight(body, "\n"), "\n")
+	m.markTaskRefs()
 	m.bodyWidth = paneWidth
 	m.syncScroll()
+}
+
+// detailBody reports whether the body currently holds the card's own rows. An
+// action or drift pane replaces them with its own, and neither renders card
+// markdown, so neither carries a reference to anchor.
+func (m Model) detailBody() bool {
+	return m.action == actionNone && m.driftMode == driftNone
+}
+
+// markTaskRefs paints pointer feedback onto the rendered references. The runs
+// are substituted back to front so an earlier reference on the same row keeps
+// the byte offsets it was scanned at.
+//
+// Spec section 10.5.1: the feedback is an attribute and a depth tier on the run
+// itself, never a cell, so the rendered rows stay the same width and the hit
+// regions the next frame records are the ones this frame recorded (section
+// 10.5.3). The reference already carries the section 5.2 link color and its
+// underline, so hover raises the run's ground rather than re-hueing text that
+// is the one thing telling the reader it is a link at all.
+func (m *Model) markTaskRefs() {
+	if !m.detailBody() {
+		return
+	}
+	if !m.pointerState.Active() && m.pointerState.Hovered() == "" {
+		return
+	}
+	hits := taskRefHits(m.bodyLines)
+	for index := len(hits) - 1; index >= 0; index-- {
+		hit := hits[index]
+		id := detailTaskRefControlID(hit)
+		line := m.bodyLines[hit.row]
+		run := line[hit.byteStart:hit.byteEnd]
+		switch {
+		case m.pointerState.IsPressed(id):
+			run = m.styles.PressedRun(run)
+		case m.pointerState.IsHovered(id):
+			run = m.styles.HoverRun(theme.OverlaySurf, theme.OverlayBand, run)
+		default:
+			continue
+		}
+		m.bodyLines[hit.row] = line[:hit.byteStart] + run + line[hit.byteEnd:]
+	}
 }
 
 func fitTerminal(rendered string, width, height int) string {

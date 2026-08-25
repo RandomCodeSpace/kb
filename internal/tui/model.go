@@ -507,6 +507,8 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			default:
 				return m, m.updateDetail(message)
 			}
+		case carddetail.OpenTaskRefMsg:
+			return m, m.openTaskRef(msg.Seq)
 		case boardCardClickedMsg, boardColumnClickedMsg,
 			filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg, filterProjectClickedMsg,
 			boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg:
@@ -1136,6 +1138,41 @@ func (m *Model) handleBoardFooterClick(key string) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// openTaskRef opens the card a rendered kb://task reference addresses (issue
+// #212). It is the path a click on a board card already takes: the board cursor
+// follows the reference so the pane it opens is the pane esc returns from, and
+// a card the current filter hides still opens - the reference is an explicit
+// request for that card, not a board navigation.
+//
+// A reference to a card this board does not hold is a notice in the pane rather
+// than a dismissal or a crash: the sequence number is card text, and card text
+// is never trusted to name something that exists.
+func (m *Model) openTaskRef(seq int) tea.Cmd {
+	task, found := m.taskBySeq(seq)
+	if !found {
+		m.detail.NoticeUnknownTaskRef(seq)
+		return nil
+	}
+	if task.ID == m.detail.TaskID() {
+		return nil
+	}
+	m.boardView.focusTask(m.filteredBoard(), task.ID)
+	m.detail.Resize(m.width, m.height)
+	return m.detail.Open(task)
+}
+
+func (m Model) taskBySeq(seq int) (board.Task, bool) {
+	if seq <= 0 {
+		return board.Task{}, false
+	}
+	for _, task := range m.board.Tasks {
+		if task.Seq == seq {
+			return task, true
+		}
+	}
+	return board.Task{}, false
 }
 
 func (m Model) taskByID(id string) (board.Task, bool) {

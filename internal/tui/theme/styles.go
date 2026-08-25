@@ -343,6 +343,28 @@ func (s *Styles) PressedRun(content string) string {
 	return s.pressedOn + rearmed + s.pressedOff
 }
 
+// HoverRun raises one inline run a depth tier inside an already-styled row.
+// Spec section 10.5.1 gives hover a one-tier raise in the section 1.1 depth
+// order; an inline reference is not a row, so the raise spans the run's own
+// cells and the row keeps its surface on both sides. The foreground is left
+// alone - a rendered link keeps the section 5.2 link color - and no cell is
+// added or removed, which is section 10.4.4 applied to the one state driven by
+// cell coordinates.
+//
+// A composed run may close with a reset that would drop the raise for the rest
+// of the run, so the tier is re-armed after each one the way PressedRun does.
+// The run closes by restoring the row's own surface rather than by resetting,
+// because it is substituted into the middle of a styled line.
+func (s *Styles) HoverRun(surface, raised Slot, content string) string {
+	if surface >= numSlots || raised >= numSlots {
+		return content
+	}
+	on, off := s.surfaceOn[raised], s.surfaceOn[surface]
+	rearmed := strings.ReplaceAll(content, shortReset, shortReset+on)
+	rearmed = strings.ReplaceAll(rearmed, explicitReset, explicitReset+on)
+	return on + rearmed + off
+}
+
 // BandRun lays an already-composed run into an overlay band row. An overlay
 // band is rendered as one styled run over the whole row, so a colored fragment
 // inside it - the branded spinner frame of spec section 10.2.5, which is the

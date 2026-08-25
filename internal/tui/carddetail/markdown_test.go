@@ -195,6 +195,33 @@ func TestNodeDerivedLineSeparatorVectors(t *testing.T) {
 	}
 }
 
+// TestTaskReferenceIsAnAutolinkAndNothingElseIs is the matcher half of issue
+// #212: kb's own scheme reaches glamour as an autolink, so escaping never
+// touches its slashes, and the three things that only look like a reference
+// stay literal text.
+func TestTaskReferenceIsAnAutolinkAndNothingElseIs(t *testing.T) {
+	got := inlineMarkdown("see kb://task/12, xkb://task/13, kb://task/ and https://x.test/kb://task/14", false)
+	for _, want := range []string{"<kb://task/12>", "<https://x.test/kb://task/14>"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("inline markdown missing %q: %s", want, got)
+		}
+	}
+	for _, reject := range []string{"<kb://task/13>", "<kb://task/>", "<kb://task/14>"} {
+		if strings.Contains(got, reject) {
+			t.Errorf("inline markdown linked %q: %s", reject, got)
+		}
+	}
+	if !strings.Contains(parityMarkdown("- kb://task/5\n## kb://task/6"), "- <kb://task/5>") {
+		t.Errorf("a reference in a list item lost its link form:\n%s", parityMarkdown("- kb://task/5"))
+	}
+	// A rendered reference is the literal text the pointer map anchors on, so
+	// glamour must not rewrite it into a label.
+	rendered := ansi.Strip(markdownWith(testStyles())("see kb://task/12 now", 60))
+	if !strings.Contains(rendered, "see kb://task/12 now") {
+		t.Fatalf("rendered reference is not literal:\n%s", rendered)
+	}
+}
+
 func TestParityMarkdownUnterminatedFenceAndEmptyInput(t *testing.T) {
 	fence := strings.Repeat(string(rune(0x60)), 3)
 	got := parityMarkdown(fence + "\ncode\n~~~")
