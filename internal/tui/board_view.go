@@ -927,8 +927,9 @@ func (m Model) measureCards(tasks []board.Task, status board.Status, width int, 
 }
 
 // columnScrollbar is the affordance of spec section 10.3.4 at column scope. It
-// is measured against the same stack height the reserve was decided from, so
-// the column and the bar can never disagree about whether the body overflows.
+// is measured against the same stack height the affordance column was decided
+// from, so the column and the bar can never disagree about whether the body
+// overflows.
 func (m Model) columnScrollbar(styles *theme.Styles, railed bool, index, total, visible, offset int) []string {
 	if !railed {
 		return nil

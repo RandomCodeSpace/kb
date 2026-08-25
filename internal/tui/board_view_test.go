@@ -684,6 +684,56 @@ func TestBoardViewSmallHelpers(t *testing.T) {
 	}
 }
 
+// TestBoardOverflowCueCountsTheCardsItCouldNotDrawWhole is the section 3.7 cue
+// under issue #243's content-sized cards, with arithmetic small enough to check
+// by hand. Five identical bare cards - a title, no description, no labels - are
+// three rows each at normal density: the title, the interior separator, the meta
+// row. With the one-row inter-card gutter the stack is 19 rows.
+//
+// The panel gets 11: one for the band, one for the column meta line, one for the
+// cue, and eight for the body. Two cards and the gutter after each fill those
+// eight exactly, the third would need four more, and the cue therefore says
+// three. Nothing is clipped to make it fit.
+func TestBoardOverflowCueCountsTheCardsItCouldNotDrawWhole(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	fixture := board.Board{Title: "Roadmap"}
+	for index := range 5 {
+		fixture.Tasks = append(fixture.Tasks, board.Task{
+			ID: fmt.Sprintf("todo-%d", index), Seq: index + 1, Title: "Card",
+			Status: board.StatusTodo, Prio: 1, CreatedAt: now, MovedAt: now,
+		})
+	}
+	m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
+	m.loading, m.haveBoardSnapshot = false, true
+	m.board = fixture
+	m.now = func() time.Time { return now }
+	m.renderedAt = now
+	m.width, m.height = 120, 40
+
+	tasks := tasksInStatus(m.filteredBoard(), board.StatusTodo)
+	heights := m.measureCards(tasks, board.StatusTodo, 40, theme.DensityNormal)
+	for index, height := range heights {
+		if height != 3 {
+			t.Fatalf("card %d measured %d rows, want the bare card's 3", index, height)
+		}
+	}
+	if got := m.columnStackHeight(heights, theme.DensityNormal); got != 19 {
+		t.Fatalf("the stack measured %d rows, want 19", got)
+	}
+
+	column := m.renderBoardColumnAt(board.StatusTodo, 44, 11, theme.DensityNormal)
+	body := strings.Join(mapPlain(column.lines), "\n")
+	if !strings.Contains(body, "+3 more") {
+		t.Errorf("the column did not say +3 more:\n%s", body)
+	}
+	if strings.Contains(body, "#3") {
+		t.Errorf("the third card was drawn although it did not fit whole:\n%s", body)
+	}
+	if !strings.Contains(body, "#2") {
+		t.Errorf("the second card fit and was not drawn:\n%s", body)
+	}
+}
+
 // TestBoardStateCarriesSemanticHue pins the footer's state segment onto the
 // status colors of spec section 1.5.
 func TestBoardStateCarriesSemanticHue(t *testing.T) {
