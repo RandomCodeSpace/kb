@@ -454,7 +454,10 @@ chips up; the card's row grid is fixed by density, not by content.
 
 ### 3.2 Row 0 — title
 
-`emoji + " " + title`, foreground `FgBase`, bold only when selected. Right-aligned
+`emoji + " " + title`, foreground `FgBase`, bold only when selected. A
+two-cell emoji and the space after it are their own styled run (§10.4.1, as
+amended by #229): the title row ends in a padding run, so a title left inside
+the emoji's run loses its last character under that padding. Right-aligned
 `#seq` in `FgMuted`. The title field is `inner - width(seq) - 1` wide and is
 ellipsized to fit; `#seq` is never truncated.
 
@@ -498,7 +501,8 @@ letter is what still reads on a font that has no pictograph and draws tofu.
 An effort value the S/M/L scale does not name falls back to `Diamond` and
 three cells. `metaRowWidth` measures each chip rather than assuming a width,
 so the survival order and the column-wide drop of `metaDepth` carry the cost
-without a constant to maintain; the fourth cell is spent on the last label of
+without a constant to maintain. The square and the column it owns are their
+own styled run (§10.4.1, as amended by #229); the fourth cell is spent on the last label of
 the compact flat row at the widths where that row was already full.
 
 ### 3.5 Label pill row
@@ -2308,6 +2312,24 @@ alignment is the block-glyph risk §3.6 accepts. It does not bind `Check`,
 those are written with a following space anyway. The rule is about the column a mark
 occupies, not about its token: the space belongs to the render site, and every
 `Cells` value in the table above is unchanged.
+
+**Amended by #229.** The column is necessary and was not sufficient. A
+terminal shapes one styled run as one text run, and a color pictograph is
+drawn by font machinery whose advance is wider than the two columns the cell
+grid gives it, so every glyph after it *inside the same run* is drawn pushed
+right by the excess — and the run after that, placed by the cell grid rather
+than by the pen, is painted over the tail of the last glyph. The adjacency
+column stopped anything being *written* on the mark; it did not stop the mark
+displacing what shares its run. So a mark bound by this rule ends its run at
+the column it owns, and the text beside it starts a fresh one. The mark run
+carries the ground as its foreground: a two-cell mark is admitted only as a
+single East Asian Wide code point, which is what `Emoji_Presentation`
+guarantees, so it paints its own colors and has none to lose, and the column
+beside it has no ink. A one-cell mark keeps the single run — it carries a real
+foreground and has no advance to overrun. The split is `widget.MarkRun`, it
+costs no cell, and it is invisible to every width calculation, which is why
+the four-cell effort chip and the frame-width goldens held throughout the
+defect. Bound render sites today: the §3.4 effort chip and the §3.2 card title.
 
 **Guard.** `theme/seam_test.go` gains a walk over `internal/tui`. It fails on any
 non-test `.go` file outside `theme/` containing a **string literal** with a rune at
