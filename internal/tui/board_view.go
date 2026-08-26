@@ -139,42 +139,80 @@ func (s boardViewState) visibleStatuses() []board.Status {
 	return boardStatuses[:limit]
 }
 
+type boardNavigation interface {
+	statusCount(board.Status) int
+	taskAtStatus(board.Status, int) (board.Task, bool)
+	ordinalForTask(board.Status, string) (int, bool)
+	taskByID(string) (board.Task, bool)
+}
+
+type scannedBoardNavigation struct{ board board.Board }
+
+func (n scannedBoardNavigation) statusCount(status board.Status) int {
+	return taskCount(n.board, status)
+}
+
+func (n scannedBoardNavigation) taskAtStatus(status board.Status, ordinal int) (board.Task, bool) {
+	return taskAtStatusIndex(n.board, status, ordinal)
+}
+
+func (n scannedBoardNavigation) ordinalForTask(status board.Status, id string) (int, bool) {
+	return taskIndexFound(n.board, status, id)
+}
+
+func (n scannedBoardNavigation) taskByID(id string) (board.Task, bool) {
+	for _, task := range n.board.Tasks {
+		if task.ID == id {
+			return task, true
+		}
+	}
+	return board.Task{}, false
+}
+
 func (s *boardViewState) handleKey(key string, current board.Board) boardAction {
-	s.restoreColumnCursor(current, s.column)
+	return s.handleNavigationKey(key, scannedBoardNavigation{current})
+}
+
+func (s *boardViewState) handleProjectionKey(key string, current *renderProjection) boardAction {
+	return s.handleNavigationKey(key, current)
+}
+
+func (s *boardViewState) handleNavigationKey(key string, current boardNavigation) boardAction {
+	s.restoreColumnCursorFrom(current, s.column)
 	switch key {
 	case "c":
 		s.showCancelled = !s.showCancelled
 		if !s.showCancelled && s.column == len(boardStatuses)-1 {
 			s.column--
 		}
-		s.clampRow(current)
+		s.clampRowFrom(current)
 		return boardToggledCancelled
 	case "left", "h", "shift+tab":
-		s.moveColumn(-1, current)
+		s.moveColumnFrom(-1, current)
 		return boardChanged
 	case "right", "l", "tab":
-		s.moveColumn(1, current)
+		s.moveColumnFrom(1, current)
 		return boardChanged
 	case "up", "k":
 		if s.rows[s.column] > 0 {
 			s.rows[s.column]--
 		}
-		s.setCursorAt(current, s.column, s.rows[s.column])
+		s.setCursorAtFrom(current, s.column, s.rows[s.column])
 		s.manualScroll[s.column] = false
 		return boardChanged
 	case "down", "j":
-		count := taskCount(current, boardStatuses[s.column])
+		count := current.statusCount(boardStatuses[s.column])
 		if s.rows[s.column]+1 < count {
 			s.rows[s.column]++
 		}
-		s.setCursorAt(current, s.column, s.rows[s.column])
+		s.setCursorAtFrom(current, s.column, s.rows[s.column])
 		s.manualScroll[s.column] = false
 		return boardChanged
 	case "1", "2", "3", "4":
 		at := int(key[0] - '1')
 		if at < len(s.visibleStatuses()) {
 			s.column = at
-			s.clampRow(current)
+			s.clampRowFrom(current)
 			return boardChanged
 		}
 	}
@@ -182,20 +220,36 @@ func (s *boardViewState) handleKey(key string, current board.Board) boardAction 
 }
 
 func (s *boardViewState) moveColumn(delta int, current board.Board) {
+	s.moveColumnFrom(delta, scannedBoardNavigation{current})
+}
+
+func (s *boardViewState) moveColumnFrom(delta int, current boardNavigation) {
 	count := len(s.visibleStatuses())
 	s.column = (s.column + delta + count) % count
-	s.clampRow(current)
+	s.clampRowFrom(current)
 }
 
 func (s *boardViewState) clampRow(current board.Board) {
-	s.restoreColumnCursor(current, s.column)
+	s.clampRowFrom(scannedBoardNavigation{current})
+}
+
+func (s *boardViewState) clampRowFrom(current boardNavigation) {
+	s.restoreColumnCursorFrom(current, s.column)
 }
 
 func (s *boardViewState) focusColumn(status board.Status, current board.Board) {
+	s.focusColumnFrom(status, scannedBoardNavigation{current})
+}
+
+func (s *boardViewState) focusProjectionColumn(status board.Status, current *renderProjection) {
+	s.focusColumnFrom(status, current)
+}
+
+func (s *boardViewState) focusColumnFrom(status board.Status, current boardNavigation) {
 	for i, candidate := range s.visibleStatuses() {
 		if candidate == status {
 			s.column = i
-			s.clampRow(current)
+			s.clampRowFrom(current)
 			return
 		}
 	}
@@ -206,26 +260,34 @@ func (s *boardViewState) focusTask(current board.Board, id string) bool {
 }
 
 func (s *boardViewState) focusTaskWithScroll(current board.Board, id string, resetScroll bool) bool {
-	for _, task := range current.Tasks {
-		if task.ID != id {
+	return s.focusTaskWithScrollFrom(scannedBoardNavigation{current}, id, resetScroll)
+}
+
+func (s *boardViewState) focusProjectionTask(current *renderProjection, id string) bool {
+	return s.focusTaskWithScrollFrom(current, id, true)
+}
+
+func (s *boardViewState) focusTaskWithScrollFrom(current boardNavigation, id string, resetScroll bool) bool {
+	task, ok := current.taskByID(id)
+	if !ok || task.Status == board.StatusCancelled && !s.showCancelled {
+		return false
+	}
+	for i, status := range boardStatuses {
+		if status != task.Status {
 			continue
 		}
-		if task.Status == board.StatusCancelled && !s.showCancelled {
+		at, ok := current.ordinalForTask(task.Status, id)
+		if !ok {
 			return false
 		}
-		for i, status := range boardStatuses {
-			if status == task.Status {
-				s.column = i
-				at := taskIndex(current, task.Status, id)
-				s.rows[i] = at
-				s.cursors[i] = boardTaskAnchor{TaskID: id, IndexHint: at}
-				if resetScroll {
-					s.scrollAnchors[i] = boardTaskAnchor{TaskID: id, IndexHint: at}
-					s.manualScroll[i] = false
-				}
-				return true
-			}
+		s.column = i
+		s.rows[i] = at
+		s.cursors[i] = boardTaskAnchor{TaskID: id, IndexHint: at}
+		if resetScroll {
+			s.scrollAnchors[i] = boardTaskAnchor{TaskID: id, IndexHint: at}
+			s.manualScroll[i] = false
 		}
+		return true
 	}
 	return false
 }
@@ -250,42 +312,43 @@ func (s *boardViewState) adoptBoard(previous, current board.Board) {
 // normalizeSelection keeps refresh focus on a selectable visible card when
 // one exists. Ordinary column navigation may still focus an empty column.
 func (s *boardViewState) normalizeSelection(current board.Board) {
+	s.normalizeSelectionFrom(scannedBoardNavigation{current})
+}
+
+func (s *boardViewState) normalizeSelectionFrom(current boardNavigation) {
 	visible := s.visibleStatuses()
-	if taskCount(current, boardStatuses[s.column]) > 0 {
-		s.clampRow(current)
+	if current.statusCount(boardStatuses[s.column]) > 0 {
+		s.clampRowFrom(current)
 		return
 	}
 	for offset := 1; offset < len(visible); offset++ {
 		column := (s.column + offset) % len(visible)
-		if taskCount(current, visible[column]) == 0 {
+		if current.statusCount(visible[column]) == 0 {
 			continue
 		}
 		s.column = column
-		s.clampRow(current)
+		s.clampRowFrom(current)
 		return
 	}
-	s.clampRow(current)
+	s.clampRowFrom(current)
 }
 
 func (s boardViewState) selectedTask(current board.Board) (board.Task, bool) {
+	return s.selectedTaskFrom(scannedBoardNavigation{current})
+}
+
+func (s boardViewState) selectedProjectionTask(current *renderProjection) (board.Task, bool) {
+	return s.selectedTaskFrom(current)
+}
+
+func (s boardViewState) selectedTaskFrom(current boardNavigation) (board.Task, bool) {
 	status := boardStatuses[s.column]
 	if id := s.cursors[s.column].TaskID; id != "" {
-		if at, ok := taskIndexFound(current, status, id); ok && at == s.rows[s.column] {
-			return taskAtStatusIndex(current, status, at)
+		if at, ok := current.ordinalForTask(status, id); ok && at == s.rows[s.column] {
+			return current.taskAtStatus(status, at)
 		}
 	}
-	want := s.rows[s.column]
-	at := 0
-	for _, task := range current.Tasks {
-		if task.Status != status {
-			continue
-		}
-		if at == want {
-			return task, true
-		}
-		at++
-	}
-	return board.Task{}, false
+	return current.taskAtStatus(status, s.rows[s.column])
 }
 
 func (s *boardViewState) captureColumnAnchors(current board.Board, column int, status board.Status) {
@@ -301,13 +364,17 @@ func (s *boardViewState) captureColumnAnchors(current board.Board, column int, s
 }
 
 func (s *boardViewState) restoreColumnCursor(current board.Board, column int) {
+	s.restoreColumnCursorFrom(scannedBoardNavigation{current}, column)
+}
+
+func (s *boardViewState) restoreColumnCursorFrom(current boardNavigation, column int) {
 	status := boardStatuses[column]
-	if at, ok := taskIndexFound(current, status, s.cursors[column].TaskID); ok {
+	if at, ok := current.ordinalForTask(status, s.cursors[column].TaskID); ok {
 		s.rows[column] = at
 		s.cursors[column].IndexHint = at
 		return
 	}
-	count := taskCount(current, status)
+	count := current.statusCount(status)
 	if count == 0 {
 		s.rows[column] = 0
 		return
@@ -316,7 +383,7 @@ func (s *boardViewState) restoreColumnCursor(current board.Board, column int) {
 	if s.cursors[column].TaskID == "" {
 		hint = s.rows[column]
 	}
-	s.setCursorAt(current, column, min(max(hint, 0), count-1))
+	s.setCursorAtFrom(current, column, min(max(hint, 0), count-1))
 }
 
 func (s *boardViewState) restoreColumnScroll(current board.Board, column int) {
@@ -337,8 +404,12 @@ func (s *boardViewState) restoreColumnScroll(current board.Board, column int) {
 }
 
 func (s *boardViewState) setCursorAt(current board.Board, column, row int) {
+	s.setCursorAtFrom(scannedBoardNavigation{current}, column, row)
+}
+
+func (s *boardViewState) setCursorAtFrom(current boardNavigation, column, row int) {
 	status := boardStatuses[column]
-	task, ok := taskAtStatusIndex(current, status, row)
+	task, ok := current.taskAtStatus(status, row)
 	if !ok {
 		s.rows[column] = 0
 		return
@@ -395,7 +466,39 @@ func taskIndexFound(current board.Board, status board.Status, id string) (int, b
 
 // selectedTask is the narrow handoff used by the card-detail overlay.
 func (m Model) selectedTask() (board.Task, bool) {
+	if projection := m.currentProjection(); projection != nil {
+		selected, ok := m.boardView.selectedProjectionTask(projection)
+		if !ok {
+			return board.Task{}, false
+		}
+		if current, found := projection.sourceTaskByID(m.board, selected.ID); found {
+			return current, true
+		}
+		return selected, true
+	}
 	return m.boardView.selectedTask(m.filteredBoard())
+}
+
+func (m *Model) handleBoardNavigationKey(key string) boardAction {
+	if projection := m.currentProjection(); projection != nil {
+		return m.boardView.handleProjectionKey(key, projection)
+	}
+	return m.boardView.handleKey(key, m.filteredBoard())
+}
+
+func (m *Model) focusBoardTask(id string) bool {
+	if projection := m.currentProjection(); projection != nil {
+		return m.boardView.focusProjectionTask(projection, id)
+	}
+	return m.boardView.focusTask(m.filteredBoard(), id)
+}
+
+func (m *Model) focusBoardColumn(status board.Status) {
+	if projection := m.currentProjection(); projection != nil {
+		m.boardView.focusProjectionColumn(status, projection)
+		return
+	}
+	m.boardView.focusColumn(status, m.filteredBoard())
 }
 
 func taskCount(current board.Board, status board.Status) int {
@@ -782,7 +885,13 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 	}
 	appendPart(0, "[project: "+sanitizeTerminal(m.projects.label())+"]", projectStyle, boardHitProject, "")
 	if m.filter.active() {
-		count := fmt.Sprintf("%d of %d cards", len(m.filteredBoard().Tasks), len(m.projectBoard().Tasks))
+		var visible, projected int
+		if projection := m.currentProjection(); projection != nil {
+			visible, projected = len(projection.board.Tasks), projection.projected
+		} else {
+			visible, projected = len(m.filteredBoard().Tasks), len(m.projectBoard().Tasks)
+		}
+		count := fmt.Sprintf("%d of %d cards", visible, projected)
 		appendPart(1, count, styles.On(theme.FgMuted, theme.Canvas), boardHitDefault, "")
 	}
 	for _, tag := range labels {
@@ -908,6 +1017,12 @@ func (m Model) renderBoardColumn(status board.Status, width, height int) rendere
 // to. Depth is the shade step from the band to the panel body to the cards;
 // there is no border anywhere in it (spec section 2.2).
 func (m Model) renderBoardColumnAt(status board.Status, width, height int, density theme.Density) renderedColumn {
+	if m.renderingGeometry != nil && m.renderingProjection != nil {
+		column := m.renderingGeometry.columns[statusIndex(status)]
+		if column.status == status && column.width == width && column.panelHeight == height && column.density == density {
+			return m.renderVirtualColumn(m.renderingProjection, column)
+		}
+	}
 	styles := m.themeStyles()
 	metrics := styles.Metrics
 	index := statusIndex(status)
@@ -1182,54 +1297,160 @@ func visibleCardEnd(owners []string, start, height int) int {
 // and the render pass go through it, so the height the column packed against is
 // the height the card draws (spec section 2.5 as issue #243 re-cut it).
 func (m Model) cardOptsFor(styles *theme.Styles, tasks []board.Task, status board.Status, width int, density theme.Density) ([]widget.CardOpts, [][]string) {
-	index := statusIndex(status)
-	focused := m.boardView.column == index
-	selected := m.boardView.selectedIndex(tasks, status)
-	frameHeight := max(m.height, 8)
-	titleLines := styles.Metrics.TitleRows(frameHeight, density)
-	descLines := styles.Metrics.DescLines(frameHeight, density)
-	labelRows := styles.Metrics.LabelRows(frameHeight, density)
-	padRows := styles.Metrics.InnerPadRows(frameHeight, density)
-	metas := make([][]string, len(tasks))
-	for i, task := range tasks {
-		metas[i] = m.cardMeta(styles, task,
-			styles.Surface(focused && i == selected, density.Compact() && i%2 == 1), density)
-	}
-	depth := metaDepth(metas, styles.Metrics.CardInner(width, density))
+	depth := m.cardMetaDepth(tasks, width, density)
 	opts := make([]widget.CardOpts, 0, len(tasks))
 	orders := make([][]string, 0, len(tasks))
-	for i, task := range tasks {
-		// The project pill leads the label row: the row is rendered in survival
-		// order, so the card's mandatory scope is the label that stays on it
-		// when the row runs out of width (spec section 3.5).
-		ordered := project.Lead(task.Tags)
-		tags := make([]string, 0, len(ordered))
-		for _, tag := range ordered {
-			tags = append(tags, sanitizeTerminal(tag))
-		}
+	for i := range tasks {
+		card, ordered := m.cardOptsAt(styles, tasks, status, width, density, i, depth)
+		opts = append(opts, card)
 		orders = append(orders, ordered)
-		opts = append(opts, widget.CardOpts{
-			Title:      sanitizeTerminal(task.Title),
-			Emoji:      sanitizeTerminal(task.Emoji),
-			Seq:        seqLabel(task),
-			Desc:       sanitizeTerminalText(task.Desc),
-			Meta:       metas[i][:depth],
-			Labels:     tags,
-			Priority:   task.Prio,
-			Blocked:    task.Blocked,
-			Selected:   focused && i == selected,
-			Alt:        density.Compact() && i%2 == 1,
-			Width:      width,
-			TitleLines: titleLines,
-			DescLines:  descLines,
-			LabelRows:  labelRows,
-			PadRows:    padRows,
-			Density:    density,
-			Hovered:    m.pointerState.IsHovered(boardCardControlID(task.ID)),
-			HoverTag:   m.hoveredCardTag(task.ID, ordered),
-		})
 	}
 	return opts, orders
+}
+
+// cardOptsAt builds the render options for one card. The cold renderer calls
+// it for every task; the retained renderer and geometry worker call it only
+// for the bounded records they actually need. Keeping one builder is the
+// differential contract -- virtualizing a second approximation would be fast
+// right up to the first wrong pointer row.
+func (m Model) cardOptsAt(
+	styles *theme.Styles,
+	tasks []board.Task,
+	status board.Status,
+	width int,
+	density theme.Density,
+	ordinal int,
+	depth int,
+) (widget.CardOpts, []string) {
+	if ordinal < 0 || ordinal >= len(tasks) {
+		return widget.CardOpts{}, nil
+	}
+	focused := m.boardView.column == statusIndex(status)
+	selected := m.boardView.selectedIndex(tasks, status)
+	return m.cardOptsForTask(styles, tasks[ordinal], width, density, ordinal, depth,
+		focused && ordinal == selected)
+}
+
+func (m Model) cardOptsForTask(
+	styles *theme.Styles,
+	task board.Task,
+	width int,
+	density theme.Density,
+	ordinal int,
+	depth int,
+	selected bool,
+) (widget.CardOpts, []string) {
+	frameHeight := max(m.height, 8)
+	surface := styles.Surface(selected, density.Compact() && ordinal%2 == 1)
+	meta := m.cardMeta(styles, task, surface, density)
+	depth = min(max(depth, 1), len(meta))
+
+	// The project pill leads the label row: the row is rendered in survival
+	// order, so the card's mandatory scope is the label that stays on it when
+	// the row runs out of width (spec section 3.5).
+	ordered := project.Lead(task.Tags)
+	tags := make([]string, 0, len(ordered))
+	for _, tag := range ordered {
+		tags = append(tags, sanitizeTerminal(tag))
+	}
+	return widget.CardOpts{
+		Title:      sanitizeTerminal(task.Title),
+		Emoji:      sanitizeTerminal(task.Emoji),
+		Seq:        seqLabel(task),
+		Desc:       sanitizeTerminalText(task.Desc),
+		Meta:       meta[:depth],
+		Labels:     tags,
+		Priority:   task.Prio,
+		Blocked:    task.Blocked,
+		Selected:   selected,
+		Alt:        density.Compact() && ordinal%2 == 1,
+		Width:      width,
+		TitleLines: styles.Metrics.TitleRows(frameHeight, density),
+		DescLines:  styles.Metrics.DescLines(frameHeight, density),
+		LabelRows:  styles.Metrics.LabelRows(frameHeight, density),
+		PadRows:    styles.Metrics.InnerPadRows(frameHeight, density),
+		Density:    density,
+		Hovered:    m.pointerState.IsHovered(boardCardControlID(task.ID)),
+		HoverTag:   m.hoveredCardTag(task.ID, ordered),
+	}, ordered
+}
+
+// cardMetaDepth resolves the column-wide survival depth without styling every
+// offscreen card. ANSI attributes do not occupy cells; the widths below are
+// the plain anatomy costs of the same widgets cardMeta later draws for the
+// bounded render window.
+func (m Model) cardMetaDepth(tasks []board.Task, width int, density theme.Density) int {
+	return m.cardMetaDepthFor(width, density, len(tasks), func(index int) board.Task { return tasks[index] })
+}
+
+func (m Model) cardMetaDepthFor(
+	width int,
+	density theme.Density,
+	count int,
+	taskAt func(int) board.Task,
+) int {
+	inner := m.themeStyles().Metrics.CardInner(width, density)
+	depth := cardMetaSlots
+	for depth > 1 {
+		fits := true
+		for index := 0; index < count; index++ {
+			task := taskAt(index)
+			if metaWidthPrefix(m.cardMetaWidths(task, density), depth) > inner {
+				fits = false
+				break
+			}
+		}
+		if fits {
+			break
+		}
+		depth--
+	}
+	return depth
+}
+
+func (m Model) cardMetaWidths(task board.Task, density theme.Density) [cardMetaSlots]int {
+	styles := m.themeStyles()
+	flat := density.Compact()
+	pad := 2
+	if flat {
+		pad = 0
+	}
+	widths := [cardMetaSlots]int{
+		1 + pad,
+		ansi.StringWidth(ageChip(task, m.renderedAt)),
+		0,
+		0,
+	}
+	if task.Due != "" {
+		label, overdue := dueChip(sanitizeTerminal(task.Due), m.renderedAt)
+		widths[2] = ansi.StringWidth(label)
+		if overdue {
+			widths[2] = ansi.StringWidth(styles.Glyph.MarkDue+label) + pad
+		}
+	}
+	effort := sanitizeTerminal(task.Effort)
+	if effort != "" {
+		if _, onScale := theme.EffortSlot(effort); onScale {
+			widths[3] = ansi.StringWidth(effort) + pad
+		} else {
+			widths[3] = ansi.StringWidth(styles.Glyph.Diamond + " " + effort)
+		}
+	}
+	return widths
+}
+
+func metaWidthPrefix(widths [cardMetaSlots]int, depth int) int {
+	width := 0
+	for _, entry := range widths[:min(max(depth, 0), len(widths))] {
+		if entry == 0 {
+			continue
+		}
+		if width > 0 {
+			width++
+		}
+		width += entry
+	}
+	return width
 }
 
 func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width int, density theme.Density) ([]string, []string, [][]labelSpan) {

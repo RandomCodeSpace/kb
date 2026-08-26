@@ -912,6 +912,7 @@ func TestBoardCardLabelsHavePerRegionPressedIdentity(t *testing.T) {
 	m.width, m.height = 120, 30
 	m.board.Tasks[0].Tags = []string{"shared"}
 	m.board.Tasks[1].Tags = []string{"shared"}
+	rebuildTestView(&m)
 	_, hits := m.renderBoard()
 	var first boardHit
 	for _, hit := range hits {
@@ -942,6 +943,7 @@ func TestBoardReleaseClearsPressedControlRemovedByRefresh(t *testing.T) {
 	m := mouseRoutingTestModel(t)
 	m.width, m.height = 120, 30
 	m.board.Tasks[0].Tags = []string{"temporary"}
+	rebuildTestView(&m)
 	_, hits := m.renderBoard()
 	var label boardHit
 	for _, hit := range hits {

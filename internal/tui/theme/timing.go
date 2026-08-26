@@ -43,6 +43,12 @@ type Timing struct {
 	PollInterval  time.Duration
 	AutoShipDelay time.Duration
 	SimilarDelay  time.Duration
+
+	// GeometrySliceTarget is the preferred amount of offscreen layout work per
+	// worker command. GeometrySliceLimit is the hard ceiling used to report an
+	// overrun. Both are worker budgets, not paint-path timing.
+	GeometrySliceTarget time.Duration
+	GeometrySliceLimit  time.Duration
 }
 
 // DefaultTiming is the table of spec section 10.3.1. crush is the donor for
@@ -75,6 +81,9 @@ var DefaultTiming = Timing{
 	PollInterval:  1000 * time.Millisecond,
 	AutoShipDelay: 350 * time.Millisecond,
 	SimilarDelay:  400 * time.Millisecond,
+
+	GeometrySliceTarget: 8 * time.Millisecond,
+	GeometrySliceLimit:  16 * time.Millisecond,
 }
 
 // TimingCollapsed is the test configuration: the struct zero value. Every

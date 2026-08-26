@@ -277,10 +277,17 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	// counters separate lets the performance harness observe coalesced, delayed,
 	// and stale publications once those later phases become asynchronous.
 	m.acceptedMessageID++
+	checkSource := m.current == nil || !m.current.projection.matchesSourceIdentity(m.board)
+	if batch, ok := message.(geometryBatchMsg); ok {
+		next := m.installGeometryBatch(batch)
+		next.acceptedMessageID = m.acceptedMessageID
+		return next, next.startGeometryWorker()
+	}
+	beforeBoard := m.board
 	next, command := m.update(message)
 	next.acceptedMessageID = m.acceptedMessageID
-	next.rebuildRenderPlan(renderImpactFor(message))
-	return next, command
+	next.rebuildRenderPlanAfterUpdate(renderImpactFor(message), checkSource || !sameBoardSourceIdentity(beforeBoard, next.board))
+	return next, batchCommands(command, next.startGeometryWorker())
 }
 
 func (m Model) update(message tea.Msg) (Model, tea.Cmd) {
@@ -648,7 +655,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			}
 			return m, nil
 		default:
-			if m.boardView.handleKey(msg.String(), m.filteredBoard()) == boardToggledCancelled {
+			if m.handleBoardNavigationKey(msg.String()) == boardToggledCancelled {
 				return m, m.queuePreferences()
 			}
 		}
@@ -660,7 +667,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			m.cancelCardMove("focus changed")
 		}
 		m.filter.blur()
-		if m.boardView.focusTask(m.filteredBoard(), msg.taskID) {
+		if m.focusBoardTask(msg.taskID) {
 			if task, ok := m.selectedTask(); ok {
 				m.detail.Resize(m.width, m.height)
 				return m, m.detail.Open(task)
@@ -676,7 +683,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			m.cancelCardMove("focus changed")
 		}
 		m.filter.blur()
-		m.boardView.focusColumn(msg.status, m.filteredBoard())
+		m.focusBoardColumn(msg.status)
 	case boardPointerDownMsg:
 		if m.loading || m.move.saving {
 			return m, nil
@@ -685,7 +692,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			m.cancelCardMove("focus changed")
 		}
 		m.filter.blur()
-		if !m.boardView.focusTask(m.filteredBoard(), msg.taskID) {
+		if !m.focusBoardTask(msg.taskID) {
 			return m, nil
 		}
 		if task, ok := m.selectedTask(); ok {
@@ -713,7 +720,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			m.clicks = clicks
 			m.cancelCardMove("")
 			m.move.status = ""
-			m.boardView.focusTask(m.filteredBoard(), taskID)
+			m.focusBoardTask(taskID)
 			if task, ok := m.selectedTask(); ok {
 				m.detail.Resize(m.width, m.height)
 				return m, batchCommands(window, m.detail.Open(task))
@@ -1049,9 +1056,20 @@ func (m Model) backdrop() Model {
 func (m Model) renderColdView() tea.View { return m.renderColdSnapshot().view }
 
 func (m Model) renderColdSnapshot() coldRenderSnapshot {
+	// The oracle is the full-board renderer. Keep the accepted immutable
+	// projection so both paths consume identical tasks, but explicitly remove
+	// retained geometry before entering the shared frame composer.
+	m.renderingGeometry = nil
+	return m.renderSnapshot()
+}
+
+func (m Model) renderRetainedSnapshot() coldRenderSnapshot { return m.renderSnapshot() }
+
+func (m Model) renderSnapshot() coldRenderSnapshot {
 	backdrop := m.backdrop()
 	var content string
 	var hits []boardHit
+	handler := renderHandlerNone
 	if m.launching() {
 		// Spec section 10.6.7: the launch screen owns the frame until the first
 		// board snapshot lands, and it carries no hit regions because it
@@ -1065,44 +1083,52 @@ func (m Model) renderColdSnapshot() coldRenderSnapshot {
 		surface := m.keyboardHelpSurface(content)
 		content = surface.Content
 		overlayMouse = surface.Pointer
+		handler = renderHandlerHelp
 		hits = nil
 	}
 	if m.detail.IsOpen() {
 		surface := m.detail.PointerSurface(content, m.width, m.height)
 		content = surface.Content
 		overlayMouse = surface.Pointer
+		handler = renderHandlerDetail
 		hits = nil
 	}
 	if m.settings != nil {
 		surface := m.settings.Surface(content, m.width, m.height)
 		content = surface.Content
 		overlayMouse = surface.Pointer
+		handler = renderHandlerSettings
 		hits = nil
 	}
 	if m.adr.IsOpen() {
 		content = m.adr.Overlay(content, m.width, m.height)
 		overlayMouse = m.adr.MouseHandler(m.width, m.height)
+		handler = renderHandlerADR
 		hits = nil
 	}
 	if m.editor.IsOpen() {
 		content = m.editor.Overlay(content, m.width, m.height)
 		overlayMouse = m.editor.MouseHandler(m.width, m.height)
+		handler = renderHandlerEditor
 		hits = nil
 	}
 	if m.action.open() {
 		surface := m.taskActionSurface(content)
 		content = surface.Content
 		overlayMouse = surface.Pointer
+		handler = renderHandlerAction
 		hits = nil
 	}
 	if m.issueImport.IsOpen() {
 		content = m.issueImport.Overlay(content, m.width, m.height)
 		overlayMouse = m.issueImport.MouseHandler(m.width, m.height)
+		handler = renderHandlerIssueImport
 		hits = nil
 	}
 	if m.palette.IsOpen() {
 		content = m.palette.Overlay(content, m.width, m.height)
 		overlayMouse = m.palette.MouseHandler(m.width, m.height)
+		handler = renderHandlerPalette
 		hits = nil
 	}
 	view := tea.NewView(content)
@@ -1110,7 +1136,7 @@ func (m Model) renderColdSnapshot() coldRenderSnapshot {
 	view.MouseMode = tea.MouseModeCellMotion
 	if overlayMouse != nil {
 		view.OnMouse = overlayMouse
-		return coldRenderSnapshot{view: view}
+		return coldRenderSnapshot{view: view, semantics: renderSnapshotSemantics{handler: handler}}
 	}
 	if !m.helpOpen && m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() &&
 		!m.issueImport.IsOpen() && !m.palette.IsOpen() && !m.detail.OwnsInput() {
@@ -1118,8 +1144,13 @@ func (m Model) renderColdSnapshot() coldRenderSnapshot {
 		immutableHits := append([]boardHit(nil), hits...)
 		view.OnMouse = boardMouseHandlerWithFeedback(immutableHits, pointerActive, m.pointerState)
 		hits = immutableHits
+		handler = renderHandlerBoard
 	}
-	return coldRenderSnapshot{view: view, hitRegions: hits}
+	semantics := renderSnapshotSemantics{handler: handler, hits: hits}
+	if m.renderingGeometry != nil && m.renderingProjection != nil {
+		semantics.columns = m.renderingGeometry.renderSemantics(m.boardView, m.renderingProjection)
+	}
+	return coldRenderSnapshot{view: view, hitRegions: hits, semantics: semantics}
 }
 
 func (m *Model) handleBoardFooterClick(key string) tea.Cmd {

@@ -99,13 +99,19 @@ func performanceModel(taskCount int, filter string, width, height int) Model {
 	model := NewModel(stubBoardReader{board: fixture}, nil, "perf")
 	model.now = func() time.Time { return now }
 	model.renderedAt = now
-	updated, _ := model.Update(boardLoadedMsg{board: fixture})
+	updated, command := model.Update(boardLoadedMsg{board: fixture})
 	model = updated.(Model)
 	if filter != "" {
 		model.filter.input.SetValue(filter)
 	}
-	updated, _ = model.Update(tea.WindowSizeMsg{Width: width, Height: height})
-	return updated.(Model)
+	updated, resizeCommand := model.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	model = updated.(Model)
+	command = batchCommands(command, resizeCommand)
+	for command != nil {
+		updated, command = model.Update(command())
+		model = updated.(Model)
+	}
+	return model
 }
 
 func seedPerformanceStore(t testing.TB, count int) (string, []byte) {

@@ -48,6 +48,8 @@ func TestDefaultTimingTable(t *testing.T) {
 		{"PollInterval", timing.PollInterval, time.Second},
 		{"AutoShipDelay", timing.AutoShipDelay, 350 * time.Millisecond},
 		{"SimilarDelay", timing.SimilarDelay, 400 * time.Millisecond},
+		{"GeometrySliceTarget", timing.GeometrySliceTarget, 8 * time.Millisecond},
+		{"GeometrySliceLimit", timing.GeometrySliceLimit, 16 * time.Millisecond},
 	}
 	for _, item := range durations {
 		if item.got != item.want {

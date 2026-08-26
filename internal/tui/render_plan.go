@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"slices"
+	"time"
 	"unsafe"
 
 	tea "charm.land/bubbletea/v2"
@@ -52,9 +54,23 @@ type RenderPlanStats struct {
 	PublishedFrames                uint64              `json:"published_frames"`
 	DiscardedEvents                uint64              `json:"discarded_events"`
 	StaleWorkerResults             uint64              `json:"stale_worker_results"`
+	StaleGeometryRootResults       uint64              `json:"stale_geometry_root_results"`
 	ProjectionBuilds               uint64              `json:"projection_builds"`
+	ProjectionTaskVisits           uint64              `json:"projection_task_visits"`
+	SourceTaskComparisons          uint64              `json:"source_task_comparisons"`
 	TaskDerivations                uint64              `json:"task_derivations"`
 	ProjectedTasks                 uint64              `json:"projected_tasks"`
+	LayoutRecords                  uint64              `json:"layout_records"`
+	ExactLayoutRecords             uint64              `json:"exact_layout_records"`
+	EstimatedLayoutRecords         uint64              `json:"estimated_layout_records"`
+	GeometryWorkerSlices           uint64              `json:"geometry_worker_slices"`
+	MaxGeometryWorkerSliceNS       int64               `json:"max_geometry_worker_slice_ns"`
+	GeometryWorkerOverruns         uint64              `json:"geometry_worker_overruns"`
+	RenderedCardRecords            uint64              `json:"rendered_card_records"`
+	SynchronousLayoutRecords       uint64              `json:"synchronous_layout_records"`
+	SynchronousIndexNodes          uint64              `json:"synchronous_index_nodes"`
+	GeometrySnapshotInstalls       uint64              `json:"geometry_snapshot_installs"`
+	MaxGeometryInstallUnits        uint64              `json:"max_geometry_install_units"`
 	ContentBytes                   uint64              `json:"content_bytes"`
 	HitRegions                     uint64              `json:"hit_regions"`
 	RetainedPlanOwnedBytesEstimate uint64              `json:"retained_plan_owned_bytes_estimate"`
@@ -66,7 +82,10 @@ type RenderPlanStats struct {
 // join this root in later slices without widening that interface.
 type renderPlan struct {
 	view       tea.View
+	semantics  renderSnapshotSemantics
 	projection renderProjection
+	geometry   renderGeometry
+	worker     geometryWorkerState
 	stats      RenderPlanStats
 }
 
@@ -77,8 +96,13 @@ type renderPlan struct {
 type retainedRenderView struct {
 	current             *renderPlan
 	renderingProjection *renderProjection
+	renderingGeometry   *renderGeometry
+	preparedProjection  *renderProjection
 	acceptedMessageID   uint64
+	renderTrace         *renderVisitTrace
 }
+
+type renderVisitTrace struct{ cardRecords uint64 }
 
 // View returns the complete immutable frame most recently installed by Update.
 // Rendering, hit-map construction, and overlay composition happen only at the
@@ -93,21 +117,81 @@ func (r retainedRenderView) View() tea.View {
 type coldRenderSnapshot struct {
 	view       tea.View
 	hitRegions []boardHit
+	semantics  renderSnapshotSemantics
 }
 
-func (p renderPlan) rebuild(model Model, impact renderImpact) renderPlan {
+type renderHandlerTopology uint8
+
+const (
+	renderHandlerNone renderHandlerTopology = iota
+	renderHandlerBoard
+	renderHandlerHelp
+	renderHandlerDetail
+	renderHandlerSettings
+	renderHandlerADR
+	renderHandlerEditor
+	renderHandlerAction
+	renderHandlerIssueImport
+	renderHandlerPalette
+)
+
+type columnRenderSemantics struct {
+	present       bool
+	status        string
+	width         int
+	panelHeight   int
+	bodyWidth     int
+	contentHeight int
+	totalRows     int
+	windowStart   int
+	maxScroll     int
+	visibleFirst  int
+	visibleLast   int
+	railed        bool
+}
+
+type renderSnapshotSemantics struct {
+	handler renderHandlerTopology
+	hits    []boardHit
+	columns [len(boardStatuses)]columnRenderSemantics
+}
+
+func (p renderPlan) semanticallyMatches(snapshot coldRenderSnapshot) bool {
+	return p.view.Content == snapshot.view.Content && p.view.AltScreen == snapshot.view.AltScreen &&
+		p.view.MouseMode == snapshot.view.MouseMode && p.semantics.handler == snapshot.semantics.handler &&
+		p.semantics.columns == snapshot.semantics.columns && slices.Equal(p.semantics.hits, snapshot.semantics.hits)
+}
+
+func (p renderPlan) rebuild(model Model, impact renderImpact, checkSource bool) renderPlan {
 	var projectionChanged bool
-	p.projection, _, projectionChanged = p.projection.rebuild(model)
+	if prepared := model.preparedProjection; prepared != nil && prepared.matchesProjectionKey(model) {
+		p.projection = *prepared
+		projectionChanged = true
+	} else {
+		if checkSource && p.projection.initialized {
+			p.stats.SourceTaskComparisons += uint64(len(model.board.Tasks))
+		}
+		p.projection, _, projectionChanged = p.projection.rebuildSource(model, checkSource)
+	}
 	if projectionChanged {
 		p.stats.ProjectionBuilds++
+		p.stats.ProjectionTaskVisits += uint64(len(p.projection.tasks))
 	}
 	// The cold renderer consumes the just-built immutable projection. Pointing
 	// this short-lived model copy at p keeps the oracle on the same data that
 	// the installed plan publishes.
 	model.current = &p
 	model.renderingProjection = &p.projection
-	snapshot := model.renderColdSnapshot()
+	var synchronousRecords, synchronousNodes int
+	p.geometry, synchronousRecords, synchronousNodes = p.geometry.rebuild(model, &p.projection, projectionChanged)
+	p.stats.SynchronousLayoutRecords += uint64(synchronousRecords)
+	p.stats.SynchronousIndexNodes += uint64(synchronousNodes)
+	model.renderingGeometry = &p.geometry
+	trace := renderVisitTrace{}
+	model.renderTrace = &trace
+	snapshot := model.renderRetainedSnapshot()
 	p.view = snapshot.view
+	p.semantics = snapshot.semantics
 	p.stats.Builds++
 	p.stats.PublishedFrames++
 	p.stats.InstalledSnapshotID++
@@ -115,11 +199,19 @@ func (p renderPlan) rebuild(model Model, impact renderImpact) renderPlan {
 	p.stats.Revisions.advance(impact)
 	p.stats.ContentBytes = uint64(len(snapshot.view.Content))
 	p.stats.HitRegions = uint64(len(snapshot.hitRegions))
+	p.stats.RenderedCardRecords += trace.cardRecords
 	p.stats.TaskDerivations = uint64(len(p.projection.tasks))
 	p.stats.ProjectedTasks = uint64(len(p.projection.board.Tasks))
+	p.refreshGeometryStats()
 	p.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
-		p.projection.ownedBytesEstimate()
+		p.projection.ownedBytesEstimate() + p.geometry.ownedBytesEstimate()
 	return p
+}
+
+func (p *renderPlan) refreshGeometryStats() {
+	p.stats.LayoutRecords = uint64(p.geometry.layoutRecords)
+	p.stats.ExactLayoutRecords = uint64(p.geometry.exactRecords)
+	p.stats.EstimatedLayoutRecords = p.stats.LayoutRecords - p.stats.ExactLayoutRecords
 }
 
 // conservativePointerRegion mirrors the owned fields in pointer.Map's region
@@ -205,12 +297,120 @@ func (r *RenderPlanRevisions) advance(impact renderImpact) {
 }
 
 func (m *Model) rebuildRenderPlan(impact renderImpact) {
+	m.rebuildRenderPlanAfterUpdate(impact, true)
+}
+
+func (m *Model) rebuildRenderPlanAfterUpdate(impact renderImpact, checkSource bool) {
 	var current renderPlan
 	if m.current != nil {
 		current = *m.current
 	}
-	next := current.rebuild(*m, impact)
+	next := current.rebuild(*m, impact, checkSource)
 	m.current = &next
+	m.preparedProjection = nil
+}
+
+// startGeometryWorker serializes the offscreen command chain. A superseding
+// layout keeps the old token until its bounded slice returns stale; only then
+// may the current generation start, so two generations never accumulate.
+func (m *Model) startGeometryWorker() tea.Cmd {
+	if m.current == nil || m.current.worker.inFlight || m.current.geometry.unresolvedRecords == 0 {
+		return nil
+	}
+	next := *m.current
+	if next.worker.generation != next.geometry.generation {
+		next.worker.cursor = 0
+	}
+	next.worker.inFlight = true
+	next.worker.generation = next.geometry.generation
+	next.worker.sequence++
+
+	geometry := next.geometry
+	projection := next.projection
+	request := geometryWorkRequest{
+		generation: geometry.generation, rootRevision: geometry.rootRevision,
+		sequence: next.worker.sequence, cursor: next.worker.cursor,
+		geometry: &geometry, projection: &projection, styles: m.themeStyles(),
+		height: max(m.height, 8), renderedAt: m.renderedAt, now: time.Now,
+	}
+	m.current = &next
+	return request.command()
+}
+
+func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
+	if m.current == nil {
+		return m
+	}
+	next := *m.current
+	worker := next.worker
+	if !worker.inFlight || worker.sequence != message.sequence || worker.generation != message.generation {
+		next.stats.StaleWorkerResults++
+		m.current = &next
+		return m
+	}
+	// This result owns the active token. Release it even when its generation was
+	// superseded; an unrelated duplicate result above must not release the
+	// current command and accidentally start a second one.
+	next.worker.inFlight = false
+	if message.generation != next.geometry.generation {
+		next.stats.StaleWorkerResults++
+		next.worker.cursor = 0
+		m.current = &next
+		return m
+	}
+	if message.sourceRootRevision != next.geometry.rootRevision {
+		next.stats.StaleWorkerResults++
+		next.stats.StaleGeometryRootResults++
+		next.worker.cursor = 0
+		m.current = &next
+		return m
+	}
+
+	if message.prepared.generation != message.generation ||
+		message.prepared.rootRevision != message.sourceRootRevision+1 {
+		next.stats.StaleWorkerResults++
+		m.current = &next
+		return m
+	}
+	next.geometry = message.prepared
+	next.stats.GeometrySnapshotInstalls++
+	next.stats.MaxGeometryInstallUnits = max(next.stats.MaxGeometryInstallUnits, 1)
+	next.worker.cursor = message.next
+	next.stats.GeometryWorkerSlices++
+	next.stats.MaxGeometryWorkerSliceNS = max(next.stats.MaxGeometryWorkerSliceNS, message.elapsed.Nanoseconds())
+	if message.elapsed > m.themeStyles().Timing.GeometrySliceLimit {
+		next.stats.GeometryWorkerOverruns++
+	}
+	next.refreshGeometryStats()
+
+	// Intermediate offscreen progress owns no frame. At convergence, publish
+	// only when exact total geometry changed visible content (normally the
+	// scrollbar); otherwise preserve the last-flushed content and hit map.
+	if message.complete || next.geometry.unresolvedRecords == 0 {
+		next.worker.cursor = 0
+		model := m
+		model.current = &next
+		model.renderingProjection = &next.projection
+		model.renderingGeometry = &next.geometry
+		trace := renderVisitTrace{}
+		model.renderTrace = &trace
+		snapshot := model.renderRetainedSnapshot()
+		next.stats.RenderedCardRecords += trace.cardRecords
+		if !next.semanticallyMatches(snapshot) {
+			next.view = snapshot.view
+			next.semantics = snapshot.semantics
+			next.stats.Builds++
+			next.stats.PublishedFrames++
+			next.stats.InstalledSnapshotID++
+			next.stats.InstalledForMessageID = m.acceptedMessageID
+			next.stats.ContentBytes = uint64(len(snapshot.view.Content))
+			next.stats.HitRegions = uint64(len(snapshot.hitRegions))
+			next.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
+				next.projection.ownedBytesEstimate() + next.geometry.ownedBytesEstimate()
+		}
+	}
+	m.current = &next
+	return m
 }
 
 // RenderPlanStats returns a value copy so instrumentation cannot mutate the
