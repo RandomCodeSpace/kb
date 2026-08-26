@@ -57,6 +57,8 @@ Measured on the development VM on 2026-08-26. Durations are process-local sample
 
 For comparison, the accepted current-pipeline diagnostic measured a 1000-task `View()` at roughly 733-745 ms with about 323 MiB allocated and 1.98 million allocations per frame. The prototype removes the board-size slope from startup and accepted interaction. Total offscreen work still grows with task count, as physics remains regrettably installed, but the work is bounded per command and does not repaint the terminal.
 
+With the interactive 1000-task prototype settled in a PTY, `pidstat -p PID 1 5` reported 1.20% average CPU for the process on the 8-CPU development VM; RSS was about 20 MiB. An automated 200-event Down burst still allowed immediate quit and restored alt-screen, cursor, bracketed-paste, and mouse modes. These checks establish bounded idle work and cleanup, not human-perceived smoothness.
+
 ## Physical-terminal gate
 
 Run the 1000-task command in the actual terminal used for development, then report:
