@@ -11,6 +11,9 @@
 /docs/research/*
 !/docs/research/bubbletea-stack.md
 !/docs/research/tui-performance-baseline.md
+!/docs/prototypes/
+/docs/prototypes/*
+!/docs/prototypes/large-board-render-pipeline.md
 !/docs/releases/
 /docs/releases/*
 !/docs/releases/v1.0.0.md
