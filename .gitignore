@@ -10,6 +10,7 @@
 !/docs/research/
 /docs/research/*
 !/docs/research/bubbletea-stack.md
+!/docs/research/bubbletea-v2-rendering-performance.md
 !/docs/releases/
 /docs/releases/*
 !/docs/releases/v1.0.0.md
