@@ -113,6 +113,12 @@ func updateTestModel(t *testing.T, model *Model, message tea.Msg) tea.Cmd {
 	return command
 }
 
+// rebuildTestView publishes test fixtures that deliberately mutate root fields
+// without going through Update. Production code has no such path.
+func rebuildTestView(model *Model) {
+	model.rebuildRenderPlan(renderImpactAll)
+}
+
 // newTestRootModel is NewModel with the interaction gates of spec section 10.3
 // collapsed: the destructive-prompt grace, the double-click window and the
 // footer-notice TTL dispatch immediately instead of scheduling, so no assertion
@@ -148,6 +154,7 @@ func collapseInteractionTiming(m Model) Model {
 	// root test arms its tick chain and every intermediate frame is asserted
 	// synchronously against widget.Brand instead. The brand tests reset this.
 	m.brandFrame = timing.BrandBirthSteps
+	rebuildTestView(&m)
 	return m
 }
 
@@ -641,6 +648,7 @@ func containsReverseVideo(content string) bool {
 
 func pointerCommandForLabel(t *testing.T, model *Model, label string) tea.Cmd {
 	t.Helper()
+	rebuildTestView(model)
 	view := model.View()
 	handler := requireMouseHandler(t, view.OnMouse, label)
 	lines := strings.Split(ansi.Strip(view.Content), "\n")
@@ -749,6 +757,7 @@ func TestRootRoutesPointerPressFeedbackToEveryTopmostOwner(t *testing.T) {
 	}
 	press := func(t *testing.T, m *Model, label string) {
 		t.Helper()
+		rebuildTestView(m)
 		before := m.View()
 		for row, line := range strings.Split(ansi.Strip(before.Content), "\n") {
 			index := strings.Index(line, label)
@@ -877,6 +886,7 @@ func TestBoardPrimaryControlsRenderPressAndActivateOnRelease(t *testing.T) {
 				t.Fatal("rendered board control has no stable pointer identity")
 			}
 			x, y := target.x0, target.y0
+			rebuildTestView(&m)
 			press := requireMouseCommand(t, m.View().OnMouse(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}), "board press")
 			if command := updateTestModel(t, &m, press()); command != nil || !m.pointerState.IsPressed(id) {
 				t.Fatalf("board press command=%v pressed=%v", command, m.pointerState.IsPressed(id))
@@ -915,6 +925,7 @@ func TestBoardCardLabelsHavePerRegionPressedIdentity(t *testing.T) {
 	}
 	firstID := boardHitControlID(first)
 	secondID := boardCardLabelControlID(m.board.Tasks[1].ID, "shared")
+	rebuildTestView(&m)
 	press := requireMouseCommand(t, m.View().OnMouse(tea.MouseClickMsg{X: first.x0, Y: first.y0, Button: tea.MouseLeft}), "card label press")
 	if command := updateTestModel(t, &m, press()); command != nil {
 		t.Fatalf("card label press returned domain command %v", command)
@@ -942,6 +953,7 @@ func TestBoardReleaseClearsPressedControlRemovedByRefresh(t *testing.T) {
 	if label.taskID == "" {
 		t.Fatal("temporary card label was not rendered")
 	}
+	rebuildTestView(&m)
 	press := requireMouseCommand(t, m.View().OnMouse(tea.MouseClickMsg{X: label.x0, Y: label.y0, Button: tea.MouseLeft}), "temporary label press")
 	updateTestModel(t, &m, press())
 	if !m.pointerState.Active() {
@@ -1855,6 +1867,7 @@ func TestADRSplitRootRoutingMoveCancellationAndShutdown(t *testing.T) {
 	}
 	m.detail.Close()
 	m.settingsNew = func() *settingsModel { return newSettingsModel(st, "u", context.Background()) }
+	rebuildTestView(&m)
 	footer := ansi.Strip(m.View().Content)
 	if !strings.Contains(footer, "a split ADR") {
 		t.Fatalf("ADR shortcut undiscoverable:\n%s", footer)

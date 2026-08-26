@@ -294,6 +294,7 @@ func TestIntegratedMoveModalAndFooterPrecedence(t *testing.T) {
 	m.move.saving = false
 	m.move.lifted = nil
 	m.move.notice = false
+	rebuildTestView(&m)
 	view = ansi.Strip(m.View().Content)
 	if !strings.Contains(view, "stale load error") || strings.Contains(view, "Lifted Move me") {
 		t.Fatalf("stale move notice masked root error:\n%s", view)

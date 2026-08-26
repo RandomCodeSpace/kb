@@ -34,6 +34,7 @@ func boardHitFor(t *testing.T, model Model, want func(boardHit) bool) boardHit {
 // answered with, which is the hover step of spec section 10.5.1 end to end.
 func hoverBoard(t *testing.T, model *Model, x, y int) {
 	t.Helper()
+	rebuildTestView(model)
 	handler := requireMouseHandler(t, model.View().OnMouse, "board")
 	command := handler(tea.MouseMotionMsg{X: x, Y: y, Button: tea.MouseNone})
 	if command == nil {

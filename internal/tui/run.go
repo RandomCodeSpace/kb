@@ -105,6 +105,10 @@ func runProgram(
 	if settingsNew != nil {
 		model.settingsNew = func() *settingsModel { return settingsNew(ctx) }
 	}
+	// Pre-program wiring is the only state installation outside Update. Publish
+	// it once after every setter and preference restore so the first View is the
+	// same complete snapshot the event loop will retain thereafter.
+	model.rebuildRenderPlan(renderImpactAll)
 	// Spec section 10.3.6: motion and wheel are coalesced at the program level,
 	// where the whole input stream is visible, rather than inside any one
 	// surface. The filter is built from the model's own Timing token, so a

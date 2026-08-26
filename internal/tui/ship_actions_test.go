@@ -564,6 +564,7 @@ func TestTaskActionOverlaySanitizesAndStaysBounded(t *testing.T) {
 	task := board.Task{ID: "x", Title: "bad\x1b[2Jtitle", Status: board.StatusTodo,
 		Checks: []board.Check{{Text: "line\x1b]8;;https://evil.invalid\a"}}}
 	m.openChecklist(task)
+	rebuildTestView(&m)
 	view := m.View().Content
 	if strings.Contains(view, "\x1b[2J") || strings.Contains(view, "evil.invalid") {
 		t.Fatalf("action overlay leaked control sequence: %q", view)

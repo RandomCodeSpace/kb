@@ -65,6 +65,7 @@ func TestBoardClickWindowExpiryIsConsumedByTheRoot(t *testing.T) {
 	if arm == nil {
 		t.Fatal("the classifier produced no arming command")
 	}
+	rebuildTestView(&m)
 	before := m.View().Content
 	updated, command := m.Update(arm())
 	m = updated.(Model)

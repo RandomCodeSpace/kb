@@ -537,6 +537,7 @@ func TestPollTickRefreshesRenderTimeAtRolloverBoundary(t *testing.T) {
 		CreatedAt: before.Add(-23*time.Hour - 59*time.Minute - 59*time.Second),
 		MovedAt:   before.Add(-23*time.Hour - 59*time.Minute - 59*time.Second),
 	}}}
+	rebuildTestView(&m)
 
 	initial := plain(m.View().Content)
 	for _, want := range []string{"new", "today", "× 1 shipped today"} {

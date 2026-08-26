@@ -126,12 +126,23 @@ type Model struct {
 	brandSeed    int64
 	brandFrame   int
 	brandGen     uint32
+
+	// renderPlan is the sole complete-frame publication point. It is copied
+	// with Model, so content and the pointer closure derived from its hit map
+	// advance atomically through Update.
+	retainedRenderView
 }
 
 // SetVersion records the build version the launch screen's meta row prints.
 // The TUI cannot reach package main's build info, so the string arrives on
 // tui.Run and is stored here (spec section 10.6.5).
-func (m *Model) SetVersion(version string) { m.version = version }
+func (m *Model) SetVersion(version string) {
+	m.version = version
+	// The version changes terminal content and can change row geometry. Until
+	// render records report their own dependencies, a root setter must be just
+	// as conservative as Update.
+	m.rebuildRenderPlan(renderImpactAll)
+}
 
 // applyStyles adopts a rebuilt design system and hands it to every sub-model
 // the root owns.
@@ -159,6 +170,7 @@ func (m *Model) SetActiveProject(name string) {
 	m.activeProject = name
 	m.projects.restore(projectSwitcher{}, name)
 	m.editor.SetProjectDefault(m.projectDefault())
+	m.rebuildRenderPlan(renderImpactAll)
 }
 
 func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
@@ -204,7 +216,7 @@ func newModel(
 	// target, which is the correct assumption until the terminal answers.
 	styles := theme.NewFor(true, colorprofile.TrueColor)
 	brandStretch, brandSeed := widget.RollBrand(styles.Metrics)
-	return Model{
+	model := Model{
 		store:       store,
 		styles:      styles,
 		isDark:      true,
@@ -232,6 +244,8 @@ func newModel(
 		brandSeed:    brandSeed,
 		brandGen:     1,
 	}
+	model.rebuildRenderPlan(renderImpactAll)
+	return model
 }
 
 // Init loads the first board snapshot and starts the external-write watcher.
@@ -259,6 +273,17 @@ func (m Model) Init() tea.Cmd {
 // notice TTL. Each expires because a message arrived, never because a render
 // read a clock.
 func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	// This identity belongs to admission, not publication. Keeping the two
+	// counters separate lets the performance harness observe coalesced, delayed,
+	// and stale publications once those later phases become asynchronous.
+	m.acceptedMessageID++
+	next, command := m.update(message)
+	next.acceptedMessageID = m.acceptedMessageID
+	next.rebuildRenderPlan(renderImpactFor(message))
+	return next, command
+}
+
+func (m Model) update(message tea.Msg) (Model, tea.Cmd) {
 	if m.stopped {
 		return m, nil
 	}
@@ -1018,9 +1043,11 @@ func (m Model) backdrop() Model {
 	return m
 }
 
-// View renders the responsive read-only board and wires view-derived mouse hit
-// regions back into the update loop. Editing behavior arrives in later slices.
-func (m Model) View() tea.View {
+// renderColdView is the differential oracle retained until the production
+// render plan has passed every parity gate.
+func (m Model) renderColdView() tea.View { return m.renderColdSnapshot().view }
+
+func (m Model) renderColdSnapshot() coldRenderSnapshot {
 	backdrop := m.backdrop()
 	var content string
 	var hits []boardHit
@@ -1082,14 +1109,16 @@ func (m Model) View() tea.View {
 	view.MouseMode = tea.MouseModeCellMotion
 	if overlayMouse != nil {
 		view.OnMouse = overlayMouse
-		return view
+		return coldRenderSnapshot{view: view}
 	}
 	if !m.helpOpen && m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() &&
 		!m.issueImport.IsOpen() && !m.palette.IsOpen() && !m.detail.OwnsInput() {
 		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
-		view.OnMouse = boardMouseHandlerWithFeedback(hits, pointerActive, m.pointerState)
+		immutableHits := append([]boardHit(nil), hits...)
+		view.OnMouse = boardMouseHandlerWithFeedback(immutableHits, pointerActive, m.pointerState)
+		hits = immutableHits
 	}
-	return view
+	return coldRenderSnapshot{view: view, hitRegions: hits}
 }
 
 func (m *Model) handleBoardFooterClick(key string) tea.Cmd {
