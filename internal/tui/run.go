@@ -114,7 +114,15 @@ func runProgram(
 	// surface. The filter is built from the model's own Timing token, so a
 	// program running collapsed timing is not throttled at all.
 	coalescer := newInputCoalescer(model.themeStyles().Timing.InputCoalesce, nil, nil)
-	program := tea.NewProgram(model, append(options, tea.WithFilter(coalescer.Filter))...)
+	keyboard := newKeyboardAdmission(nil, model.inputAdmission, model.themeStyles().Timing)
+	filter := func(current tea.Model, message tea.Msg) tea.Msg {
+		message = keyboard.Filter(current, message)
+		if message == nil {
+			return nil
+		}
+		return coalescer.Filter(current, message)
+	}
+	program := tea.NewProgram(model, append(options, tea.WithFilter(filter))...)
 	// A coalesced flush leaves as one message per notch, re-injected from off
 	// the loop the filter runs on.
 	coalescer.send = asyncSender(program.Send)

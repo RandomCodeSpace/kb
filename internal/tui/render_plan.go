@@ -308,6 +308,7 @@ func (m *Model) rebuildRenderPlanAfterUpdate(impact renderImpact, checkSource bo
 	next := current.rebuild(*m, impact, checkSource)
 	m.current = &next
 	m.preparedProjection = nil
+	m.publishKeyboardAdmissionSnapshot()
 }
 
 // startGeometryWorker serializes the offscreen command chain. A superseding
@@ -417,10 +418,14 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 // frame or its revision graph.
 func (m Model) RenderPlanStats() RenderPlanStats {
 	if m.current == nil {
-		return RenderPlanStats{AcceptedMessageID: m.acceptedMessageID}
+		return RenderPlanStats{
+			AcceptedMessageID: m.acceptedMessageID,
+			DiscardedEvents:   m.inputAdmission.discardedEvents(),
+		}
 	}
 	stats := m.current.stats
 	stats.AcceptedMessageID = m.acceptedMessageID
+	stats.DiscardedEvents += m.inputAdmission.discardedEvents()
 	return stats
 }
 

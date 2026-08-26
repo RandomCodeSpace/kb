@@ -44,6 +44,8 @@ func TestDefaultTimingTable(t *testing.T) {
 		{"ScrollActiveLinger", timing.ScrollActiveLinger, 2000 * time.Millisecond},
 		{"DoubleClickWindow", timing.DoubleClickWindow, 400 * time.Millisecond},
 		{"InputCoalesce", timing.InputCoalesce, 16 * time.Millisecond},
+		{"KeyboardNavigationInterval", timing.KeyboardNavigationInterval, 50 * time.Millisecond},
+		{"KeyboardNavigationQuiet", timing.KeyboardNavigationQuiet, 100 * time.Millisecond},
 		{"NoticeTTL", timing.NoticeTTL, 5000 * time.Millisecond},
 		{"PollInterval", timing.PollInterval, time.Second},
 		{"AutoShipDelay", timing.AutoShipDelay, 350 * time.Millisecond},

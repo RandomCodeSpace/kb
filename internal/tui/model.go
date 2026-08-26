@@ -117,6 +117,7 @@ type Model struct {
 	actionNotice      bool
 	noticeSeq         uint64
 	shipped           shippedRecord
+	inputAdmission    *inputAdmissionStats
 
 	// The brand mark of spec section 10.6. The stretch and the reveal seed are
 	// rolled once in newModel and are plain fields, so a test pins them by
@@ -217,28 +218,29 @@ func newModel(
 	styles := theme.NewFor(true, colorprofile.TrueColor)
 	brandStretch, brandSeed := widget.RollBrand(styles.Metrics)
 	model := Model{
-		store:       store,
-		styles:      styles,
-		isDark:      true,
-		profile:     colorprofile.TrueColor,
-		moveStore:   moveStore,
-		actionStore: actionStore,
-		watcher:     watcher,
-		user:        user,
-		board:       board.Board{Title: "Board"},
-		filter:      newBoardFilterState(),
-		projects:    projectSwitcher{all: true},
-		detail:      carddetail.New(detailReader, user, styles),
-		editor:      cardeditor.New(editorStore, user),
-		palette:     cmdpalette.New(),
-		width:       defaultWidth,
-		height:      defaultHeight,
-		loading:     watcher == nil,
-		readContext: ctx,
-		now:         now,
-		renderedAt:  now(),
-		action:      newTaskActionState(),
-		spin:        spinner.New(spinner.WithSpinner(styles.Spinner)),
+		store:          store,
+		styles:         styles,
+		isDark:         true,
+		profile:        colorprofile.TrueColor,
+		moveStore:      moveStore,
+		actionStore:    actionStore,
+		watcher:        watcher,
+		user:           user,
+		board:          board.Board{Title: "Board"},
+		filter:         newBoardFilterState(),
+		projects:       projectSwitcher{all: true},
+		detail:         carddetail.New(detailReader, user, styles),
+		editor:         cardeditor.New(editorStore, user),
+		palette:        cmdpalette.New(),
+		width:          defaultWidth,
+		height:         defaultHeight,
+		loading:        watcher == nil,
+		readContext:    ctx,
+		now:            now,
+		renderedAt:     now(),
+		action:         newTaskActionState(),
+		spin:           spinner.New(spinner.WithSpinner(styles.Spinner)),
+		inputAdmission: &inputAdmissionStats{},
 
 		brandStretch: brandStretch,
 		brandSeed:    brandSeed,
@@ -272,7 +274,29 @@ func (m Model) Init() tea.Cmd {
 // them: the destructive-prompt grace, the double-click window, and the footer
 // notice TTL. Each expires because a message arrived, never because a render
 // read a clock.
+type modelUpdateCommands struct {
+	followUp tea.Cmd
+	geometry tea.Cmd
+}
+
+func (commands modelUpdateCommands) command() tea.Cmd {
+	return batchCommands(commands.followUp, commands.geometry)
+}
+
 func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	next, commands := m.updateWithCommands(message)
+	return next, commands.command()
+}
+
+// updateWithCommands keeps application follow-ups separate from the offscreen
+// geometry chain. Production batches both in their original order; the
+// performance harness uses the explicit seam to settle geometry without
+// guessing which opaque tea.Cmd happens to own the worker token.
+func (m Model) updateWithCommands(message tea.Msg) (Model, modelUpdateCommands) {
+	if intent, ok := message.(boardNavigationIntentMsg); ok && !m.matchesBoardNavigationIntent(intent) {
+		m.inputAdmission.discard()
+		return m, modelUpdateCommands{}
+	}
 	// This identity belongs to admission, not publication. Keeping the two
 	// counters separate lets the performance harness observe coalesced, delayed,
 	// and stale publications once those later phases become asynchronous.
@@ -281,13 +305,15 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if batch, ok := message.(geometryBatchMsg); ok {
 		next := m.installGeometryBatch(batch)
 		next.acceptedMessageID = m.acceptedMessageID
-		return next, next.startGeometryWorker()
+		commands := modelUpdateCommands{geometry: next.startGeometryWorker()}
+		next.publishKeyboardAdmissionSnapshot()
+		return next, commands
 	}
 	beforeBoard := m.board
 	next, command := m.update(message)
 	next.acceptedMessageID = m.acceptedMessageID
 	next.rebuildRenderPlanAfterUpdate(renderImpactFor(message), checkSource || !sameBoardSourceIdentity(beforeBoard, next.board))
-	return next, batchCommands(command, next.startGeometryWorker())
+	return next, modelUpdateCommands{followUp: command, geometry: next.startGeometryWorker()}
 }
 
 func (m Model) update(message tea.Msg) (Model, tea.Cmd) {
@@ -550,6 +576,9 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 		}
 	}
 	switch msg := message.(type) {
+	case boardNavigationIntentMsg:
+		m.applyBoardNavigationIntent(msg)
+		return m, nil
 	case tea.KeyPressMsg:
 		if msg.String() == ctrlCKey {
 			if m.settings != nil {
@@ -846,7 +875,7 @@ func (m *Model) updateDetail(message tea.Msg) tea.Cmd {
 
 func isBoardUserInput(message tea.Msg) bool {
 	switch message.(type) {
-	case tea.KeyPressMsg, boardCardClickedMsg, boardColumnClickedMsg,
+	case tea.KeyPressMsg, boardNavigationIntentMsg, boardCardClickedMsg, boardColumnClickedMsg,
 		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg,
 		boardColumnScrolledMsg, filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
 		filterProjectClickedMsg:
@@ -1134,6 +1163,7 @@ func (m Model) renderSnapshot() coldRenderSnapshot {
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
+	view.KeyboardEnhancements.ReportEventTypes = true
 	if overlayMouse != nil {
 		view.OnMouse = overlayMouse
 		return coldRenderSnapshot{view: view, semantics: renderSnapshotSemantics{handler: handler}}

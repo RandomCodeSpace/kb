@@ -41,22 +41,24 @@ type projectionStatusSummary struct {
 // project/filter projection. It is not a general cache and retains no prior
 // query results.
 type renderProjection struct {
-	initialized   bool
-	title         string
-	sourceData    *board.Task
-	sourceLen     int
-	tasks         []taskDerivation
-	key           projectionKey
-	board         board.Board
-	statuses      [len(boardStatuses)][]int
-	summaries     [len(boardStatuses)]projectionStatusSummary
-	ordinals      [len(boardStatuses)]map[string]int
-	taskIndexes   map[string]int
-	sourceIndexes map[string]int
-	labels        []string
-	toolbarLabels []string
-	projected     int
-	ownedBytes    uint64
+	initialized      bool
+	sourceGeneration uint64
+	generation       uint64
+	title            string
+	sourceData       *board.Task
+	sourceLen        int
+	tasks            []taskDerivation
+	key              projectionKey
+	board            board.Board
+	statuses         [len(boardStatuses)][]int
+	summaries        [len(boardStatuses)]projectionStatusSummary
+	ordinals         [len(boardStatuses)]map[string]int
+	taskIndexes      map[string]int
+	sourceIndexes    map[string]int
+	labels           []string
+	toolbarLabels    []string
+	projected        int
+	ownedBytes       uint64
 }
 
 func (p renderProjection) rebuild(model Model) (renderProjection, bool, bool) {
@@ -82,6 +84,7 @@ func (p renderProjection) rebuildSource(model Model, checkSource bool) (renderPr
 		}
 	}
 	if tasksChanged {
+		p.sourceGeneration++
 		p.title = model.board.Title
 		p.sourceData = unsafe.SliceData(model.board.Tasks)
 		p.sourceLen = len(model.board.Tasks)
@@ -99,6 +102,7 @@ func (p renderProjection) rebuildSource(model Model, checkSource bool) (renderPr
 	}
 	projectionChanged := tasksChanged || !p.initialized || !sameProjectionKey(p.key, key)
 	if projectionChanged {
+		p.generation++
 		p.key = key
 		p.board, p.statuses, p.summaries, p.ordinals, p.taskIndexes, p.labels, p.projected =
 			buildCurrentProjection(p.title, p.tasks, key)

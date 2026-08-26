@@ -32,13 +32,15 @@ type Timing struct {
 	// class-B effect that collapses to nothing at zero.
 	CelebrateSteps int
 
-	DialogGraceQuiet   time.Duration
-	DialogGraceMax     time.Duration
-	DialogGraceReopen  time.Duration
-	ScrollActiveLinger time.Duration
-	DoubleClickWindow  time.Duration
-	InputCoalesce      time.Duration
-	NoticeTTL          time.Duration
+	DialogGraceQuiet           time.Duration
+	DialogGraceMax             time.Duration
+	DialogGraceReopen          time.Duration
+	ScrollActiveLinger         time.Duration
+	DoubleClickWindow          time.Duration
+	InputCoalesce              time.Duration
+	KeyboardNavigationInterval time.Duration
+	KeyboardNavigationQuiet    time.Duration
+	NoticeTTL                  time.Duration
 
 	PollInterval  time.Duration
 	AutoShipDelay time.Duration
@@ -70,13 +72,15 @@ var DefaultTiming = Timing{
 	BrandBirthSteps: 12,
 	CelebrateSteps:  12,
 
-	DialogGraceQuiet:   425 * time.Millisecond,
-	DialogGraceMax:     1500 * time.Millisecond,
-	DialogGraceReopen:  500 * time.Millisecond,
-	ScrollActiveLinger: 2000 * time.Millisecond,
-	DoubleClickWindow:  400 * time.Millisecond,
-	InputCoalesce:      16 * time.Millisecond,
-	NoticeTTL:          5000 * time.Millisecond,
+	DialogGraceQuiet:           425 * time.Millisecond,
+	DialogGraceMax:             1500 * time.Millisecond,
+	DialogGraceReopen:          500 * time.Millisecond,
+	ScrollActiveLinger:         2000 * time.Millisecond,
+	DoubleClickWindow:          400 * time.Millisecond,
+	InputCoalesce:              16 * time.Millisecond,
+	KeyboardNavigationInterval: 50 * time.Millisecond,
+	KeyboardNavigationQuiet:    100 * time.Millisecond,
+	NoticeTTL:                  5000 * time.Millisecond,
 
 	PollInterval:  1000 * time.Millisecond,
 	AutoShipDelay: 350 * time.Millisecond,

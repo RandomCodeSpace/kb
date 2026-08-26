@@ -18,6 +18,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
+	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 )
 
 const (
@@ -91,6 +92,8 @@ type performancePublicationStamp struct {
 	InstalledSnapshotID   uint64 `json:"installed_snapshot_id"`
 	InstalledForMessageID uint64 `json:"installed_for_message_id"`
 	Discarded             bool   `json:"discarded"`
+	followUp              tea.Cmd
+	geometry              tea.Cmd
 }
 
 type performanceStartupResult struct {
@@ -110,9 +113,13 @@ type performanceExternalGateState struct {
 type performanceScenario struct {
 	name               string
 	expectedZeroFrames bool
+	warmups            int
+	samples            int
 	newModel           func() Model
 	prepare            func(*Model, int)
 	admit              func(*Model, int) []performancePublicationStamp
+	requireFollowUp    bool
+	settleFollowUp     func(*testing.T, *Model, tea.Cmd)
 }
 
 // TestLargeBoardPerformanceHarness is the machine-readable process-local gate.
@@ -137,7 +144,7 @@ func TestLargeBoardPerformanceHarness(t *testing.T) {
 	}
 	for _, count := range selectedPerformanceCorpora(t) {
 		assertPerformanceOracle(t, count)
-		for _, scenario := range performanceScenarios(count) {
+		for _, scenario := range selectedPerformanceScenarios(t, count) {
 			report.Scenarios = append(report.Scenarios, runPerformanceScenario(t, count, scenario))
 		}
 		if os.Getenv("KB_PERF_SKIP_STARTUP") != "1" {
@@ -155,11 +162,12 @@ func TestLargeBoardPerformanceHarness(t *testing.T) {
 func TestPerformanceHarnessRecordsHeldAndBurstPublicationIdentity(t *testing.T) {
 	scenarios := performanceScenarios(120)
 	for _, test := range []struct {
-		name       string
-		wantEvents int
+		name         string
+		wantEvents   int
+		wantAccepted int
 	}{
-		{name: "held_navigation", wantEvents: 8},
-		{name: "refresh_25_task_burst", wantEvents: 25},
+		{name: "held_navigation", wantEvents: 8, wantAccepted: 2},
+		{name: "refresh_25_task_burst", wantEvents: 25, wantAccepted: 25},
 	} {
 		var scenario *performanceScenario
 		for index := range scenarios {
@@ -177,20 +185,32 @@ func TestPerformanceHarnessRecordsHeldAndBurstPublicationIdentity(t *testing.T) 
 		}
 		before := model.RenderPlanStats()
 		stamps := scenario.admit(&model, 0)
+		settlePerformanceStampCommands(t, &model, *scenario, stamps)
 		if len(stamps) != test.wantEvents {
 			t.Fatalf("%s emitted %d identity stamps, want %d", test.name, len(stamps), test.wantEvents)
 		}
+		wantMessage := before.AcceptedMessageID
+		wantSnapshot := before.InstalledSnapshotID
+		accepted := 0
 		for index, stamp := range stamps {
-			wantMessage := before.AcceptedMessageID + uint64(index) + 1
-			wantSnapshot := before.InstalledSnapshotID + uint64(index) + 1
-			if !stamp.Accepted || stamp.AcceptedMessageID != wantMessage {
-				t.Fatalf("%s event %d accepted=%t id=%d, want true/%d",
-					test.name, index, stamp.Accepted, stamp.AcceptedMessageID, wantMessage)
+			if stamp.Accepted {
+				accepted++
+				wantMessage++
+				wantSnapshot++
+				if !stamp.Published || stamp.AcceptedMessageID != wantMessage ||
+					stamp.InstalledSnapshotID != wantSnapshot || stamp.InstalledForMessageID != wantMessage {
+					t.Fatalf("%s accepted event %d publication = %+v, want snapshot %d for message %d",
+						test.name, index, stamp, wantSnapshot, wantMessage)
+				}
+				continue
 			}
-			if !stamp.Published || stamp.InstalledSnapshotID != wantSnapshot || stamp.InstalledForMessageID != wantMessage {
-				t.Fatalf("%s event %d publication = %+v, want snapshot %d for message %d",
-					test.name, index, stamp, wantSnapshot, wantMessage)
+			if !stamp.Discarded || stamp.Published || stamp.AcceptedMessageID != wantMessage ||
+				stamp.InstalledSnapshotID != wantSnapshot {
+				t.Fatalf("%s discarded event %d changed publication identity: %+v", test.name, index, stamp)
 			}
+		}
+		if accepted != test.wantAccepted {
+			t.Fatalf("%s accepted %d events, want %d", test.name, accepted, test.wantAccepted)
 		}
 	}
 }
@@ -213,6 +233,131 @@ func TestPerformanceMemoryGateUsesRetainedPlanEstimate(t *testing.T) {
 		}},
 	}
 	validatePerformanceReport(t, report)
+}
+
+func TestPerformanceAdmissionPreservesNonWorkerCommands(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*Model)
+		message tea.Msg
+		want    func(tea.Msg) bool
+	}{
+		{
+			name:    "exact action",
+			message: tea.KeyPressMsg{Code: 'q', Text: "q"},
+			want: func(message tea.Msg) bool {
+				_, ok := message.(tea.QuitMsg)
+				return ok
+			},
+		},
+		{
+			name: "poll",
+			prepare: func(model *Model) {
+				model.applyStyles(theme.NewWith(model.isDark, theme.TimingCollapsed))
+				model.watcher = stubVersionReader{version: 1}
+				model.haveVersion = true
+				model.dataVersion = 1
+				model.rebuildRenderPlan(renderImpactAll)
+			},
+			message: dataVersionMsg{version: 1},
+			want: func(message tea.Msg) bool {
+				_, ok := message.(pollTickMsg)
+				return ok
+			},
+		},
+		{
+			name: "reload",
+			prepare: func(model *Model) {
+				model.loading = true
+				model.reloadPending = true
+			},
+			message: boardLoadedMsg{board: performanceBoard(17)},
+			want: func(message tea.Msg) bool {
+				_, ok := message.(boardLoadedMsg)
+				return ok
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model := performanceModel(17, "", performanceWidth, performanceHeight)
+			if test.prepare != nil {
+				test.prepare(&model)
+			}
+			stamps := admitPerformanceMessage(&model, test.message)
+			if len(stamps) != 1 || stamps[0].followUp == nil {
+				t.Fatalf("non-worker command was dropped: stamps=%+v", stamps)
+			}
+			if message := stamps[0].followUp(); !test.want(message) {
+				t.Fatalf("preserved command returned %T", message)
+			}
+		})
+	}
+}
+
+func TestPerformanceScenarioAccountsForGeometrySettlement(t *testing.T) {
+	scenario := performanceScenario{
+		name:     "geometry_settlement_accounting",
+		warmups:  1,
+		samples:  3,
+		newModel: func() Model { return performanceModel(37, "", performanceWidth, performanceHeight) },
+		admit: func(model *Model, _ int) []performancePublicationStamp {
+			stamps := admitPerformanceMessage(model, tea.WindowSizeMsg{Width: 100, Height: 30})
+			// Supersede the in-flight slice before it returns. Settlement must count
+			// both the stale result and the replacement chain it starts.
+			stamps = append(stamps, admitPerformanceMessage(model,
+				tea.WindowSizeMsg{Width: performanceWidth, Height: performanceHeight})...)
+			return append(stamps, admitPerformanceMessage(model,
+				tea.WindowSizeMsg{Width: performanceWidth, Height: 31})...)
+		},
+	}
+	result := runPerformanceScenario(t, 37, scenario)
+	if result.StaleWorkerResults != uint64(scenario.samples) {
+		t.Fatalf("stale worker results = %d, want %d sample settlements",
+			result.StaleWorkerResults, scenario.samples)
+	}
+	if result.PublishedFrames <= result.AcceptedMessages {
+		t.Fatalf("published frames = %d, accepted inputs = %d; settlement frames were omitted",
+			result.PublishedFrames, result.AcceptedMessages)
+	}
+}
+
+func TestPerformanceFilterScenariosDiscardOnlyTheirBlinkFollowUp(t *testing.T) {
+	for _, name := range []string{"filter_to_17", "filter_to_empty"} {
+		t.Run(name, func(t *testing.T) {
+			var scenario *performanceScenario
+			for _, candidate := range performanceScenarios(120) {
+				if candidate.name == name {
+					selected := candidate
+					scenario = &selected
+					break
+				}
+			}
+			if scenario == nil {
+				t.Fatalf("scenario %q not found", name)
+			}
+			scenario.warmups = 1
+			scenario.samples = 2
+			result := runPerformanceScenario(t, 120, *scenario)
+			if result.AcceptedMessages != uint64(scenario.samples) {
+				t.Fatalf("accepted messages = %d, want %d", result.AcceptedMessages, scenario.samples)
+			}
+		})
+	}
+}
+
+func TestPerformanceFilterBlinkSettlementDoesNotExecuteTimer(t *testing.T) {
+	model := performanceModel(17, "", performanceWidth, performanceHeight)
+	_ = model.filter.focusText()
+	model.filter.input.SetValue("keep17")
+	executed := false
+	settlePerformanceFilterBlink(t, &model, func() tea.Msg {
+		executed = true
+		return nil
+	})
+	if executed {
+		t.Fatal("filter blink timer was synchronously awaited")
+	}
 }
 
 func performanceScenarios(count int) []performanceScenario {
@@ -248,6 +393,10 @@ func performanceScenarios(count int) []performanceScenario {
 			model.rebuildRenderPlan(renderImpactAll)
 		}
 	}
+	var clampedAdmission *keyboardAdmission
+	var clampedClock stepClock
+	var heldAdmission *keyboardAdmission
+	var heldClock stepClock
 
 	return []performanceScenario{
 		{
@@ -273,23 +422,36 @@ func performanceScenarios(count int) []performanceScenario {
 				model := base("")
 				model.boardView.rows[0] = taskCount(model.board, board.StatusTodo) - 1
 				model.rebuildRenderPlan(renderImpactAll)
+				clampedClock.at = time.Unix(0, 0)
+				clampedAdmission = newKeyboardAdmission(clampedClock.now, model.inputAdmission, model.themeStyles().Timing)
 				return model
 			},
 			admit: func(model *Model, _ int) []performancePublicationStamp {
-				return admitPerformanceMessage(model, tea.KeyPressMsg{Code: tea.KeyDown, IsRepeat: true})
+				return admitPerformanceFilteredMessage(model, clampedAdmission, tea.KeyPressMsg{Code: tea.KeyDown})
 			},
 		},
 		{
-			name:     "held_navigation",
-			newModel: func() Model { return base("") },
-			prepare: func(model *Model, _ int) {
+			name: "held_navigation",
+			newModel: func() Model {
+				model := base("")
+				heldClock.at = time.Unix(0, 0)
+				heldAdmission = newKeyboardAdmission(heldClock.now, model.inputAdmission, model.themeStyles().Timing)
+				return model
+			},
+			prepare: func(model *Model, sample int) {
+				heldAdmission.clear()
+				heldClock.at = time.Unix(int64(sample+1), 0)
 				model.boardView.rows[0] = min(1, taskCount(model.board, board.StatusTodo)-1)
 				model.rebuildRenderPlan(renderImpactAll)
 			},
 			admit: func(model *Model, _ int) []performancePublicationStamp {
 				stamps := make([]performancePublicationStamp, 0, 8)
-				for range 8 {
-					stamps = append(stamps, admitPerformanceMessage(model, tea.KeyPressMsg{Code: tea.KeyDown, IsRepeat: true})...)
+				stamps = append(stamps, admitPerformanceFilteredMessage(model, heldAdmission,
+					tea.KeyPressMsg{Code: tea.KeyDown})...)
+				for range 7 {
+					heldClock.advance(10 * time.Millisecond)
+					stamps = append(stamps, admitPerformanceFilteredMessage(model, heldAdmission,
+						tea.KeyPressMsg{Code: tea.KeyDown, IsRepeat: true})...)
 				}
 				return stamps
 			},
@@ -350,6 +512,8 @@ func performanceScenarios(count int) []performanceScenario {
 			admit: func(model *Model, _ int) []performancePublicationStamp {
 				return admitPerformanceMessage(model, tea.KeyPressMsg{Code: 'k', Text: "keep17"})
 			},
+			requireFollowUp: true,
+			settleFollowUp:  settlePerformanceFilterBlink,
 		},
 		{
 			name:     "filter_to_empty",
@@ -362,6 +526,8 @@ func performanceScenarios(count int) []performanceScenario {
 			admit: func(model *Model, _ int) []performancePublicationStamp {
 				return admitPerformanceMessage(model, tea.KeyPressMsg{Code: 'z', Text: "matches-nothing"})
 			},
+			requireFollowUp: true,
+			settleFollowUp:  settlePerformanceFilterBlink,
 		},
 		{
 			name:     "resize",
@@ -390,6 +556,7 @@ func performanceScenarios(count int) []performanceScenario {
 			expectedZeroFrames: true,
 			newModel: func() Model {
 				model := base("")
+				model.applyStyles(theme.NewWith(model.isDark, theme.TimingCollapsed))
 				model.watcher = stubVersionReader{version: 1}
 				model.haveVersion = true
 				model.dataVersion = 1
@@ -398,6 +565,13 @@ func performanceScenarios(count int) []performanceScenario {
 			},
 			admit: func(model *Model, _ int) []performancePublicationStamp {
 				return admitPerformanceMessage(model, dataVersionMsg{version: 1})
+			},
+			requireFollowUp: true,
+			settleFollowUp: func(t *testing.T, _ *Model, command tea.Cmd) {
+				t.Helper()
+				if _, ok := command().(pollTickMsg); !ok {
+					t.Fatal("unchanged poll did not preserve its successor timer")
+				}
 			},
 		},
 		{
@@ -434,20 +608,28 @@ func performanceScenarios(count int) []performanceScenario {
 
 func runPerformanceScenario(t *testing.T, count int, scenario performanceScenario) performanceScenarioResult {
 	t.Helper()
+	warmups, samples := scenario.warmups, scenario.samples
+	if warmups <= 0 {
+		warmups = performanceWarmups
+	}
+	if samples <= 0 {
+		samples = performanceSamples
+	}
 	model := scenario.newModel()
-	for sample := range performanceWarmups {
+	for sample := range warmups {
 		if scenario.prepare != nil {
 			scenario.prepare(&model, sample)
 		}
-		_ = scenario.admit(&model, sample)
+		stamps := scenario.admit(&model, sample)
+		settlePerformanceStampCommands(t, &model, scenario, stamps)
 	}
 
 	runtime.GC()
-	latencies := make([]time.Duration, performanceSamples)
+	latencies := make([]time.Duration, samples)
 	var allocations, allocatedBytes, maximumPublicationBytes, maximumRetainedPlanBytes uint64
 	var accepted, frames, discarded, stale uint64
 	var trace []performancePublicationStamp
-	for sample := range performanceSamples {
+	for sample := range samples {
 		if scenario.prepare != nil {
 			scenario.prepare(&model, sample)
 		}
@@ -456,6 +638,7 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		beforeStats := model.RenderPlanStats()
 		started := time.Now()
 		stamps := scenario.admit(&model, sample)
+		settlePerformanceStampCommands(t, &model, scenario, stamps)
 		latencies[sample] = time.Since(started)
 		afterStats := model.RenderPlanStats()
 		runtime.ReadMemStats(&afterMemory)
@@ -489,11 +672,11 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 	return performanceScenarioResult{
 		Name:                           scenario.name,
 		Tasks:                          count,
-		Warmups:                        performanceWarmups,
-		Samples:                        performanceSamples,
+		Warmups:                        warmups,
+		Samples:                        samples,
 		Latency:                        performanceDurations(latencies),
-		AllocationsPerOp:               float64(allocations) / performanceSamples,
-		AllocatedBytesPerOp:            float64(allocatedBytes) / performanceSamples,
+		AllocationsPerOp:               float64(allocations) / float64(samples),
+		AllocatedBytesPerOp:            float64(allocatedBytes) / float64(samples),
 		PublicationAllocatedBytesMax:   maximumPublicationBytes,
 		RetainedPlanOwnedBytesEstimate: maximumRetainedPlanBytes,
 		AcceptedMessages:               accepted,
@@ -507,8 +690,8 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 
 func admitPerformanceMessage(model *Model, message tea.Msg) []performancePublicationStamp {
 	before := model.RenderPlanStats()
-	updated, _ := model.Update(message)
-	*model = updated.(Model)
+	updated, commands := model.updateWithCommands(message)
+	*model = updated
 	retainedPerformanceView = model.View()
 	after := model.RenderPlanStats()
 	return []performancePublicationStamp{{
@@ -517,7 +700,101 @@ func admitPerformanceMessage(model *Model, message tea.Msg) []performancePublica
 		Published:             after.InstalledSnapshotID != before.InstalledSnapshotID,
 		InstalledSnapshotID:   after.InstalledSnapshotID,
 		InstalledForMessageID: after.InstalledForMessageID,
+		followUp:              commands.followUp,
+		geometry:              commands.geometry,
 	}}
+}
+
+func settlePerformanceStampCommands(
+	t *testing.T,
+	model *Model,
+	scenario performanceScenario,
+	stamps []performancePublicationStamp,
+) {
+	t.Helper()
+	for index := range stamps {
+		followUp, geometry := stamps[index].followUp, stamps[index].geometry
+		stamps[index].followUp = nil
+		stamps[index].geometry = nil
+		if followUp != nil {
+			if scenario.settleFollowUp == nil {
+				t.Fatalf("%s returned an unexpected non-worker command", scenario.name)
+			}
+			scenario.settleFollowUp(t, model, followUp)
+		} else if scenario.requireFollowUp {
+			t.Fatalf("%s did not return its required non-worker command", scenario.name)
+		}
+		settlePerformanceGeometryCommand(t, model, geometry)
+	}
+	retainedPerformanceView = model.View()
+}
+
+func settlePerformanceFilterBlink(t *testing.T, model *Model, command tea.Cmd) {
+	t.Helper()
+	if command == nil || model.filter.focus != filterText || !model.filter.input.Focused() ||
+		!model.filter.input.VirtualCursor() || model.savePreferences != nil {
+		t.Fatalf("filter follow-up is not an isolated virtual-cursor blink: focus=%d focused=%t virtual=%t preferences=%t",
+			model.filter.focus, model.filter.input.Focused(), model.filter.input.VirtualCursor(), model.savePreferences != nil)
+	}
+	// The cursor blink is a non-semantic 500ms timer. Production retains it;
+	// the interaction harness explicitly ends this scenario at the published
+	// filter frame instead of serially awaiting a cosmetic deadline.
+}
+
+func settlePerformanceGeometryCommand(t *testing.T, model *Model, command tea.Cmd) {
+	t.Helper()
+	for steps := 0; command != nil; steps++ {
+		if steps > 4096 {
+			t.Fatal("performance geometry command did not settle")
+		}
+		message := command()
+		if _, ok := message.(geometryBatchMsg); !ok {
+			t.Fatalf("geometry command returned non-worker message %T", message)
+		}
+		updated, commands := model.updateWithCommands(message)
+		*model = updated
+		if commands.followUp != nil {
+			t.Fatal("geometry settlement produced a non-worker command")
+		}
+		command = commands.geometry
+	}
+}
+
+func settlePerformanceCommands(t *testing.T, model *Model, commands []tea.Cmd) {
+	t.Helper()
+	queue := append([]tea.Cmd(nil), commands...)
+	for steps := 0; len(queue) > 0; steps++ {
+		if steps > 4096 {
+			t.Fatal("deferred performance commands did not settle")
+		}
+		command := queue[0]
+		queue = queue[1:]
+		if command == nil {
+			continue
+		}
+		message := command()
+		if batch, ok := message.(tea.BatchMsg); ok {
+			queue = append(queue, batch...)
+			continue
+		}
+		updated, next := model.Update(message)
+		*model = updated.(Model)
+		if next != nil {
+			queue = append(queue, next)
+		}
+	}
+}
+
+func admitPerformanceFilteredMessage(
+	model *Model,
+	admission *keyboardAdmission,
+	message tea.Msg,
+) []performancePublicationStamp {
+	filtered := admission.Filter(*model, message)
+	if filtered == nil {
+		return discardedPerformanceStamp(model)
+	}
+	return admitPerformanceMessage(model, filtered)
 }
 
 func admitPerformancePointer(model *Model, message tea.MouseMsg) []performancePublicationStamp {
@@ -608,6 +885,39 @@ func selectedPerformanceCorpora(t *testing.T) []int {
 		corpora = append(corpora, count)
 	}
 	return corpora
+}
+
+func selectedPerformanceScenarios(t *testing.T, count int) []performanceScenario {
+	t.Helper()
+	wantedText := strings.TrimSpace(os.Getenv("KB_PERF_SCENARIOS"))
+	if wantedText == "" {
+		return performanceScenarios(count)
+	}
+	wanted := make(map[string]struct{})
+	for _, name := range strings.Split(wantedText, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			wanted[name] = struct{}{}
+		}
+	}
+	var selected []performanceScenario
+	for _, scenario := range performanceScenarios(count) {
+		if _, ok := wanted[scenario.name]; ok {
+			selected = append(selected, scenario)
+			delete(wanted, scenario.name)
+		}
+	}
+	if len(wanted) != 0 {
+		unknown := make([]string, 0, len(wanted))
+		for name := range wanted {
+			unknown = append(unknown, name)
+		}
+		slices.Sort(unknown)
+		t.Fatalf("KB_PERF_SCENARIOS contains unknown scenarios: %s", strings.Join(unknown, ","))
+	}
+	if len(selected) == 0 {
+		t.Fatal("KB_PERF_SCENARIOS selected no scenarios")
+	}
+	return selected
 }
 
 func currentPerformanceEnvironment() performanceEnvironment {
@@ -828,9 +1138,10 @@ func BenchmarkLargeBoardInputToFrame(b *testing.B) {
 			model := performanceModel(count, "", performanceWidth, performanceHeight)
 			model.boardView.rows[0] = taskCount(model.board, board.StatusTodo) - 1
 			model.rebuildRenderPlan(renderImpactAll)
+			admission := newKeyboardAdmission(time.Now, model.inputAdmission, model.themeStyles().Timing)
 			b.ReportAllocs()
 			for b.Loop() {
-				_ = admitPerformanceMessage(&model, tea.KeyPressMsg{Code: tea.KeyDown, IsRepeat: true})
+				_ = admitPerformanceFilteredMessage(&model, admission, tea.KeyPressMsg{Code: tea.KeyDown})
 			}
 		})
 	}
