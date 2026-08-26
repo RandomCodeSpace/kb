@@ -185,6 +185,12 @@ func boardLabels(current board.Board) []string {
 // filteredBoard is what the board renders: the project scope first, then the
 // text and label filter over what it left.
 func (m Model) filteredBoard() board.Board {
+	if m.renderingProjection != nil {
+		return m.renderingProjection.board
+	}
+	if m.current != nil && m.current.projection.matchesModel(m) {
+		return m.current.projection.board
+	}
 	return m.filter.project(m.projectBoard())
 }
 

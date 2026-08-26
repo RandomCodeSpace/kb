@@ -52,6 +52,9 @@ type RenderPlanStats struct {
 	PublishedFrames                uint64              `json:"published_frames"`
 	DiscardedEvents                uint64              `json:"discarded_events"`
 	StaleWorkerResults             uint64              `json:"stale_worker_results"`
+	ProjectionBuilds               uint64              `json:"projection_builds"`
+	TaskDerivations                uint64              `json:"task_derivations"`
+	ProjectedTasks                 uint64              `json:"projected_tasks"`
 	ContentBytes                   uint64              `json:"content_bytes"`
 	HitRegions                     uint64              `json:"hit_regions"`
 	RetainedPlanOwnedBytesEstimate uint64              `json:"retained_plan_owned_bytes_estimate"`
@@ -62,8 +65,9 @@ type RenderPlanStats struct {
 // and the harness reads counters. Projection records and compact card plans
 // join this root in later slices without widening that interface.
 type renderPlan struct {
-	view  tea.View
-	stats RenderPlanStats
+	view       tea.View
+	projection renderProjection
+	stats      RenderPlanStats
 }
 
 // retainedRenderView is embedded in Model so its small value receiver is the
@@ -71,8 +75,9 @@ type renderPlan struct {
 // Go heap-allocate the entire root model; promotion copies only this small
 // adapter and keeps View at zero allocations.
 type retainedRenderView struct {
-	current           *renderPlan
-	acceptedMessageID uint64
+	current             *renderPlan
+	renderingProjection *renderProjection
+	acceptedMessageID   uint64
 }
 
 // View returns the complete immutable frame most recently installed by Update.
@@ -91,6 +96,16 @@ type coldRenderSnapshot struct {
 }
 
 func (p renderPlan) rebuild(model Model, impact renderImpact) renderPlan {
+	var projectionChanged bool
+	p.projection, _, projectionChanged = p.projection.rebuild(model)
+	if projectionChanged {
+		p.stats.ProjectionBuilds++
+	}
+	// The cold renderer consumes the just-built immutable projection. Pointing
+	// this short-lived model copy at p keeps the oracle on the same data that
+	// the installed plan publishes.
+	model.current = &p
+	model.renderingProjection = &p.projection
 	snapshot := model.renderColdSnapshot()
 	p.view = snapshot.view
 	p.stats.Builds++
@@ -100,7 +115,10 @@ func (p renderPlan) rebuild(model Model, impact renderImpact) renderPlan {
 	p.stats.Revisions.advance(impact)
 	p.stats.ContentBytes = uint64(len(snapshot.view.Content))
 	p.stats.HitRegions = uint64(len(snapshot.hitRegions))
-	p.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot)
+	p.stats.TaskDerivations = uint64(len(p.projection.tasks))
+	p.stats.ProjectedTasks = uint64(len(p.projection.board.Tasks))
+	p.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
+		p.projection.ownedBytesEstimate()
 	return p
 }
 

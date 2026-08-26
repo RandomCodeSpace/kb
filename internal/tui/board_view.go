@@ -54,13 +54,24 @@ const (
 	boardToggledCancelled
 )
 
+// boardTaskAnchor is the durable position vocabulary for a board column. The
+// ordinal is only a deterministic fallback when the identity disappears;
+// IntraRow is used by scroll anchors and is clamped against current geometry.
+type boardTaskAnchor struct {
+	TaskID    string
+	IndexHint int
+	IntraRow  int
+}
+
 // boardViewState is the complete read-only board interaction state. Keeping it
 // together gives detail overlays one stable selectedTask seam without making
 // board rendering part of the root model's refresh machinery.
 type boardViewState struct {
 	column        int
-	rows          [len(boardStatuses)]int
-	scrolls       [len(boardStatuses)]int
+	rows          [len(boardStatuses)]int // cached ordinals; task identity is authoritative
+	cursors       [len(boardStatuses)]boardTaskAnchor
+	scrolls       [len(boardStatuses)]int // compatibility/raw fallback until an anchor exists
+	scrollAnchors [len(boardStatuses)]boardTaskAnchor
 	manualScroll  [len(boardStatuses)]bool
 	showCancelled bool
 }
@@ -81,6 +92,7 @@ type boardPointerUpMsg struct{}
 type boardColumnScrolledMsg struct {
 	status board.Status
 	offset int
+	anchor boardTaskAnchor
 }
 
 type boardHitKind uint8
@@ -96,15 +108,17 @@ const (
 )
 
 type boardHit struct {
-	x0, x1    int
-	y0, y1    int
-	status    board.Status
-	taskID    string
-	kind      boardHitKind
-	tag       string
-	key       string
-	scroll    int
-	maxScroll int
+	x0, x1     int
+	y0, y1     int
+	status     board.Status
+	taskID     string
+	kind       boardHitKind
+	tag        string
+	key        string
+	scroll     int
+	maxScroll  int
+	scrollUp   boardTaskAnchor
+	scrollDown boardTaskAnchor
 }
 
 type renderedColumn struct {
@@ -126,6 +140,7 @@ func (s boardViewState) visibleStatuses() []board.Status {
 }
 
 func (s *boardViewState) handleKey(key string, current board.Board) boardAction {
+	s.restoreColumnCursor(current, s.column)
 	switch key {
 	case "c":
 		s.showCancelled = !s.showCancelled
@@ -133,20 +148,18 @@ func (s *boardViewState) handleKey(key string, current board.Board) boardAction 
 			s.column--
 		}
 		s.clampRow(current)
-		s.manualScroll[s.column] = false
 		return boardToggledCancelled
 	case "left", "h", "shift+tab":
 		s.moveColumn(-1, current)
-		s.manualScroll[s.column] = false
 		return boardChanged
 	case "right", "l", "tab":
 		s.moveColumn(1, current)
-		s.manualScroll[s.column] = false
 		return boardChanged
 	case "up", "k":
 		if s.rows[s.column] > 0 {
 			s.rows[s.column]--
 		}
+		s.setCursorAt(current, s.column, s.rows[s.column])
 		s.manualScroll[s.column] = false
 		return boardChanged
 	case "down", "j":
@@ -154,6 +167,7 @@ func (s *boardViewState) handleKey(key string, current board.Board) boardAction 
 		if s.rows[s.column]+1 < count {
 			s.rows[s.column]++
 		}
+		s.setCursorAt(current, s.column, s.rows[s.column])
 		s.manualScroll[s.column] = false
 		return boardChanged
 	case "1", "2", "3", "4":
@@ -161,7 +175,6 @@ func (s *boardViewState) handleKey(key string, current board.Board) boardAction 
 		if at < len(s.visibleStatuses()) {
 			s.column = at
 			s.clampRow(current)
-			s.manualScroll[s.column] = false
 			return boardChanged
 		}
 	}
@@ -175,12 +188,7 @@ func (s *boardViewState) moveColumn(delta int, current board.Board) {
 }
 
 func (s *boardViewState) clampRow(current board.Board) {
-	count := taskCount(current, boardStatuses[s.column])
-	if count == 0 {
-		s.rows[s.column] = 0
-	} else if s.rows[s.column] >= count {
-		s.rows[s.column] = count - 1
-	}
+	s.restoreColumnCursor(current, s.column)
 }
 
 func (s *boardViewState) focusColumn(status board.Status, current board.Board) {
@@ -188,13 +196,16 @@ func (s *boardViewState) focusColumn(status board.Status, current board.Board) {
 		if candidate == status {
 			s.column = i
 			s.clampRow(current)
-			s.manualScroll[s.column] = false
 			return
 		}
 	}
 }
 
 func (s *boardViewState) focusTask(current board.Board, id string) bool {
+	return s.focusTaskWithScroll(current, id, true)
+}
+
+func (s *boardViewState) focusTaskWithScroll(current board.Board, id string, resetScroll bool) bool {
 	for _, task := range current.Tasks {
 		if task.ID != id {
 			continue
@@ -205,8 +216,13 @@ func (s *boardViewState) focusTask(current board.Board, id string) bool {
 		for i, status := range boardStatuses {
 			if status == task.Status {
 				s.column = i
-				s.rows[i] = taskIndex(current, task.Status, id)
-				s.manualScroll[i] = false
+				at := taskIndex(current, task.Status, id)
+				s.rows[i] = at
+				s.cursors[i] = boardTaskAnchor{TaskID: id, IndexHint: at}
+				if resetScroll {
+					s.scrollAnchors[i] = boardTaskAnchor{TaskID: id, IndexHint: at}
+					s.manualScroll[i] = false
+				}
 				return true
 			}
 		}
@@ -216,13 +232,15 @@ func (s *boardViewState) focusTask(current board.Board, id string) bool {
 
 func (s *boardViewState) adoptBoard(previous, current board.Board) {
 	selected, hadSelection := s.selectedTask(previous)
+	for column, status := range boardStatuses {
+		s.captureColumnAnchors(previous, column, status)
+		s.restoreColumnCursor(current, column)
+		s.restoreColumnScroll(current, column)
+	}
 	if hadSelection {
 		for _, task := range current.Tasks {
-			if task.ID == selected.ID {
-				if s.focusTask(current, task.ID) {
-					return
-				}
-				break
+			if task.ID == selected.ID && s.focusTaskWithScroll(current, selected.ID, task.Status != selected.Status) {
+				return
 			}
 		}
 	}
@@ -251,6 +269,11 @@ func (s *boardViewState) normalizeSelection(current board.Board) {
 
 func (s boardViewState) selectedTask(current board.Board) (board.Task, bool) {
 	status := boardStatuses[s.column]
+	if id := s.cursors[s.column].TaskID; id != "" {
+		if at, ok := taskIndexFound(current, status, id); ok && at == s.rows[s.column] {
+			return taskAtStatusIndex(current, status, at)
+		}
+	}
 	want := s.rows[s.column]
 	at := 0
 	for _, task := range current.Tasks {
@@ -263,6 +286,111 @@ func (s boardViewState) selectedTask(current board.Board) (board.Task, bool) {
 		at++
 	}
 	return board.Task{}, false
+}
+
+func (s *boardViewState) captureColumnAnchors(current board.Board, column int, status board.Status) {
+	if at, ok := taskIndexFound(current, status, s.cursors[column].TaskID); ok {
+		s.rows[column] = at
+		s.cursors[column].IndexHint = at
+	} else if task, ok := taskAtStatusIndex(current, status, s.rows[column]); ok {
+		s.cursors[column] = boardTaskAnchor{TaskID: task.ID, IndexHint: s.rows[column]}
+	}
+	if at, ok := taskIndexFound(current, status, s.scrollAnchors[column].TaskID); ok {
+		s.scrollAnchors[column].IndexHint = at
+	}
+}
+
+func (s *boardViewState) restoreColumnCursor(current board.Board, column int) {
+	status := boardStatuses[column]
+	if at, ok := taskIndexFound(current, status, s.cursors[column].TaskID); ok {
+		s.rows[column] = at
+		s.cursors[column].IndexHint = at
+		return
+	}
+	count := taskCount(current, status)
+	if count == 0 {
+		s.rows[column] = 0
+		return
+	}
+	hint := s.cursors[column].IndexHint
+	if s.cursors[column].TaskID == "" {
+		hint = s.rows[column]
+	}
+	s.setCursorAt(current, column, min(max(hint, 0), count-1))
+}
+
+func (s *boardViewState) restoreColumnScroll(current board.Board, column int) {
+	anchor := &s.scrollAnchors[column]
+	status := boardStatuses[column]
+	if at, ok := taskIndexFound(current, status, anchor.TaskID); ok {
+		anchor.IndexHint = at
+		return
+	}
+	count := taskCount(current, status)
+	if count == 0 || anchor.TaskID == "" {
+		return
+	}
+	at := min(max(anchor.IndexHint, 0), count-1)
+	if task, ok := taskAtStatusIndex(current, status, at); ok {
+		*anchor = boardTaskAnchor{TaskID: task.ID, IndexHint: at, IntraRow: anchor.IntraRow}
+	}
+}
+
+func (s *boardViewState) setCursorAt(current board.Board, column, row int) {
+	status := boardStatuses[column]
+	task, ok := taskAtStatusIndex(current, status, row)
+	if !ok {
+		s.rows[column] = 0
+		return
+	}
+	s.rows[column] = row
+	s.cursors[column] = boardTaskAnchor{TaskID: task.ID, IndexHint: row}
+}
+
+func (s boardViewState) selectedIndex(tasks []board.Task, status board.Status) int {
+	column := statusIndex(status)
+	if id := s.cursors[column].TaskID; id != "" {
+		for i, task := range tasks {
+			if task.ID == id && i == s.rows[column] {
+				return i
+			}
+		}
+	}
+	if len(tasks) == 0 {
+		return 0
+	}
+	return min(max(s.rows[column], 0), len(tasks)-1)
+}
+
+func taskAtStatusIndex(current board.Board, status board.Status, want int) (board.Task, bool) {
+	at := 0
+	for _, task := range current.Tasks {
+		if task.Status != status {
+			continue
+		}
+		if at == want {
+			return task, true
+		}
+		at++
+	}
+	return board.Task{}, false
+}
+
+func taskIndexFound(current board.Board, status board.Status, id string) (int, bool) {
+	if id == "" {
+		return 0, false
+	}
+	index := 0
+	for _, task := range current.Tasks {
+		if task.Status != status {
+			continue
+		}
+		if task.ID == id {
+			return index, true
+		}
+		index++
+	}
+	return 0, false
 }
 
 // selectedTask is the narrow handoff used by the card-detail overlay.
@@ -829,12 +957,18 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 	cardLines, owners, spans := m.renderTaskLines(tasks, status, bodyWidth, density)
 
 	maxScroll := max(len(cardLines)-contentHeight, 0)
-	start := visibleCardStart(cardLines, owners, m.boardView.rows[index], contentHeight)
+	start := visibleCardStart(cardLines, owners, m.boardView.selectedIndex(tasks, status), contentHeight)
 	if m.boardView.manualScroll[index] {
-		start = min(max(m.boardView.scrolls[index], 0), maxScroll)
+		if anchor := m.boardView.scrollAnchors[index]; anchor.TaskID != "" {
+			start = scrollOffsetForAnchor(owners, anchor, maxScroll)
+		} else {
+			start = min(max(m.boardView.scrolls[index], 0), maxScroll)
+		}
 	}
 	hits[0].scroll = start
 	hits[0].maxScroll = maxScroll
+	hits[0].scrollUp = scrollAnchorAt(owners, min(max(start-3, 0), maxScroll))
+	hits[0].scrollDown = scrollAnchorAt(owners, min(max(start+3, 0), maxScroll))
 	end := visibleCardEnd(owners, start, contentHeight)
 
 	rail := m.columnScrollbar(styles, railed, index, stack, contentHeight, start)
@@ -1050,7 +1184,7 @@ func visibleCardEnd(owners []string, start, height int) int {
 func (m Model) cardOptsFor(styles *theme.Styles, tasks []board.Task, status board.Status, width int, density theme.Density) ([]widget.CardOpts, [][]string) {
 	index := statusIndex(status)
 	focused := m.boardView.column == index
-	selected := m.boardView.rows[index]
+	selected := m.boardView.selectedIndex(tasks, status)
 	frameHeight := max(m.height, 8)
 	titleLines := styles.Metrics.TitleRows(frameHeight, density)
 	descLines := styles.Metrics.DescLines(frameHeight, density)
@@ -1332,6 +1466,95 @@ func visibleCardStart(lines, owners []string, selected, height int) int {
 	return min(max(start, 0), len(lines)-height)
 }
 
+func scrollAnchorAt(owners []string, offset int) boardTaskAnchor {
+	if len(owners) == 0 {
+		return boardTaskAnchor{}
+	}
+	offset = min(max(offset, 0), len(owners)-1)
+	ownerRow := offset
+	for ownerRow >= 0 && owners[ownerRow] == "" {
+		ownerRow--
+	}
+	if ownerRow < 0 {
+		ownerRow = offset
+		for ownerRow < len(owners) && owners[ownerRow] == "" {
+			ownerRow++
+		}
+		if ownerRow == len(owners) {
+			return boardTaskAnchor{}
+		}
+		offset = ownerRow
+	}
+	id := owners[ownerRow]
+	first := ownerRow
+	for first > 0 && owners[first-1] == id {
+		first--
+	}
+	hint := 0
+	last := ""
+	for _, owner := range owners[:first] {
+		if owner != "" && owner != last {
+			hint++
+		}
+		last = owner
+	}
+	return boardTaskAnchor{TaskID: id, IndexHint: hint, IntraRow: offset - first}
+}
+
+func scrollOffsetForAnchor(owners []string, anchor boardTaskAnchor, maxScroll int) int {
+	first := -1
+	for row, owner := range owners {
+		if owner == anchor.TaskID {
+			first = row
+			break
+		}
+	}
+	if first < 0 {
+		first, end, ok := scrollOrdinalSpan(owners, anchor.IndexHint)
+		if !ok {
+			return 0
+		}
+		intra := min(max(anchor.IntraRow, 0), end-first-1)
+		return min(max(first+intra, 0), maxScroll)
+	}
+	end := first + 1
+	for end < len(owners) && (owners[end] == anchor.TaskID || owners[end] == "") {
+		end++
+	}
+	intra := min(max(anchor.IntraRow, 0), end-first-1)
+	return min(max(first+intra, 0), maxScroll)
+}
+
+// scrollOrdinalSpan resolves a task ordinal through the current terminal-row
+// geometry. The ordinal is clamped so a removed task chooses its successor, or
+// its predecessor when it was the final task in the column. The span includes
+// trailing separator rows because scrollAnchorAt assigns those rows to the
+// preceding task.
+func scrollOrdinalSpan(owners []string, ordinal int) (first, end int, ok bool) {
+	ordinal = max(ordinal, 0)
+	candidate, lastStart, current := -1, -1, -1
+	for row, owner := range owners {
+		if owner == "" || (row > 0 && owners[row-1] == owner) {
+			continue
+		}
+		if candidate >= 0 {
+			return candidate, row, true
+		}
+		current++
+		lastStart = row
+		if current == ordinal {
+			candidate = row
+		}
+	}
+	if candidate >= 0 {
+		return candidate, len(owners), true
+	}
+	if lastStart < 0 {
+		return 0, 0, false
+	}
+	return lastStart, len(owners), true
+}
+
 // joinColumns lays the panels out side by side with a Canvas gutter and the
 // page margin of spec section 2.5, and moves every hit region onto the frame.
 func joinColumns(styles *theme.Styles, columns []renderedColumn, layout boardLayout, width int) ([]string, []boardHit) {
@@ -1394,7 +1617,13 @@ func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.C
 				if offset == hit.scroll {
 					return nil
 				}
-				return func() tea.Msg { return boardColumnScrolledMsg{status: hit.status, offset: offset} }
+				anchor := hit.scrollDown
+				if delta < 0 {
+					anchor = hit.scrollUp
+				}
+				return func() tea.Msg {
+					return boardColumnScrolledMsg{status: hit.status, offset: offset, anchor: anchor}
+				}
 			}
 			return nil
 		}

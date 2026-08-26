@@ -725,6 +725,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 	case boardColumnScrolledMsg:
 		column := statusIndex(msg.status)
 		m.boardView.scrolls[column] = max(msg.offset, 0)
+		m.boardView.scrollAnchors[column] = msg.anchor
 		m.boardView.manualScroll[column] = true
 		return m, batchCommands(detailCmd, m.armScrollLinger(column))
 	case cardMoveStoredMsg:
