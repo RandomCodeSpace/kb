@@ -63,6 +63,7 @@ type RenderPlanStats struct {
 	ProjectionTaskVisits           uint64              `json:"projection_task_visits"`
 	SourceTaskComparisons          uint64              `json:"source_task_comparisons"`
 	TaskDerivations                uint64              `json:"task_derivations"`
+	TaskDerivationBuilds           uint64              `json:"task_derivation_builds"`
 	ProjectedTasks                 uint64              `json:"projected_tasks"`
 	LayoutRecords                  uint64              `json:"layout_records"`
 	ExactLayoutRecords             uint64              `json:"exact_layout_records"`
@@ -104,6 +105,8 @@ type retainedRenderView struct {
 	renderingProjection *renderProjection
 	renderingGeometry   *renderGeometry
 	preparedProjection  *renderProjection
+	preparedDerivations int
+	preparedComparisons int
 	acceptedMessageID   uint64
 	renderTrace         *renderVisitTrace
 }
@@ -176,7 +179,9 @@ func (p renderPlan) rebuild(model Model, impact renderImpact, checkSource bool) 
 	var projectionChanged bool
 	if prepared := model.preparedProjection; prepared != nil && prepared.matchesProjectionKey(model) {
 		p.projection = *prepared
-		projectionChanged = true
+		projectionChanged = p.projection.generation != model.currentProjectionGeneration()
+		p.stats.TaskDerivationBuilds += uint64(model.preparedDerivations)
+		p.stats.SourceTaskComparisons += uint64(model.preparedComparisons)
 	} else {
 		if checkSource && p.projection.initialized {
 			p.stats.SourceTaskComparisons += uint64(len(model.board.Tasks))
@@ -322,7 +327,41 @@ func (m *Model) rebuildRenderPlanAfterUpdate(impact renderImpact, checkSource bo
 	m.installPointerHandler(&next)
 	m.current = &next
 	m.preparedProjection = nil
+	m.preparedDerivations = 0
+	m.preparedComparisons = 0
 	m.publishKeyboardAdmissionSnapshot()
+}
+
+func (m Model) currentProjectionGeneration() uint64 {
+	if m.current == nil {
+		return 0
+	}
+	return m.current.projection.generation
+}
+
+func (m *Model) adoptPreparedProjectionWithoutFrame() {
+	if m.current == nil || m.preparedProjection == nil || !m.preparedProjection.matchesProjectionKey(*m) {
+		m.preparedProjection = nil
+		m.preparedDerivations = 0
+		m.preparedComparisons = 0
+		return
+	}
+	next := *m.current
+	oldOwned := next.projection.ownedBytesEstimate()
+	next.projection = *m.preparedProjection
+	next.stats.TaskDerivationBuilds += uint64(m.preparedDerivations)
+	next.stats.SourceTaskComparisons += uint64(m.preparedComparisons)
+	next.stats.TaskDerivations = uint64(len(next.projection.tasks))
+	next.stats.ProjectedTasks = uint64(len(next.projection.board.Tasks))
+	newOwned := next.projection.ownedBytesEstimate()
+	if next.stats.RetainedPlanOwnedBytesEstimate >= oldOwned {
+		next.stats.RetainedPlanOwnedBytesEstimate -= oldOwned
+		next.stats.RetainedPlanOwnedBytesEstimate += newOwned
+	}
+	m.current = &next
+	m.preparedProjection = nil
+	m.preparedDerivations = 0
+	m.preparedComparisons = 0
 }
 
 func (m *Model) installPointerHandler(plan *renderPlan) {
@@ -511,11 +550,55 @@ func (m Model) RenderPlanStats() RenderPlanStats {
 	return stats
 }
 
-func renderImpactFor(tea.Msg) renderImpact {
-	// Root messages routinely cross nominal boundaries: a card click opens an
-	// overlay, pointer motion can move a task, and sub-model results can change
-	// both data and geometry. Narrowing by message type therefore produces
-	// false negatives. Later phases may narrow impacts only from the actual
-	// Update result and must prove the omitted revisions stayed independent.
+func renderImpactAfterUpdate(message tea.Msg, before, after Model) renderImpact {
+	// A zero impact is earned from the post-update state, never guessed from a
+	// raw event. Unknown messages remain conservative because root messages can
+	// cross nominal boundaries through focused sub-models and follow-up results.
+	switch message.(type) {
+	case pollTickMsg:
+		return 0
+	case boardLoadedMsg:
+		loaded := message.(boardLoadedMsg)
+		if loaded.generation != 0 && loaded.generation < after.loadGeneration &&
+			sameBoardSourceIdentity(before.board, after.board) &&
+			sameRenderError(before.loadErr, after.loadErr) &&
+			before.boardBusyLabel() == after.boardBusyLabel() {
+			return 0
+		}
+		if after.preparedProjection != nil && before.current != nil &&
+			after.preparedProjection.generation == before.current.projection.generation &&
+			before.boardView == after.boardView && !before.overlayOpen() && !after.overlayOpen() &&
+			sameRenderError(before.loadErr, after.loadErr) && sameRenderError(before.pollErr, after.pollErr) &&
+			before.boardBusyLabel() == after.boardBusyLabel() {
+			return 0
+		}
+	case dataVersionMsg:
+		if sameRenderError(before.pollErr, after.pollErr) &&
+			before.boardBusyLabel() == after.boardBusyLabel() &&
+			sameBoardSourceIdentity(before.board, after.board) &&
+			before.move.lifted == after.move.lifted && before.move.status == after.move.status &&
+			before.move.statusError == after.move.statusError {
+			return 0
+		}
+	case tea.WindowSizeMsg:
+		if before.width == after.width && before.height == after.height {
+			return 0
+		}
+	case tea.ColorProfileMsg:
+		if before.profile == after.profile {
+			return 0
+		}
+	case tea.BackgroundColorMsg:
+		if before.isDark == after.isDark {
+			return 0
+		}
+	}
 	return renderImpactAll
+}
+
+func sameRenderError(left, right error) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Error() == right.Error()
 }

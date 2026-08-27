@@ -273,11 +273,15 @@ func (rootDriftBackend) AcceptDrift(context.Context, string, string, string, str
 func boardLoadFromBatch(t *testing.T, command tea.Cmd) tea.Cmd {
 	t.Helper()
 	if command == nil {
-		t.Fatal("load and poll command is nil")
+		t.Fatal("board load command is nil")
 	}
-	batch, ok := command().(tea.BatchMsg)
-	if !ok || len(batch) != 2 {
-		t.Fatalf("load and poll command = %#v, want two-command batch", batch)
+	message := command()
+	if loaded, ok := message.(boardLoadedMsg); ok {
+		return func() tea.Msg { return loaded }
+	}
+	batch, ok := message.(tea.BatchMsg)
+	if !ok || len(batch) == 0 {
+		t.Fatalf("board load command = %#v", message)
 	}
 	return batch[0]
 }
@@ -1596,21 +1600,22 @@ func TestVersionBaselineDuringFallbackQueuesSerializedReload(t *testing.T) {
 
 	fallback := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{err: errors.New("version unavailable")}))
 	if !m.loading || m.reloadPending || m.haveVersion || reader.calls != 0 {
-		t.Fatalf("fallback start = model:%#v calls:%d", m, reader.calls)
+		t.Fatalf("fallback start = loading:%t pending:%t have-version:%t load-gen:%d active-gen:%d calls:%d",
+			m.loading, m.reloadPending, m.haveVersion, m.loadGeneration, m.activeLoadGen, reader.calls)
 	}
-	if nextPoll := updateTestModel(t, &m, dataVersionMsg{version: 1}); nextPoll == nil {
-		t.Fatal("successful baseline did not continue the poll chain")
+	if nextPoll := updateTestModel(t, &m, dataVersionMsg{version: 1}); nextPoll != nil {
+		t.Fatal("successful baseline started polling before the visible board frame")
 	}
 	if !m.loading || !m.reloadPending || !m.haveVersion || m.dataVersion != 1 {
 		t.Fatalf("baseline during fallback = %#v", m)
 	}
 
 	successor := completeBoardLoad(t, &m, fallback)
-	if successor == nil || !m.loading || m.reloadPending || m.board.Title != "Fallback" || reader.calls != 1 {
+	if successor == nil || !m.loading || m.reloadPending || m.board.Title == "Fallback" || reader.calls != 1 {
 		t.Fatalf("fallback completion = model:%#v calls:%d command:%v", m, reader.calls, successor)
 	}
-	if next := completeBoardLoad(t, &m, successor); next != nil {
-		t.Fatalf("serialized completion scheduled %v", next)
+	if next := completeBoardLoad(t, &m, successor); next == nil || !m.pollStarted {
+		t.Fatalf("serialized completion did not start polling after the visible frame: %v", next)
 	}
 	if m.loading || m.reloadPending || m.board.Title != "Current" || reader.calls != 2 {
 		t.Fatalf("serialized reload = model:%#v calls:%d", m, reader.calls)
@@ -1625,8 +1630,8 @@ func TestInitialVersionSuccessLoadsBoard(t *testing.T) {
 	if !m.haveVersion || m.dataVersion != 7 || !m.loading || m.reloadPending {
 		t.Fatalf("initial baseline = %#v", m)
 	}
-	if next := completeBoardLoad(t, &m, load); next != nil {
-		t.Fatalf("initial load completion scheduled %v", next)
+	if next := completeBoardLoad(t, &m, load); next == nil || !m.pollStarted {
+		t.Fatalf("initial load completion did not start polling: %v", next)
 	}
 	if m.loading || m.reloadPending || m.loadErr != nil || m.board.Title != "Initial" || reader.calls != 1 {
 		t.Fatalf("initial load = model:%#v calls:%d", m, reader.calls)
@@ -1676,8 +1681,8 @@ func TestInitialLoadFailureRetriesAfterUnchangedPoll(t *testing.T) {
 	m.board = board.Board{Title: "Last good"}
 
 	first := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 9}))
-	if next := completeBoardLoad(t, &m, first); next != nil {
-		t.Fatalf("failed load completion scheduled %v", next)
+	if next := completeBoardLoad(t, &m, first); next == nil || !m.pollStarted {
+		t.Fatalf("failed load completion did not start retry polling: %v", next)
 	}
 	if !errors.Is(m.loadErr, want) || m.loading || m.board.Title != "Last good" {
 		t.Fatalf("initial failure = %#v", m)
@@ -1744,8 +1749,9 @@ func TestVersionChangesDuringLoadCoalesceOneSuccessor(t *testing.T) {
 	}
 
 	successor := completeBoardLoad(t, &m, v2)
-	if successor == nil || !m.loading || m.reloadPending || m.board.Title != "V2" || reader.calls != 2 {
-		t.Fatalf("first changed load = model:%#v calls:%d command:%v", m, reader.calls, successor)
+	if successor == nil || !m.loading || m.reloadPending || m.board.Title != "V1" || reader.calls != 2 {
+		t.Fatalf("stale changed load = board:%q loading:%t pending:%t calls:%d command:%v",
+			m.board.Title, m.loading, m.reloadPending, reader.calls, successor)
 	}
 	if next := completeBoardLoad(t, &m, successor); next != nil {
 		t.Fatalf("coalesced successor scheduled a third load: %v", next)
@@ -1769,8 +1775,9 @@ func TestFailedLoadWithPendingChangeStartsSerializedSuccessor(t *testing.T) {
 	v2 := boardLoadFromBatch(t, updateTestModel(t, &m, dataVersionMsg{version: 2}))
 	updateTestModel(t, &m, dataVersionMsg{version: 3})
 	successor := completeBoardLoad(t, &m, v2)
-	if successor == nil || !m.loading || m.reloadPending || !errors.Is(m.loadErr, want) || m.board.Title != "V1" {
-		t.Fatalf("failed load with pending change = %#v", m)
+	if successor == nil || !m.loading || m.reloadPending || m.loadErr != nil || m.board.Title != "V1" {
+		t.Fatalf("stale failed load = board:%q loading:%t pending:%t error:%v command:%v",
+			m.board.Title, m.loading, m.reloadPending, m.loadErr, successor)
 	}
 	if next := completeBoardLoad(t, &m, successor); next != nil {
 		t.Fatalf("pending recovery scheduled %v", next)

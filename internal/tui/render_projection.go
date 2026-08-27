@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"unsafe"
@@ -35,6 +36,12 @@ type projectionKey struct {
 type projectionStatusSummary struct {
 	count   int
 	blocked int
+}
+
+type projectionDelta struct {
+	SourceChanged  bool
+	CurrentChanged bool
+	DerivedTasks   int
 }
 
 // renderProjection owns exactly one source derivation and one current
@@ -113,26 +120,125 @@ func (p renderProjection) rebuildSource(model Model, checkSource bool) (renderPr
 	return p, tasksChanged, projectionChanged
 }
 
+// reconcileSource replaces the immutable source snapshot by task identity.
+// Unchanged derivations retain their nested storage; only new or changed tasks
+// pay normalization and snapshot costs. A source-only change may therefore
+// advance without changing the current filter/project projection generation.
+func (p renderProjection) reconcileSource(model Model) (renderProjection, projectionDelta) {
+	if !p.initialized {
+		next, sourceChanged, currentChanged := p.rebuildSource(model, true)
+		return next, projectionDelta{
+			SourceChanged: sourceChanged, CurrentChanged: currentChanged, DerivedTasks: len(next.tasks),
+		}
+	}
+	if p.matchesSourceIdentity(model.board) {
+		return p, projectionDelta{}
+	}
+
+	delta := projectionDelta{SourceChanged: p.title != model.board.Title || len(p.tasks) != len(model.board.Tasks)}
+	tasks := make([]taskDerivation, len(model.board.Tasks))
+	sourceIndexes := make(map[string]int, len(model.board.Tasks))
+	for index, source := range model.board.Tasks {
+		sourceIndexes[source.ID] = index
+		previous, found := p.sourceIndexes[source.ID]
+		if found && previous >= 0 && previous < len(p.tasks) && sameTask(p.tasks[previous].task, source) {
+			tasks[index] = p.tasks[previous]
+			if previous != index {
+				delta.SourceChanged = true
+			}
+			continue
+		}
+		tasks[index] = deriveTask(source)
+		delta.SourceChanged = true
+		delta.DerivedTasks++
+	}
+
+	p.title = model.board.Title
+	p.sourceData = unsafe.SliceData(model.board.Tasks)
+	p.sourceLen = len(model.board.Tasks)
+	p.sourceIndexes = sourceIndexes
+	if !delta.SourceChanged {
+		return p, delta
+	}
+	p.sourceGeneration++
+	p.tasks = tasks
+	key := projectionKey{
+		filter: model.filter.value(), projectName: model.projects.name, projectAll: model.projects.all,
+	}
+	boardProjection, statuses, summaries, ordinals, taskIndexes, labels, projected :=
+		buildCurrentProjection(p.title, p.tasks, key)
+	toolbarLabels := selectedInclusiveLabels(labels, key.filter.Tags)
+	delta.CurrentChanged = !sameCurrentProjection(
+		p, key, boardProjection, statuses, summaries, ordinals, taskIndexes, toolbarLabels, projected,
+	)
+	if delta.CurrentChanged {
+		p.generation++
+	}
+	// Raw labels are source metadata, not publication identity. Install the
+	// fully reconciled projection even when its rendered toolbar and cards are
+	// unchanged so a later filter edit starts from the newest source facts.
+	p.key = key
+	p.board = boardProjection
+	p.statuses = statuses
+	p.summaries = summaries
+	p.ordinals = ordinals
+	p.taskIndexes = taskIndexes
+	p.labels = labels
+	p.toolbarLabels = toolbarLabels
+	p.projected = projected
+	p.refreshOwnedBytes()
+	return p, delta
+}
+
+func sameCurrentProjection(
+	current renderProjection,
+	key projectionKey,
+	projectedBoard board.Board,
+	statuses [len(boardStatuses)][]int,
+	summaries [len(boardStatuses)]projectionStatusSummary,
+	ordinals [len(boardStatuses)]map[string]int,
+	taskIndexes map[string]int,
+	toolbarLabels []string,
+	projected int,
+) bool {
+	if !sameProjectionKey(current.key, key) || current.board.Title != projectedBoard.Title ||
+		len(current.board.Tasks) != len(projectedBoard.Tasks) || current.summaries != summaries ||
+		current.projected != projected || !slices.Equal(current.toolbarLabels, toolbarLabels) {
+		return false
+	}
+	for index := range current.board.Tasks {
+		if !sameTask(current.board.Tasks[index], projectedBoard.Tasks[index]) {
+			return false
+		}
+	}
+	return reflect.DeepEqual(current.statuses, statuses) && reflect.DeepEqual(current.ordinals, ordinals) &&
+		reflect.DeepEqual(current.taskIndexes, taskIndexes)
+}
+
 func deriveTasks(tasks []board.Task) []taskDerivation {
 	derived := make([]taskDerivation, len(tasks))
 	for i, source := range tasks {
-		snapshot := source
-		snapshot.Tags = append([]string(nil), source.Tags...)
-		snapshot.Checks = append([]board.Check(nil), source.Checks...)
-		tags := make([]string, len(snapshot.Tags))
-		for j, tag := range snapshot.Tags {
-			tags[j] = normalizeSearchValue(tag)
-		}
-		derived[i] = taskDerivation{
-			task: snapshot,
-			search: taskSearchIndex{
-				title: normalizeSearchValue(snapshot.Title),
-				desc:  normalizeSearchValue(snapshot.Desc),
-				tags:  tags,
-			},
-		}
+		derived[i] = deriveTask(source)
 	}
 	return derived
+}
+
+func deriveTask(source board.Task) taskDerivation {
+	snapshot := source
+	snapshot.Tags = append([]string(nil), source.Tags...)
+	snapshot.Checks = append([]board.Check(nil), source.Checks...)
+	tags := make([]string, len(snapshot.Tags))
+	for index, tag := range snapshot.Tags {
+		tags[index] = normalizeSearchValue(tag)
+	}
+	return taskDerivation{
+		task: snapshot,
+		search: taskSearchIndex{
+			title: normalizeSearchValue(snapshot.Title),
+			desc:  normalizeSearchValue(snapshot.Desc),
+			tags:  tags,
+		},
+	}
 }
 
 func normalizeSearchValue(value string) string { return webLower(value) }

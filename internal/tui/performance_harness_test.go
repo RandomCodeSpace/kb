@@ -257,6 +257,7 @@ func TestPerformanceAdmissionPreservesNonWorkerCommands(t *testing.T) {
 				model.watcher = stubVersionReader{version: 1}
 				model.haveVersion = true
 				model.dataVersion = 1
+				model.pollStarted = true
 				model.rebuildRenderPlan(renderImpactAll)
 			},
 			message: dataVersionMsg{version: 1},
@@ -909,6 +910,70 @@ func assertPerformanceOracle(t *testing.T, count int) {
 			}
 		}
 	}
+}
+
+func TestPerformanceColdOracleDefaultSizeFilterParity(t *testing.T) {
+	for _, filter := range []string{"keep17", "matches-nothing"} {
+		t.Run(filter, func(t *testing.T) {
+			assertPerformanceColdOracleParity(t, performanceModel(120, filter, 80, 24))
+		})
+	}
+}
+
+func TestPerformanceFilterUpdatePublishesAtDefaultSize(t *testing.T) {
+	fixture := performanceBoard(0)
+	model := NewModel(stubBoardReader{board: fixture}, nil, "perf")
+	updated, _ := model.Update(boardLoadedMsg{board: fixture})
+	model = updated.(Model)
+	model, _ = applyPerformanceFilter(model, "k")
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	assertPerformanceColdOracleParity(t, updated.(Model))
+}
+
+func TestPerformanceDirectMutationDoesNotTurnSameSizeResizeIntoPublication(t *testing.T) {
+	fixture := performanceBoard(0)
+	model := NewModel(stubBoardReader{board: fixture}, nil, "perf")
+	updated, _ := model.Update(boardLoadedMsg{board: fixture})
+	model = updated.(Model)
+	beforeView := model.View()
+	beforeStats := model.RenderPlanStats()
+
+	// Direct sub-model mutation is not a supported publication path. This is a
+	// guard for test fixtures: a no-op resize must not conceal their bypass by
+	// manufacturing a frame.
+	model.filter.input.SetValue("k")
+	if cold := model.renderColdView(); cold.Content == beforeView.Content {
+		t.Fatal("direct mutation did not make the cold model observably different")
+	}
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(Model)
+	afterStats := model.RenderPlanStats()
+	if afterStats.PublishedFrames != beforeStats.PublishedFrames {
+		t.Fatalf("same-size resize published %d frames, want 0", afterStats.PublishedFrames-beforeStats.PublishedFrames)
+	}
+	if after := model.View(); after.Content != beforeView.Content {
+		t.Fatal("same-size resize published an out-of-band direct mutation")
+	}
+}
+
+func assertPerformanceColdOracleParity(t *testing.T, model Model) {
+	t.Helper()
+	got, want := model.View(), model.renderColdView()
+	if got.Content == want.Content && got.AltScreen == want.AltScreen && got.MouseMode == want.MouseMode {
+		return
+	}
+
+	gotLines := strings.Split(plain(got.Content), "\n")
+	wantLines := strings.Split(plain(want.Content), "\n")
+	limit := min(len(gotLines), len(wantLines))
+	for row := range limit {
+		if gotLines[row] != wantLines[row] {
+			t.Fatalf("cold-oracle mismatch at row %d: retained=%q cold=%q metadata retained=(alt=%t mouse=%d) cold=(alt=%t mouse=%d)",
+				row, gotLines[row], wantLines[row], got.AltScreen, got.MouseMode, want.AltScreen, want.MouseMode)
+		}
+	}
+	t.Fatalf("cold-oracle mismatch after %d shared rows: retained rows=%d cold rows=%d metadata retained=(alt=%t mouse=%d) cold=(alt=%t mouse=%d)",
+		limit, len(gotLines), len(wantLines), got.AltScreen, got.MouseMode, want.AltScreen, want.MouseMode)
 }
 
 func performanceDurations(values []time.Duration) performanceDistribution {

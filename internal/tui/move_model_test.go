@@ -402,6 +402,7 @@ func TestWatcherChangeCancelsUnsavedPreviewBeforeRefresh(t *testing.T) {
 	m := loadedMoveModel(s)
 	m.watcher = stubVersionReader{version: 2}
 	m.haveVersion, m.dataVersion = true, 1
+	m.pollStarted = true
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyDown})
 	command := updateTestModel(t, &m, dataVersionMsg{version: 2})
@@ -416,6 +417,8 @@ func TestWatcherChangeCancelsUnsavedPreviewBeforeRefresh(t *testing.T) {
 func TestMoveSerializesWatcherRefreshBehindStoreWrite(t *testing.T) {
 	s := &moveTestStore{board: moveFixture()}
 	m := loadedMoveModel(s)
+	m.watcher = stubVersionReader{version: 2}
+	m.haveVersion, m.dataVersion, m.pollStarted = true, 1, true
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 	drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if command := updateTestModel(t, &m, dataVersionMsg{version: 2}); command == nil {

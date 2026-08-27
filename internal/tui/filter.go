@@ -220,10 +220,14 @@ func (m Model) currentProjection() *renderProjection {
 func (m *Model) prepareFilterProjection() *renderProjection {
 	if m.current == nil || !m.current.projection.matchesSourceIdentity(m.board) {
 		m.preparedProjection = nil
+		m.preparedDerivations = 0
+		m.preparedComparisons = 0
 		return nil
 	}
 	prepared, _, _ := m.current.projection.rebuildSource(*m, false)
 	m.preparedProjection = &prepared
+	m.preparedDerivations = 0
+	m.preparedComparisons = 0
 	return &prepared
 }
 

@@ -47,8 +47,9 @@ type dataVersionReader interface {
 }
 
 type boardLoadedMsg struct {
-	board board.Board
-	err   error
+	board      board.Board
+	err        error
+	generation uint64
 }
 
 type dataVersionMsg struct {
@@ -89,6 +90,9 @@ type Model struct {
 	pollErr           error
 	dataVersion       int64
 	haveVersion       bool
+	pollStarted       bool
+	loadGeneration    uint64
+	activeLoadGen     uint64
 	stopped           bool
 	helpOpen          bool
 	isDark            bool
@@ -252,6 +256,12 @@ func newModel(
 		brandSeed:    brandSeed,
 		brandGen:     1,
 	}
+	if watcher == nil {
+		// Init is a value receiver, so the no-watcher startup generation must be
+		// established before it creates the first load command.
+		model.loadGeneration = 1
+		model.activeLoadGen = 1
+	}
 	model.rebuildRenderPlan(renderImpactAll)
 	return model
 }
@@ -261,7 +271,7 @@ func (m Model) Init() tea.Cmd {
 	if m.stopped {
 		return nil
 	}
-	start := m.loadBoard()
+	start := m.loadBoard(m.activeLoadGen)
 	if m.watcher != nil {
 		// Establish the connection-local baseline before loading. If these ran
 		// concurrently, a commit between the stale load and a later baseline
@@ -324,7 +334,16 @@ func (m Model) updateWithCommands(message tea.Msg) (Model, modelUpdateCommands) 
 	beforeBoard := m.board
 	next, command := m.update(message)
 	next.acceptedMessageID = m.acceptedMessageID
-	next.rebuildRenderPlanAfterUpdate(renderImpactFor(message), checkSource || !sameBoardSourceIdentity(beforeBoard, next.board))
+	impact := renderImpactAfterUpdate(message, m, next)
+	if impact != 0 {
+		next.rebuildRenderPlanAfterUpdate(impact, checkSource || !sameBoardSourceIdentity(beforeBoard, next.board))
+	} else {
+		// Admission state belongs to Update even when the accepted message has no
+		// render effect. Keep the immutable input snapshot current and continue an
+		// already-active geometry chain without manufacturing a frame.
+		next.adoptPreparedProjectionWithoutFrame()
+		next.publishKeyboardAdmissionSnapshot()
+	}
 	if next.stopped {
 		next.resetPointerPipeline()
 	}
@@ -1033,7 +1052,7 @@ func (m *Model) observeDataVersion(msg dataVersionMsg) tea.Cmd {
 		if !m.haveVersion || m.loadErr != nil {
 			load = m.startBoardLoad()
 		}
-		return m.pollAfter(load)
+		return m.continuePollingAfter(load)
 	}
 
 	m.pollErr = nil
@@ -1048,19 +1067,57 @@ func (m *Model) observeDataVersion(msg dataVersionMsg) tea.Cmd {
 	case m.loadErr != nil:
 		load = m.startBoardLoad()
 	}
+	return m.continuePollingAfter(load)
+}
+
+func (m Model) continuePollingAfter(load tea.Cmd) tea.Cmd {
+	if !m.pollStarted {
+		if load == nil {
+			return nil
+		}
+		// Keep the initial load lazy and distinguishable from the poll chain. A
+		// one-command batch still runs after Update publishes its current frame.
+		return func() tea.Msg { return tea.BatchMsg{load} }
+	}
 	return m.pollAfter(load)
 }
 
 // finishBoardLoad commits only successful snapshots. A pending freshness
 // obligation starts one serialized successor without creating another poll.
 func (m *Model) finishBoardLoad(msg boardLoadedMsg) tea.Cmd {
+	generation := msg.generation
+	if generation == 0 {
+		// Package-local callers predating generation-tagged IO inject a settled
+		// snapshot directly. Production load commands always carry a generation.
+		generation = m.activeLoadGen
+		if generation == 0 {
+			generation = m.loadGeneration
+		}
+	}
+	if m.activeLoadGen != 0 && generation != m.activeLoadGen {
+		return nil
+	}
 	m.loading = false
+	m.activeLoadGen = 0
+	if generation != 0 && generation < m.loadGeneration {
+		// A newer freshness obligation arrived while this serialized read was in
+		// flight. Never flash the older board; immediately spend the single
+		// successor slot on the newest requested generation.
+		m.reloadPending = false
+		return m.startBoardLoadGeneration(m.loadGeneration)
+	}
 	m.loadErr = msg.err
 	var detailCmd tea.Cmd
 	if msg.err == nil {
 		m.haveBoardSnapshot = true
 		previous := m.filteredBoard()
 		m.board = msg.board
+		if m.current != nil {
+			prepared, delta := m.current.projection.reconcileSource(*m)
+			m.preparedProjection = &prepared
+			m.preparedDerivations = delta.DerivedTasks
+			m.preparedComparisons = len(m.board.Tasks)
+		}
 		filtered := m.filteredBoard()
 		m.boardView.adoptBoard(previous, filtered)
 		if m.selectAfterLoad != "" {
@@ -1071,11 +1128,15 @@ func (m *Model) finishBoardLoad(msg boardLoadedMsg) tea.Cmd {
 		}
 		detailCmd = batchCommands(m.reconcileDetail(), m.reconcileEditor())
 	}
-	if !m.reloadPending {
-		return detailCmd
+	if m.reloadPending {
+		m.reloadPending = false
+		return batchCommands(detailCmd, m.startBoardLoadGeneration(m.loadGeneration))
 	}
-	m.reloadPending = false
-	return batchCommands(detailCmd, m.startBoardLoad())
+	if m.watcher != nil && !m.pollStarted {
+		m.pollStarted = true
+		return batchCommands(detailCmd, m.schedulePoll())
+	}
+	return detailCmd
 }
 
 func (m *Model) reconcileEditor() tea.Cmd {
@@ -1104,19 +1165,39 @@ func (m *Model) reconcileDetail() tea.Cmd {
 // active load already satisfies that obligation, so it does not queue another.
 func (m *Model) startBoardLoad() tea.Cmd {
 	if m.writeBusy() {
+		m.loadGeneration++
 		m.reloadPending = true
 		return nil
 	}
 	if m.loading {
 		return nil
 	}
+	m.loadGeneration++
+	return m.startBoardLoadGeneration(m.loadGeneration)
+}
+
+func (m *Model) startBoardLoadGeneration(generation uint64) tea.Cmd {
+	if generation == 0 {
+		m.loadGeneration++
+		generation = m.loadGeneration
+	}
+	if m.writeBusy() {
+		m.reloadPending = true
+		return nil
+	}
+	if m.loading {
+		m.reloadPending = true
+		return nil
+	}
 	m.loading = true
-	return m.loadBoard()
+	m.activeLoadGen = generation
+	return m.loadBoard(generation)
 }
 
 // requireFreshBoard records a new baseline/change obligation while a load is
 // active. Multiple obligations coalesce into one serialized successor.
 func (m *Model) requireFreshBoard() tea.Cmd {
+	m.loadGeneration++
 	if m.writeBusy() {
 		m.reloadPending = true
 		return nil
@@ -1128,7 +1209,7 @@ func (m *Model) requireFreshBoard() tea.Cmd {
 		m.reloadPending = true
 		return nil
 	}
-	return m.startBoardLoad()
+	return m.startBoardLoadGeneration(m.loadGeneration)
 }
 
 func (m Model) writeBusy() bool { return m.move.saving || m.action.busy }
@@ -1436,10 +1517,10 @@ func (m Model) taskByID(id string) (board.Task, bool) {
 	return board.Task{}, false
 }
 
-func (m Model) loadBoard() tea.Cmd {
+func (m Model) loadBoard(generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		loaded, err := m.store.Board(m.user)
-		return boardLoadedMsg{board: loaded, err: err}
+		return boardLoadedMsg{board: loaded, err: err, generation: generation}
 	}
 }
 

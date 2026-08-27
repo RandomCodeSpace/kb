@@ -97,6 +97,54 @@ func TestProductionUpdatePublishesAcceptedMessageSnapshot(t *testing.T) {
 	}
 }
 
+func TestSemanticNoOpUpdatesDoNotPublishFrames(t *testing.T) {
+	fixture := board.Board{Title: "Board", Tasks: []board.Task{{
+		ID: "one", Title: "One", Status: board.StatusTodo,
+	}}}
+	model := NewModel(stubBoardReader{board: fixture}, stubVersionReader{version: 7}, "alice")
+	updated, _ := model.Update(boardLoadedMsg{board: fixture})
+	model = updated.(Model)
+	model.haveVersion = true
+	model.dataVersion = 7
+	model.rebuildRenderPlan(renderImpactAll)
+
+	for _, message := range []tea.Msg{
+		tea.WindowSizeMsg{Width: model.width, Height: model.height},
+		pollTickMsg{},
+		dataVersionMsg{version: 7},
+	} {
+		before := model.RenderPlanStats()
+		updated, command := model.Update(message)
+		model = updated.(Model)
+		after := model.RenderPlanStats()
+		if after.AcceptedMessageID != before.AcceptedMessageID+1 {
+			t.Fatalf("%T accepted message id = %d, want %d", message, after.AcceptedMessageID, before.AcceptedMessageID+1)
+		}
+		if after.PublishedFrames != before.PublishedFrames || after.InstalledSnapshotID != before.InstalledSnapshotID {
+			t.Fatalf("%T published a semantic no-op: before=%+v after=%+v", message, before, after)
+		}
+		if command == nil && (message == (pollTickMsg{}) || message == (dataVersionMsg{version: 7})) {
+			t.Fatalf("%T dropped its follow-up command", message)
+		}
+	}
+}
+
+func TestUnknownMessagesRemainConservative(t *testing.T) {
+	type unknownMessage struct{}
+	model := NewModel(stubBoardReader{}, nil, "alice")
+	before := model.RenderPlanStats()
+	updated, _ := model.Update(unknownMessage{})
+	after := updated.(Model).RenderPlanStats()
+	if after.PublishedFrames != before.PublishedFrames+1 {
+		t.Fatalf("unknown message frames = %d, want %d", after.PublishedFrames, before.PublishedFrames+1)
+	}
+	want := before.Revisions
+	want.advance(renderImpactAll)
+	if after.Revisions != want {
+		t.Fatalf("unknown message revisions = %+v, want %+v", after.Revisions, want)
+	}
+}
+
 func TestUpdateImpactsRemainConservative(t *testing.T) {
 	fixture := board.Board{Title: "Board", Tasks: []board.Task{{
 		ID: "one", Title: "One", Status: board.StatusTodo,

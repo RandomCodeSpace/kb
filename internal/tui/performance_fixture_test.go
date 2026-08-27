@@ -101,17 +101,35 @@ func performanceModel(taskCount int, filter string, width, height int) Model {
 	model.renderedAt = now
 	updated, command := model.Update(boardLoadedMsg{board: fixture})
 	model = updated.(Model)
+	var filterGeometry tea.Cmd
 	if filter != "" {
-		model.filter.input.SetValue(filter)
+		model, filterGeometry = applyPerformanceFilter(model, filter)
 	}
 	updated, resizeCommand := model.Update(tea.WindowSizeMsg{Width: width, Height: height})
 	model = updated.(Model)
-	command = batchCommands(command, resizeCommand)
+	command = batchCommands(command, filterGeometry, resizeCommand)
 	for command != nil {
 		updated, command = model.Update(command())
 		model = updated.(Model)
 	}
 	return model
+}
+
+// applyPerformanceFilter drives the same mutation and publication seam as a
+// user typing in the filter. Cosmetic cursor commands are deliberately omitted
+// from the fixture; geometry remains part of the deterministic settlement.
+func applyPerformanceFilter(model Model, filter string) (Model, tea.Cmd) {
+	var geometry tea.Cmd
+	for _, message := range []tea.KeyPressMsg{
+		{Code: '/', Text: "/"},
+		{Code: []rune(filter)[0], Text: filter},
+		{Code: tea.KeyEnter},
+	} {
+		next, commands := model.updateWithCommands(message)
+		model = next
+		geometry = batchCommands(geometry, commands.geometry)
+	}
+	return model, geometry
 }
 
 func seedPerformanceStore(t testing.TB, count int) (string, []byte) {

@@ -525,7 +525,7 @@ func TestViewIsByteStableAcrossMovingWallClock(t *testing.T) {
 	}
 }
 
-func TestPollTickRefreshesRenderTimeAtRolloverBoundary(t *testing.T) {
+func TestPollTickDefersRolloverUntilAMeaningfulFrame(t *testing.T) {
 	before := time.Date(2026, 8, 18, 23, 59, 59, 0, time.UTC)
 	after := before.Add(time.Second)
 	m := newTestRootModel(stubBoardReader{}, stubVersionReader{}, "alice")
@@ -554,6 +554,10 @@ func TestPollTickRefreshesRenderTimeAtRolloverBoundary(t *testing.T) {
 	if !m.renderedAt.Equal(after) {
 		t.Fatalf("poll timestamp = %s, want %s", m.renderedAt, after)
 	}
+	if got := plain(m.View().Content); got != initial {
+		t.Fatalf("unchanged poll published a rollover frame:\n%s", got)
+	}
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: m.width + 1, Height: m.height})
 
 	rolled := plain(m.View().Content)
 	// The age is the bare elapsed count and the passed deadline is the "!"

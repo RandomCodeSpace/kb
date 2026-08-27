@@ -127,6 +127,46 @@ func TestSameContentReloadRebindsProjectionSourceForOrdinaryInput(t *testing.T) 
 	}
 }
 
+func TestRenderProjectionReconcilesSourceByTaskIdentity(t *testing.T) {
+	model := performanceModel(1000, "keep17", performanceWidth, performanceHeight)
+	current := model.current.projection
+	unchangedTags := unsafe.SliceData(current.tasks[0].task.Tags)
+
+	nextBoard := cloneBoard(model.board)
+	nextBoard.Tasks = append(nextBoard.Tasks, board.Task{
+		ID: "nonmatching", Title: "ordinary external insert", Desc: "outside active query",
+		Status: board.StatusTodo, Tags: []string{"performance", "dev"},
+	})
+	model.board = nextBoard
+	reconciled, delta := current.reconcileSource(model)
+	if !delta.SourceChanged || !delta.CurrentChanged || delta.DerivedTasks != 1 {
+		t.Fatalf("nonmatching delta = %+v", delta)
+	}
+	if reconciled.generation != current.generation+1 {
+		t.Fatalf("metadata-changing projection generation = %d, want %d", reconciled.generation, current.generation+1)
+	}
+	if unsafe.SliceData(reconciled.tasks[0].task.Tags) != unchangedTags {
+		t.Fatal("unchanged task derivation was rebuilt")
+	}
+	if !reconciled.matchesSourceIdentity(nextBoard) || len(reconciled.tasks) != len(nextBoard.Tasks) {
+		t.Fatalf("reconciled source identity/tasks = %t/%d", reconciled.matchesSourceIdentity(nextBoard), len(reconciled.tasks))
+	}
+
+	changedBoard := cloneBoard(nextBoard)
+	changedBoard.Tasks[0].Title = "keep17 externally changed"
+	model.board = changedBoard
+	changed, delta := reconciled.reconcileSource(model)
+	if !delta.SourceChanged || !delta.CurrentChanged || delta.DerivedTasks != 1 {
+		t.Fatalf("matching delta = %+v", delta)
+	}
+	if changed.generation != reconciled.generation+1 {
+		t.Fatalf("matching projection generation = %d, want %d", changed.generation, reconciled.generation+1)
+	}
+	if got, ok := changed.taskByID(changedBoard.Tasks[0].ID); !ok || got.Title != "keep17 externally changed" {
+		t.Fatalf("matching changed task = %+v, %t", got, ok)
+	}
+}
+
 func TestProjectionCachesSelectedInclusiveToolbarLabels(t *testing.T) {
 	model := Model{board: projectionFixture(), filter: newBoardFilterState(), projects: projectSwitcher{all: true}}
 	model.filter.restore(boardFilter{Tags: []string{"missing-but-selected"}})
