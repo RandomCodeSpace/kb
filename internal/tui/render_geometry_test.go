@@ -2,6 +2,7 @@ package tui
 
 import (
 	"math/bits"
+	"slices"
 	"testing"
 	"time"
 
@@ -373,6 +374,126 @@ func TestCardArtifactRetentionPrunesDisjointWindows(t *testing.T) {
 		if _, retained := last[id]; retained {
 			t.Fatalf("disjoint window retained stale artifact %q", id)
 		}
+	}
+}
+
+func TestMatchingRefreshReusesStableTaskArtifactsWithFreshTopology(t *testing.T) {
+	model := performanceModel(120, "keep17", performanceWidth, performanceHeight)
+	previous := model.View()
+	before := model.RenderPlanStats()
+	nextBoard := appendPerformanceTasks(model.board, 1, true)
+
+	updated, _ := model.Update(boardLoadedMsg{board: nextBoard})
+	model = updated.(Model)
+	after := model.RenderPlanStats()
+
+	hits := after.NavigationArtifactHits - before.NavigationArtifactHits
+	misses := after.NavigationArtifactMisses - before.NavigationArtifactMisses
+	if hits == 0 || after.NavigationArtifactFallbacks != before.NavigationArtifactFallbacks ||
+		after.RenderedCardRecords-before.RenderedCardRecords != misses {
+		t.Fatalf("matching refresh artifacts hits=%d misses=%d fallbacks=%d rendered=%d",
+			hits, misses, after.NavigationArtifactFallbacks-before.NavigationArtifactFallbacks,
+			after.RenderedCardRecords-before.RenderedCardRecords)
+	}
+	assertArtifactColdSurfaceParity(t, model)
+	if previous.OnMouse == nil || model.View().OnMouse == nil {
+		t.Fatal("matching refresh did not retain fresh pointer surfaces")
+	}
+	raw := tea.MouseMotionMsg{X: 0, Y: 0, Button: tea.MouseNone}
+	if command := previous.OnMouse(raw); command != nil {
+		t.Fatal("previous refresh route escaped its mailbox")
+	}
+	_, oldRoute, oldResult := model.pointerMailbox.take(raw)
+	if oldResult != pointerMailboxMatched || oldRoute.snapshot == after.InstalledSnapshotID {
+		t.Fatalf("previous refresh route=%+v result=%v current=%d", oldRoute, oldResult, after.InstalledSnapshotID)
+	}
+	if command := model.View().OnMouse(raw); command != nil {
+		t.Fatal("current refresh route escaped its mailbox")
+	}
+	_, currentRoute, currentResult := model.pointerMailbox.take(raw)
+	if currentResult != pointerMailboxMatched || currentRoute.snapshot != after.InstalledSnapshotID ||
+		currentRoute.snapshot == oldRoute.snapshot {
+		t.Fatalf("current refresh route=%+v previous=%+v result=%v", currentRoute, oldRoute, currentResult)
+	}
+}
+
+func TestChangedRefreshTaskMissesStableArtifactIdentity(t *testing.T) {
+	model := performanceModel(120, "keep17", performanceWidth, performanceHeight)
+	changedBoard := cloneBoard(model.board)
+	visible := model.current.projection.board.Tasks[0]
+	sourceIndex := model.current.projection.sourceIndexes[visible.ID]
+	changedBoard.Tasks[sourceIndex].Title += " externally changed"
+	beforeRevision, _ := model.current.projection.taskRenderRevision(visible.ID)
+	before := model.RenderPlanStats()
+
+	updated, _ := model.Update(boardLoadedMsg{board: changedBoard})
+	model = updated.(Model)
+	after := model.RenderPlanStats()
+	afterRevision, ok := model.current.projection.taskRenderRevision(visible.ID)
+	if !ok || afterRevision <= beforeRevision {
+		t.Fatalf("changed task revision=%d, %t; before=%d", afterRevision, ok, beforeRevision)
+	}
+	if misses := after.NavigationArtifactMisses - before.NavigationArtifactMisses; misses == 0 ||
+		after.RenderedCardRecords-before.RenderedCardRecords != misses {
+		t.Fatalf("changed refresh misses=%d rendered=%d", misses,
+			after.RenderedCardRecords-before.RenderedCardRecords)
+	}
+	if after.NavigationArtifactFallbacks != before.NavigationArtifactFallbacks {
+		t.Fatal("changed refresh used an artifact fallback")
+	}
+	assertArtifactColdSurfaceParity(t, model)
+}
+
+func TestCompactRefreshInsertAndReorderUseActualAlternateIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(board.Board) board.Board
+	}{
+		{name: "insert", mutate: func(current board.Board) board.Board {
+			next := cloneBoard(current)
+			inserted := board.Task{ID: "compact-insert", Title: "compact insert", Status: board.StatusTodo}
+			next.Tasks = append([]board.Task{inserted}, next.Tasks...)
+			return next
+		}},
+		{name: "reorder", mutate: func(current board.Board) board.Board {
+			next := cloneBoard(current)
+			next.Tasks[0], next.Tasks[1] = next.Tasks[1], next.Tasks[0]
+			return next
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := performanceModel(120, "", 80, 16)
+			column := model.current.geometry.columns[statusIndexExact(board.StatusTodo)]
+			if !column.density.Compact() {
+				t.Fatal("compact artifact fixture selected a non-compact density")
+			}
+			before := model.RenderPlanStats()
+			updated, _ := model.Update(boardLoadedMsg{board: test.mutate(model.board)})
+			model = updated.(Model)
+			after := model.RenderPlanStats()
+			if after.NavigationArtifactFallbacks != before.NavigationArtifactFallbacks {
+				t.Fatal("compact refresh fell back instead of comparing exact alternate identity")
+			}
+			if after.NavigationArtifactMisses == before.NavigationArtifactMisses {
+				t.Fatal("compact insert/reorder reused cards whose alternate bit changed")
+			}
+			assertArtifactColdSurfaceParity(t, model)
+		})
+	}
+}
+
+func assertArtifactColdSurfaceParity(t *testing.T, model Model) {
+	t.Helper()
+	cold := model.renderColdSnapshot()
+	retained := model.current
+	if retained.view.Content != cold.view.Content || retained.view.AltScreen != cold.view.AltScreen ||
+		retained.view.MouseMode != cold.view.MouseMode {
+		t.Fatal("retained artifact content or terminal modes differ from cold oracle")
+	}
+	if retained.semantics.handler != cold.semantics.handler ||
+		!retained.semantics.topology.SameControls(cold.semantics.topology) ||
+		!slices.Equal(retained.semantics.hits, cold.semantics.hits) {
+		t.Fatal("retained artifact hits or pointer topology differ from cold oracle")
 	}
 }
 

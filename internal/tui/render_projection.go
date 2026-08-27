@@ -23,8 +23,9 @@ type taskSearchIndex struct {
 // canonical immutable values, while nested slices are copied so a store or a
 // test cannot mutate a published plan through an aliased backing array.
 type taskDerivation struct {
-	task   board.Task
-	search taskSearchIndex
+	task           board.Task
+	search         taskSearchIndex
+	renderRevision uint64
 }
 
 type projectionKey struct {
@@ -49,24 +50,25 @@ type projectionDelta struct {
 // project/filter projection. It is not a general cache and retains no prior
 // query results.
 type renderProjection struct {
-	initialized      bool
-	sourceGeneration uint64
-	generation       uint64
-	title            string
-	sourceData       *board.Task
-	sourceLen        int
-	tasks            []taskDerivation
-	key              projectionKey
-	board            board.Board
-	statuses         [len(boardStatuses)][]int
-	summaries        [len(boardStatuses)]projectionStatusSummary
-	ordinals         [len(boardStatuses)]map[string]int
-	taskIndexes      map[string]int
-	sourceIndexes    map[string]int
-	labels           []string
-	toolbarLabels    []string
-	projected        int
-	ownedBytes       uint64
+	initialized        bool
+	sourceGeneration   uint64
+	generation         uint64
+	nextRenderRevision uint64
+	title              string
+	sourceData         *board.Task
+	sourceLen          int
+	tasks              []taskDerivation
+	key                projectionKey
+	board              board.Board
+	statuses           [len(boardStatuses)][]int
+	summaries          [len(boardStatuses)]projectionStatusSummary
+	ordinals           [len(boardStatuses)]map[string]int
+	taskIndexes        map[string]int
+	sourceIndexes      map[string]int
+	labels             []string
+	toolbarLabels      []string
+	projected          int
+	ownedBytes         uint64
 }
 
 func (p renderProjection) rebuild(model Model) (renderProjection, bool, bool) {
@@ -96,7 +98,11 @@ func (p renderProjection) rebuildSource(model Model, checkSource bool) (renderPr
 		p.title = model.board.Title
 		p.sourceData = unsafe.SliceData(model.board.Tasks)
 		p.sourceLen = len(model.board.Tasks)
-		p.tasks = deriveTasks(model.board.Tasks)
+		p.tasks = make([]taskDerivation, len(model.board.Tasks))
+		for index, source := range model.board.Tasks {
+			p.tasks[index] = deriveTask(source)
+			p.tasks[index].renderRevision = p.allocateRenderRevision()
+		}
 		p.sourceIndexes = make(map[string]int, len(model.board.Tasks))
 		for index, task := range model.board.Tasks {
 			p.sourceIndexes[task.ID] = index
@@ -151,6 +157,7 @@ func (p renderProjection) reconcileSource(model Model) (renderProjection, projec
 			continue
 		}
 		tasks[index] = deriveTask(source)
+		tasks[index].renderRevision = p.allocateRenderRevision()
 		delta.SourceChanged = true
 		delta.DerivedTasks++
 	}
@@ -218,14 +225,6 @@ func sameCurrentProjection(
 		reflect.DeepEqual(current.taskIndexes, taskIndexes)
 }
 
-func deriveTasks(tasks []board.Task) []taskDerivation {
-	derived := make([]taskDerivation, len(tasks))
-	for i, source := range tasks {
-		derived[i] = deriveTask(source)
-	}
-	return derived
-}
-
 func deriveTask(source board.Task) taskDerivation {
 	snapshot := source
 	snapshot.Tags = append([]string(nil), source.Tags...)
@@ -242,6 +241,26 @@ func deriveTask(source board.Task) taskDerivation {
 			tags:  tags,
 		},
 	}
+}
+
+// allocateRenderRevision returns a projection-local monotonic identity for one
+// immutable task render snapshot. Exhaustion fails closed: zero revisions are
+// never cacheable, so wrapping cannot make changed content alias old output.
+func (p *renderProjection) allocateRenderRevision() uint64 {
+	if p.nextRenderRevision == ^uint64(0) {
+		return 0
+	}
+	p.nextRenderRevision++
+	return p.nextRenderRevision
+}
+
+func (p renderProjection) taskRenderRevision(taskID string) (uint64, bool) {
+	index, ok := p.sourceIndexes[taskID]
+	if !ok || index < 0 || index >= len(p.tasks) || p.tasks[index].task.ID != taskID {
+		return 0, false
+	}
+	revision := p.tasks[index].renderRevision
+	return revision, revision != 0
 }
 
 func normalizeSearchValue(value string) string { return webLower(value) }

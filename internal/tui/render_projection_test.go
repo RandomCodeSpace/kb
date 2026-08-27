@@ -169,6 +169,94 @@ func TestRenderProjectionReconcilesSourceByTaskIdentity(t *testing.T) {
 	}
 }
 
+func TestRenderProjectionTaskRevisionLifecycle(t *testing.T) {
+	model := performanceModel(17, "", performanceWidth, performanceHeight)
+	projection := model.current.projection
+	original := model.board.Tasks[0]
+	originalRevision, ok := projection.taskRenderRevision(original.ID)
+	if !ok || originalRevision == 0 {
+		t.Fatalf("initial render revision = %d, %t", originalRevision, ok)
+	}
+
+	insertedBoard := cloneBoard(model.board)
+	insertedBoard.Tasks = append(insertedBoard.Tasks, board.Task{
+		ID: "inserted", Title: "Inserted", Status: board.StatusTodo,
+	})
+	model.board = insertedBoard
+	inserted, _ := projection.reconcileSource(model)
+	if revision, ok := inserted.taskRenderRevision(original.ID); !ok || revision != originalRevision {
+		t.Fatalf("unchanged task revision = %d, %t; want %d", revision, ok, originalRevision)
+	}
+	insertedRevision, ok := inserted.taskRenderRevision("inserted")
+	if !ok || insertedRevision <= originalRevision {
+		t.Fatalf("inserted task revision = %d, %t; want newer than %d", insertedRevision, ok, originalRevision)
+	}
+
+	changedBoard := cloneBoard(insertedBoard)
+	changedBoard.Tasks[0].Title += " changed"
+	model.board = changedBoard
+	changed, _ := inserted.reconcileSource(model)
+	changedRevision, ok := changed.taskRenderRevision(original.ID)
+	if !ok || changedRevision <= insertedRevision {
+		t.Fatalf("changed task revision = %d, %t; want newer than %d", changedRevision, ok, insertedRevision)
+	}
+
+	deletedBoard := cloneBoard(changedBoard)
+	deletedBoard.Tasks = deletedBoard.Tasks[1:]
+	model.board = deletedBoard
+	deleted, _ := changed.reconcileSource(model)
+	if revision, ok := deleted.taskRenderRevision(original.ID); ok || revision != 0 {
+		t.Fatalf("deleted task revision = %d, %t; want missing", revision, ok)
+	}
+
+	recreatedBoard := cloneBoard(deletedBoard)
+	recreatedBoard.Tasks = append(recreatedBoard.Tasks, original)
+	model.board = recreatedBoard
+	recreated, _ := deleted.reconcileSource(model)
+	recreatedRevision, ok := recreated.taskRenderRevision(original.ID)
+	if !ok || recreatedRevision <= changedRevision {
+		t.Fatalf("recreated task revision = %d, %t; want newer than %d", recreatedRevision, ok, changedRevision)
+	}
+}
+
+func TestRenderProjectionTaskRevisionFailsClosedAtExhaustion(t *testing.T) {
+	model := Model{board: projectionFixture(), filter: newBoardFilterState(), projects: projectSwitcher{all: true}}
+	projection := renderProjection{nextRenderRevision: ^uint64(0)}
+	projection, _, _ = projection.rebuild(model)
+	for _, task := range model.board.Tasks {
+		if revision, ok := projection.taskRenderRevision(task.ID); ok || revision != 0 {
+			t.Fatalf("exhausted revision for %q = %d, %t; want uncacheable", task.ID, revision, ok)
+		}
+	}
+}
+
+func TestRenderProjectionTaskRevisionSurvivesOutOfScopeFrames(t *testing.T) {
+	model := Model{board: projectionFixture(), filter: newBoardFilterState(), projects: projectSwitcher{all: true}}
+	projection, _, _ := (renderProjection{}).rebuild(model)
+	want, ok := projection.taskRenderRevision("doing-beta")
+	if !ok {
+		t.Fatal("beta task had no initial render revision")
+	}
+
+	model.projects = projectSwitcher{name: "alpha"}
+	alpha, _, _ := projection.rebuildSource(model, true)
+	if _, visible := alpha.taskByID("doing-beta"); visible {
+		t.Fatal("beta task remained visible in alpha scope")
+	}
+	if got, ok := alpha.taskRenderRevision("doing-beta"); !ok || got != want {
+		t.Fatalf("out-of-scope revision = %d, %t; want %d", got, ok, want)
+	}
+
+	model.projects = projectSwitcher{name: "beta"}
+	beta, _, _ := alpha.rebuildSource(model, true)
+	if _, visible := beta.taskByID("doing-beta"); !visible {
+		t.Fatal("beta task did not return in beta scope")
+	}
+	if got, ok := beta.taskRenderRevision("doing-beta"); !ok || got != want {
+		t.Fatalf("later-frame revision = %d, %t; want %d", got, ok, want)
+	}
+}
+
 func TestProjectionCachesSelectedInclusiveToolbarLabels(t *testing.T) {
 	model := Model{board: projectionFixture(), filter: newBoardFilterState(), projects: projectSwitcher{all: true}}
 	model.filter.restore(boardFilter{Tags: []string{"missing-but-selected"}})

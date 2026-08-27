@@ -64,76 +64,81 @@ type pollTickMsg struct{}
 // dimensions, and all message routing; commands perform IO and only return
 // messages, so Update remains deterministic.
 type Model struct {
-	store                     boardReader
-	moveStore                 taskMoveStore
-	actionStore               taskActionStore
-	watcher                   dataVersionReader
-	user                      string
-	dataDir                   string
-	board                     board.Board
-	styles                    *theme.Styles
-	boardView                 boardViewState
-	filter                    boardFilterState
-	projects                  projectSwitcher
-	activeProject             string
-	detail                    carddetail.Model
-	editor                    cardeditor.Model
-	adr                       adrsplit.Model
-	issueImport               issueimport.Model
-	palette                   cmdpalette.Model
-	selectAfterLoad           string
-	width                     int
-	height                    int
-	loading                   bool
-	haveBoardSnapshot         bool
-	reloadPending             bool
-	loadErr                   error
-	pollErr                   error
-	dataVersion               int64
-	haveVersion               bool
-	pollStarted               bool
-	loadGeneration            uint64
-	activeLoadGen             uint64
-	stopped                   bool
-	helpOpen                  bool
-	isDark                    bool
-	profile                   colorprofile.Profile
-	readContext               context.Context
-	now                       func() time.Time
-	renderedAt                time.Time
-	temporalSchedule          temporalScheduler
-	temporalGeneration        uint64
-	temporalVisualGeneration  uint64
-	temporalDeadline          time.Time
-	temporalScheduleInput     temporalScheduleInput
-	haveTemporalScheduleInput bool
-	savePreferences           func(tuiPreferences) error
-	preferenceErr             error
-	prefSaving                bool
-	prefPending               *tuiPreferences
-	settings                  *settingsModel
-	settingsNew               func() *settingsModel
-	move                      cardMoveState
-	action                    taskActionState
-	taskActionSession         uint64
-	pointerState              pointer.State
-	clicks                    pointer.Clicks
-	spin                      spinner.Model
-	scroll                    boardScrollState
-	celebrate                 shipCelebration
-	celebrateGen              uint64
-	grace                     graceState
-	actionStatus              string
-	actionStatusError         bool
-	actionNotice              bool
-	noticeSeq                 uint64
-	shipped                   shippedRecord
-	inputAdmission            *inputAdmissionStats
-	pointerMailbox            *pointerMailbox
-	pointerOwner              renderHandlerTopology
-	pointerOwnerEpoch         uint64
-	pointerOwnerSeq           uint64
-	pointerAdmission          pointerAdmissionState
+	store                       boardReader
+	moveStore                   taskMoveStore
+	actionStore                 taskActionStore
+	watcher                     dataVersionReader
+	user                        string
+	dataDir                     string
+	board                       board.Board
+	styles                      *theme.Styles
+	boardView                   boardViewState
+	filter                      boardFilterState
+	projects                    projectSwitcher
+	activeProject               string
+	detail                      carddetail.Model
+	editor                      cardeditor.Model
+	adr                         adrsplit.Model
+	issueImport                 issueimport.Model
+	palette                     cmdpalette.Model
+	selectAfterLoad             string
+	width                       int
+	height                      int
+	loading                     bool
+	haveBoardSnapshot           bool
+	reloadPending               bool
+	loadErr                     error
+	pollErr                     error
+	dataVersion                 int64
+	haveVersion                 bool
+	pollStarted                 bool
+	loadGeneration              uint64
+	activeLoadGen               uint64
+	watcherPollFastPaths        uint64
+	watcherVersionFastPaths     uint64
+	watcherStaleLoadFastPaths   uint64
+	watcherLifecycleFallbacks   uint64
+	renderImpactClassifications uint64
+	stopped                     bool
+	helpOpen                    bool
+	isDark                      bool
+	profile                     colorprofile.Profile
+	readContext                 context.Context
+	now                         func() time.Time
+	renderedAt                  time.Time
+	temporalSchedule            temporalScheduler
+	temporalGeneration          uint64
+	temporalVisualGeneration    uint64
+	temporalDeadline            time.Time
+	temporalScheduleInput       temporalScheduleInput
+	haveTemporalScheduleInput   bool
+	savePreferences             func(tuiPreferences) error
+	preferenceErr               error
+	prefSaving                  bool
+	prefPending                 *tuiPreferences
+	settings                    *settingsModel
+	settingsNew                 func() *settingsModel
+	move                        cardMoveState
+	action                      taskActionState
+	taskActionSession           uint64
+	pointerState                pointer.State
+	clicks                      pointer.Clicks
+	spin                        spinner.Model
+	scroll                      boardScrollState
+	celebrate                   shipCelebration
+	celebrateGen                uint64
+	grace                       graceState
+	actionStatus                string
+	actionStatusError           bool
+	actionNotice                bool
+	noticeSeq                   uint64
+	shipped                     shippedRecord
+	inputAdmission              *inputAdmissionStats
+	pointerMailbox              *pointerMailbox
+	pointerOwner                renderHandlerTopology
+	pointerOwnerEpoch           uint64
+	pointerOwnerSeq             uint64
+	pointerAdmission            pointerAdmissionState
 
 	// The brand mark of spec section 10.6. The stretch and the reveal seed are
 	// rolled once in newModel and are plain fields, so a test pins them by
@@ -335,6 +340,9 @@ func (m Model) updateWithCommands(message tea.Msg) (Model, modelUpdateCommands) 
 	// counters separate lets the performance harness observe coalesced, delayed,
 	// and stale publications once those later phases become asynchronous.
 	m.acceptedMessageID++
+	if commands, handled := m.fastWatcherLifecycle(message); handled {
+		return m, commands
+	}
 	checkSource := m.current == nil || !m.current.projection.matchesSourceIdentity(m.board)
 	if batch, ok := message.(geometryBatchMsg); ok {
 		next := m.installGeometryBatch(batch)
@@ -346,6 +354,7 @@ func (m Model) updateWithCommands(message tea.Msg) (Model, modelUpdateCommands) 
 	beforeBoard := m.board
 	next, command := m.update(message)
 	next.acceptedMessageID = m.acceptedMessageID
+	next.renderImpactClassifications++
 	impact := renderImpactAfterUpdate(message, m, next)
 	if impact != 0 {
 		next.rebuildRenderPlanAfterUpdate(impact, checkSource || !sameBoardSourceIdentity(beforeBoard, next.board))
@@ -364,6 +373,75 @@ func (m Model) updateWithCommands(message tea.Msg) (Model, modelUpdateCommands) 
 		geometry: next.startGeometryWorker(),
 		temporal: next.reconcileTemporalSchedule(),
 	}
+}
+
+// fastWatcherLifecycle handles settled watcher messages before the generic
+// root router and render-impact classifier. Only strictly stale board-load
+// results enter this seam; any result that can install source state stays generic.
+func (m *Model) fastWatcherLifecycle(message tea.Msg) (modelUpdateCommands, bool) {
+	settledPlainBoard := m.settledWatcherPlainBoard(false)
+	switch msg := message.(type) {
+	case pollTickMsg:
+		if !settledPlainBoard || m.watcher == nil {
+			m.watcherLifecycleFallbacks++
+			return modelUpdateCommands{}, false
+		}
+		m.watcherPollFastPaths++
+		return modelUpdateCommands{
+			followUp: m.readDataVersion(),
+			geometry: m.startGeometryWorker(),
+			temporal: m.reconcileTemporalSchedule(),
+		}, true
+	case dataVersionMsg:
+		if !settledPlainBoard || msg.err != nil || m.watcher == nil || !m.pollStarted ||
+			!m.haveVersion || !m.haveBoardSnapshot || m.loadErr != nil || m.pollErr != nil ||
+			m.move.saving || m.action.busy || m.move.lifted != nil {
+			m.watcherLifecycleFallbacks++
+			return modelUpdateCommands{}, false
+		}
+		m.watcherVersionFastPaths++
+		followUp := m.observeDataVersion(msg)
+		return modelUpdateCommands{
+			followUp: followUp,
+			geometry: m.startGeometryWorker(),
+			temporal: m.reconcileTemporalSchedule(),
+		}, true
+	case boardLoadedMsg:
+		// Only a generation proven older than the newest requested load belongs
+		// to this lifecycle seam. Current results still take the generic path and
+		// remain the sole place that can install board data.
+		if msg.generation == 0 || msg.generation >= m.loadGeneration {
+			return modelUpdateCommands{}, false
+		}
+		settledStaleLoad := m.settledWatcherPlainBoard(true)
+		if !settledStaleLoad || !m.loading || m.activeLoadGen == 0 || msg.generation != m.activeLoadGen {
+			m.watcherLifecycleFallbacks++
+			return modelUpdateCommands{}, false
+		}
+		m.watcherStaleLoadFastPaths++
+		followUp := m.finishBoardLoad(msg)
+		m.adoptPreparedProjectionWithoutFrame()
+		m.publishKeyboardAdmissionSnapshot()
+		return modelUpdateCommands{
+			followUp: followUp,
+			geometry: m.startGeometryWorker(),
+			temporal: m.reconcileTemporalSchedule(),
+		}, true
+	default:
+		return modelUpdateCommands{}, false
+	}
+}
+
+// settledWatcherPlainBoard is pointer-local because this predicate sits on a
+// repeated lifecycle hot path. Calling the root's value-receiver overlay and
+// launch helpers here would copy the entire Model for every watcher message.
+func (m *Model) settledWatcherPlainBoard(allowLaunch bool) bool {
+	if m.stopped || m.current == nil || m.preparedProjection != nil || m.helpOpen ||
+		m.detail.IsOpen() || m.settings != nil || m.adr.IsOpen() || m.editor.IsOpen() ||
+		m.action.open() || m.issueImport.IsOpen() || m.palette.IsOpen() {
+		return false
+	}
+	return allowLaunch || !m.loading || m.haveBoardSnapshot
 }
 
 func (m Model) updateRawPointer(raw tea.MouseMsg) (Model, modelUpdateCommands) {
@@ -417,6 +495,7 @@ func (m Model) applyResolvedPointer(message tea.Msg, publish bool) (Model, model
 	checkSource := m.current == nil || !m.current.projection.matchesSourceIdentity(beforeBoard) ||
 		!sameBoardSourceIdentity(beforeBoard, m.board)
 	if publish {
+		m.renderImpactClassifications++
 		m.rebuildRenderPlanAfterUpdate(renderImpactAfterUpdate(message, before, m), checkSource)
 	}
 	if m.stopped {

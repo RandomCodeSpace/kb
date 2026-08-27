@@ -17,43 +17,39 @@ type cardRenderArtifact struct {
 	spans [][]labelSpan
 }
 
-// cardArtifactKey names every input that can change card output. Generations
-// bind the task identity and content; the remaining fields make layout,
+// cardArtifactKey names every input that can change card output. The stable
+// task revision binds identity and content; the remaining fields make layout,
 // appearance, temporal, selection, and per-card pointer feedback explicit.
 type cardArtifactKey struct {
-	projectionGeneration uint64
-	sourceGeneration     uint64
-	temporalGeneration   uint64
-	taskID               string
-	status               board.Status
-	projectionIndex      int
-	ordinal              int
-	bodyWidth            int
-	columnWidth          int
-	panelHeight          int
-	contentHeight        int
-	frameHeight          int
-	metaDepth            int
-	density              theme.Density
-	styles               *theme.Styles
-	renderedAt           time.Time
-	selected             bool
-	railed               bool
-	cardHovered          bool
-	hoveredTag           string
-	pressedTag           string
+	renderRevision     uint64
+	temporalGeneration uint64
+	taskID             string
+	status             board.Status
+	bodyWidth          int
+	columnWidth        int
+	panelHeight        int
+	contentHeight      int
+	frameHeight        int
+	metaDepth          int
+	density            theme.Density
+	styles             *theme.Styles
+	renderedAt         time.Time
+	selected           bool
+	alternate          bool
+	railed             bool
+	cardHovered        bool
+	hoveredTag         string
+	pressedTag         string
 }
 
 type cardArtifactDomain struct {
-	projectionGeneration uint64
-	sourceGeneration     uint64
-	temporalGeneration   uint64
-	styles               *theme.Styles
-	renderedAt           time.Time
-	width                int
-	height               int
-	selectionColumn      int
-	showCancelled        bool
+	temporalGeneration uint64
+	styles             *theme.Styles
+	renderedAt         time.Time
+	width              int
+	height             int
+	selectionColumn    int
+	showCancelled      bool
 }
 
 type retainedCardArtifacts struct {
@@ -155,17 +151,15 @@ func cardArtifactsOwnedBytesEstimate(records map[cardArtifactKey]cardRenderArtif
 	return estimate
 }
 
-func (m Model) cardArtifactDomain(projection *renderProjection) cardArtifactDomain {
+func (m Model) cardArtifactDomain(_ *renderProjection) cardArtifactDomain {
 	return cardArtifactDomain{
-		projectionGeneration: projection.generation,
-		sourceGeneration:     projection.sourceGeneration,
-		temporalGeneration:   m.temporalVisualGeneration,
-		styles:               m.themeStyles(),
-		renderedAt:           m.renderedAt,
-		width:                m.width,
-		height:               m.height,
-		selectionColumn:      m.boardView.column,
-		showCancelled:        m.boardView.showCancelled,
+		temporalGeneration: m.temporalVisualGeneration,
+		styles:             m.themeStyles(),
+		renderedAt:         m.renderedAt,
+		width:              m.width,
+		height:             m.height,
+		selectionColumn:    m.boardView.column,
+		showCancelled:      m.boardView.showCancelled,
 	}
 }
 
@@ -173,9 +167,13 @@ func (m Model) cardArtifactKey(
 	projection *renderProjection,
 	column columnLayoutGeometry,
 	ordinal int,
-) cardArtifactKey {
+) (cardArtifactKey, bool) {
 	record := column.index.recordAt(ordinal)
 	task := projection.board.Tasks[record.projectionIndex]
+	revision, cacheable := projection.taskRenderRevision(task.ID)
+	if !cacheable {
+		return cardArtifactKey{}, false
+	}
 	selected := m.boardView.column == statusIndex(column.status) &&
 		m.boardView.rows[statusIndex(column.status)] == ordinal
 	ordered := project.Lead(task.Tags)
@@ -188,26 +186,24 @@ func (m Model) cardArtifactKey(
 		}
 	}
 	return cardArtifactKey{
-		projectionGeneration: projection.generation,
-		sourceGeneration:     projection.sourceGeneration,
-		temporalGeneration:   m.temporalVisualGeneration,
-		taskID:               task.ID,
-		status:               column.status,
-		projectionIndex:      record.projectionIndex,
-		ordinal:              ordinal,
-		bodyWidth:            column.bodyWidth,
-		columnWidth:          column.width,
-		panelHeight:          column.panelHeight,
-		contentHeight:        column.contentHeight,
-		frameHeight:          max(m.height, 8),
-		metaDepth:            column.metaDepth,
-		density:              column.density,
-		styles:               m.themeStyles(),
-		renderedAt:           m.renderedAt,
-		selected:             selected,
-		railed:               column.railed,
-		cardHovered:          m.pointerState.IsHovered(boardCardControlID(task.ID)),
-		hoveredTag:           hoveredTag,
-		pressedTag:           pressedTag,
-	}
+		renderRevision:     revision,
+		temporalGeneration: m.temporalVisualGeneration,
+		taskID:             task.ID,
+		status:             column.status,
+		bodyWidth:          column.bodyWidth,
+		columnWidth:        column.width,
+		panelHeight:        column.panelHeight,
+		contentHeight:      column.contentHeight,
+		frameHeight:        max(m.height, 8),
+		metaDepth:          column.metaDepth,
+		density:            column.density,
+		styles:             m.themeStyles(),
+		renderedAt:         m.renderedAt,
+		selected:           selected,
+		alternate:          column.density.Compact() && ordinal%2 == 1,
+		railed:             column.railed,
+		cardHovered:        m.pointerState.IsHovered(boardCardControlID(task.ID)),
+		hoveredTag:         hoveredTag,
+		pressedTag:         pressedTag,
+	}, true
 }

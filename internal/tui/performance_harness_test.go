@@ -67,6 +67,7 @@ type performanceScenarioResult struct {
 	Warmups                        int                           `json:"warmups"`
 	Samples                        int                           `json:"samples"`
 	Latency                        performanceDistribution       `json:"latency"`
+	ConvergenceLatency             performanceDistribution       `json:"convergence_latency"`
 	AllocationsPerOp               float64                       `json:"allocations_per_op"`
 	AllocatedBytesPerOp            float64                       `json:"allocated_bytes_per_op"`
 	PublicationAllocatedBytesMax   uint64                        `json:"publication_allocated_bytes_max"`
@@ -74,6 +75,7 @@ type performanceScenarioResult struct {
 	AcceptedMessages               uint64                        `json:"accepted_messages"`
 	PublishedFrames                uint64                        `json:"published_frames"`
 	DiscardedEvents                uint64                        `json:"discarded_events"`
+	StaleBoardLoads                uint64                        `json:"stale_board_loads"`
 	StaleWorkerResults             uint64                        `json:"stale_worker_results"`
 	NormalBaseBuilds               uint64                        `json:"normal_base_builds"`
 	DimmedBaseBuilds               uint64                        `json:"dimmed_base_builds"`
@@ -87,6 +89,11 @@ type performanceScenarioResult struct {
 	NavigationArtifactMisses       uint64                        `json:"navigation_artifact_misses"`
 	NavigationArtifactPublications uint64                        `json:"navigation_artifact_publications"`
 	NavigationArtifactFallbacks    uint64                        `json:"navigation_artifact_fallbacks"`
+	WatcherPollFastPaths           uint64                        `json:"watcher_poll_fast_paths"`
+	WatcherVersionFastPaths        uint64                        `json:"watcher_version_fast_paths"`
+	WatcherStaleLoadFastPaths      uint64                        `json:"watcher_stale_load_fast_paths"`
+	WatcherLifecycleFallbacks      uint64                        `json:"watcher_lifecycle_fallbacks"`
+	RenderImpactClassifications    uint64                        `json:"render_impact_classifications"`
 	SynchronousLayoutRecords       uint64                        `json:"synchronous_layout_records"`
 	TemporalScheduledTicks         uint64                        `json:"temporal_scheduled_ticks"`
 	TemporalStaleTicks             uint64                        `json:"temporal_stale_ticks"`
@@ -110,7 +117,9 @@ type performancePublicationStamp struct {
 	InstalledSnapshotID   uint64 `json:"installed_snapshot_id"`
 	InstalledForMessageID uint64 `json:"installed_for_message_id"`
 	Discarded             bool   `json:"discarded"`
+	StaleBoardLoad        bool   `json:"stale_board_load"`
 	followUp              tea.Cmd
+	pollFollowUp          tea.Cmd
 	geometry              tea.Cmd
 	temporal              tea.Cmd
 }
@@ -132,6 +141,10 @@ type performanceExternalGateState struct {
 type performanceScenario struct {
 	name               string
 	expectedZeroFrames bool
+	deferGeometry      bool
+	// reconciliationOnly marks direct boardLoadedMsg coverage. It exercises
+	// the incremental projection seam, not the watcher admission path.
+	reconciliationOnly bool
 	warmups            int
 	samples            int
 	newModel           func() Model
@@ -188,7 +201,7 @@ func TestPerformanceHarnessRecordsHeldAndBurstPublicationIdentity(t *testing.T) 
 		wantAccepted int
 	}{
 		{name: "held_navigation", wantEvents: 8, wantAccepted: 2},
-		{name: "refresh_25_task_burst", wantEvents: 25, wantAccepted: 25},
+		{name: "refresh_25_task_burst", wantEvents: 27, wantAccepted: 27},
 	} {
 		var scenario *performanceScenario
 		for index := range scenarios {
@@ -214,6 +227,29 @@ func TestPerformanceHarnessRecordsHeldAndBurstPublicationIdentity(t *testing.T) 
 		wantSnapshot := before.InstalledSnapshotID
 		accepted := 0
 		for index, stamp := range stamps {
+			if test.name == "refresh_25_task_burst" {
+				accepted++
+				wantMessage++
+				if !stamp.Accepted || stamp.AcceptedMessageID != wantMessage {
+					t.Fatalf("%s event %d admission identity = %+v, want accepted message %d",
+						test.name, index, stamp, wantMessage)
+				}
+				if index < len(stamps)-1 {
+					if stamp.Published || stamp.InstalledSnapshotID != wantSnapshot || stamp.InstalledForMessageID != before.InstalledForMessageID {
+						t.Fatalf("%s event %d published before newest generation: %+v", test.name, index, stamp)
+					}
+					if index == len(stamps)-2 && (!stamp.StaleBoardLoad || stamp.Discarded) {
+						t.Fatalf("%s stale first load observation = %+v, want generation-stale without admission discard", test.name, stamp)
+					}
+					continue
+				}
+				wantSnapshot++
+				if !stamp.Published || stamp.InstalledSnapshotID != wantSnapshot || stamp.InstalledForMessageID != wantMessage {
+					t.Fatalf("%s newest generation publication = %+v, want snapshot %d for message %d",
+						test.name, stamp, wantSnapshot, wantMessage)
+				}
+				continue
+			}
 			if stamp.Accepted {
 				accepted++
 				wantMessage++
@@ -233,6 +269,123 @@ func TestPerformanceHarnessRecordsHeldAndBurstPublicationIdentity(t *testing.T) 
 		if accepted != test.wantAccepted {
 			t.Fatalf("%s accepted %d events, want %d", test.name, accepted, test.wantAccepted)
 		}
+	}
+}
+
+func TestPerformanceRefreshScenariosEnforcePublicationContracts(t *testing.T) {
+	for _, count := range []int{120, 500, 1000} {
+		t.Run(integerLabel(count), func(t *testing.T) {
+			for _, name := range []string{
+				"refresh_nonmatching_insert", "refresh_nonmatching_total_metadata",
+				"refresh_nonmatching_label_metadata", "refresh_admission_new_issue", "refresh_25_task_burst",
+			} {
+				t.Run(name, func(t *testing.T) {
+					var scenario performanceScenario
+					found := false
+					for _, candidate := range performanceScenarios(count) {
+						if candidate.name == name {
+							scenario, found = candidate, true
+							break
+						}
+					}
+					if !found {
+						t.Fatalf("scenario %q not found", name)
+					}
+					if name != "refresh_admission_new_issue" && name != "refresh_25_task_burst" && !scenario.reconciliationOnly {
+						t.Fatalf("direct boardLoaded scenario %q is not marked reconciliation-only", name)
+					}
+					scenario.warmups, scenario.samples = 1, 1
+					result := runPerformanceScenario(t, count, scenario)
+					switch name {
+					case "refresh_nonmatching_insert":
+						if result.AcceptedMessages != 1 || result.PublishedFrames != 0 || result.ProjectionBuilds != 0 ||
+							result.SourceTaskComparisons != uint64(count+1) {
+							t.Fatalf("source-only refresh = accepted:%d published:%d projection-builds:%d source-comparisons:%d, want 1/0/0/%d",
+								result.AcceptedMessages, result.PublishedFrames, result.ProjectionBuilds,
+								result.SourceTaskComparisons, count+1)
+						}
+					case "refresh_nonmatching_total_metadata", "refresh_nonmatching_label_metadata":
+						if result.AcceptedMessages != 1 || result.PublishedFrames != 1 {
+							t.Fatalf("metadata refresh = accepted:%d published:%d, want 1/1",
+								result.AcceptedMessages, result.PublishedFrames)
+						}
+					case "refresh_admission_new_issue":
+						if result.AcceptedMessages != 5 || result.PublishedFrames != 1 {
+							t.Fatalf("end-to-end refresh = accepted:%d published:%d, want 5/1",
+								result.AcceptedMessages, result.PublishedFrames)
+						}
+						if violation := navigationArtifactAcceptanceViolation(result); violation != "" {
+							t.Fatalf("end-to-end refresh artifact acceptance: %s", violation)
+						}
+						if result.WatcherPollFastPaths != 2 || result.WatcherVersionFastPaths != 2 ||
+							result.WatcherLifecycleFallbacks != 0 || result.RenderImpactClassifications != 1 {
+							t.Fatalf("end-to-end lifecycle = polls:%d versions:%d fallbacks:%d classifications:%d, want 2/2/0/1",
+								result.WatcherPollFastPaths, result.WatcherVersionFastPaths,
+								result.WatcherLifecycleFallbacks, result.RenderImpactClassifications)
+						}
+					case "refresh_25_task_burst":
+						if result.AcceptedMessages != 27 || result.PublishedFrames != 1 || result.DiscardedEvents != 0 || result.StaleBoardLoads != 1 {
+							t.Fatalf("generation burst = accepted:%d published:%d discarded:%d stale-loads:%d, want 27/1/0/1",
+								result.AcceptedMessages, result.PublishedFrames, result.DiscardedEvents, result.StaleBoardLoads)
+						}
+						if violation := navigationArtifactAcceptanceViolation(result); violation != "" {
+							t.Fatalf("generation burst artifact acceptance: %s", violation)
+						}
+						if result.WatcherPollFastPaths != 0 || result.WatcherVersionFastPaths != 25 ||
+							result.WatcherStaleLoadFastPaths != 1 || result.WatcherLifecycleFallbacks != 0 ||
+							result.RenderImpactClassifications != 1 {
+							t.Fatalf("generation burst lifecycle = polls:%d versions:%d stale-loads:%d fallbacks:%d classifications:%d, want 0/25/1/0/1",
+								result.WatcherPollFastPaths, result.WatcherVersionFastPaths,
+								result.WatcherStaleLoadFastPaths, result.WatcherLifecycleFallbacks,
+								result.RenderImpactClassifications)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestPerformanceBurstFirstVisibleExcludesDeferredGeometry(t *testing.T) {
+	var scenario performanceScenario
+	found := false
+	for _, candidate := range performanceScenarios(120) {
+		if candidate.name == "refresh_25_task_burst" {
+			scenario, found = candidate, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("refresh_25_task_burst scenario not found")
+	}
+	scenario.warmups, scenario.samples = 1, 1
+	admit := scenario.admit
+	scenario.admit = func(model *Model, sample int) []performancePublicationStamp {
+		stamps := admit(model, sample)
+		wrapped := false
+		for index := range stamps {
+			if stamps[index].geometry == nil {
+				continue
+			}
+			command := stamps[index].geometry
+			stamps[index].geometry = func() tea.Msg {
+				time.Sleep(75 * time.Millisecond)
+				return command()
+			}
+			wrapped = true
+		}
+		if !wrapped {
+			panic("refresh burst did not expose deferred geometry")
+		}
+		return stamps
+	}
+	result := runPerformanceScenario(t, 120, scenario)
+	if result.Latency.P50NS >= result.ConvergenceLatency.P50NS {
+		t.Fatalf("first-visible latency = %s, convergence = %s; deferred worker polluted first-visible",
+			time.Duration(result.Latency.P50NS), time.Duration(result.ConvergenceLatency.P50NS))
+	}
+	if result.ConvergenceLatency.P50NS < (75 * time.Millisecond).Nanoseconds() {
+		t.Fatalf("convergence latency = %s, did not record deferred worker", time.Duration(result.ConvergenceLatency.P50NS))
 	}
 }
 
@@ -299,11 +452,23 @@ func TestNavigationArtifactAcceptanceRejectsMissingOrUnboundedReuse(t *testing.T
 		NavigationArtifactPublications: 101,
 		RenderedCardRecords:            101,
 	}
+	refresh := performanceScenarioResult{
+		Name:                           "refresh_admission_new_issue",
+		Tasks:                          1000,
+		PublishedFrames:                1,
+		NavigationArtifactHits:         20,
+		NavigationArtifactMisses:       1,
+		NavigationArtifactPublications: 1,
+		RenderedCardRecords:            1,
+	}
 	if violation := navigationArtifactAcceptanceViolation(held); violation != "" {
 		t.Fatalf("honest held artifacts rejected: %s", violation)
 	}
 	if violation := navigationArtifactAcceptanceViolation(wheel); violation != "" {
 		t.Fatalf("honest wheel artifacts rejected: %s", violation)
+	}
+	if violation := navigationArtifactAcceptanceViolation(refresh); violation != "" {
+		t.Fatalf("honest refresh artifacts rejected: %s", violation)
 	}
 
 	tests := []struct {
@@ -339,6 +504,22 @@ func TestNavigationArtifactAcceptanceRejectsMissingOrUnboundedReuse(t *testing.T
 		}()},
 		{name: "wheel fallback", result: func() performanceScenarioResult {
 			result := wheel
+			result.NavigationArtifactFallbacks = 1
+			return result
+		}()},
+		{name: "refresh zero hits", result: func() performanceScenarioResult {
+			result := refresh
+			result.NavigationArtifactHits = 0
+			return result
+		}()},
+		{name: "refresh excessive misses", result: func() performanceScenarioResult {
+			result := refresh
+			result.NavigationArtifactMisses = 65
+			result.RenderedCardRecords = 65
+			return result
+		}()},
+		{name: "refresh fallback", result: func() performanceScenarioResult {
+			result := refresh
 			result.NavigationArtifactFallbacks = 1
 			return result
 		}()},
@@ -614,10 +795,19 @@ func performanceScenarios(count int) []performanceScenario {
 
 	baseBoard := performanceBoard(count)
 	matching := appendPerformanceTasks(baseBoard, 1, true)
-	nonmatching := appendPerformanceTasks(baseBoard, 1, false)
-	burst := make([]board.Board, 25)
-	for index := range burst {
-		burst[index] = appendPerformanceTasks(baseBoard, index+1, true)
+	scopedBoard := cloneBoard(baseBoard)
+	for index := range scopedBoard.Tasks {
+		scopedBoard.Tasks[index].Tags = append(scopedBoard.Tasks[index].Tags, "project::alpha")
+	}
+	outOfScope := appendPerformanceTasks(scopedBoard, 1, false)
+	outOfScope.Tasks[len(outOfScope.Tasks)-1].Tags = []string{"performance", "dev", "project::beta"}
+	metadataTotal := appendPerformanceTasks(baseBoard, 1, false)
+	metadataLabel := cloneBoard(baseBoard)
+	for index := range metadataLabel.Tasks {
+		if !strings.Contains(metadataLabel.Tasks[index].Title, "keep17") {
+			metadataLabel.Tasks[index].Tags = append(metadataLabel.Tasks[index].Tags, "new-filter-label")
+			break
+		}
 	}
 	resetBoard := func(filter string) func(*Model, int) {
 		return func(model *Model, _ int) {
@@ -627,10 +817,26 @@ func performanceScenarios(count int) []performanceScenario {
 			model.rebuildRenderPlan(renderImpactAll)
 		}
 	}
+	resetScopedBoard := func(filter string) func(*Model, int) {
+		return func(model *Model, _ int) {
+			model.board = scopedBoard
+			model.projects = projectSwitcher{name: "alpha"}
+			model.filter.input.SetValue(filter)
+			model.boardView.normalizeSelection(model.filteredBoard())
+			model.rebuildRenderPlan(renderImpactAll)
+		}
+	}
 	var clampedAdmission *keyboardAdmission
 	var clampedClock stepClock
 	var heldAdmission *keyboardAdmission
 	var heldClock stepClock
+	var burstReader *sequenceBoardReader
+	var admissionReader *sequenceBoardReader
+	var admissionWatcher *countingVersionReader
+	var admissionTimerTicks int
+	burstStale := appendPerformanceTasks(baseBoard, 1, true)
+	burstNewest := appendPerformanceTasks(baseBoard, 25, true)
+	admissionBoard := appendPerformanceTasks(baseBoard, 1, true)
 
 	return []performanceScenario{
 		{
@@ -908,9 +1114,10 @@ func performanceScenarios(count int) []performanceScenario {
 			},
 		},
 		{
-			name:     "refresh_matching_insert",
-			newModel: func() Model { return base("keep17") },
-			prepare:  resetBoard("keep17"),
+			name:               "refresh_matching_insert",
+			reconciliationOnly: true,
+			newModel:           func() Model { return base("keep17") },
+			prepare:            resetBoard("keep17"),
 			admit: func(model *Model, _ int) []performancePublicationStamp {
 				return admitPerformanceMessage(model, boardLoadedMsg{board: matching})
 			},
@@ -918,25 +1125,290 @@ func performanceScenarios(count int) []performanceScenario {
 		{
 			name:               "refresh_nonmatching_insert",
 			expectedZeroFrames: true,
-			newModel:           func() Model { return base("keep17") },
-			prepare:            resetBoard("keep17"),
+			reconciliationOnly: true,
+			newModel: func() Model {
+				model := base("keep17")
+				model.board = scopedBoard
+				model.projects = projectSwitcher{name: "alpha"}
+				model.rebuildRenderPlan(renderImpactAll)
+				return model
+			},
+			prepare: resetScopedBoard("keep17"),
 			admit: func(model *Model, _ int) []performancePublicationStamp {
-				return admitPerformanceMessage(model, boardLoadedMsg{board: nonmatching})
+				return admitPerformanceMessage(model, boardLoadedMsg{board: outOfScope})
+			},
+			validateSample: func(t *testing.T, model *Model, stamps []performancePublicationStamp) {
+				t.Helper()
+				if len(stamps) != 1 || !stamps[0].Accepted || stamps[0].Published {
+					t.Fatalf("out-of-project refresh admission = %+v, want accepted without publication", stamps)
+				}
+				if !model.current.projection.matchesSourceIdentity(outOfScope) ||
+					len(model.current.projection.tasks) != count+1 || model.projects.name != "alpha" {
+					t.Fatal("out-of-project refresh did not reconcile the scoped source")
+				}
 			},
 		},
 		{
-			name:     "refresh_25_task_burst",
-			newModel: func() Model { return base("keep17") },
-			prepare:  resetBoard("keep17"),
+			name:               "refresh_nonmatching_total_metadata",
+			reconciliationOnly: true,
+			newModel:           func() Model { return base("keep17") },
+			prepare:            resetBoard("keep17"),
 			admit: func(model *Model, _ int) []performancePublicationStamp {
-				stamps := make([]performancePublicationStamp, 0, len(burst))
-				for _, snapshot := range burst {
-					stamps = append(stamps, admitPerformanceMessage(model, boardLoadedMsg{board: snapshot})...)
+				return admitPerformanceMessage(model, boardLoadedMsg{board: metadataTotal})
+			},
+			validateSample: func(t *testing.T, model *Model, stamps []performancePublicationStamp) {
+				t.Helper()
+				if len(stamps) != 1 || !stamps[0].Accepted || !stamps[0].Published {
+					t.Fatalf("total metadata refresh admission = %+v, want one publication", stamps)
 				}
-				return stamps
+				if !strings.Contains(model.View().Content, "17 of "+integerLabel(count+1)+" cards") {
+					t.Fatal("total metadata refresh did not publish the new source total")
+				}
+			},
+		},
+		{
+			name:               "refresh_nonmatching_label_metadata",
+			reconciliationOnly: true,
+			newModel:           func() Model { return base("keep17") },
+			prepare:            resetBoard("keep17"),
+			admit: func(model *Model, _ int) []performancePublicationStamp {
+				return admitPerformanceMessage(model, boardLoadedMsg{board: metadataLabel})
+			},
+			validateSample: func(t *testing.T, model *Model, stamps []performancePublicationStamp) {
+				t.Helper()
+				if len(stamps) != 1 || !stamps[0].Accepted || !stamps[0].Published {
+					t.Fatalf("label metadata refresh admission = %+v, want one publication", stamps)
+				}
+				if !strings.Contains(model.View().Content, "new-filter-label") {
+					t.Fatal("label metadata refresh did not publish the new toolbar label")
+				}
+			},
+		},
+		{
+			name: "refresh_admission_new_issue",
+			newModel: func() Model {
+				reader := &sequenceBoardReader{results: []boardResult{{board: admissionBoard}}}
+				watcher := &countingVersionReader{version: 2}
+				admissionReader = reader
+				admissionWatcher = watcher
+				model := base("keep17")
+				model.store = reader
+				model.watcher = watcher
+				model.haveVersion = true
+				model.dataVersion = 1
+				model.pollStarted = true
+				model.loadGeneration = 1
+				model.applyStyles(theme.NewWith(model.isDark, theme.TimingCollapsed))
+				model.rebuildRenderPlan(renderImpactAll)
+				return model
+			},
+			prepare: func(model *Model, _ int) {
+				resetBoard("keep17")(model, 0)
+				admissionReader.results = []boardResult{{board: admissionBoard}}
+				admissionReader.calls = 0
+				admissionWatcher.calls = 0
+				admissionTimerTicks = 0
+				model.store = admissionReader
+				model.watcher = admissionWatcher
+				model.haveVersion = true
+				model.dataVersion = 1
+				model.pollStarted = true
+				model.loading = false
+				model.reloadPending = false
+				model.loadGeneration = 1
+				model.activeLoadGen = 0
+				model.applyStyles(theme.NewWith(model.isDark, theme.TimingCollapsed))
+				model.rebuildRenderPlan(renderImpactAll)
+			},
+			admit: func(model *Model, _ int) []performancePublicationStamp {
+				admissionTimerTicks++
+				timer := model.schedulePoll()
+				timerStamps := admitPerformanceMessage(model, timer())
+				versionRead := timerStamps[0].followUp
+				timerStamps[0].followUp = nil
+				version := performanceDataVersionResult(versionRead)
+				versionStamps := admitPerformanceMessage(model, version)
+				load, poll := performanceLoadAndPollCommands(versionStamps[0].followUp)
+				versionStamps[0].followUp = nil
+				versionStamps[0].pollFollowUp = poll
+				loaded := performanceLoadResult(load)
+				loadedStamps := admitPerformanceMessage(model, loaded)
+				nextPoll := versionStamps[0].pollFollowUp
+				admissionTimerTicks++
+				nextPollStamps := admitPerformanceMessage(model, nextPoll())
+				nextRead := nextPollStamps[0].followUp
+				nextPollStamps[0].followUp = nil
+				nextVersionStamps := admitPerformanceMessage(model, performanceDataVersionResult(nextRead))
+				nextPollStamps[0].pollFollowUp = nil
+				nextVersionStamps[0].pollFollowUp = nextVersionStamps[0].followUp
+				nextVersionStamps[0].followUp = nil
+				stamps := append(timerStamps, versionStamps...)
+				stamps = append(stamps, loadedStamps...)
+				stamps = append(stamps, nextPollStamps...)
+				return append(stamps, nextVersionStamps...)
+			},
+			validateSample: func(t *testing.T, model *Model, stamps []performancePublicationStamp) {
+				t.Helper()
+				if len(stamps) != 5 || admissionTimerTicks != 2 || admissionWatcher.calls != 2 ||
+					!stamps[0].Accepted || stamps[0].Published ||
+					!stamps[1].Accepted || stamps[1].Published || stamps[1].pollFollowUp == nil ||
+					!stamps[2].Accepted || !stamps[2].Published ||
+					!stamps[3].Accepted || stamps[3].Published || stamps[3].pollFollowUp != nil ||
+					!stamps[4].Accepted || stamps[4].Published || stamps[4].pollFollowUp == nil || admissionReader.calls != 1 ||
+					model.loadGeneration != 2 || model.activeLoadGen != 0 || model.loading || model.reloadPending ||
+					!model.current.projection.matchesSourceIdentity(admissionBoard) {
+					t.Fatalf("end-to-end refresh = stamps:%+v timers:%d version-reads:%d board-reads:%d source:%t",
+						stamps, admissionTimerTicks, admissionWatcher.calls, admissionReader.calls,
+						model.current.projection.matchesSourceIdentity(admissionBoard))
+				}
+				assertPerformanceSinglePollSuccessor(t, stamps[4].pollFollowUp)
+			},
+		},
+		{
+			name:          "refresh_25_task_burst",
+			deferGeometry: true,
+			newModel: func() Model {
+				reader := &sequenceBoardReader{results: []boardResult{{board: burstStale}, {board: burstNewest}}}
+				burstReader = reader
+				model := base("keep17")
+				model.store = reader
+				model.watcher = stubVersionReader{}
+				model.haveVersion = true
+				model.dataVersion = 1
+				model.pollStarted = true
+				model.loadGeneration = 1
+				model.activeLoadGen = 0
+				model.applyStyles(theme.NewWith(model.isDark, theme.TimingCollapsed))
+				model.rebuildRenderPlan(renderImpactAll)
+				return model
+			},
+			prepare: func(model *Model, _ int) {
+				resetBoard("keep17")(model, 0)
+				burstReader.results = []boardResult{{board: burstStale}, {board: burstNewest}}
+				burstReader.calls = 0
+				model.store = burstReader
+				model.watcher = stubVersionReader{}
+				model.haveVersion = true
+				model.dataVersion = 1
+				model.pollStarted = true
+				model.loading = false
+				model.reloadPending = false
+				model.loadGeneration = 1
+				model.activeLoadGen = 0
+				model.applyStyles(theme.NewWith(model.isDark, theme.TimingCollapsed))
+				model.rebuildRenderPlan(renderImpactAll)
+			},
+			admit: func(model *Model, _ int) []performancePublicationStamp {
+				stamps := admitPerformanceMessage(model, dataVersionMsg{version: 2})
+				firstLoad := stamps[0].followUp
+				stamps[0].followUp = nil
+				for version := int64(3); version <= 26; version++ {
+					versionStamps := admitPerformanceMessage(model, dataVersionMsg{version: version})
+					performancePollResult(versionStamps[0].followUp)
+					versionStamps[0].followUp = nil
+					stamps = append(stamps, versionStamps...)
+				}
+				stale := performanceLoadAndPollResult(firstLoad)
+				staleStamps := admitPerformanceMessage(model, stale)
+				nextLoad := staleStamps[0].followUp
+				staleStamps[0].followUp = nil
+				stamps = append(stamps, staleStamps...)
+				newest := performanceLoadResult(nextLoad)
+				return append(stamps, admitPerformanceMessage(model, newest)...)
+			},
+			validateSample: func(t *testing.T, model *Model, stamps []performancePublicationStamp) {
+				t.Helper()
+				if len(stamps) != 27 {
+					t.Fatalf("refresh burst emitted %d events, want 27 version/load admissions", len(stamps))
+				}
+				published, discarded, staleLoads := 0, 0, 0
+				for _, stamp := range stamps {
+					if stamp.Published {
+						published++
+					}
+					if stamp.Discarded {
+						discarded++
+					}
+					if stamp.StaleBoardLoad {
+						staleLoads++
+					}
+				}
+				if published != 1 || discarded != 0 || staleLoads != 1 || !model.current.projection.matchesSourceIdentity(burstNewest) {
+					t.Fatalf("refresh burst settlement = published:%d discarded:%d stale-loads:%d source:%t",
+						published, discarded, staleLoads, model.current.projection.matchesSourceIdentity(burstNewest))
+				}
 			},
 		},
 	}
+}
+
+func performanceDataVersionResult(command tea.Cmd) dataVersionMsg {
+	if command == nil {
+		panic("refresh admission did not retain a data-version read")
+	}
+	message, ok := command().(dataVersionMsg)
+	if !ok {
+		panic(fmt.Sprintf("refresh admission read returned %T, want dataVersionMsg", message))
+	}
+	return message
+}
+
+func performanceLoadAndPollCommands(command tea.Cmd) (tea.Cmd, tea.Cmd) {
+	if command == nil {
+		panic("refresh admission did not retain a load and poll command")
+	}
+	message := command()
+	batch, ok := message.(tea.BatchMsg)
+	if !ok || len(batch) != 2 || batch[0] == nil || batch[1] == nil {
+		panic(fmt.Sprintf("refresh admission returned %T batch with wrong cardinality", message))
+	}
+	return batch[0], batch[1]
+}
+
+// performanceLoadAndPollResult executes the production load plus poll
+// successor returned by a data-version admission. Timing is collapsed, so the
+// poll command is observed without waiting for a real timer.
+func performanceLoadAndPollResult(command tea.Cmd) boardLoadedMsg {
+	load, poll := performanceLoadAndPollCommands(command)
+	performancePollResult(poll)
+	return performanceLoadResult(load)
+}
+
+func performancePollResult(command tea.Cmd) {
+	if command == nil {
+		panic("refresh admission dropped a poll successor")
+	}
+	if poll, ok := command().(pollTickMsg); !ok {
+		panic(fmt.Sprintf("refresh admission successor returned %T, want pollTickMsg", poll))
+	}
+}
+
+func assertPerformanceSinglePollSuccessor(t *testing.T, command tea.Cmd) {
+	t.Helper()
+	if command == nil {
+		t.Fatal("refresh admission did not return its next poll successor")
+	}
+	if message := command(); message == nil {
+		t.Fatal("refresh admission poll successor returned nil")
+	} else if _, ok := message.(pollTickMsg); !ok {
+		t.Fatalf("refresh admission poll successor returned %T, want exactly one pollTickMsg", message)
+	}
+}
+
+// performanceLoadResult executes a direct production board-load command.
+func performanceLoadResult(command tea.Cmd) boardLoadedMsg {
+	if command == nil {
+		panic("refresh burst did not retain a load command")
+	}
+	message := command()
+	if loaded, ok := message.(boardLoadedMsg); ok {
+		return loaded
+	}
+	batch, ok := message.(tea.BatchMsg)
+	if !ok || len(batch) == 0 || batch[0] == nil {
+		panic(fmt.Sprintf("refresh burst load command returned %T", message))
+	}
+	return performanceLoadResult(batch[0])
 }
 
 func runPerformanceScenario(t *testing.T, count int, scenario performanceScenario) performanceScenarioResult {
@@ -959,11 +1431,14 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 
 	runtime.GC()
 	latencies := make([]time.Duration, samples)
+	convergenceLatencies := make([]time.Duration, samples)
 	var allocations, allocatedBytes, maximumPublicationBytes, maximumRetainedPlanBytes uint64
-	var accepted, frames, discarded, stale uint64
+	var accepted, frames, discarded, stale, staleBoardLoads uint64
 	var normalBases, dimmedBases, compositions, projectionBuilds, projectionVisits uint64
 	var sourceComparisons, shippedIDVisits uint64
 	var renderedCards, artifactHits, artifactMisses, artifactPublications, artifactFallbacks uint64
+	var watcherPollFastPaths, watcherVersionFastPaths, watcherStaleLoadFastPaths uint64
+	var watcherLifecycleFallbacks, renderImpactClassifications uint64
 	var synchronousLayout, temporalScheduled, temporalStale, temporalVisits uint64
 	var temporalRecords, temporalNodes uint64
 	var trace []performancePublicationStamp
@@ -976,8 +1451,20 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		beforeStats := model.RenderPlanStats()
 		started := time.Now()
 		stamps := scenario.admit(&model, sample)
-		settlePerformanceStampCommands(t, &model, scenario, stamps)
-		latencies[sample] = time.Since(started)
+		if scenario.deferGeometry {
+			for _, stamp := range stamps {
+				if stamp.followUp != nil || stamp.temporal != nil {
+					t.Fatalf("%s scheduled a non-geometry command before first-visible timing ended", scenario.name)
+				}
+			}
+			latencies[sample] = time.Since(started)
+			convergenceStarted := time.Now()
+			settlePerformanceStampCommands(t, &model, scenario, stamps)
+			convergenceLatencies[sample] = time.Since(convergenceStarted)
+		} else {
+			settlePerformanceStampCommands(t, &model, scenario, stamps)
+			latencies[sample] = time.Since(started)
+		}
 		if scenario.validateSample != nil {
 			scenario.validateSample(t, &model, stamps)
 		}
@@ -1002,6 +1489,11 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		artifactMisses += afterStats.NavigationArtifactMisses - beforeStats.NavigationArtifactMisses
 		artifactPublications += afterStats.NavigationArtifactPublications - beforeStats.NavigationArtifactPublications
 		artifactFallbacks += afterStats.NavigationArtifactFallbacks - beforeStats.NavigationArtifactFallbacks
+		watcherPollFastPaths += afterStats.WatcherPollFastPaths - beforeStats.WatcherPollFastPaths
+		watcherVersionFastPaths += afterStats.WatcherVersionFastPaths - beforeStats.WatcherVersionFastPaths
+		watcherStaleLoadFastPaths += afterStats.WatcherStaleLoadFastPaths - beforeStats.WatcherStaleLoadFastPaths
+		watcherLifecycleFallbacks += afterStats.WatcherLifecycleFallbacks - beforeStats.WatcherLifecycleFallbacks
+		renderImpactClassifications += afterStats.RenderImpactClassifications - beforeStats.RenderImpactClassifications
 		synchronousLayout += afterStats.SynchronousLayoutRecords - beforeStats.SynchronousLayoutRecords
 		temporalScheduled += afterStats.TemporalScheduledTicks - beforeStats.TemporalScheduledTicks
 		temporalStale += afterStats.TemporalStaleTicks - beforeStats.TemporalStaleTicks
@@ -1018,6 +1510,9 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 			if stamps[event].Discarded {
 				observedDiscard++
 			}
+			if stamps[event].StaleBoardLoad {
+				staleBoardLoads++
+			}
 		}
 		trace = append(trace, stamps...)
 		instrumentedDiscard := afterStats.DiscardedEvents - beforeStats.DiscardedEvents
@@ -1028,12 +1523,17 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		got.AltScreen != want.AltScreen || got.MouseMode != want.MouseMode {
 		t.Errorf("%s/%d retained frame differs from cold renderer", scenario.name, count)
 	}
+	var convergence performanceDistribution
+	if scenario.deferGeometry {
+		convergence = performanceDurations(convergenceLatencies)
+	}
 	return performanceScenarioResult{
 		Name:                           scenario.name,
 		Tasks:                          count,
 		Warmups:                        warmups,
 		Samples:                        samples,
 		Latency:                        performanceDurations(latencies),
+		ConvergenceLatency:             convergence,
 		AllocationsPerOp:               float64(allocations) / float64(samples),
 		AllocatedBytesPerOp:            float64(allocatedBytes) / float64(samples),
 		PublicationAllocatedBytesMax:   maximumPublicationBytes,
@@ -1041,6 +1541,7 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		AcceptedMessages:               accepted,
 		PublishedFrames:                frames,
 		DiscardedEvents:                discarded,
+		StaleBoardLoads:                staleBoardLoads,
 		StaleWorkerResults:             stale,
 		NormalBaseBuilds:               normalBases,
 		DimmedBaseBuilds:               dimmedBases,
@@ -1054,6 +1555,11 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		NavigationArtifactMisses:       artifactMisses,
 		NavigationArtifactPublications: artifactPublications,
 		NavigationArtifactFallbacks:    artifactFallbacks,
+		WatcherPollFastPaths:           watcherPollFastPaths,
+		WatcherVersionFastPaths:        watcherVersionFastPaths,
+		WatcherStaleLoadFastPaths:      watcherStaleLoadFastPaths,
+		WatcherLifecycleFallbacks:      watcherLifecycleFallbacks,
+		RenderImpactClassifications:    renderImpactClassifications,
 		SynchronousLayoutRecords:       synchronousLayout,
 		TemporalScheduledTicks:         temporalScheduled,
 		TemporalStaleTicks:             temporalStale,
@@ -1071,6 +1577,12 @@ func admitPerformanceMessage(model *Model, message tea.Msg) []performancePublica
 	*model = updated
 	retainedPerformanceView = model.View()
 	after := model.RenderPlanStats()
+	staleBoardLoad := false
+	if loaded, ok := message.(boardLoadedMsg); ok {
+		staleBoardLoad = loaded.generation != 0 && loaded.generation < model.loadGeneration &&
+			after.InstalledSnapshotID == before.InstalledSnapshotID &&
+			after.InstalledForMessageID == before.InstalledForMessageID
+	}
 	return []performancePublicationStamp{{
 		Accepted:              after.AcceptedMessageID != before.AcceptedMessageID,
 		AcceptedMessageID:     after.AcceptedMessageID,
@@ -1080,6 +1592,7 @@ func admitPerformanceMessage(model *Model, message tea.Msg) []performancePublica
 		followUp:              commands.followUp,
 		geometry:              commands.geometry,
 		temporal:              commands.temporal,
+		StaleBoardLoad:        staleBoardLoad,
 	}}
 }
 
@@ -1529,13 +2042,14 @@ func validatePerformanceReport(t *testing.T, report performanceReport) {
 }
 
 func navigationArtifactAcceptanceViolation(result performanceScenarioResult) string {
-	if result.Name != "held_navigation" && result.Name != "useful_wheel" {
+	isRefresh := result.Name == "refresh_admission_new_issue" || result.Name == "refresh_25_task_burst"
+	if result.Name != "held_navigation" && result.Name != "useful_wheel" && !isRefresh {
 		return ""
 	}
 	if result.NavigationArtifactHits == 0 {
 		return "recorded zero reuse hits"
 	}
-	if result.NavigationArtifactPublications != result.PublishedFrames {
+	if !isRefresh && result.NavigationArtifactPublications != result.PublishedFrames {
 		return fmt.Sprintf("artifact publications=%d, published frames=%d",
 			result.NavigationArtifactPublications, result.PublishedFrames)
 	}
@@ -1546,7 +2060,7 @@ func navigationArtifactAcceptanceViolation(result performanceScenarioResult) str
 	if result.NavigationArtifactFallbacks != 0 {
 		return fmt.Sprintf("fallbacks=%d, want zero", result.NavigationArtifactFallbacks)
 	}
-	if result.NavigationArtifactHits <= result.NavigationArtifactMisses {
+	if !isRefresh && result.NavigationArtifactHits <= result.NavigationArtifactMisses {
 		return fmt.Sprintf("hits=%d do not exceed misses=%d",
 			result.NavigationArtifactHits, result.NavigationArtifactMisses)
 	}
@@ -1556,6 +2070,17 @@ func navigationArtifactAcceptanceViolation(result performanceScenarioResult) str
 		if result.NavigationArtifactMisses < minimum || result.NavigationArtifactMisses > maximum {
 			return fmt.Sprintf("misses=%d outside held bound %d..%d",
 				result.NavigationArtifactMisses, minimum, maximum)
+		}
+		return ""
+	}
+	if isRefresh {
+		if result.NavigationArtifactPublications == 0 {
+			return "recorded zero artifact publications"
+		}
+		maximum := 64 * result.NavigationArtifactPublications
+		if result.NavigationArtifactMisses > maximum {
+			return fmt.Sprintf("misses=%d exceed refresh bound %d",
+				result.NavigationArtifactMisses, maximum)
 		}
 		return ""
 	}

@@ -76,6 +76,11 @@ type RenderPlanStats struct {
 	NavigationArtifactMisses       uint64              `json:"navigation_artifact_misses"`
 	NavigationArtifactPublications uint64              `json:"navigation_artifact_publications"`
 	NavigationArtifactFallbacks    uint64              `json:"navigation_artifact_fallbacks"`
+	WatcherPollFastPaths           uint64              `json:"watcher_poll_fast_paths"`
+	WatcherVersionFastPaths        uint64              `json:"watcher_version_fast_paths"`
+	WatcherStaleLoadFastPaths      uint64              `json:"watcher_stale_load_fast_paths"`
+	WatcherLifecycleFallbacks      uint64              `json:"watcher_lifecycle_fallbacks"`
+	RenderImpactClassifications    uint64              `json:"render_impact_classifications"`
 	SynchronousLayoutRecords       uint64              `json:"synchronous_layout_records"`
 	SynchronousIndexNodes          uint64              `json:"synchronous_index_nodes"`
 	GeometrySnapshotInstalls       uint64              `json:"geometry_snapshot_installs"`
@@ -684,12 +689,17 @@ func boardHoverControlAt(hits []boardHit, point pointer.Point) pointer.ControlID
 func (m Model) RenderPlanStats() RenderPlanStats {
 	if m.current == nil {
 		return RenderPlanStats{
-			AcceptedMessageID:      m.acceptedMessageID,
-			DiscardedEvents:        m.inputAdmission.discardedEvents() + m.pointerAdmission.discarded,
-			PointerEventsAccepted:  m.pointerAdmission.accepted,
-			PointerEventsDeferred:  m.pointerAdmission.deferred,
-			PointerTrailingFlushes: m.pointerAdmission.flushes,
-			PointerIntentPending:   m.pointerAdmission.havePending,
+			AcceptedMessageID:           m.acceptedMessageID,
+			DiscardedEvents:             m.inputAdmission.discardedEvents() + m.pointerAdmission.discarded,
+			PointerEventsAccepted:       m.pointerAdmission.accepted,
+			PointerEventsDeferred:       m.pointerAdmission.deferred,
+			PointerTrailingFlushes:      m.pointerAdmission.flushes,
+			PointerIntentPending:        m.pointerAdmission.havePending,
+			WatcherPollFastPaths:        m.watcherPollFastPaths,
+			WatcherVersionFastPaths:     m.watcherVersionFastPaths,
+			WatcherStaleLoadFastPaths:   m.watcherStaleLoadFastPaths,
+			WatcherLifecycleFallbacks:   m.watcherLifecycleFallbacks,
+			RenderImpactClassifications: m.renderImpactClassifications,
 		}
 	}
 	stats := m.current.stats
@@ -699,6 +709,11 @@ func (m Model) RenderPlanStats() RenderPlanStats {
 	stats.PointerEventsDeferred = m.pointerAdmission.deferred
 	stats.PointerTrailingFlushes = m.pointerAdmission.flushes
 	stats.PointerIntentPending = m.pointerAdmission.havePending
+	stats.WatcherPollFastPaths = m.watcherPollFastPaths
+	stats.WatcherVersionFastPaths = m.watcherVersionFastPaths
+	stats.WatcherStaleLoadFastPaths = m.watcherStaleLoadFastPaths
+	stats.WatcherLifecycleFallbacks = m.watcherLifecycleFallbacks
+	stats.RenderImpactClassifications = m.renderImpactClassifications
 	return stats
 }
 

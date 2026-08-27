@@ -995,8 +995,8 @@ func (m Model) renderVirtualCard(
 	column columnLayoutGeometry,
 	ordinal int,
 ) virtualCardRows {
-	key := m.cardArtifactKey(projection, column, ordinal)
-	if m.cardArtifacts != nil {
+	key, cacheable := m.cardArtifactKey(projection, column, ordinal)
+	if cacheable && m.cardArtifacts != nil {
 		if artifact, ok := m.cardArtifacts.lookup(key); ok {
 			return artifact
 		}
@@ -1022,7 +1022,7 @@ func (m Model) renderVirtualCard(
 		lines[rowIndex] = line
 	}
 	artifact := cardRenderArtifact{lines: lines, spans: rowSpans}
-	if m.cardArtifacts != nil {
+	if cacheable && m.cardArtifacts != nil {
 		m.cardArtifacts.store(key, artifact)
 	}
 	return artifact
