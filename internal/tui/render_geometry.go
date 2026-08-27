@@ -25,6 +25,8 @@ type cardLayoutRecord struct {
 	projectionIndex int
 	height          int
 	exact           bool
+	nextTemporal    time.Time
+	metaOverflow    [cardMetaSlots + 1]bool
 }
 
 // cardLayoutIndex is an immutable prefix-sum tree. A visible miss replaces one
@@ -40,12 +42,14 @@ type cardLayoutIndex struct {
 }
 
 type cardLayoutNode struct {
-	left   *cardLayoutNode
-	right  *cardLayoutNode
-	record cardLayoutRecord
-	count  int
-	rows   int
-	exact  int
+	left         *cardLayoutNode
+	right        *cardLayoutNode
+	record       cardLayoutRecord
+	count        int
+	rows         int
+	exact        int
+	minTemporal  time.Time
+	metaOverflow [cardMetaSlots + 1]int
 }
 
 func newCardLayoutIndex(records []cardLayoutRecord, gap int) cardLayoutIndex {
@@ -70,7 +74,16 @@ func buildCardLayoutNode(records []cardLayoutRecord, first, last, gap int) *card
 		if records[first].exact {
 			exact = 1
 		}
-		return &cardLayoutNode{record: records[first], count: 1, rows: rows, exact: exact}
+		node := &cardLayoutNode{
+			record: records[first], count: 1, rows: rows, exact: exact,
+			minTemporal: records[first].nextTemporal,
+		}
+		for depth := 1; depth <= cardMetaSlots; depth++ {
+			if records[first].metaOverflow[depth] {
+				node.metaOverflow[depth] = 1
+			}
+		}
+		return node
 	}
 	middle := first + (last-first)/2
 	return combineCardLayoutNodes(
@@ -80,12 +93,38 @@ func buildCardLayoutNode(records []cardLayoutRecord, first, last, gap int) *card
 }
 
 func combineCardLayoutNodes(left, right *cardLayoutNode) *cardLayoutNode {
-	return &cardLayoutNode{
+	node := &cardLayoutNode{
 		left: left, right: right,
 		count: cardNodeCount(left) + cardNodeCount(right),
 		rows:  cardNodeRows(left) + cardNodeRows(right),
 		exact: cardNodeExact(left) + cardNodeExact(right),
 	}
+	node.minTemporal = earlierNonzeroTime(cardNodeMinTemporal(left), cardNodeMinTemporal(right))
+	for depth := 1; depth <= cardMetaSlots; depth++ {
+		node.metaOverflow[depth] = cardNodeMetaOverflow(left, depth) + cardNodeMetaOverflow(right, depth)
+	}
+	return node
+}
+
+func earlierNonzeroTime(left, right time.Time) time.Time {
+	if left.IsZero() || !right.IsZero() && right.Before(left) {
+		return right
+	}
+	return left
+}
+
+func cardNodeMinTemporal(node *cardLayoutNode) time.Time {
+	if node == nil {
+		return time.Time{}
+	}
+	return node.minTemporal
+}
+
+func cardNodeMetaOverflow(node *cardLayoutNode, depth int) int {
+	if node == nil || depth < 0 || depth >= len(node.metaOverflow) {
+		return 0
+	}
+	return node.metaOverflow[depth]
 }
 
 func cardNodeCount(node *cardLayoutNode) int {
@@ -155,7 +194,15 @@ func replaceCardLayoutRecord(
 		if record.exact {
 			exact = 1
 		}
-		return &cardLayoutNode{record: record, count: 1, rows: rows, exact: exact}, 1
+		next := &cardLayoutNode{
+			record: record, count: 1, rows: rows, exact: exact, minTemporal: record.nextTemporal,
+		}
+		for depth := 1; depth <= cardMetaSlots; depth++ {
+			if record.metaOverflow[depth] {
+				next.metaOverflow[depth] = 1
+			}
+		}
+		return next, 1
 	}
 	leftCount := cardNodeCount(node.left)
 	if ordinal < leftCount {
@@ -233,6 +280,7 @@ type columnLayoutGeometry struct {
 	bodyWidth     int
 	contentHeight int
 	metaDepth     int
+	metaOverflow  [cardMetaSlots + 1]int
 	median        int
 	gap           int
 	density       theme.Density
@@ -241,26 +289,29 @@ type columnLayoutGeometry struct {
 }
 
 type renderGeometryKey struct {
-	width         int
-	height        int
-	showCancelled bool
-	styles        *theme.Styles
-	temporalHour  int64
+	width              int
+	height             int
+	showCancelled      bool
+	styles             *theme.Styles
+	temporalGeneration uint64
 }
 
 // renderGeometry retains only the current layout generation. A command may
 // still hold the immediately superseded value while its bounded slice exits;
 // renderPlan's worker token prevents a second command from starting meanwhile.
 type renderGeometry struct {
-	initialized       bool
-	generation        uint64
-	rootRevision      uint64
-	key               renderGeometryKey
-	columns           [len(boardStatuses)]columnLayoutGeometry
-	layoutRecords     int
-	exactRecords      int
-	unresolvedRecords int
-	ownedBytes        uint64
+	initialized               bool
+	generation                uint64
+	rootRevision              uint64
+	key                       renderGeometryKey
+	renderedAt                time.Time
+	columns                   [len(boardStatuses)]columnLayoutGeometry
+	layoutRecords             int
+	exactRecords              int
+	unresolvedRecords         int
+	ownedBytes                uint64
+	temporalRecordsRefreshed  int
+	temporalIndexNodesVisited int
 }
 
 type geometryBatchMsg struct {
@@ -295,12 +346,17 @@ type geometryWorkRequest struct {
 }
 
 func (g renderGeometry) rebuild(model Model, projection *renderProjection, projectionChanged bool) (renderGeometry, int, int) {
+	g.temporalRecordsRefreshed = 0
+	g.temporalIndexNodesVisited = 0
 	key := renderGeometryKey{
-		width:         max(model.width, 1),
-		height:        max(model.height, 8),
-		showCancelled: model.boardView.showCancelled,
-		styles:        model.themeStyles(),
-		temporalHour:  model.renderedAt.Unix() / secondsPerHour,
+		width:              max(model.width, 1),
+		height:             max(model.height, 8),
+		showCancelled:      model.boardView.showCancelled,
+		styles:             model.themeStyles(),
+		temporalGeneration: model.temporalVisualGeneration,
+	}
+	if g.initialized && !projectionChanged && sameGeometryBaseKey(g.key, key) && g.key.temporalGeneration != key.temporalGeneration {
+		return g.rebuildTemporal(model, projection, key)
 	}
 	if !g.initialized || projectionChanged || g.key != key {
 		g = newRenderGeometry(model, projection, g.generation+1, key)
@@ -308,8 +364,15 @@ func (g renderGeometry) rebuild(model Model, projection *renderProjection, proje
 	return g.ensureInteractiveGeometry(model, projection)
 }
 
+func sameGeometryBaseKey(left, right renderGeometryKey) bool {
+	return left.width == right.width && left.height == right.height &&
+		left.showCancelled == right.showCancelled && left.styles == right.styles
+}
+
 func newRenderGeometry(model Model, projection *renderProjection, generation uint64, key renderGeometryKey) renderGeometry {
-	g := renderGeometry{initialized: true, generation: generation, rootRevision: 1, key: key}
+	g := renderGeometry{
+		initialized: true, generation: generation, rootRevision: 1, key: key, renderedAt: model.renderedAt,
+	}
 	styles := model.themeStyles()
 	metrics := styles.Metrics
 	statuses := model.boardView.visibleStatuses()
@@ -333,6 +396,93 @@ func newRenderGeometry(model Model, projection *renderProjection, generation uin
 	}
 	g.refreshDerived()
 	return g
+}
+
+func (g renderGeometry) rebuildTemporal(
+	model Model,
+	projection *renderProjection,
+	key renderGeometryKey,
+) (renderGeometry, int, int) {
+	next := g
+	next.key = key
+	next.renderedAt = model.renderedAt
+	metaDepthChanged := false
+	for columnIndex := range next.columns {
+		column := next.columns[columnIndex]
+		if column.index.length == 0 {
+			continue
+		}
+		inner := model.themeStyles().Metrics.CardInner(column.bodyWidth, column.density)
+		root, refreshed, visited, changed := refreshTemporalLayoutNode(
+			column.index.root, projection, model, column.density, inner,
+		)
+		next.temporalRecordsRefreshed += refreshed
+		next.temporalIndexNodesVisited += visited
+		if !changed {
+			continue
+		}
+		column.index.root = root
+		column.metaOverflow = root.metaOverflow
+		metaDepth := metaDepthFromOverflow(column.metaOverflow)
+		if metaDepth != column.metaDepth {
+			column.metaDepth = metaDepth
+			metaDepthChanged = true
+		}
+		next.columns[columnIndex] = column
+	}
+	if next.temporalRecordsRefreshed > 0 {
+		next.rootRevision++
+	}
+	if metaDepthChanged {
+		next.generation++
+	}
+	return next, 0, 0
+}
+
+func refreshTemporalLayoutNode(
+	node *cardLayoutNode,
+	projection *renderProjection,
+	model Model,
+	density theme.Density,
+	inner int,
+) (*cardLayoutNode, int, int, bool) {
+	if node == nil {
+		return nil, 0, 0, false
+	}
+	visited := 1
+	if node.minTemporal.IsZero() || node.minTemporal.After(model.renderedAt) {
+		return node, 0, visited, false
+	}
+	if node.count == 1 {
+		record := node.record
+		task := projection.board.Tasks[record.projectionIndex]
+		record.nextTemporal, _ = nextTaskTemporalBoundary(task, model.renderedAt)
+		widths := model.cardMetaWidths(task, density)
+		for depth := 1; depth <= cardMetaSlots; depth++ {
+			record.metaOverflow[depth] = metaWidthPrefix(widths, depth) > inner
+		}
+		next := *node
+		next.record = record
+		next.minTemporal = record.nextTemporal
+		for depth := 1; depth <= cardMetaSlots; depth++ {
+			next.metaOverflow[depth] = 0
+			if record.metaOverflow[depth] {
+				next.metaOverflow[depth] = 1
+			}
+		}
+		return &next, 1, visited, true
+	}
+	left, leftRecords, leftVisited, leftChanged := refreshTemporalLayoutNode(
+		node.left, projection, model, density, inner,
+	)
+	right, rightRecords, rightVisited, rightChanged := refreshTemporalLayoutNode(
+		node.right, projection, model, density, inner,
+	)
+	visited += leftVisited + rightVisited
+	if !leftChanged && !rightChanged {
+		return node, 0, visited, false
+	}
+	return combineCardLayoutNodes(left, right), leftRecords + rightRecords, visited, true
 }
 
 func newColumnLayoutGeometry(
@@ -382,7 +532,8 @@ func newColumnLayoutGeometry(
 	for ordinal, projectionIndex := range projectionIndexes {
 		records[ordinal] = cardLayoutRecord{projectionIndex: projectionIndex, height: c.median}
 	}
-	c.metaDepth = projectionMetaDepth(model, projection, records, bodyWidth, density)
+	prepareTemporalLayoutRecords(model, projection, records, bodyWidth, density)
+	c.metaDepth, c.metaOverflow = metaStateFromRecords(records)
 	c.index = newCardLayoutIndex(records, gap)
 
 	// If even one-row cards fit, the rail decision is not knowable from a
@@ -401,7 +552,8 @@ func newColumnLayoutGeometry(
 				c.railed = true
 				c.bodyWidth = baseBodyWidth - widget.ScrollbarW
 				records = c.index.records()
-				c.metaDepth = projectionMetaDepth(model, projection, records, c.bodyWidth, density)
+				prepareTemporalLayoutRecords(model, projection, records, c.bodyWidth, density)
+				c.metaDepth, c.metaOverflow = metaStateFromRecords(records)
 				for ordinal := range records {
 					records[ordinal].height = measureCardLayout(model, projection, c, ordinal)
 				}
@@ -413,6 +565,45 @@ func newColumnLayoutGeometry(
 		c.contentHeight-- // the overflow cue owns the final panel row
 	}
 	return c
+}
+
+func prepareTemporalLayoutRecords(
+	model Model,
+	projection *renderProjection,
+	records []cardLayoutRecord,
+	width int,
+	density theme.Density,
+) {
+	inner := model.themeStyles().Metrics.CardInner(width, density)
+	for index := range records {
+		task := projection.board.Tasks[records[index].projectionIndex]
+		records[index].nextTemporal, _ = nextTaskTemporalBoundary(task, model.renderedAt)
+		widths := model.cardMetaWidths(task, density)
+		for depth := 1; depth <= cardMetaSlots; depth++ {
+			records[index].metaOverflow[depth] = metaWidthPrefix(widths, depth) > inner
+		}
+	}
+}
+
+func metaStateFromRecords(records []cardLayoutRecord) (int, [cardMetaSlots + 1]int) {
+	var overflow [cardMetaSlots + 1]int
+	for _, record := range records {
+		for depth := 1; depth <= cardMetaSlots; depth++ {
+			if record.metaOverflow[depth] {
+				overflow[depth]++
+			}
+		}
+	}
+	return metaDepthFromOverflow(overflow), overflow
+}
+
+func metaDepthFromOverflow(overflow [cardMetaSlots + 1]int) int {
+	for depth := cardMetaSlots; depth > 1; depth-- {
+		if overflow[depth] == 0 {
+			return depth
+		}
+	}
+	return 1
 }
 
 func defaultCardHeightEstimate(model Model, density theme.Density) int {
@@ -430,9 +621,33 @@ func projectionMetaDepth(
 	width int,
 	density theme.Density,
 ) int {
-	return model.cardMetaDepthFor(width, density, len(cards), func(index int) board.Task {
-		return projection.board.Tasks[cards[index].projectionIndex]
-	})
+	depth, _ := projectionMetaState(model, projection, cards, width, density)
+	return depth
+}
+
+func projectionMetaState(
+	model Model,
+	projection *renderProjection,
+	cards []cardLayoutRecord,
+	width int,
+	density theme.Density,
+) (int, [cardMetaSlots + 1]int) {
+	inner := model.themeStyles().Metrics.CardInner(width, density)
+	var overflow [cardMetaSlots + 1]int
+	for _, card := range cards {
+		widths := model.cardMetaWidths(projection.board.Tasks[card.projectionIndex], density)
+		for depth := 1; depth <= cardMetaSlots; depth++ {
+			if metaWidthPrefix(widths, depth) > inner {
+				overflow[depth]++
+			}
+		}
+	}
+	for depth := cardMetaSlots; depth > 1; depth-- {
+		if overflow[depth] == 0 {
+			return depth, overflow
+		}
+	}
+	return 1, overflow
 }
 
 func measureCardLayout(model Model, projection *renderProjection, column columnLayoutGeometry, ordinal int) int {

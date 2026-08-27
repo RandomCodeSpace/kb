@@ -99,18 +99,33 @@ func performanceModel(taskCount int, filter string, width, height int) Model {
 	model := NewModel(stubBoardReader{board: fixture}, nil, "perf")
 	model.now = func() time.Time { return now }
 	model.renderedAt = now
-	updated, command := model.Update(boardLoadedMsg{board: fixture})
-	model = updated.(Model)
+	var commands modelUpdateCommands
+	model, commands = model.updateWithCommands(boardLoadedMsg{board: fixture})
+	geometry := commands.geometry
 	var filterGeometry tea.Cmd
 	if filter != "" {
 		model, filterGeometry = applyPerformanceFilter(model, filter)
 	}
-	updated, resizeCommand := model.Update(tea.WindowSizeMsg{Width: width, Height: height})
-	model = updated.(Model)
-	command = batchCommands(command, filterGeometry, resizeCommand)
-	for command != nil {
-		updated, command = model.Update(command())
-		model = updated.(Model)
+	model, commands = model.updateWithCommands(tea.WindowSizeMsg{Width: width, Height: height})
+	geometry = batchCommands(geometry, filterGeometry, commands.geometry)
+	for steps := 0; geometry != nil; steps++ {
+		if steps > 4096 {
+			panic("performance fixture geometry did not settle")
+		}
+		message := geometry()
+		if batch, ok := message.(tea.BatchMsg); ok {
+			geometry = nil
+			for _, command := range batch {
+				if command == nil {
+					continue
+				}
+				model, commands = model.updateWithCommands(command())
+				geometry = batchCommands(geometry, commands.geometry)
+			}
+			continue
+		}
+		model, commands = model.updateWithCommands(message)
+		geometry = commands.geometry
 	}
 	return model
 }

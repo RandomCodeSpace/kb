@@ -799,6 +799,11 @@ func (m *Model) reloadAfterActionFailure(reloadErr error) tea.Cmd {
 type shippedRecord struct {
 	Date string   `json:"date,omitempty"`
 	IDs  []string `json:"ids,omitempty"`
+
+	visibleCount int
+	dateIdentity int
+	revision     uint64
+	normalized   bool
 }
 
 const shippedDateLayout = "2006-01-02"
@@ -810,16 +815,22 @@ func (m *Model) normalizeShipped() {
 func (m *Model) normalizeShippedAt(now time.Time) {
 	today := now.Format(shippedDateLayout)
 	if m.shipped.Date == "" && len(m.shipped.IDs) == 0 {
+		m.shipped.visibleCount = 0
+		m.shipped.dateIdentity = 0
+		m.shipped.normalized = true
 		return
 	}
 	if m.shipped.Date != today {
-		m.shipped = shippedRecord{Date: today}
+		m.shipped = shippedRecord{
+			Date: today, dateIdentity: shippedDateIdentity(now),
+			revision: m.shipped.revision + 1, normalized: true,
+		}
 		return
 	}
 	seen := make(map[string]struct{}, len(m.shipped.IDs))
-	source := append([]string(nil), m.shipped.IDs...)
+	sourceLength := len(m.shipped.IDs)
 	ids := m.shipped.IDs[:0]
-	for _, id := range source {
+	for _, id := range m.shipped.IDs {
 		if id == "" {
 			continue
 		}
@@ -829,13 +840,32 @@ func (m *Model) normalizeShippedAt(now time.Time) {
 		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
+	m.mutateRenderPlanStats(func(stats *RenderPlanStats) { stats.ShippedIDVisits += uint64(sourceLength) })
+	if !m.shipped.normalized || len(ids) != sourceLength {
+		m.shipped.revision++
+	}
 	m.shipped.IDs = ids
+	m.shipped.visibleCount = len(ids)
+	m.shipped.dateIdentity = shippedDateIdentity(now)
+	m.shipped.normalized = true
+}
+
+func (m *Model) adoptShippedAt(record shippedRecord, now time.Time) {
+	revision := m.shipped.revision + 1
+	m.shipped = record
+	m.shipped.revision = revision
+	m.shipped.normalized = false
+	m.normalizeShippedAt(now)
 }
 
 func (m *Model) recordShipped(taskID string) {
 	m.normalizeShipped()
+	if taskID == "" {
+		return
+	}
 	if m.shipped.Date == "" {
 		m.shipped.Date = m.now().Format(shippedDateLayout)
+		m.shipped.dateIdentity = shippedDateIdentity(m.now())
 	}
 	for _, id := range m.shipped.IDs {
 		if id == taskID {
@@ -843,6 +873,9 @@ func (m *Model) recordShipped(taskID string) {
 		}
 	}
 	m.shipped.IDs = append(m.shipped.IDs, taskID)
+	m.shipped.visibleCount++
+	m.shipped.revision++
+	m.shipped.normalized = true
 }
 
 func (m *Model) unrecordShipped(taskID string) {
@@ -850,22 +883,23 @@ func (m *Model) unrecordShipped(taskID string) {
 	for index, id := range m.shipped.IDs {
 		if id == taskID {
 			m.shipped.IDs = append(m.shipped.IDs[:index], m.shipped.IDs[index+1:]...)
+			m.shipped.visibleCount--
+			m.shipped.revision++
 			return
 		}
 	}
 }
 
 func (m Model) shippedCount() int {
-	if m.shipped.Date != m.renderedAt.Format(shippedDateLayout) {
+	if m.shipped.dateIdentity == 0 || m.shipped.dateIdentity != shippedDateIdentity(m.renderedAt) {
 		return 0
 	}
-	seen := make(map[string]struct{}, len(m.shipped.IDs))
-	for _, id := range m.shipped.IDs {
-		if id != "" {
-			seen[id] = struct{}{}
-		}
-	}
-	return len(seen)
+	return m.shipped.visibleCount
+}
+
+func shippedDateIdentity(at time.Time) int {
+	year, month, dayOfMonth := at.Date()
+	return year*10000 + int(month)*100 + dayOfMonth
 }
 
 // actionLabel is one clickable run inside a dialog row. pad widens the hit

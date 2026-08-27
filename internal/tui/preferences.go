@@ -78,8 +78,7 @@ func (m *Model) adoptPreferences(preferences tuiPreferences) {
 	m.filter.restore(preferences.Filter)
 	m.projects.restore(projectSwitcher{name: preferences.Project, all: preferences.ProjectAll}, m.activeProject)
 	m.editor.SetProjectDefault(m.projectDefault())
-	m.shipped = preferences.Shipped
-	m.normalizeShipped()
+	m.adoptShippedAt(preferences.Shipped, m.now())
 }
 
 type preferenceTempFile interface {
@@ -161,9 +160,11 @@ func (m *Model) preferences() tuiPreferences {
 	return tuiPreferences{
 		ShowCancelled: m.boardView.showCancelled,
 		Filter:        m.filter.value(),
-		Shipped:       m.shipped,
-		Project:       m.projects.name,
-		ProjectAll:    m.projects.all,
+		Shipped: shippedRecord{
+			Date: m.shipped.Date, IDs: append([]string(nil), m.shipped.IDs...),
+		},
+		Project:    m.projects.name,
+		ProjectAll: m.projects.all,
 	}
 }
 

@@ -107,10 +107,10 @@ func (s stubVersionReader) DataVersion(context.Context) (int64, error) {
 
 func updateTestModel(t *testing.T, model *Model, message tea.Msg) tea.Cmd {
 	t.Helper()
-	updated, command := model.Update(message)
-	*model = updated.(Model)
+	next, commands := model.updateWithCommands(message)
+	*model = next
 	releaseGrace(t, model)
-	return command
+	return batchCommands(commands.followUp, commands.geometry)
 }
 
 // rebuildTestView publishes test fixtures that deliberately mutate root fields

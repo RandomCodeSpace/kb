@@ -12,6 +12,8 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/board"
 )
 
+var filterProjectionMatchSink bool
+
 func projectionFixture() board.Board {
 	return board.Board{Title: "Projection", Tasks: []board.Task{
 		{ID: "todo-alpha", Title: "Alpha API", Desc: "Unicode İ", Status: board.StatusTodo, Tags: []string{"project::alpha", "backend"}, Checks: []board.Check{{Text: "ship", Done: true}}},
@@ -231,5 +233,33 @@ func assertSingleFilterProjectionPass(t *testing.T, model Model, before RenderPl
 	}
 	if !model.current.projection.matchesProjectionKey(model) {
 		t.Fatal("installed projection does not match the current filter key")
+	}
+}
+
+func TestOverlayProjectionIdentityDoesNotScaleWithSelectedTags(t *testing.T) {
+	model := performanceModel(17, "", performanceWidth, performanceHeight)
+	projection := model.current.projection
+	measure := func(tags int) testing.BenchmarkResult {
+		selected, retained := make([]string, tags), make([]string, tags)
+		for index := range tags {
+			selected[index], retained[index] = "selected", "selected"
+		}
+		candidate := model
+		candidate.filter.tags = selected
+		current := projection
+		current.key.filter.Tags = retained
+		return testing.Benchmark(func(b *testing.B) {
+			for range b.N {
+				filterProjectionMatchSink = current.matchesProjectionKey(candidate)
+			}
+		})
+	}
+
+	constant := measure(1)
+	large := measure(100000)
+	limit := max(constant.NsPerOp()*8, int64(5000))
+	if large.NsPerOp() > limit {
+		t.Fatalf("overlay projection identity scales with selected tags: one=%dns 100000=%dns limit=%dns",
+			constant.NsPerOp(), large.NsPerOp(), limit)
 	}
 }

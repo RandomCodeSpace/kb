@@ -2,6 +2,7 @@ package tui
 
 import (
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -30,11 +31,29 @@ const (
 const filterMarkField = "filter"
 
 type boardFilterState struct {
-	input      textinput.Model
-	tags       []string
-	focus      filterFocus
-	labelIndex int
-	mark       formview.Mark
+	input              textinput.Model
+	tags               []string
+	projectionRevision uint64
+	focus              filterFocus
+	labelIndex         int
+	mark               formview.Mark
+}
+
+type boardFilterVisualIdentity struct {
+	focus         filterFocus
+	labelIndex    int
+	position      int
+	inputFocused  bool
+	virtualCursor bool
+	marked        bool
+}
+
+func (s *boardFilterState) visualIdentity() boardFilterVisualIdentity {
+	return boardFilterVisualIdentity{
+		focus: s.focus, labelIndex: s.labelIndex, position: s.input.Position(),
+		inputFocused: s.input.Focused(), virtualCursor: s.input.VirtualCursor(),
+		marked: s.mark.Active(filterMarkField),
+	}
 }
 
 func newBoardFilterState() boardFilterState {
@@ -50,8 +69,14 @@ func (s boardFilterState) value() boardFilter {
 }
 
 func (s *boardFilterState) restore(value boardFilter) {
+	beforeText := s.input.Value()
+	beforeTags := s.tags
+	tags := normalizedFilterTags(value.Tags)
 	s.input.SetValue(value.Text)
-	s.tags = normalizedFilterTags(value.Tags)
+	s.tags = tags
+	if beforeText != value.Text || !slices.Equal(beforeTags, tags) {
+		s.projectionRevision++
+	}
 }
 
 func normalizedFilterTags(tags []string) []string {
@@ -92,6 +117,7 @@ func (s *boardFilterState) clear() bool {
 	}
 	s.input.SetValue("")
 	s.tags = nil
+	s.projectionRevision++
 	return true
 }
 
@@ -102,10 +128,12 @@ func (s *boardFilterState) toggleTag(tag string) bool {
 	for i, selected := range s.tags {
 		if selected == tag {
 			s.tags = append(s.tags[:i], s.tags[i+1:]...)
+			s.projectionRevision++
 			return true
 		}
 	}
 	s.tags = append(s.tags, tag)
+	s.projectionRevision++
 	return true
 }
 
@@ -234,9 +262,13 @@ func (m *Model) prepareFilterProjection() *renderProjection {
 func (m *Model) mutateFilter(change func(*boardFilterState)) tea.Cmd {
 	previous := m.filteredBoard()
 	before := m.filter.value()
+	beforeRevision := m.filter.projectionRevision
 	change(&m.filter)
 	if reflect.DeepEqual(before, m.filter.value()) {
 		return nil
+	}
+	if m.filter.projectionRevision == beforeRevision {
+		m.filter.projectionRevision++
 	}
 	if prepared := m.prepareFilterProjection(); prepared != nil {
 		m.boardView.adoptBoard(previous, prepared.board)
@@ -333,6 +365,7 @@ func (m *Model) filterTextChanged(previous board.Board, before string, inputCmd 
 	if before == m.filter.input.Value() {
 		return inputCmd
 	}
+	m.filter.projectionRevision++
 	if prepared := m.prepareFilterProjection(); prepared != nil {
 		m.boardView.adoptBoard(previous, prepared.board)
 	} else {

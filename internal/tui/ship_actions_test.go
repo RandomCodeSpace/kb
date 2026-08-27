@@ -529,7 +529,7 @@ func TestShippedRecordPersistenceRolloverAndIdentity(t *testing.T) {
 	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	m.now = func() time.Time { return now }
 	m.renderedAt = now
-	m.shipped = shippedRecord{Date: "2026-08-18", IDs: []string{"a", "a", "", "b"}}
+	m.adoptShippedAt(shippedRecord{Date: "2026-08-18", IDs: []string{"a", "a", "", "b"}}, now)
 	if got := m.shippedCount(); got != 2 {
 		t.Fatalf("normalized shipped count = %d", got)
 	}

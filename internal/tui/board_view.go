@@ -2096,6 +2096,12 @@ func ageChip(task board.Task, now time.Time) string {
 	if task.Status == board.StatusDoing {
 		reference = task.MovedAt
 	}
+	if reference.IsZero() {
+		if task.Status == board.StatusDoing {
+			return "1h"
+		}
+		return "new"
+	}
 	elapsed := now.Sub(reference)
 	if elapsed < 0 {
 		elapsed = 0

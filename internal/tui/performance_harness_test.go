@@ -75,6 +75,20 @@ type performanceScenarioResult struct {
 	PublishedFrames                uint64                        `json:"published_frames"`
 	DiscardedEvents                uint64                        `json:"discarded_events"`
 	StaleWorkerResults             uint64                        `json:"stale_worker_results"`
+	NormalBaseBuilds               uint64                        `json:"normal_base_builds"`
+	DimmedBaseBuilds               uint64                        `json:"dimmed_base_builds"`
+	OverlayCompositions            uint64                        `json:"overlay_compositions"`
+	ProjectionBuilds               uint64                        `json:"projection_builds"`
+	ProjectionTaskVisits           uint64                        `json:"projection_task_visits"`
+	SourceTaskComparisons          uint64                        `json:"source_task_comparisons"`
+	ShippedIDVisits                uint64                        `json:"shipped_id_visits"`
+	RenderedCardRecords            uint64                        `json:"rendered_card_records"`
+	SynchronousLayoutRecords       uint64                        `json:"synchronous_layout_records"`
+	TemporalScheduledTicks         uint64                        `json:"temporal_scheduled_ticks"`
+	TemporalStaleTicks             uint64                        `json:"temporal_stale_ticks"`
+	TemporalTaskVisits             uint64                        `json:"temporal_task_visits"`
+	TemporalRecordsRefreshed       uint64                        `json:"temporal_records_refreshed"`
+	TemporalIndexNodesVisited      uint64                        `json:"temporal_index_nodes_visited"`
 	PublicationTrace               []performancePublicationStamp `json:"publication_trace"`
 	ExpectedZeroFrames             bool                          `json:"expected_zero_frames"`
 }
@@ -94,6 +108,7 @@ type performancePublicationStamp struct {
 	Discarded             bool   `json:"discarded"`
 	followUp              tea.Cmd
 	geometry              tea.Cmd
+	temporal              tea.Cmd
 }
 
 type performanceStartupResult struct {
@@ -119,6 +134,7 @@ type performanceScenario struct {
 	prepare            func(*Model, int)
 	admit              func(*Model, int) []performancePublicationStamp
 	requireFollowUp    bool
+	requireTemporal    bool
 	settleFollowUp     func(*testing.T, *Model, tea.Cmd)
 }
 
@@ -361,6 +377,86 @@ func TestPerformanceFilterBlinkSettlementDoesNotExecuteTimer(t *testing.T) {
 	}
 }
 
+func TestPerformanceGeometrySettlementDoesNotExecuteTemporalTimer(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	model := NewModel(stubBoardReader{}, nil, "perf")
+	model.now = func() time.Time { return now }
+	model.renderedAt = now
+	model.board = board.Board{Title: "Clock", Tasks: []board.Task{{
+		ID: "one", Title: "One", Status: board.StatusTodo, CreatedAt: now.Add(-23 * time.Hour),
+	}}}
+	executed := false
+	model.temporalSchedule = func(_ time.Duration, message temporalTickMsg) tea.Cmd {
+		return func() tea.Msg {
+			executed = true
+			return message
+		}
+	}
+	model.rebuildRenderPlan(renderImpactAll)
+	model, commands := model.updateWithCommands(tea.WindowSizeMsg{Width: 100, Height: 30})
+	if commands.temporal == nil {
+		t.Fatal("fixture did not expose a temporal timer separately from geometry")
+	}
+	settlePerformanceGeometryCommand(t, &model, commands.geometry)
+	if executed {
+		t.Fatal("geometry settlement executed the temporal timer")
+	}
+}
+
+func TestPerformanceCachedOverlayAndTemporalScenariosExactWork(t *testing.T) {
+	for _, name := range []string{
+		"overlay_update_cached_dim", "overlay_close_cached_normal", "temporal_boundary", "stale_temporal_tick",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var scenario performanceScenario
+			found := false
+			for _, candidate := range performanceScenarios(120) {
+				if candidate.name == name {
+					scenario, found = candidate, true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("scenario %q not found", name)
+			}
+			scenario.warmups, scenario.samples = 1, 2
+			result := runPerformanceScenario(t, 120, scenario)
+			switch name {
+			case "overlay_update_cached_dim", "overlay_close_cached_normal":
+				if result.NormalBaseBuilds != 0 || result.DimmedBaseBuilds != 0 ||
+					result.ProjectionBuilds != 0 || result.ProjectionTaskVisits != 0 ||
+					result.SourceTaskComparisons != 0 || result.ShippedIDVisits != 0 ||
+					result.RenderedCardRecords != 0 || result.SynchronousLayoutRecords != 0 ||
+					result.OverlayCompositions != uint64(scenario.samples) ||
+					result.PublishedFrames != uint64(scenario.samples) || result.TemporalTaskVisits != 0 ||
+					result.TemporalScheduledTicks != 0 {
+					t.Fatalf("cached overlay exact work = %+v", result)
+				}
+			case "temporal_boundary":
+				if result.ProjectionBuilds != 0 || result.ProjectionTaskVisits != 0 ||
+					result.SourceTaskComparisons != 0 || result.ShippedIDVisits != 0 ||
+					result.SynchronousLayoutRecords != 0 ||
+					result.NormalBaseBuilds != uint64(scenario.samples) ||
+					result.OverlayCompositions != uint64(scenario.samples) ||
+					result.PublishedFrames != uint64(scenario.samples) ||
+					result.TemporalScheduledTicks != uint64(scenario.samples) {
+					t.Fatalf("temporal boundary exact work = %+v", result)
+				}
+			case "stale_temporal_tick":
+				if result.AcceptedMessages != 0 || result.PublishedFrames != 0 ||
+					result.NormalBaseBuilds != 0 || result.DimmedBaseBuilds != 0 ||
+					result.OverlayCompositions != 0 || result.ProjectionBuilds != 0 ||
+					result.ProjectionTaskVisits != 0 || result.SourceTaskComparisons != 0 ||
+					result.ShippedIDVisits != 0 || result.RenderedCardRecords != 0 ||
+					result.SynchronousLayoutRecords != 0 || result.TemporalScheduledTicks != 0 ||
+					result.TemporalStaleTicks != uint64(scenario.samples) || result.TemporalTaskVisits != 0 {
+					t.Fatalf("stale temporal exact work = %+v", result)
+				}
+			}
+		})
+	}
+}
+
 func TestPointerResolverCostIsBoundedByVisibleHitSnapshot(t *testing.T) {
 	const visibleHitBudget = 512
 	var baseline uint64
@@ -593,6 +689,67 @@ func performanceScenarios(count int) []performanceScenario {
 			},
 		},
 		{
+			name: "overlay_update_cached_dim",
+			newModel: func() Model {
+				model := base("")
+				model, _ = model.updateWithCommands(tea.KeyPressMsg{Code: '?', Text: "?"})
+				return model
+			},
+			admit: func(model *Model, _ int) []performancePublicationStamp {
+				return admitPerformanceMessage(model, tea.KeyPressMsg{Code: 'x', Text: "x"})
+			},
+		},
+		{
+			name: "overlay_close_cached_normal",
+			newModel: func() Model {
+				model := base("")
+				model, _ = model.updateWithCommands(tea.KeyPressMsg{Code: '?', Text: "?"})
+				return model
+			},
+			prepare: func(model *Model, _ int) {
+				if !model.helpOpen {
+					*model, _ = model.updateWithCommands(tea.KeyPressMsg{Code: '?', Text: "?"})
+				}
+			},
+			admit: func(model *Model, _ int) []performancePublicationStamp {
+				return admitPerformanceMessage(model, tea.KeyPressMsg{Code: '?', Text: "?"})
+			},
+		},
+		{
+			name: "temporal_boundary",
+			newModel: func() Model {
+				model := base("")
+				model.temporalSchedule = func(_ time.Duration, message temporalTickMsg) tea.Cmd {
+					return func() tea.Msg { return message }
+				}
+				_ = model.reconcileTemporalSchedule()
+				return model
+			},
+			prepare: func(model *Model, _ int) {
+				model.now = func() time.Time { return model.temporalDeadline }
+			},
+			admit: func(model *Model, _ int) []performancePublicationStamp {
+				return admitPerformanceMessage(model, temporalTickMsg{
+					generation: model.temporalGeneration, deadline: model.temporalDeadline,
+				})
+			},
+			requireTemporal: true,
+		},
+		{
+			name:               "stale_temporal_tick",
+			expectedZeroFrames: true,
+			newModel: func() Model {
+				model := base("")
+				_ = model.reconcileTemporalSchedule()
+				return model
+			},
+			admit: func(model *Model, _ int) []performancePublicationStamp {
+				return admitPerformanceMessage(model, temporalTickMsg{
+					generation: model.temporalGeneration - 1, deadline: model.temporalDeadline,
+				})
+			},
+		},
+		{
 			name:               "unchanged_poll",
 			expectedZeroFrames: true,
 			newModel: func() Model {
@@ -669,6 +826,10 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 	latencies := make([]time.Duration, samples)
 	var allocations, allocatedBytes, maximumPublicationBytes, maximumRetainedPlanBytes uint64
 	var accepted, frames, discarded, stale uint64
+	var normalBases, dimmedBases, compositions, projectionBuilds, projectionVisits uint64
+	var sourceComparisons, shippedIDVisits uint64
+	var renderedCards, synchronousLayout, temporalScheduled, temporalStale, temporalVisits uint64
+	var temporalRecords, temporalNodes uint64
 	var trace []performancePublicationStamp
 	for sample := range samples {
 		if scenario.prepare != nil {
@@ -690,6 +851,20 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		maximumRetainedPlanBytes = max(maximumRetainedPlanBytes, afterStats.RetainedPlanOwnedBytesEstimate)
 		frames += afterStats.PublishedFrames - beforeStats.PublishedFrames
 		stale += afterStats.StaleWorkerResults - beforeStats.StaleWorkerResults
+		normalBases += afterStats.NormalBaseBuilds - beforeStats.NormalBaseBuilds
+		dimmedBases += afterStats.DimmedBaseBuilds - beforeStats.DimmedBaseBuilds
+		compositions += afterStats.OverlayCompositions - beforeStats.OverlayCompositions
+		projectionBuilds += afterStats.ProjectionBuilds - beforeStats.ProjectionBuilds
+		projectionVisits += afterStats.ProjectionTaskVisits - beforeStats.ProjectionTaskVisits
+		sourceComparisons += afterStats.SourceTaskComparisons - beforeStats.SourceTaskComparisons
+		shippedIDVisits += afterStats.ShippedIDVisits - beforeStats.ShippedIDVisits
+		renderedCards += afterStats.RenderedCardRecords - beforeStats.RenderedCardRecords
+		synchronousLayout += afterStats.SynchronousLayoutRecords - beforeStats.SynchronousLayoutRecords
+		temporalScheduled += afterStats.TemporalScheduledTicks - beforeStats.TemporalScheduledTicks
+		temporalStale += afterStats.TemporalStaleTicks - beforeStats.TemporalStaleTicks
+		temporalVisits += afterStats.TemporalTaskVisits - beforeStats.TemporalTaskVisits
+		temporalRecords += afterStats.TemporalRecordsRefreshed - beforeStats.TemporalRecordsRefreshed
+		temporalNodes += afterStats.TemporalIndexNodesVisited - beforeStats.TemporalIndexNodesVisited
 		var observedDiscard uint64
 		for event := range stamps {
 			stamps[event].Sample = sample
@@ -724,6 +899,20 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		PublishedFrames:                frames,
 		DiscardedEvents:                discarded,
 		StaleWorkerResults:             stale,
+		NormalBaseBuilds:               normalBases,
+		DimmedBaseBuilds:               dimmedBases,
+		OverlayCompositions:            compositions,
+		ProjectionBuilds:               projectionBuilds,
+		ProjectionTaskVisits:           projectionVisits,
+		SourceTaskComparisons:          sourceComparisons,
+		ShippedIDVisits:                shippedIDVisits,
+		RenderedCardRecords:            renderedCards,
+		SynchronousLayoutRecords:       synchronousLayout,
+		TemporalScheduledTicks:         temporalScheduled,
+		TemporalStaleTicks:             temporalStale,
+		TemporalTaskVisits:             temporalVisits,
+		TemporalRecordsRefreshed:       temporalRecords,
+		TemporalIndexNodesVisited:      temporalNodes,
 		PublicationTrace:               trace,
 		ExpectedZeroFrames:             scenario.expectedZeroFrames,
 	}
@@ -743,6 +932,7 @@ func admitPerformanceMessage(model *Model, message tea.Msg) []performancePublica
 		InstalledForMessageID: after.InstalledForMessageID,
 		followUp:              commands.followUp,
 		geometry:              commands.geometry,
+		temporal:              commands.temporal,
 	}}
 }
 
@@ -754,9 +944,10 @@ func settlePerformanceStampCommands(
 ) {
 	t.Helper()
 	for index := range stamps {
-		followUp, geometry := stamps[index].followUp, stamps[index].geometry
+		followUp, geometry, temporal := stamps[index].followUp, stamps[index].geometry, stamps[index].temporal
 		stamps[index].followUp = nil
 		stamps[index].geometry = nil
+		stamps[index].temporal = nil
 		if followUp != nil {
 			if scenario.settleFollowUp == nil {
 				t.Fatalf("%s returned an unexpected non-worker command", scenario.name)
@@ -764,6 +955,9 @@ func settlePerformanceStampCommands(
 			scenario.settleFollowUp(t, model, followUp)
 		} else if scenario.requireFollowUp {
 			t.Fatalf("%s did not return its required non-worker command", scenario.name)
+		}
+		if scenario.requireTemporal && temporal == nil {
+			t.Fatalf("%s did not return its required temporal command", scenario.name)
 		}
 		settlePerformanceGeometryCommand(t, model, geometry)
 	}

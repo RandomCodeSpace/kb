@@ -80,6 +80,56 @@ func TestDataVersionWatcherDetectsAnotherConnection(t *testing.T) {
 	}
 }
 
+func TestUnchangedSQLiteWatcherPollIsFrameAndTemporalFree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kb.db")
+	st, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	watcher, err := OpenDataVersionWatcher(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = watcher.Close() })
+	version, err := watcher.DataVersion(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := st.Board("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newTestRootModel(st, watcher, "alice")
+	stamp := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	model.now = func() time.Time { return stamp.Add(12 * time.Hour) }
+	model.renderedAt = stamp
+	model.board = fixture
+	model.loading = false
+	model.haveBoardSnapshot = true
+	model.haveVersion = true
+	model.pollStarted = true
+	model.dataVersion = version
+	rebuildTestView(&model)
+	before := model.RenderPlanStats()
+
+	model, commands := model.updateWithCommands(pollTickMsg{})
+	if commands.followUp == nil || commands.temporal != nil || !model.renderedAt.Equal(stamp) {
+		t.Fatalf("poll command/clock = follow=%v temporal=%v rendered=%s", commands.followUp, commands.temporal, model.renderedAt)
+	}
+	message, ok := commands.followUp().(dataVersionMsg)
+	if !ok || message.err != nil || message.version != version {
+		t.Fatalf("real watcher poll = %#v", message)
+	}
+	model, commands = model.updateWithCommands(message)
+	after := model.RenderPlanStats()
+	if commands.followUp == nil || commands.temporal != nil ||
+		after.PublishedFrames != before.PublishedFrames || after.TemporalScheduledTicks != before.TemporalScheduledTicks ||
+		after.TemporalTaskVisits != before.TemporalTaskVisits {
+		t.Fatalf("unchanged real watcher changed frame/temporal state: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestRunStartsAndQuits(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kb.db")
 	st, err := store.Open(path, []byte("test-secret"))

@@ -36,8 +36,7 @@ func TestIntegratedFilterEditorRoutingAndRefresh(t *testing.T) {
 		t.Fatalf("focused filter routed n/e to editor: open=%v text=%q", m.editor.IsOpen(), m.filter.input.Value())
 	}
 
-	m.filter.input.SetValue("")
-	m.filter.tags = []string{"bug"}
+	m.filter.restore(boardFilter{Tags: []string{"bug"}})
 	m.filter.blur()
 	m.boardView.adoptBoard(m.board, m.filteredBoard())
 	loadLabels := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'e'})
@@ -79,7 +78,7 @@ func TestIntegratedSavedSelectionRespectsFilterVisibility(t *testing.T) {
 	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	m.loading = false
 	m.board = board.Board{Tasks: []board.Task{visible, hidden}}
-	m.filter.input.SetValue("keep")
+	m.filter.restore(boardFilter{Text: "keep"})
 	m.boardView.focusTask(m.filteredBoard(), visible.ID)
 
 	m.selectAfterLoad = created.ID
@@ -111,7 +110,7 @@ func TestIntegratedSavedSelectionWaitsForFreshSuccessor(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			m := newTestRootModel(stubBoardReader{board: test.fresh}, nil, "alice")
 			m.board = board.Board{Tasks: []board.Task{old}}
-			m.filter.input.SetValue("keep")
+			m.filter.restore(boardFilter{Text: "keep"})
 			m.boardView.focusTask(m.filteredBoard(), old.ID)
 			m.loading = true
 			m.reloadPending = true
@@ -196,7 +195,7 @@ func TestIntegratedFilteredMovePreservesHiddenOrder(t *testing.T) {
 		{ID: "hidden-2", Title: "H2", Status: board.StatusTodo},
 	}}
 	filter := newBoardFilterState()
-	filter.tags = []string{"bug"}
+	filter.restore(boardFilter{Tags: []string{"bug"}})
 	visible := filter.project(current)
 	moving, _ := boardTaskByID(current, "moving")
 	statuses := []board.Status{board.StatusTodo, board.StatusDoing, board.StatusDone}
@@ -265,7 +264,7 @@ func TestIntegratedMoveModalAndFooterPrecedence(t *testing.T) {
 	}
 	m := newTestRootModel(st, nil, "alice")
 	completeBoardLoad(t, &m, m.Init())
-	m.filter.tags = []string{"bug"}
+	m.filter.restore(boardFilter{Tags: []string{"bug"}})
 	m.loadErr = errors.New("stale load error")
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 	if m.move.lifted == nil {

@@ -28,9 +28,10 @@ type taskDerivation struct {
 }
 
 type projectionKey struct {
-	filter      boardFilter
-	projectName string
-	projectAll  bool
+	filter         boardFilter
+	filterRevision uint64
+	projectName    string
+	projectAll     bool
 }
 
 type projectionStatusSummary struct {
@@ -103,9 +104,10 @@ func (p renderProjection) rebuildSource(model Model, checkSource bool) (renderPr
 	}
 
 	key := projectionKey{
-		filter:      model.filter.value(),
-		projectName: model.projects.name,
-		projectAll:  model.projects.all,
+		filter:         model.filter.value(),
+		filterRevision: model.filter.projectionRevision,
+		projectName:    model.projects.name,
+		projectAll:     model.projects.all,
 	}
 	projectionChanged := tasksChanged || !p.initialized || !sameProjectionKey(p.key, key)
 	if projectionChanged {
@@ -163,7 +165,8 @@ func (p renderProjection) reconcileSource(model Model) (renderProjection, projec
 	p.sourceGeneration++
 	p.tasks = tasks
 	key := projectionKey{
-		filter: model.filter.value(), projectName: model.projects.name, projectAll: model.projects.all,
+		filter: model.filter.value(), filterRevision: model.filter.projectionRevision,
+		projectName: model.projects.name, projectAll: model.projects.all,
 	}
 	boardProjection, statuses, summaries, ordinals, taskIndexes, labels, projected :=
 		buildCurrentProjection(p.title, p.tasks, key)
@@ -337,7 +340,7 @@ func (p renderProjection) matchesModel(model Model) bool {
 func (p renderProjection) matchesProjectionKey(model Model) bool {
 	return p.matchesSourceIdentity(model.board) &&
 		p.key.projectName == model.projects.name && p.key.projectAll == model.projects.all &&
-		p.key.filter.Text == model.filter.input.Value() && slices.Equal(p.key.filter.Tags, model.filter.tags)
+		p.key.filterRevision == model.filter.projectionRevision
 }
 
 func (p renderProjection) matchesSourceIdentity(current board.Board) bool {
@@ -432,7 +435,8 @@ func sameTask(left, right board.Task) bool {
 }
 
 func sameProjectionKey(left, right projectionKey) bool {
-	return left.projectName == right.projectName && left.projectAll == right.projectAll &&
+	return left.filterRevision == right.filterRevision &&
+		left.projectName == right.projectName && left.projectAll == right.projectAll &&
 		left.filter.Text == right.filter.Text && slices.Equal(left.filter.Tags, right.filter.Tags)
 }
 

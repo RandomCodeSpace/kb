@@ -118,7 +118,7 @@ func TestBoundGlyphsAreNeverAbutted(t *testing.T) {
 		m.renderedAt = now
 		// The shipped counter is the top bar's only ambiguous mark and it is
 		// only drawn when the count is non-zero, so the walk seeds one.
-		m.shipped = shippedRecord{Date: now.Format(shippedDateLayout), IDs: []string{"done-1"}}
+		m.adoptShippedAt(shippedRecord{Date: now.Format(shippedDateLayout), IDs: []string{"done-1"}}, now)
 		sized, _ := m.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
 		m = sized.(Model)
 		for row, line := range strings.Split(plain(m.render()), "\n") {

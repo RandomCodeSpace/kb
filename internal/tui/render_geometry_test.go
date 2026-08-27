@@ -563,6 +563,40 @@ func TestPrefixCorrectionPreservesTaskAndIntraRowAnchor(t *testing.T) {
 	}
 }
 
+func TestCardLayoutPathReplacementKeepsReachableOwnershipStable(t *testing.T) {
+	records := make([]cardLayoutRecord, 129)
+	for index := range records {
+		records[index].height = index%7 + 1
+	}
+	layout := newCardLayoutIndex(records, 1)
+	wantBytes := layout.ownedBytes
+
+	for index := range records {
+		record := layout.recordAt(index)
+		record.height++
+		var copied int
+		layout, copied = layout.withRecord(index, record)
+		if copied <= 0 {
+			t.Fatalf("replacement %d copied no path", index)
+		}
+		if layout.ownedBytes != wantBytes {
+			t.Fatalf("replacement %d owned bytes = %d, want stable reachable estimate %d",
+				index, layout.ownedBytes, wantBytes)
+		}
+	}
+
+	var reachable func(*cardLayoutNode) int
+	reachable = func(node *cardLayoutNode) int {
+		if node == nil {
+			return 0
+		}
+		return 1 + reachable(node.left) + reachable(node.right)
+	}
+	if got, want := reachable(layout.root), 2*len(records)-1; got != want {
+		t.Fatalf("reachable nodes after path replacements = %d, want %d", got, want)
+	}
+}
+
 func settleGeometry(t *testing.T, model Model) Model {
 	t.Helper()
 	command := model.startGeometryWorker()

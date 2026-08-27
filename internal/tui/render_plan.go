@@ -79,6 +79,15 @@ type RenderPlanStats struct {
 	ContentBytes                   uint64              `json:"content_bytes"`
 	HitRegions                     uint64              `json:"hit_regions"`
 	RetainedPlanOwnedBytesEstimate uint64              `json:"retained_plan_owned_bytes_estimate"`
+	NormalBaseBuilds               uint64              `json:"normal_base_builds"`
+	DimmedBaseBuilds               uint64              `json:"dimmed_base_builds"`
+	OverlayCompositions            uint64              `json:"overlay_compositions"`
+	TemporalScheduledTicks         uint64              `json:"temporal_scheduled_ticks"`
+	TemporalStaleTicks             uint64              `json:"temporal_stale_ticks"`
+	TemporalTaskVisits             uint64              `json:"temporal_task_visits"`
+	TemporalRecordsRefreshed       uint64              `json:"temporal_records_refreshed"`
+	TemporalIndexNodesVisited      uint64              `json:"temporal_index_nodes_visited"`
+	ShippedIDVisits                uint64              `json:"shipped_id_visits"`
 }
 
 // renderPlan is the process-local root of rendering state. Its interface is
@@ -89,11 +98,20 @@ type renderPlan struct {
 	view       tea.View
 	resolver   func(tea.MouseMsg) tea.Cmd
 	semantics  renderSnapshotSemantics
+	bases      retainedBoardBases
 	pointer    pointer.State
 	projection renderProjection
 	geometry   renderGeometry
 	worker     geometryWorkerState
 	stats      RenderPlanStats
+}
+
+type retainedBoardBases struct {
+	generation uint64
+	normal     boardRenderBase
+	dimmed     boardRenderBase
+	haveNormal bool
+	haveDimmed bool
 }
 
 // retainedRenderView is embedded in Model so its small value receiver is the
@@ -176,41 +194,74 @@ func (p renderPlan) semanticallyMatches(snapshot coldRenderSnapshot) bool {
 }
 
 func (p renderPlan) rebuild(model Model, impact renderImpact, checkSource bool) renderPlan {
-	var projectionChanged bool
-	if prepared := model.preparedProjection; prepared != nil && prepared.matchesProjectionKey(model) {
-		p.projection = *prepared
-		projectionChanged = p.projection.generation != model.currentProjectionGeneration()
-		p.stats.TaskDerivationBuilds += uint64(model.preparedDerivations)
-		p.stats.SourceTaskComparisons += uint64(model.preparedComparisons)
-	} else {
-		if checkSource && p.projection.initialized {
-			p.stats.SourceTaskComparisons += uint64(len(model.board.Tasks))
+	desiredOwner, desiredEpoch := model.renderOwnerIdentity()
+	if p.stats.InstalledSnapshotID != 0 &&
+		(p.semantics.handler != desiredOwner || p.semantics.ownerEpoch != desiredEpoch) {
+		model.pointerState = model.pointerState.ClearCapture().ClearHoverObservation()
+	}
+	baseImpact := impact&^renderImpactOverlay != 0 || !p.bases.haveNormal
+	if !baseImpact && desiredOwner == renderHandlerBoard && p.bases.normal.pointer != model.pointerState {
+		// An overlay pointer owner may leave feedback identities that a board
+		// base never rendered. Rebuild instead of resurrecting stale styling.
+		baseImpact = true
+	}
+	if baseImpact {
+		var projectionChanged bool
+		if prepared := model.preparedProjection; prepared != nil && prepared.matchesProjectionKey(model) {
+			p.projection = *prepared
+			projectionChanged = p.projection.generation != model.currentProjectionGeneration()
+			p.stats.TaskDerivationBuilds += uint64(model.preparedDerivations)
+			p.stats.SourceTaskComparisons += uint64(model.preparedComparisons)
+		} else {
+			if checkSource && p.projection.initialized {
+				p.stats.SourceTaskComparisons += uint64(len(model.board.Tasks))
+			}
+			p.projection, _, projectionChanged = p.projection.rebuildSource(model, checkSource)
 		}
-		p.projection, _, projectionChanged = p.projection.rebuildSource(model, checkSource)
+		if projectionChanged {
+			p.stats.ProjectionBuilds++
+			p.stats.ProjectionTaskVisits += uint64(len(p.projection.tasks))
+		}
+		model.current = &p
+		model.renderingProjection = &p.projection
+		var synchronousRecords, synchronousNodes int
+		p.geometry, synchronousRecords, synchronousNodes = p.geometry.rebuild(model, &p.projection, projectionChanged)
+		p.stats.SynchronousLayoutRecords += uint64(synchronousRecords)
+		p.stats.SynchronousIndexNodes += uint64(synchronousNodes)
+		p.stats.TemporalRecordsRefreshed += uint64(p.geometry.temporalRecordsRefreshed)
+		p.stats.TemporalIndexNodesVisited += uint64(p.geometry.temporalIndexNodesVisited)
+		model.renderingGeometry = &p.geometry
 	}
-	if projectionChanged {
-		p.stats.ProjectionBuilds++
-		p.stats.ProjectionTaskVisits += uint64(len(p.projection.tasks))
-	}
-	// The cold renderer consumes the just-built immutable projection. Pointing
-	// this short-lived model copy at p keeps the oracle on the same data that
-	// the installed plan publishes.
 	model.current = &p
 	model.renderingProjection = &p.projection
-	var synchronousRecords, synchronousNodes int
-	p.geometry, synchronousRecords, synchronousNodes = p.geometry.rebuild(model, &p.projection, projectionChanged)
-	p.stats.SynchronousLayoutRecords += uint64(synchronousRecords)
-	p.stats.SynchronousIndexNodes += uint64(synchronousNodes)
 	model.renderingGeometry = &p.geometry
 	trace := renderVisitTrace{}
 	model.renderTrace = &trace
-	snapshot := model.renderRetainedSnapshot()
-	snapshot = model.reresolveBoardHover(snapshot)
+	if baseImpact {
+		base := model.renderBoardBase(false)
+		base = model.reresolveBoardHoverBase(base, false)
+		p.bases.generation++
+		p.bases.normal = base
+		p.bases.haveNormal = true
+		p.bases.haveDimmed = false
+		p.stats.NormalBaseBuilds++
+	}
+	base := p.bases.normal
+	if model.overlayOpen() {
+		if !p.bases.haveDimmed {
+			p.bases.dimmed = model.renderBoardBase(true)
+			p.bases.haveDimmed = true
+			p.stats.DimmedBaseBuilds++
+		}
+		base = p.bases.dimmed
+	}
+	snapshot := model.composeSnapshot(base)
 	p.view = snapshot.view
 	p.semantics = snapshot.semantics
 	p.pointer = model.pointerState
 	p.stats.Builds++
 	p.stats.PublishedFrames++
+	p.stats.OverlayCompositions++
 	p.stats.InstalledSnapshotID++
 	p.stats.InstalledForMessageID = model.acceptedMessageID
 	p.stats.Revisions.advance(impact)
@@ -221,8 +272,19 @@ func (p renderPlan) rebuild(model Model, impact renderImpact, checkSource bool) 
 	p.stats.ProjectedTasks = uint64(len(p.projection.board.Tasks))
 	p.refreshGeometryStats()
 	p.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
-		p.projection.ownedBytesEstimate() + p.geometry.ownedBytesEstimate()
+		p.projection.ownedBytesEstimate() + p.geometry.ownedBytesEstimate() + p.bases.ownedBytesEstimate()
 	return p
+}
+
+func (b retainedBoardBases) ownedBytesEstimate() uint64 {
+	var estimate uint64
+	if b.haveNormal {
+		estimate += b.normal.ownedBytesEstimate()
+	}
+	if b.haveDimmed {
+		estimate += b.dimmed.ownedBytesEstimate()
+	}
+	return estimate
 }
 
 func (p *renderPlan) refreshGeometryStats() {
@@ -332,7 +394,7 @@ func (m *Model) rebuildRenderPlanAfterUpdate(impact renderImpact, checkSource bo
 	m.publishKeyboardAdmissionSnapshot()
 }
 
-func (m Model) currentProjectionGeneration() uint64 {
+func (m *Model) currentProjectionGeneration() uint64 {
 	if m.current == nil {
 		return 0
 	}
@@ -374,7 +436,7 @@ func (m *Model) installPointerHandler(plan *renderPlan) {
 		m.pointerOwner = plan.semantics.handler
 		m.pointerOwnerEpoch = plan.semantics.ownerEpoch
 		m.pointerOwnerSeq++
-		m.pointerState = m.pointerState.ClearCapture()
+		m.pointerState = m.pointerState.ClearCapture().ClearHoverObservation()
 	}
 	if plan.view.OnMouse == nil {
 		plan.resolver = nil
@@ -386,6 +448,39 @@ func (m *Model) installPointerHandler(plan *renderPlan) {
 	}
 	plan.resolver = plan.view.OnMouse
 	plan.view.OnMouse = m.pointerMailbox.wrap(plan.resolver, route)
+}
+
+func (m Model) renderOwnerIdentity() (renderHandlerTopology, uint64) {
+	handler := renderHandlerNone
+	var epoch uint64
+	if m.helpOpen {
+		handler = renderHandlerHelp
+	}
+	if m.detail.IsOpen() {
+		handler, epoch = renderHandlerDetail, m.detail.PointerSession()
+	}
+	if m.settings != nil {
+		handler, epoch = renderHandlerSettings, 0
+	}
+	if m.adr.IsOpen() {
+		handler, epoch = renderHandlerADR, m.adr.PointerSession()
+	}
+	if m.editor.IsOpen() {
+		handler, epoch = renderHandlerEditor, m.editor.PointerSession()
+	}
+	if m.action.open() {
+		handler, epoch = renderHandlerAction, m.taskActionSession
+	}
+	if m.issueImport.IsOpen() {
+		handler, epoch = renderHandlerIssueImport, m.issueImport.PointerSession()
+	}
+	if m.palette.IsOpen() {
+		handler, epoch = renderHandlerPalette, m.palette.PointerSession()
+	}
+	if handler == renderHandlerNone && !m.detail.OwnsInput() && !m.launching() {
+		handler = renderHandlerBoard
+	}
+	return handler, epoch
 }
 
 // startGeometryWorker serializes the offscreen command chain. A superseding
@@ -472,8 +567,21 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 		model.renderingGeometry = &next.geometry
 		trace := renderVisitTrace{}
 		model.renderTrace = &trace
-		snapshot := model.renderRetainedSnapshot()
-		snapshot = model.reresolveBoardHover(snapshot)
+		base := model.renderBoardBase(false)
+		base = model.reresolveBoardHoverBase(base, false)
+		next.bases.generation++
+		next.bases.normal = base
+		next.bases.haveNormal = true
+		next.bases.haveDimmed = false
+		next.stats.NormalBaseBuilds++
+		if model.overlayOpen() {
+			next.bases.dimmed = model.renderBoardBase(true)
+			next.bases.haveDimmed = true
+			next.stats.DimmedBaseBuilds++
+			base = next.bases.dimmed
+		}
+		snapshot := model.composeSnapshot(base)
+		next.stats.OverlayCompositions++
 		next.pointer = model.pointerState
 		next.stats.RenderedCardRecords += trace.cardRecords
 		if !next.semanticallyMatches(snapshot) {
@@ -486,7 +594,8 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 			next.stats.ContentBytes = uint64(len(snapshot.view.Content))
 			next.stats.HitRegions = uint64(len(snapshot.hitRegions))
 			next.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
-				next.projection.ownedBytesEstimate() + next.geometry.ownedBytesEstimate()
+				next.projection.ownedBytesEstimate() + next.geometry.ownedBytesEstimate() +
+				next.bases.ownedBytesEstimate()
 			m.installPointerHandler(&next)
 		}
 	}
@@ -509,6 +618,23 @@ func (m *Model) reresolveBoardHover(snapshot coldRenderSnapshot) coldRenderSnaps
 	}
 	m.pointerState = next
 	return m.renderRetainedSnapshot()
+}
+
+func (m *Model) reresolveBoardHoverBase(base boardRenderBase, dimmed bool) boardRenderBase {
+	owner, _ := m.renderOwnerIdentity()
+	if owner != renderHandlerBoard {
+		return base
+	}
+	point, ok := m.pointerState.HoverPoint()
+	if !ok {
+		return base
+	}
+	next := m.pointerState.Hover(boardHoverControlAt(base.hits, point), point)
+	if next.Hovered() == m.pointerState.Hovered() {
+		return base
+	}
+	m.pointerState = next
+	return m.renderBoardBase(dimmed)
 }
 
 func boardHoverControlAt(hits []boardHit, point pointer.Point) pointer.ControlID {
@@ -557,6 +683,8 @@ func renderImpactAfterUpdate(message tea.Msg, before, after Model) renderImpact 
 	switch message.(type) {
 	case pollTickMsg:
 		return 0
+	case temporalTickMsg:
+		return renderImpactTemporal | renderImpactAppearance
 	case boardLoadedMsg:
 		loaded := message.(boardLoadedMsg)
 		if loaded.generation != 0 && loaded.generation < after.loadGeneration &&
@@ -593,7 +721,36 @@ func renderImpactAfterUpdate(message tea.Msg, before, after Model) renderImpact 
 			return 0
 		}
 	}
+	if (before.overlayOpen() || after.overlayOpen()) && boardBaseStableAcross(&before, &after) {
+		return renderImpactOverlay
+	}
 	return renderImpactAll
+}
+
+func boardBaseStableAcross(before, after *Model) bool {
+	if before.current == nil || !before.current.projection.matchesProjectionKey(*after) {
+		return false
+	}
+	if before.width != after.width || before.height != after.height || before.styles != after.styles ||
+		!before.renderedAt.Equal(after.renderedAt) || before.temporalVisualGeneration != after.temporalVisualGeneration ||
+		before.boardView != after.boardView || before.loading != after.loading ||
+		before.haveBoardSnapshot != after.haveBoardSnapshot || before.stopped != after.stopped ||
+		before.brandFrame != after.brandFrame || before.brandGen != after.brandGen ||
+		before.version != after.version || before.scroll != after.scroll || before.celebrate != after.celebrate ||
+		before.boardBusyLabel() != after.boardBusyLabel() || before.busyFrameText() != after.busyFrameText() ||
+		before.actionNotice != after.actionNotice || before.actionStatus != after.actionStatus ||
+		before.actionStatusError != after.actionStatusError || before.noticeSeq != after.noticeSeq ||
+		before.move.lifted != after.move.lifted || before.move.saving != after.move.saving ||
+		before.move.status != after.move.status || before.move.statusError != after.move.statusError ||
+		before.move.notice != after.move.notice ||
+		before.filter.visualIdentity() != after.filter.visualIdentity() ||
+		!sameRenderError(before.loadErr, after.loadErr) || !sameRenderError(before.pollErr, after.pollErr) ||
+		!sameRenderError(before.preferenceErr, after.preferenceErr) || before.shipped.Date != after.shipped.Date ||
+		before.shipped.revision != after.shipped.revision ||
+		before.shipped.visibleCount != after.shipped.visibleCount {
+		return false
+	}
+	return true
 }
 
 func sameRenderError(left, right error) bool {
