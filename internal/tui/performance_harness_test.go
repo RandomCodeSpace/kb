@@ -77,6 +77,14 @@ type performanceScenarioResult struct {
 	DiscardedEvents                uint64                        `json:"discarded_events"`
 	StaleBoardLoads                uint64                        `json:"stale_board_loads"`
 	StaleWorkerResults             uint64                        `json:"stale_worker_results"`
+	GeometryWorkerSlices           uint64                        `json:"geometry_worker_slices"`
+	GeometrySnapshotInstalls       uint64                        `json:"geometry_snapshot_installs"`
+	GeometryCacheHits              uint64                        `json:"geometry_cache_hits"`
+	GeometryCacheMisses            uint64                        `json:"geometry_cache_misses"`
+	GeometryCacheEvictions         uint64                        `json:"geometry_cache_evictions"`
+	GeometryCacheInvalidations     uint64                        `json:"geometry_cache_invalidations"`
+	GeometryCacheEntries           uint64                        `json:"geometry_cache_entries"`
+	GeometryCacheOwnedBytes        uint64                        `json:"geometry_cache_owned_bytes"`
 	NormalBaseBuilds               uint64                        `json:"normal_base_builds"`
 	DimmedBaseBuilds               uint64                        `json:"dimmed_base_builds"`
 	OverlayCompositions            uint64                        `json:"overlay_compositions"`
@@ -118,6 +126,7 @@ type performancePublicationStamp struct {
 	InstalledForMessageID uint64 `json:"installed_for_message_id"`
 	Discarded             bool   `json:"discarded"`
 	StaleBoardLoad        bool   `json:"stale_board_load"`
+	HadGeometry           bool   `json:"had_geometry"`
 	followUp              tea.Cmd
 	pollFollowUp          tea.Cmd
 	geometry              tea.Cmd
@@ -142,6 +151,7 @@ type performanceScenario struct {
 	name               string
 	expectedZeroFrames bool
 	deferGeometry      bool
+	preSettleGeometry  bool
 	// reconciliationOnly marks direct boardLoadedMsg coverage. It exercises
 	// the incremental projection seam, not the watcher admission path.
 	reconciliationOnly bool
@@ -154,6 +164,7 @@ type performanceScenario struct {
 	requireTemporal    bool
 	settleFollowUp     func(*testing.T, *Model, tea.Cmd)
 	validateSample     func(*testing.T, *Model, []performancePublicationStamp)
+	measureNow         func() time.Time
 }
 
 // TestLargeBoardPerformanceHarness is the machine-readable process-local gate.
@@ -168,7 +179,7 @@ func TestLargeBoardPerformanceHarness(t *testing.T) {
 	t.Cleanup(func() { runtime.GOMAXPROCS(previousProcs) })
 
 	report := performanceReport{
-		SchemaVersion: 3,
+		SchemaVersion: 4,
 		GeneratedAt:   time.Now().UTC(),
 		Environment:   currentPerformanceEnvironment(),
 		ExternalGates: performanceExternalGateState{
@@ -359,6 +370,8 @@ func TestPerformanceBurstFirstVisibleExcludesDeferredGeometry(t *testing.T) {
 		t.Fatal("refresh_25_task_burst scenario not found")
 	}
 	scenario.warmups, scenario.samples = 1, 1
+	measuredAt := time.Unix(0, 0)
+	scenario.measureNow = func() time.Time { return measuredAt }
 	admit := scenario.admit
 	scenario.admit = func(model *Model, sample int) []performancePublicationStamp {
 		stamps := admit(model, sample)
@@ -369,7 +382,7 @@ func TestPerformanceBurstFirstVisibleExcludesDeferredGeometry(t *testing.T) {
 			}
 			command := stamps[index].geometry
 			stamps[index].geometry = func() tea.Msg {
-				time.Sleep(75 * time.Millisecond)
+				measuredAt = measuredAt.Add(75 * time.Millisecond)
 				return command()
 			}
 			wrapped = true
@@ -409,8 +422,27 @@ func TestPerformanceMemoryGateUsesRetainedPlanEstimate(t *testing.T) {
 	validatePerformanceReport(t, report)
 }
 
+func TestPerformanceResizeScenarioUsesOnlySettledGeometryCacheHits(t *testing.T) {
+	var scenario performanceScenario
+	for _, candidate := range performanceScenarios(120) {
+		if candidate.name == "resize" {
+			scenario = candidate
+			break
+		}
+	}
+	if scenario.newModel == nil {
+		t.Fatal("resize scenario not found")
+	}
+	scenario.warmups, scenario.samples = 2, 3
+	result := runPerformanceScenario(t, 120, scenario)
+	if violation := resizeGeometryCacheAcceptanceViolation(result); violation != "" {
+		t.Fatal(violation)
+	}
+}
+
 func TestPerformanceLatencyExcludesSampleValidation(t *testing.T) {
 	validated := false
+	measuredAt := time.Unix(0, 0)
 	scenario := performanceScenario{
 		name:     "validation_outside_latency",
 		warmups:  1,
@@ -420,9 +452,10 @@ func TestPerformanceLatencyExcludesSampleValidation(t *testing.T) {
 			return discardedPerformanceStamp(model)
 		},
 		validateSample: func(_ *testing.T, _ *Model, _ []performancePublicationStamp) {
-			time.Sleep(100 * time.Millisecond)
+			measuredAt = measuredAt.Add(100 * time.Millisecond)
 			validated = true
 		},
+		measureNow: func() time.Time { return measuredAt },
 	}
 	result := runPerformanceScenario(t, 17, scenario)
 	if !validated {
@@ -596,28 +629,84 @@ func TestPerformanceAdmissionPreservesNonWorkerCommands(t *testing.T) {
 
 func TestPerformanceScenarioAccountsForGeometrySettlement(t *testing.T) {
 	scenario := performanceScenario{
-		name:     "geometry_settlement_accounting",
-		warmups:  1,
-		samples:  3,
-		newModel: func() Model { return performanceModel(37, "", performanceWidth, performanceHeight) },
+		name:              "geometry_settlement_accounting",
+		deferGeometry:     true,
+		preSettleGeometry: true,
+		warmups:           1,
+		samples:           3,
+		newModel:          func() Model { return performanceModel(37, "", performanceWidth, performanceHeight) },
+		prepare: func(model *Model, _ int) {
+			plan := *model.current
+			geometry := plan.geometry.deepClone()
+			for columnIndex := range geometry.columns {
+				column := &geometry.columns[columnIndex]
+				for ordinal := 0; ordinal < column.index.length; ordinal++ {
+					record := column.index.recordAt(ordinal)
+					record.exact = false
+					column.index, _ = column.index.withRecord(ordinal, record)
+				}
+			}
+			geometry.rootRevision++
+			geometry.refreshDerived()
+			plan.geometry = geometry
+			plan.worker = geometryWorkerState{}
+			plan.geometryCache = renderGeometryLRU{}
+			plan.refreshGeometryStats()
+			model.current = &plan
+			model.boardView.column = statusIndexExact(board.StatusTodo)
+			model.boardView.manualScroll[model.boardView.column] = false
+			model.boardView.scrolls[model.boardView.column] = 0
+		},
 		admit: func(model *Model, _ int) []performancePublicationStamp {
-			stamps := admitPerformanceMessage(model, tea.WindowSizeMsg{Width: 100, Height: 30})
-			// Supersede the in-flight slice before it returns. Settlement must count
-			// both the stale result and the replacement chain it starts.
-			stamps = append(stamps, admitPerformanceMessage(model,
-				tea.WindowSizeMsg{Width: performanceWidth, Height: performanceHeight})...)
-			return append(stamps, admitPerformanceMessage(model,
-				tea.WindowSizeMsg{Width: performanceWidth, Height: 31})...)
+			stamps := admitPerformanceMessage(model, tea.KeyPressMsg{Code: tea.KeyDown})
+			columnIndex := model.boardView.column
+			column := model.current.geometry.columns[columnIndex]
+			maximum := max(column.totalRows()-column.contentHeight, 0)
+			bottom := admitPerformanceMessage(model, boardColumnScrolledMsg{
+				status: column.status, from: 0, offset: maximum,
+				anchor: column.anchorAt(maximum, &model.current.projection), max: maximum,
+			})
+			bottom[0].followUp = nil // scroll linger is unrelated to worker accounting
+			stamps = append(stamps, bottom...)
+			column = model.current.geometry.columns[columnIndex]
+			top := admitPerformanceMessage(model, boardColumnScrolledMsg{
+				status: column.status, from: maximum, offset: 0,
+				anchor: column.anchorAt(0, &model.current.projection), max: maximum,
+			})
+			top[0].followUp = nil // scroll linger is unrelated to worker accounting
+			return append(stamps, top...)
 		},
 	}
 	result := runPerformanceScenario(t, 37, scenario)
+	wantMessages := uint64(3 * scenario.samples)
+	if result.AcceptedMessages != wantMessages || result.PublishedFrames != wantMessages {
+		t.Fatalf("accepted/published = %d/%d, want %d/%d",
+			result.AcceptedMessages, result.PublishedFrames, wantMessages, wantMessages)
+	}
+	geometryCommands := 0
+	for _, stamp := range result.PublicationTrace {
+		if stamp.HadGeometry {
+			geometryCommands++
+		}
+	}
+	if geometryCommands != scenario.samples {
+		t.Fatalf("geometry commands = %d, want %d superseded slices", geometryCommands, scenario.samples)
+	}
 	if result.StaleWorkerResults != uint64(scenario.samples) {
 		t.Fatalf("stale worker results = %d, want %d sample settlements",
 			result.StaleWorkerResults, scenario.samples)
 	}
-	if result.PublishedFrames <= result.AcceptedMessages {
-		t.Fatalf("published frames = %d, accepted inputs = %d; settlement frames were omitted",
-			result.PublishedFrames, result.AcceptedMessages)
+	if result.GeometryWorkerSlices != result.GeometrySnapshotInstalls ||
+		result.GeometryWorkerSlices < uint64(scenario.samples) {
+		t.Fatalf("geometry settlement slices=%d installs=%d, want equal and at least %d",
+			result.GeometryWorkerSlices, result.GeometrySnapshotInstalls, scenario.samples)
+	}
+	if result.ConvergenceLatency.MaxNS <= 0 {
+		t.Fatal("geometry settlement recorded no convergence latency")
+	}
+	if result.PublishedFrames > result.AcceptedMessages {
+		t.Fatalf("geometry settlement manufactured %d extra frames",
+			result.PublishedFrames-result.AcceptedMessages)
 	}
 }
 
@@ -1007,14 +1096,25 @@ func performanceScenarios(count int) []performanceScenario {
 			settleFollowUp:  settlePerformanceFilterBlink,
 		},
 		{
-			name:     "resize",
-			newModel: func() Model { return base("") },
+			name:              "resize",
+			deferGeometry:     true,
+			preSettleGeometry: true,
+			newModel:          func() Model { return base("") },
 			admit: func(model *Model, sample int) []performancePublicationStamp {
 				width, height := 100, 30
 				if sample%2 == 1 {
 					width, height = performanceWidth, performanceHeight
 				}
 				return admitPerformanceMessage(model, tea.WindowSizeMsg{Width: width, Height: height})
+			},
+			validateSample: func(t *testing.T, model *Model, stamps []performancePublicationStamp) {
+				t.Helper()
+				if len(stamps) != 1 || stamps[0].HadGeometry {
+					t.Fatalf("warmed resize exposed geometry work: %+v", stamps)
+				}
+				if model.current == nil || !model.current.geometry.settled() {
+					t.Fatal("warmed resize did not activate settled exact geometry")
+				}
 			},
 		},
 		{
@@ -1421,6 +1521,16 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		samples = performanceSamples
 	}
 	model := scenario.newModel()
+	measureNow := time.Now
+	if scenario.measureNow != nil {
+		measureNow = scenario.measureNow
+	}
+	if scenario.preSettleGeometry {
+		settlePerformanceGeometryCommand(t, &model, model.startGeometryWorker())
+		if model.current == nil || !model.current.geometry.settled() {
+			t.Fatalf("%s pre-settlement left incomplete geometry", scenario.name)
+		}
+	}
 	for sample := range warmups {
 		if scenario.prepare != nil {
 			scenario.prepare(&model, sample)
@@ -1434,6 +1544,9 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 	convergenceLatencies := make([]time.Duration, samples)
 	var allocations, allocatedBytes, maximumPublicationBytes, maximumRetainedPlanBytes uint64
 	var accepted, frames, discarded, stale, staleBoardLoads uint64
+	var geometryWorkerSlices, geometrySnapshotInstalls uint64
+	var geometryCacheHits, geometryCacheMisses, geometryCacheEvictions, geometryCacheInvalidations uint64
+	var maximumGeometryCacheEntries, maximumGeometryCacheOwnedBytes uint64
 	var normalBases, dimmedBases, compositions, projectionBuilds, projectionVisits uint64
 	var sourceComparisons, shippedIDVisits uint64
 	var renderedCards, artifactHits, artifactMisses, artifactPublications, artifactFallbacks uint64
@@ -1449,7 +1562,7 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		var beforeMemory, afterMemory runtime.MemStats
 		runtime.ReadMemStats(&beforeMemory)
 		beforeStats := model.RenderPlanStats()
-		started := time.Now()
+		started := measureNow()
 		stamps := scenario.admit(&model, sample)
 		if scenario.deferGeometry {
 			for _, stamp := range stamps {
@@ -1457,13 +1570,13 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 					t.Fatalf("%s scheduled a non-geometry command before first-visible timing ended", scenario.name)
 				}
 			}
-			latencies[sample] = time.Since(started)
-			convergenceStarted := time.Now()
+			latencies[sample] = measureNow().Sub(started)
+			convergenceStarted := measureNow()
 			settlePerformanceStampCommands(t, &model, scenario, stamps)
-			convergenceLatencies[sample] = time.Since(convergenceStarted)
+			convergenceLatencies[sample] = measureNow().Sub(convergenceStarted)
 		} else {
 			settlePerformanceStampCommands(t, &model, scenario, stamps)
-			latencies[sample] = time.Since(started)
+			latencies[sample] = measureNow().Sub(started)
 		}
 		if scenario.validateSample != nil {
 			scenario.validateSample(t, &model, stamps)
@@ -1477,6 +1590,14 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		maximumRetainedPlanBytes = max(maximumRetainedPlanBytes, afterStats.RetainedPlanOwnedBytesEstimate)
 		frames += afterStats.PublishedFrames - beforeStats.PublishedFrames
 		stale += afterStats.StaleWorkerResults - beforeStats.StaleWorkerResults
+		geometryWorkerSlices += afterStats.GeometryWorkerSlices - beforeStats.GeometryWorkerSlices
+		geometrySnapshotInstalls += afterStats.GeometrySnapshotInstalls - beforeStats.GeometrySnapshotInstalls
+		geometryCacheHits += afterStats.GeometryCacheHits - beforeStats.GeometryCacheHits
+		geometryCacheMisses += afterStats.GeometryCacheMisses - beforeStats.GeometryCacheMisses
+		geometryCacheEvictions += afterStats.GeometryCacheEvictions - beforeStats.GeometryCacheEvictions
+		geometryCacheInvalidations += afterStats.GeometryCacheInvalidations - beforeStats.GeometryCacheInvalidations
+		maximumGeometryCacheEntries = max(maximumGeometryCacheEntries, afterStats.GeometryCacheEntries)
+		maximumGeometryCacheOwnedBytes = max(maximumGeometryCacheOwnedBytes, afterStats.GeometryCacheOwnedBytes)
 		normalBases += afterStats.NormalBaseBuilds - beforeStats.NormalBaseBuilds
 		dimmedBases += afterStats.DimmedBaseBuilds - beforeStats.DimmedBaseBuilds
 		compositions += afterStats.OverlayCompositions - beforeStats.OverlayCompositions
@@ -1543,6 +1664,14 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		DiscardedEvents:                discarded,
 		StaleBoardLoads:                staleBoardLoads,
 		StaleWorkerResults:             stale,
+		GeometryWorkerSlices:           geometryWorkerSlices,
+		GeometrySnapshotInstalls:       geometrySnapshotInstalls,
+		GeometryCacheHits:              geometryCacheHits,
+		GeometryCacheMisses:            geometryCacheMisses,
+		GeometryCacheEvictions:         geometryCacheEvictions,
+		GeometryCacheInvalidations:     geometryCacheInvalidations,
+		GeometryCacheEntries:           maximumGeometryCacheEntries,
+		GeometryCacheOwnedBytes:        maximumGeometryCacheOwnedBytes,
 		NormalBaseBuilds:               normalBases,
 		DimmedBaseBuilds:               dimmedBases,
 		OverlayCompositions:            compositions,
@@ -1591,6 +1720,7 @@ func admitPerformanceMessage(model *Model, message tea.Msg) []performancePublica
 		InstalledForMessageID: after.InstalledForMessageID,
 		followUp:              commands.followUp,
 		geometry:              commands.geometry,
+		HadGeometry:           commands.geometry != nil,
 		temporal:              commands.temporal,
 		StaleBoardLoad:        staleBoardLoad,
 	}}
@@ -2015,6 +2145,9 @@ func validatePerformanceReport(t *testing.T, report performanceReport) {
 		if result.ExpectedZeroFrames && result.PublishedFrames != 0 {
 			t.Errorf("%s/%d published %d frames, want zero", result.Name, result.Tasks, result.PublishedFrames)
 		}
+		if violation := resizeGeometryCacheAcceptanceViolation(result); violation != "" {
+			t.Errorf("resize/%d geometry cache acceptance: %s", result.Tasks, violation)
+		}
 		if result.Name == "held_navigation" &&
 			(result.AcceptedMessages != 202 || result.PublishedFrames != 202 || result.DiscardedEvents != 606) {
 			t.Errorf("held_navigation/%d accepted=%d published=%d discarded=%d, want 202/202/606",
@@ -2039,6 +2172,36 @@ func validatePerformanceReport(t *testing.T, report performanceReport) {
 			t.Errorf("startup/%d p95=%s exceeds 700ms", result.Tasks, time.Duration(result.Latency.P95NS))
 		}
 	}
+}
+
+func resizeGeometryCacheAcceptanceViolation(result performanceScenarioResult) string {
+	if result.Name != "resize" {
+		return ""
+	}
+	want := uint64(result.Samples)
+	if result.AcceptedMessages != want || result.PublishedFrames != want ||
+		result.NormalBaseBuilds != want || result.OverlayCompositions != want ||
+		result.NavigationArtifactPublications != want {
+		return fmt.Sprintf("accepted/published/base/composition/artifact-publications=%d/%d/%d/%d/%d, want %d each",
+			result.AcceptedMessages, result.PublishedFrames, result.NormalBaseBuilds,
+			result.OverlayCompositions, result.NavigationArtifactPublications, want)
+	}
+	if result.GeometryCacheHits != want || result.GeometryCacheMisses != 0 ||
+		result.GeometryCacheEvictions != 0 || result.GeometryCacheInvalidations != 0 ||
+		result.GeometryCacheEntries != 1 || result.GeometryCacheOwnedBytes == 0 {
+		return fmt.Sprintf("hits/misses/evictions/invalidations/entries/owned=%d/%d/%d/%d/%d/%d, want %d/0/0/0/1/>0",
+			result.GeometryCacheHits, result.GeometryCacheMisses, result.GeometryCacheEvictions,
+			result.GeometryCacheInvalidations, result.GeometryCacheEntries, result.GeometryCacheOwnedBytes, want)
+	}
+	if result.GeometryWorkerSlices != 0 || result.GeometrySnapshotInstalls != 0 ||
+		result.StaleWorkerResults != 0 || result.SynchronousLayoutRecords != 0 ||
+		result.ProjectionBuilds != 0 || result.ProjectionTaskVisits != 0 || result.SourceTaskComparisons != 0 {
+		return fmt.Sprintf("worker-slices/installs/stale/sync-layout/projection-builds/projection-visits/source-comparisons=%d/%d/%d/%d/%d/%d/%d, want zero",
+			result.GeometryWorkerSlices, result.GeometrySnapshotInstalls, result.StaleWorkerResults,
+			result.SynchronousLayoutRecords, result.ProjectionBuilds, result.ProjectionTaskVisits,
+			result.SourceTaskComparisons)
+	}
+	return ""
 }
 
 func navigationArtifactAcceptanceViolation(result performanceScenarioResult) string {

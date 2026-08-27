@@ -289,11 +289,76 @@ type columnLayoutGeometry struct {
 }
 
 type renderGeometryKey struct {
-	width              int
-	height             int
-	showCancelled      bool
-	styles             *theme.Styles
-	temporalGeneration uint64
+	projectionGeneration uint64
+	width                int
+	height               int
+	showCancelled        bool
+	styles               *theme.Styles
+	temporalGeneration   uint64
+	renderedAt           time.Time
+}
+
+const inactiveRenderGeometryCapacity = 2
+
+// renderGeometryLRU retains only settled persistent geometry roots. Entry zero
+// is MRU; the final occupied entry is LRU. Two slots do not require a map or
+// the nondeterminism and accounting fiction that would come with one.
+type renderGeometryLRU struct {
+	entries [inactiveRenderGeometryCapacity]renderGeometry
+	count   int
+}
+
+func (c *renderGeometryLRU) take(key renderGeometryKey) (renderGeometry, bool) {
+	for index := 0; index < c.count; index++ {
+		if !sameGeometryKey(c.entries[index].key, key) {
+			continue
+		}
+		geometry := c.entries[index]
+		copy(c.entries[index:c.count-1], c.entries[index+1:c.count])
+		c.count--
+		c.entries[c.count] = renderGeometry{}
+		return geometry, true
+	}
+	return renderGeometry{}, false
+}
+
+func (c *renderGeometryLRU) park(geometry renderGeometry) (accepted, evicted bool) {
+	if !geometry.settled() {
+		return false, false
+	}
+	for index := 0; index < c.count; index++ {
+		if !sameGeometryKey(c.entries[index].key, geometry.key) {
+			continue
+		}
+		copy(c.entries[1:index+1], c.entries[0:index])
+		c.entries[0] = geometry
+		return true, false
+	}
+	if c.count == len(c.entries) {
+		evicted = true
+		copy(c.entries[1:], c.entries[:len(c.entries)-1])
+	} else {
+		copy(c.entries[1:c.count+1], c.entries[:c.count])
+		c.count++
+	}
+	c.entries[0] = geometry
+	return true, evicted
+}
+
+func (c *renderGeometryLRU) clear() bool {
+	if c.count == 0 {
+		return false
+	}
+	*c = renderGeometryLRU{}
+	return true
+}
+
+func (c renderGeometryLRU) ownedBytesEstimate() uint64 {
+	var estimate uint64
+	for index := 0; index < c.count; index++ {
+		estimate += c.entries[index].ownedBytesEstimate()
+	}
+	return estimate
 }
 
 // renderGeometry retains only the current layout generation. A command may
@@ -312,6 +377,10 @@ type renderGeometry struct {
 	ownedBytes                uint64
 	temporalRecordsRefreshed  int
 	temporalIndexNodesVisited int
+}
+
+func (g renderGeometry) settled() bool {
+	return g.initialized && g.unresolvedRecords == 0 && g.exactRecords == g.layoutRecords
 }
 
 type geometryBatchMsg struct {
@@ -345,28 +414,50 @@ type geometryWorkRequest struct {
 	now          func() time.Time
 }
 
-func (g renderGeometry) rebuild(model Model, projection *renderProjection, projectionChanged bool) (renderGeometry, int, int) {
+func renderGeometryKeyFor(model Model, projection *renderProjection) renderGeometryKey {
+	return renderGeometryKey{
+		projectionGeneration: projection.generation,
+		width:                max(model.width, 1),
+		height:               max(model.height, 8),
+		showCancelled:        model.boardView.showCancelled,
+		styles:               model.themeStyles(),
+		temporalGeneration:   model.temporalVisualGeneration,
+		renderedAt:           model.renderedAt,
+	}
+}
+
+func (g renderGeometry) rebuild(model Model, projection *renderProjection, generation uint64, key renderGeometryKey) (renderGeometry, int, int) {
 	g.temporalRecordsRefreshed = 0
 	g.temporalIndexNodesVisited = 0
-	key := renderGeometryKey{
-		width:              max(model.width, 1),
-		height:             max(model.height, 8),
-		showCancelled:      model.boardView.showCancelled,
-		styles:             model.themeStyles(),
-		temporalGeneration: model.temporalVisualGeneration,
+	if g.initialized && sameGeometryStructuralKey(g.key, key) &&
+		(g.key.temporalGeneration != key.temporalGeneration || g.key.renderedAt != key.renderedAt) {
+		next, records, nodes := g.rebuildTemporal(model, projection, key)
+		next.generation = generation
+		return next, records, nodes
 	}
-	if g.initialized && !projectionChanged && sameGeometryBaseKey(g.key, key) && g.key.temporalGeneration != key.temporalGeneration {
-		return g.rebuildTemporal(model, projection, key)
-	}
-	if !g.initialized || projectionChanged || g.key != key {
-		g = newRenderGeometry(model, projection, g.generation+1, key)
+	if !g.initialized || !sameGeometryKey(g.key, key) {
+		g = newRenderGeometry(model, projection, generation, key)
 	}
 	return g.ensureInteractiveGeometry(model, projection)
 }
 
-func sameGeometryBaseKey(left, right renderGeometryKey) bool {
-	return left.width == right.width && left.height == right.height &&
+func sameGeometryStructuralKey(left, right renderGeometryKey) bool {
+	return left.projectionGeneration == right.projectionGeneration &&
+		left.width == right.width && left.height == right.height &&
 		left.showCancelled == right.showCancelled && left.styles == right.styles
+}
+
+func sameGeometryKey(left, right renderGeometryKey) bool {
+	return sameGeometryStructuralKey(left, right) &&
+		left.temporalGeneration == right.temporalGeneration && left.renderedAt == right.renderedAt
+}
+
+// sameGeometryCacheDomain excludes only the switches the LRU is allowed to
+// retain across: normalized size and cancelled-column visibility.
+func sameGeometryCacheDomain(left, right renderGeometryKey) bool {
+	return left.projectionGeneration == right.projectionGeneration &&
+		left.styles == right.styles && left.temporalGeneration == right.temporalGeneration &&
+		left.renderedAt == right.renderedAt
 }
 
 func newRenderGeometry(model Model, projection *renderProjection, generation uint64, key renderGeometryKey) renderGeometry {

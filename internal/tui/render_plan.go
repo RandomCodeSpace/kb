@@ -71,6 +71,12 @@ type RenderPlanStats struct {
 	GeometryWorkerSlices           uint64              `json:"geometry_worker_slices"`
 	MaxGeometryWorkerSliceNS       int64               `json:"max_geometry_worker_slice_ns"`
 	GeometryWorkerOverruns         uint64              `json:"geometry_worker_overruns"`
+	GeometryCacheHits              uint64              `json:"geometry_cache_hits"`
+	GeometryCacheMisses            uint64              `json:"geometry_cache_misses"`
+	GeometryCacheEvictions         uint64              `json:"geometry_cache_evictions"`
+	GeometryCacheInvalidations     uint64              `json:"geometry_cache_invalidations"`
+	GeometryCacheEntries           uint64              `json:"geometry_cache_entries"`
+	GeometryCacheOwnedBytes        uint64              `json:"geometry_cache_owned_bytes"`
 	RenderedCardRecords            uint64              `json:"rendered_card_records"`
 	NavigationArtifactHits         uint64              `json:"navigation_artifact_hits"`
 	NavigationArtifactMisses       uint64              `json:"navigation_artifact_misses"`
@@ -104,16 +110,18 @@ type RenderPlanStats struct {
 // and the harness reads counters. Projection records and compact card plans
 // join this root in later slices without widening that interface.
 type renderPlan struct {
-	view       tea.View
-	resolver   func(tea.MouseMsg) tea.Cmd
-	semantics  renderSnapshotSemantics
-	bases      retainedBoardBases
-	pointer    pointer.State
-	projection renderProjection
-	geometry   renderGeometry
-	worker     geometryWorkerState
-	artifacts  retainedCardArtifacts
-	stats      RenderPlanStats
+	view          tea.View
+	resolver      func(tea.MouseMsg) tea.Cmd
+	semantics     renderSnapshotSemantics
+	bases         retainedBoardBases
+	pointer       pointer.State
+	projection    renderProjection
+	geometry      renderGeometry
+	geometryCache renderGeometryLRU
+	geometryEpoch uint64
+	worker        geometryWorkerState
+	artifacts     retainedCardArtifacts
+	stats         RenderPlanStats
 }
 
 type retainedBoardBases struct {
@@ -236,7 +244,7 @@ func (p renderPlan) rebuild(model Model, impact renderImpact, checkSource bool) 
 		model.current = &p
 		model.renderingProjection = &p.projection
 		var synchronousRecords, synchronousNodes int
-		p.geometry, synchronousRecords, synchronousNodes = p.geometry.rebuild(model, &p.projection, projectionChanged)
+		synchronousRecords, synchronousNodes = p.rebuildGeometry(model, projectionChanged)
 		p.stats.SynchronousLayoutRecords += uint64(synchronousRecords)
 		p.stats.SynchronousIndexNodes += uint64(synchronousNodes)
 		p.stats.TemporalRecordsRefreshed += uint64(p.geometry.temporalRecordsRefreshed)
@@ -294,7 +302,7 @@ func (p renderPlan) rebuild(model Model, impact renderImpact, checkSource bool) 
 	p.refreshGeometryStats()
 	p.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
 		p.projection.ownedBytesEstimate() + p.geometry.ownedBytesEstimate() + p.bases.ownedBytesEstimate() +
-		p.artifacts.ownedBytesEstimate()
+		p.artifacts.ownedBytesEstimate() + p.geometryCache.ownedBytesEstimate()
 	return p
 }
 
@@ -313,6 +321,57 @@ func (p *renderPlan) refreshGeometryStats() {
 	p.stats.LayoutRecords = uint64(p.geometry.layoutRecords)
 	p.stats.ExactLayoutRecords = uint64(p.geometry.exactRecords)
 	p.stats.EstimatedLayoutRecords = p.stats.LayoutRecords - p.stats.ExactLayoutRecords
+	p.stats.GeometryCacheEntries = uint64(p.geometryCache.count)
+	p.stats.GeometryCacheOwnedBytes = p.geometryCache.ownedBytesEstimate()
+}
+
+func (p *renderPlan) allocateGeometryEpoch() uint64 {
+	p.geometryEpoch++
+	if p.geometryEpoch == 0 {
+		// Generation zero is never installed. Exhaustion is not recoverable, but
+		// failing closed here prevents an ancient worker token from becoming live.
+		panic("render geometry epoch exhausted")
+	}
+	return p.geometryEpoch
+}
+
+func (p *renderPlan) rebuildGeometry(model Model, projectionChanged bool) (int, int) {
+	key := renderGeometryKeyFor(model, &p.projection)
+	current := p.geometry
+	if current.initialized && (!sameGeometryCacheDomain(current.key, key) || projectionChanged) {
+		if p.geometryCache.clear() {
+			p.stats.GeometryCacheInvalidations++
+		}
+	}
+
+	if current.initialized && !projectionChanged && sameGeometryKey(current.key, key) {
+		var records, nodes int
+		p.geometry, records, nodes = current.ensureInteractiveGeometry(model, &p.projection)
+		return records, nodes
+	}
+
+	if current.initialized && !projectionChanged && sameGeometryCacheDomain(current.key, key) {
+		if cached, ok := p.geometryCache.take(key); ok {
+			// Remove the target before parking the old active root. Otherwise a
+			// full cache could evict an LRU target immediately before taking it.
+			p.geometryCache.park(current)
+			p.stats.GeometryCacheHits++
+			cached.generation = p.allocateGeometryEpoch()
+			cached.temporalRecordsRefreshed = 0
+			cached.temporalIndexNodesVisited = 0
+			p.geometry = cached
+			return 0, 0
+		}
+		p.stats.GeometryCacheMisses++
+		if accepted, evicted := p.geometryCache.park(current); accepted && evicted {
+			p.stats.GeometryCacheEvictions++
+		}
+	}
+
+	generation := p.allocateGeometryEpoch()
+	var records, nodes int
+	p.geometry, records, nodes = current.rebuild(model, &p.projection, generation, key)
+	return records, nodes
 }
 
 // conservativePointerRegion mirrors the owned fields in pointer.Map's region
@@ -617,7 +676,8 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 		next.stats.RenderedCardRecords += trace.cardRecords
 		next.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
 			next.projection.ownedBytesEstimate() + next.geometry.ownedBytesEstimate() +
-			next.bases.ownedBytesEstimate() + next.artifacts.ownedBytesEstimate()
+			next.bases.ownedBytesEstimate() + next.artifacts.ownedBytesEstimate() +
+			next.geometryCache.ownedBytesEstimate()
 		if !next.semanticallyMatches(snapshot) {
 			next.view = snapshot.view
 			next.semantics = snapshot.semantics
