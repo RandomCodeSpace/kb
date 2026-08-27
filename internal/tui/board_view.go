@@ -88,11 +88,18 @@ type boardPointerMoveMsg struct {
 	status       board.Status
 	beforeTaskID string
 }
-type boardPointerUpMsg struct{}
+type boardPointerUpMsg struct {
+	resolved     bool
+	valid        bool
+	status       board.Status
+	beforeTaskID string
+}
 type boardColumnScrolledMsg struct {
 	status board.Status
+	from   int
 	offset int
 	anchor boardTaskAnchor
+	max    int
 }
 
 type boardHitKind uint8
@@ -1815,7 +1822,7 @@ func joinColumns(styles *theme.Styles, columns []renderedColumn, layout boardLay
 }
 
 func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.Cmd {
-	pointerActive := len(active) > 0 && active[0]
+	_ = active // capture is authoritative in Model, not in a rendered closure.
 	return func(message tea.MouseMsg) tea.Cmd {
 		mouse := message.Mouse()
 		if _, wheel := message.(tea.MouseWheelMsg); wheel {
@@ -1843,14 +1850,27 @@ func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.C
 					anchor = hit.scrollUp
 				}
 				return func() tea.Msg {
-					return boardColumnScrolledMsg{status: hit.status, offset: offset, anchor: anchor}
+					return boardColumnScrolledMsg{status: hit.status, from: hit.scroll,
+						offset: offset, anchor: anchor, max: hit.maxScroll}
 				}
 			}
 			return nil
 		}
 		if _, release := message.(tea.MouseReleaseMsg); release {
-			if mouse.Button == tea.MouseLeft || (mouse.Button == tea.MouseNone && pointerActive) {
-				return func() tea.Msg { return boardPointerUpMsg{} }
+			if mouse.Button == tea.MouseLeft || mouse.Button == tea.MouseNone {
+				result := boardPointerUpMsg{resolved: true}
+				for index := len(hits) - 1; index >= 0; index-- {
+					hit := hits[index]
+					if hit.kind != boardHitDefault || mouse.X < hit.x0 || mouse.X >= hit.x1 ||
+						mouse.Y < hit.y0 || mouse.Y >= hit.y1 {
+						continue
+					}
+					result.valid = true
+					result.status = hit.status
+					result.beforeTaskID = hit.taskID
+					break
+				}
+				return func() tea.Msg { return result }
 			}
 			return nil
 		}
@@ -1904,8 +1924,13 @@ func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.C
 }
 
 func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.State) func(tea.MouseMsg) tea.Cmd {
+	return boardPointerSurface(hits, active, state).Pointer
+}
+
+func boardPointerSurface(hits []boardHit, active bool, state pointer.State) pointer.Surface {
 	base := boardMouseHandler(hits, active)
 	var controls, hovers pointer.Map
+	topology := pointer.Topology{}
 	gesture := state.Active()
 	for _, hit := range hits {
 		rect := pointer.Rect{X0: hit.x0, Y0: hit.y0, X1: hit.x1, Y1: hit.y1}
@@ -1929,6 +1954,20 @@ func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.S
 		controls.AddControl(id, rect, deliver)
 		hovers.AddControl(id, rect, deliver)
 	}
+	topology = controls.Topology().Merge(hovers.Topology())
+	for _, hit := range hits {
+		if hit.kind != boardHitDefault || hit.taskID != "" || hit.maxScroll <= 0 {
+			continue
+		}
+		current := hit
+		intent := pointer.WheelIntent{Key: "board:" + string(current.status), Current: current.scroll,
+			Target: current.scroll, Min: 0, Max: current.maxScroll}
+		topology = topology.WithWheel(intent, func(target int) tea.Msg {
+			target = min(max(target, 0), current.maxScroll)
+			return boardColumnScrolledMsg{status: current.status, from: current.scroll,
+				offset: target, max: current.maxScroll}
+		})
+	}
 	controlHandler := controls.Handler()
 	hoverHandler := hovers.Handler()
 	controlHit := func(mouse tea.Mouse) bool {
@@ -1940,9 +1979,16 @@ func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.S
 		}
 		return false
 	}
-	return func(message tea.MouseMsg) tea.Cmd {
+	handler := func(message tea.MouseMsg) tea.Cmd {
 		mouse := message.Mouse()
 		switch message.(type) {
+		case tea.MouseWheelMsg:
+			command := base(message)
+			if gesture {
+				gesture = false
+				return pointer.CancelWith(command)
+			}
+			return command
 		case tea.MouseClickMsg:
 			if controlHit(mouse) {
 				gesture = true
@@ -1970,6 +2016,7 @@ func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.S
 		}
 		return base(message)
 	}
+	return pointer.Surface{Pointer: handler, Topology: topology}
 }
 
 // boardCardHoverID is the hover identity of one card body row, empty for a hit

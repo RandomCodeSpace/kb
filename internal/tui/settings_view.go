@@ -202,7 +202,19 @@ func (m *settingsModel) Surface(background string, width, height int) pointer.Su
 	content := settingsCompose(styles, opts, background, frame, width, height)
 
 	footerY := frame.y + frame.height - 1
-	hitMap.AddWheel(viewport.Rect, func(delta int) tea.Msg { return settingsWheelMsg{delta: delta} })
+	targets := m.focusTargets()
+	currentFocus := 0
+	for index, target := range targets {
+		if target == m.focus {
+			currentFocus = index
+			break
+		}
+	}
+	maxFocusIndex := max(len(targets)-1, 0)
+	hitMap.AddWheel(viewport.Rect, func(delta int) tea.Msg {
+		return settingsWheelMsg{owner: m, current: currentFocus,
+			target: min(max(currentFocus+delta, 0), maxFocusIndex), maxFocusIndex: maxFocusIndex}
+	})
 	hitMap.AddControl(
 		settingsControlID("close"),
 		pointer.Rect{X0: frame.x + inset, Y0: footerY, X1: min(frame.x+frame.width, frame.x+inset+7), Y1: footerY + 1},
@@ -213,7 +225,7 @@ func (m *settingsModel) Surface(background string, width, height int) pointer.Su
 	// from the retained point against the map this render just built. A point
 	// that no longer lands on a region clears hover and mouse mode with it.
 	m.pointerState = m.pointerState.Reresolve(hitMap)
-	return pointer.Surface{Content: content, Pointer: hitMap.Handler()}
+	return pointer.Surface{Content: content, Pointer: hitMap.Handler(), Topology: hitMap.Topology()}
 }
 
 // settingsCompose elevates the panel over the dimmed board. Spec section 4: an

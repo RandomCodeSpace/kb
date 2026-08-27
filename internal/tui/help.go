@@ -129,7 +129,8 @@ func (m Model) keyboardHelpSurface(background string) pointer.Surface {
 	var hits pointer.Map
 	panel := pointer.Rect{X0: x, Y0: y, X1: x + paneWidth, Y1: y + opts.Height}
 	closeAction := func(pointer.Point) tea.Msg { return helpClosedMsg{} }
-	hits.AddBackdrop(pointer.Rect{X1: width, Y1: height}, panel, closeAction)
+	hits.AddBackdropControl(pointer.ControlID("help.backdrop"),
+		pointer.Rect{X1: width, Y1: height}, panel, closeAction)
 	footerY := y + opts.Height - 1
 	hits.AddControl(
 		helpCloseID,
@@ -139,7 +140,7 @@ func (m Model) keyboardHelpSurface(background string) pointer.Surface {
 		},
 		closeAction,
 	)
-	return pointer.Surface{Content: content, Pointer: hits.Handler()}
+	return pointer.Surface{Content: content, Pointer: hits.Handler(), Topology: hits.Topology()}
 }
 
 // helpBodyRows lays the component's own output onto the panel surface. bubbles

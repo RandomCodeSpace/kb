@@ -360,6 +360,42 @@ func TestPerformanceFilterBlinkSettlementDoesNotExecuteTimer(t *testing.T) {
 	}
 }
 
+func TestPointerResolverCostIsBoundedByVisibleHitSnapshot(t *testing.T) {
+	const visibleHitBudget = 512
+	var baseline uint64
+	for _, count := range []int{120, 500, 1000} {
+		t.Run(fmt.Sprintf("tasks_%04d", count), func(t *testing.T) {
+			model := performanceModel(count, "", performanceWidth, performanceHeight)
+			stats := model.RenderPlanStats()
+			if stats.HitRegions == 0 || stats.HitRegions > visibleHitBudget {
+				t.Fatalf("resolver hit snapshot = %d regions, budget 1..%d", stats.HitRegions, visibleHitBudget)
+			}
+			if got := uint64(len(model.current.semantics.hits)); got != stats.HitRegions {
+				t.Fatalf("resolver instrumentation = %d regions, immutable visible hits = %d", stats.HitRegions, got)
+			}
+			if count == 120 {
+				baseline = stats.HitRegions
+			} else if stats.HitRegions > baseline+16 {
+				t.Fatalf("resolver regions grew with offscreen tasks: baseline=%d current=%d", baseline, stats.HitRegions)
+			}
+
+			handler := model.View().OnMouse
+			if handler == nil {
+				t.Fatal("last-flushed board installed no resolver")
+			}
+			raw := tea.MouseMotionMsg{X: 0, Y: 0, Button: tea.MouseNone}
+			if command := handler(raw); command != nil {
+				t.Fatal("resolver escaped the synchronous mailbox")
+			}
+			before := model.RenderPlanStats()
+			next, commands := model.updateWithCommands(raw)
+			if commands.followUp != nil || next.RenderPlanStats().PublishedFrames-before.PublishedFrames > 1 {
+				t.Fatal("one raw pointer observation produced more than one semantic publication")
+			}
+		})
+	}
+}
+
 func performanceScenarios(count int) []performanceScenario {
 	base := func(filter string) Model {
 		return performanceModel(count, filter, performanceWidth, performanceHeight)
@@ -457,9 +493,12 @@ func performanceScenarios(count int) []performanceScenario {
 			},
 		},
 		{
-			name:     "useful_wheel",
-			newModel: func() Model { return base("") },
+			name:            "useful_wheel",
+			newModel:        func() Model { return base("") },
+			requireFollowUp: true,
+			settleFollowUp:  settlePerformancePointerScrollLinger,
 			prepare: func(model *Model, _ int) {
+				model.pointerAdmission.resetCadence()
 				model.boardView.scrolls[0] = 0
 				model.rebuildRenderPlan(renderImpactAll)
 			},
@@ -483,6 +522,7 @@ func performanceScenarios(count int) []performanceScenario {
 			name:     "hover_change",
 			newModel: hoverModel,
 			prepare: func(model *Model, _ int) {
+				model.pointerAdmission.resetCadence()
 				model.pointerState = pointerZeroState()
 				model.rebuildRenderPlan(renderImpactAll)
 			},
@@ -741,6 +781,20 @@ func settlePerformanceFilterBlink(t *testing.T, model *Model, command tea.Cmd) {
 	// filter frame instead of serially awaiting a cosmetic deadline.
 }
 
+func settlePerformancePointerScrollLinger(t *testing.T, model *Model, command tea.Cmd) {
+	t.Helper()
+	if command == nil {
+		t.Fatal("useful wheel did not retain its scroll-linger deadline")
+	}
+	lingering := false
+	for column := range boardStatuses {
+		lingering = lingering || model.scroll.lingering(column)
+	}
+	if !lingering {
+		t.Fatal("wheel follow-up is not an active scroll-linger deadline")
+	}
+}
+
 func settlePerformanceGeometryCommand(t *testing.T, model *Model, command tea.Cmd) {
 	t.Helper()
 	for steps := 0; command != nil; steps++ {
@@ -803,11 +857,10 @@ func admitPerformancePointer(model *Model, message tea.MouseMsg) []performancePu
 		return discardedPerformanceStamp(model)
 	}
 	command := handler(message)
-	if command == nil {
-		retainedPerformanceView = model.View()
-		return discardedPerformanceStamp(model)
+	if command != nil {
+		panic("pointer resolver escaped the synchronous mailbox")
 	}
-	return admitPerformanceMessage(model, command())
+	return admitPerformanceMessage(model, message)
 }
 
 func discardedPerformanceStamp(model *Model) []performancePublicationStamp {

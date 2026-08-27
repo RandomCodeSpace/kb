@@ -52,22 +52,11 @@ func clickReference(t *testing.T, m *Model, reference string) {
 	if view.OnMouse == nil {
 		t.Fatal("the detail frame routed no mouse handler")
 	}
-	press := view.OnMouse(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-	if press == nil {
-		t.Fatalf("reference %q ignored the press", reference)
+	updateRootPointerTest(t, m, tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if followup := updateRootPointerTest(t, m,
+		tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft}); followup != nil {
+		updateTestModel(t, m, singleCommandMessage(t, followup))
 	}
-	updateTestModel(t, m, singleCommandMessage(t, press))
-
-	after := m.View()
-	release := after.OnMouse(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
-	if release == nil {
-		t.Fatalf("reference %q ignored the release", reference)
-	}
-	activate := updateTestModel(t, m, singleCommandMessage(t, release))
-	if activate == nil {
-		t.Fatalf("reference %q release produced no activation", reference)
-	}
-	updateTestModel(t, m, singleCommandMessage(t, activate))
 }
 
 // TestTaskReferenceOpensTheCardItNames is issue #212 end to end: a rendered

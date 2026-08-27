@@ -118,6 +118,11 @@ type Model struct {
 	noticeSeq         uint64
 	shipped           shippedRecord
 	inputAdmission    *inputAdmissionStats
+	pointerMailbox    *pointerMailbox
+	pointerOwner      renderHandlerTopology
+	pointerOwnerEpoch uint64
+	pointerOwnerSeq   uint64
+	pointerAdmission  pointerAdmissionState
 
 	// The brand mark of spec section 10.6. The stretch and the reveal seed are
 	// rolled once in newModel and are plain fields, so a test pins them by
@@ -241,6 +246,7 @@ func newModel(
 		action:         newTaskActionState(),
 		spin:           spinner.New(spinner.WithSpinner(styles.Spinner)),
 		inputAdmission: &inputAdmissionStats{},
+		pointerMailbox: newPointerMailbox(),
 
 		brandStretch: brandStretch,
 		brandSeed:    brandSeed,
@@ -293,6 +299,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 // performance harness uses the explicit seam to settle geometry without
 // guessing which opaque tea.Cmd happens to own the worker token.
 func (m Model) updateWithCommands(message tea.Msg) (Model, modelUpdateCommands) {
+	if flush, ok := message.(pointerFlushMsg); ok {
+		return m.flushPointerIntent(flush)
+	}
+	if raw, ok := message.(tea.MouseMsg); ok {
+		return m.updateRawPointer(raw)
+	}
 	if intent, ok := message.(boardNavigationIntentMsg); ok && !m.matchesBoardNavigationIntent(intent) {
 		m.inputAdmission.discard()
 		return m, modelUpdateCommands{}
@@ -313,7 +325,120 @@ func (m Model) updateWithCommands(message tea.Msg) (Model, modelUpdateCommands) 
 	next, command := m.update(message)
 	next.acceptedMessageID = m.acceptedMessageID
 	next.rebuildRenderPlanAfterUpdate(renderImpactFor(message), checkSource || !sameBoardSourceIdentity(beforeBoard, next.board))
+	if next.stopped {
+		next.resetPointerPipeline()
+	}
 	return next, modelUpdateCommands{followUp: command, geometry: next.startGeometryWorker()}
+}
+
+func (m Model) updateRawPointer(raw tea.MouseMsg) (Model, modelUpdateCommands) {
+	if m.stopped {
+		m.resetPointerPipeline()
+		return m, modelUpdateCommands{}
+	}
+	command, route, result := m.pointerMailbox.take(raw)
+	if result != pointerMailboxMatched || !route.sameOwner(m.pointerRoute()) {
+		return m.failClosedPointer()
+	}
+	if command == nil {
+		if next, commands, ok := m.reuseBoundaryWheel(raw, route); ok {
+			return next, commands
+		}
+		if _, wheel := raw.(tea.MouseWheelMsg); wheel {
+			m.pointerAdmission.cancelPending()
+		}
+		m.discardPointer()
+		return m, modelUpdateCommands{}
+	}
+	// Execute after the mailbox mutex is released. Pointer lifecycle and its
+	// exact activation remain ordered inside this raw Update.
+	resolved := command()
+	if resolved == nil {
+		return m, modelUpdateCommands{}
+	}
+	return m.admitResolvedPointer(resolved, route, raw)
+}
+
+func (m Model) applyResolvedPointer(message tea.Msg, publish bool) (Model, modelUpdateCommands) {
+	beforeBoard := m.board
+	m.pointerAdmission.accepted++
+	m.acceptedMessageID++
+	var command tea.Cmd
+	if pointer.IsMessage(message) {
+		m, command = m.route(message)
+		if command != nil {
+			activation := command()
+			if activation != nil {
+				m.acceptedMessageID++
+				m, command = m.update(activation)
+			} else {
+				command = nil
+			}
+		}
+	} else {
+		m, command = m.update(message)
+	}
+	checkSource := m.current == nil || !m.current.projection.matchesSourceIdentity(beforeBoard) ||
+		!sameBoardSourceIdentity(beforeBoard, m.board)
+	if publish {
+		m.rebuildRenderPlanAfterUpdate(renderImpactAll, checkSource)
+	}
+	if m.stopped {
+		m.resetPointerPipeline()
+	}
+	return m, modelUpdateCommands{followUp: command, geometry: m.startGeometryWorker()}
+}
+
+func (m *Model) resetPointerPipeline() {
+	m.pointerMailbox.reset()
+	m.pointerAdmission.resetAll()
+	m.pointerState = m.pointerState.ClearCapture()
+	m.clicks = m.clicks.Reset()
+	if m.move.lifted != nil && m.move.lifted.fromMouse {
+		m.cancelCardMove("pointer input lost")
+	}
+}
+
+func (m Model) failClosedPointer() (Model, modelUpdateCommands) {
+	_, rootHoverObserved := m.pointerState.HoverPoint()
+	hadHoverObservation := m.pointerAdmission.hoverObserved || rootHoverObserved
+	hadHoverVisual := m.pointerAdmission.hoverControl != "" || m.pointerState.Hovered() != ""
+	hadActiveState := m.pointerAdmission.captureKey != "" || m.pointerState.Active() ||
+		(m.move.lifted != nil && m.move.lifted.fromMouse) || hadHoverVisual
+	m.discardPointer()
+	if hadHoverObservation {
+		if reset := pointer.ResetHover(); reset != nil {
+			if message := reset(); message != nil {
+				m, _ = m.route(message)
+			}
+		}
+	}
+	if cancel := pointer.Cancel(); cancel != nil {
+		if message := cancel(); message != nil {
+			m, _ = m.route(message)
+		}
+	}
+	beforeBoard := m.board
+	m.resetPointerPipeline()
+	if !hadActiveState {
+		return m, modelUpdateCommands{}
+	}
+	sourceChanged := !sameBoardSourceIdentity(beforeBoard, m.board)
+	impact := renderImpactPointer | renderImpactAppearance
+	if sourceChanged {
+		impact |= renderImpactTasks | renderImpactProjection | renderImpactLayout
+	}
+	m.rebuildRenderPlanAfterUpdate(impact, sourceChanged)
+	return m, modelUpdateCommands{geometry: m.startGeometryWorker()}
+}
+
+func (m Model) pointerRoute() pointerRouteIdentity {
+	route := pointerRouteIdentity{owner: m.pointerOwner, ownerSession: m.pointerOwnerSeq}
+	if m.current != nil {
+		route.geometry = m.current.geometry.generation
+		route.snapshot = m.current.stats.InstalledSnapshotID
+	}
+	return route
 }
 
 func (m Model) update(message tea.Msg) (Model, tea.Cmd) {
@@ -736,6 +861,16 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 		if m.move.lifted == nil || !m.move.lifted.fromMouse {
 			return m, nil
 		}
+		if msg.resolved {
+			if !msg.valid {
+				m.cancelCardMove("pointer released outside a drop target")
+				return m, nil
+			}
+			if preview, handled := m.move.previewMouse(msg.status, msg.beforeTaskID); handled {
+				m.board = preview
+				m.boardView.focusTask(m.filteredBoard(), m.move.lifted.taskID)
+			}
+		}
 		if !m.move.lifted.dragged {
 			taskID := m.move.lifted.taskID
 			// Spec section 10.3.5: the classifier runs on the completed
@@ -1108,10 +1243,13 @@ func (m Model) renderSnapshot() coldRenderSnapshot {
 		content, hits = backdrop.renderBoard()
 	}
 	var overlayMouse func(tea.MouseMsg) tea.Cmd
+	var overlayTopology pointer.Topology
+	var ownerEpoch uint64
 	if m.helpOpen {
 		surface := m.keyboardHelpSurface(content)
 		content = surface.Content
 		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
 		handler = renderHandlerHelp
 		hits = nil
 	}
@@ -1119,6 +1257,8 @@ func (m Model) renderSnapshot() coldRenderSnapshot {
 		surface := m.detail.PointerSurface(content, m.width, m.height)
 		content = surface.Content
 		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		ownerEpoch = m.detail.PointerSession()
 		handler = renderHandlerDetail
 		hits = nil
 	}
@@ -1126,18 +1266,25 @@ func (m Model) renderSnapshot() coldRenderSnapshot {
 		surface := m.settings.Surface(content, m.width, m.height)
 		content = surface.Content
 		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
 		handler = renderHandlerSettings
 		hits = nil
 	}
 	if m.adr.IsOpen() {
 		content = m.adr.Overlay(content, m.width, m.height)
-		overlayMouse = m.adr.MouseHandler(m.width, m.height)
+		surface := m.adr.PointerSurface(m.width, m.height)
+		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		ownerEpoch = m.adr.PointerSession()
 		handler = renderHandlerADR
 		hits = nil
 	}
 	if m.editor.IsOpen() {
 		content = m.editor.Overlay(content, m.width, m.height)
-		overlayMouse = m.editor.MouseHandler(m.width, m.height)
+		surface := m.editor.PointerSurface(m.width, m.height)
+		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		ownerEpoch = m.editor.PointerSession()
 		handler = renderHandlerEditor
 		hits = nil
 	}
@@ -1145,38 +1292,52 @@ func (m Model) renderSnapshot() coldRenderSnapshot {
 		surface := m.taskActionSurface(content)
 		content = surface.Content
 		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		ownerEpoch = m.taskActionSession
 		handler = renderHandlerAction
 		hits = nil
 	}
 	if m.issueImport.IsOpen() {
 		content = m.issueImport.Overlay(content, m.width, m.height)
-		overlayMouse = m.issueImport.MouseHandler(m.width, m.height)
+		surface := m.issueImport.PointerSurface(m.width, m.height)
+		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		ownerEpoch = m.issueImport.PointerSession()
 		handler = renderHandlerIssueImport
 		hits = nil
 	}
 	if m.palette.IsOpen() {
 		content = m.palette.Overlay(content, m.width, m.height)
-		overlayMouse = m.palette.MouseHandler(m.width, m.height)
+		surface := m.palette.PointerSurface(m.width, m.height)
+		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		ownerEpoch = m.palette.PointerSession()
 		handler = renderHandlerPalette
 		hits = nil
 	}
 	view := tea.NewView(content)
 	view.AltScreen = true
-	view.MouseMode = tea.MouseModeCellMotion
+	// All-motion is safe only after semantic admission has resolved same-target
+	// observations to the retained no-op path.
+	view.MouseMode = tea.MouseModeAllMotion
 	view.KeyboardEnhancements.ReportEventTypes = true
 	if overlayMouse != nil {
 		view.OnMouse = overlayMouse
-		return coldRenderSnapshot{view: view, semantics: renderSnapshotSemantics{handler: handler}}
+		return coldRenderSnapshot{view: view, semantics: renderSnapshotSemantics{
+			handler: handler, ownerEpoch: ownerEpoch, topology: overlayTopology,
+		}}
 	}
 	if !m.helpOpen && m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() &&
 		!m.issueImport.IsOpen() && !m.palette.IsOpen() && !m.detail.OwnsInput() {
 		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
 		immutableHits := append([]boardHit(nil), hits...)
-		view.OnMouse = boardMouseHandlerWithFeedback(immutableHits, pointerActive, m.pointerState)
+		surface := boardPointerSurface(immutableHits, pointerActive, m.pointerState)
+		view.OnMouse = surface.Pointer
+		overlayTopology = surface.Topology
 		hits = immutableHits
 		handler = renderHandlerBoard
 	}
-	semantics := renderSnapshotSemantics{handler: handler, hits: hits}
+	semantics := renderSnapshotSemantics{handler: handler, topology: overlayTopology, hits: hits}
 	if m.renderingGeometry != nil && m.renderingProjection != nil {
 		semantics.columns = m.renderingGeometry.renderSemantics(m.boardView, m.renderingProjection)
 	}

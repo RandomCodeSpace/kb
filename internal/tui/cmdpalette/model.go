@@ -143,6 +143,12 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	if activation, ok := message.(pointerActionMsg); ok {
 		return m.pointerAction(activation)
 	}
+	if wheel, ok := message.(pointerWheelMsg); ok {
+		if wheel.generation == m.generation && len(m.entries) > 0 {
+			m.cursor = min(max(wheel.target, 0), len(m.entries)-1)
+		}
+		return nil
+	}
 	msg, ok := message.(tea.KeyPressMsg)
 	if !ok {
 		return nil
@@ -244,6 +250,10 @@ func IsMessage(message tea.Msg) bool {
 	if pointer.IsMessage(message) {
 		return true
 	}
-	_, ok := message.(pointerActionMsg)
-	return ok
+	switch message.(type) {
+	case pointerActionMsg, pointerWheelMsg:
+		return true
+	default:
+		return false
+	}
 }

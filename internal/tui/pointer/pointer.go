@@ -15,8 +15,9 @@ type Point struct {
 
 // Surface couples rendered content with the pointer map from that render pass.
 type Surface struct {
-	Content string
-	Pointer func(tea.MouseMsg) tea.Cmd
+	Content  string
+	Pointer  func(tea.MouseMsg) tea.Cmd
+	Topology Topology
 }
 
 // Rect is a half-open rectangle in zero-based terminal cells.
@@ -46,9 +47,10 @@ type ControlID string
 // set and resolving to one of a surface's own regions, so there is exactly one
 // bit of state to clear and no second copy of the same fact to disagree with.
 type State struct {
-	pressed ControlID
-	hovered ControlID
-	hoverAt Point
+	pressed   ControlID
+	hovered   ControlID
+	hoverAt   Point
+	haveHover bool
 }
 
 // IsPressed reports whether the identified control owns the active pointer
@@ -60,6 +62,13 @@ func (s State) IsPressed(id ControlID) bool {
 // Active reports whether any rendered control owns the current press.
 func (s State) Active() bool { return s.pressed != "" }
 
+// ClearCapture cancels pressed feedback without changing the last hover
+// observation. Root pointer admission uses it when raw correlation fails.
+func (s State) ClearCapture() State {
+	s.pressed = ""
+	return s
+}
+
 // IsHovered reports whether the identified control is under the pointer.
 // Callers use this while rendering the control's hovered style.
 func (s State) IsHovered(id ControlID) bool {
@@ -69,14 +78,18 @@ func (s State) IsHovered(id ControlID) bool {
 // Hovered returns the control under the pointer, empty when there is none.
 func (s State) Hovered() ControlID { return s.hovered }
 
-// HoverPoint returns the cell hover last resolved from. The second result is
-// false while nothing is hovered, so a re-resolve has nothing to re-resolve.
+// HoverPoint returns the last observed pointer cell. The second result is false
+// only before any hover observation; an observation that resolved to no control
+// still retains its cell so stationary re-resolution can discover moved content.
 func (s State) HoverPoint() (Point, bool) {
-	if s.hovered == "" {
+	if !s.haveHover {
 		return Point{}, false
 	}
 	return s.hoverAt, true
 }
+
+// Pressed returns the stable identity that owns capture.
+func (s State) Pressed() ControlID { return s.pressed }
 
 // Hover sets the hovered control and the cell it resolved from. An empty id
 // clears hover while retaining the point, which is what a motion onto an
@@ -84,6 +97,7 @@ func (s State) HoverPoint() (Point, bool) {
 func (s State) Hover(id ControlID, at Point) State {
 	s.hovered = id
 	s.hoverAt = at
+	s.haveHover = true
 	return s
 }
 
@@ -91,6 +105,17 @@ func (s State) Hover(id ControlID, at Point) State {
 // turning mouse mode off is clearing hover, and that is the whole of it.
 func (s State) ClearHover() State {
 	s.hovered = ""
+	return s
+}
+
+// ClearHoverObservation removes both hover feedback and the retained terminal
+// cell. Admission uses it when raw input cannot be correlated with the frame
+// that resolved it; keeping that cell would let a later render resurrect a
+// hover the user never actually delivered.
+func (s State) ClearHoverObservation() State {
+	s.hovered = ""
+	s.hoverAt = Point{}
+	s.haveHover = false
 	return s
 }
 
@@ -135,6 +160,8 @@ func (s State) Update(message tea.Msg) (State, tea.Cmd, bool) {
 	switch event.kind {
 	case interactionHover:
 		return s.Hover(event.id, event.point), nil, true
+	case interactionResetHover:
+		return s.ClearHoverObservation(), nil, true
 	case interactionPress:
 		s.pressed = event.id
 		return s, nil, true
@@ -165,6 +192,7 @@ const (
 	interactionRelease
 	interactionCancel
 	interactionHover
+	interactionResetHover
 )
 
 type interactionMsg struct {
@@ -173,6 +201,79 @@ type interactionMsg struct {
 	point    Point
 	activate Action
 	followup tea.Msg
+}
+
+// Interaction is the immutable semantic identity resolved by a rendered map.
+// Activation remains private to State.Update.
+type Interaction struct {
+	Kind     InteractionKind
+	ID       ControlID
+	Point    Point
+	Followup tea.Msg
+}
+
+type InteractionKind uint8
+
+const (
+	InteractionPress InteractionKind = iota + 1
+	InteractionRelease
+	InteractionCancel
+	InteractionHover
+	InteractionResetHover
+)
+
+func ObserveInteraction(message tea.Msg) (Interaction, bool) {
+	event, ok := message.(interactionMsg)
+	if !ok {
+		return Interaction{}, false
+	}
+	kind := InteractionKind(0)
+	switch event.kind {
+	case interactionPress:
+		kind = InteractionPress
+	case interactionRelease:
+		kind = InteractionRelease
+	case interactionCancel:
+		kind = InteractionCancel
+	case interactionHover:
+		kind = InteractionHover
+	case interactionResetHover:
+		kind = InteractionResetHover
+	}
+	return Interaction{Kind: kind, ID: event.id, Point: event.point, Followup: event.followup}, true
+}
+
+func ReplaceFollowup(message tea.Msg, followup tea.Msg) tea.Msg {
+	event, ok := message.(interactionMsg)
+	if !ok {
+		return followup
+	}
+	event.followup = followup
+	return event
+}
+
+// ReplaceActivation binds a resolved release to the current stable action for
+// the same control identity. It does not perform a coordinate lookup.
+func ReplaceActivation(message tea.Msg, action Action) tea.Msg {
+	event, ok := message.(interactionMsg)
+	if !ok {
+		return message
+	}
+	event.activate = action
+	return event
+}
+
+type WheelIntent struct {
+	Key     string
+	Current int
+	Target  int
+	Min     int
+	Max     int
+}
+
+type WheelMessage interface {
+	PointerWheelIntent() WheelIntent
+	PointerWheelTarget(int) tea.Msg
 }
 
 // IsMessage reports whether message carries pointer feedback that State.Update
@@ -185,6 +286,24 @@ func IsMessage(message tea.Msg) bool {
 // Cancel clears any active press when the original control disappeared between
 // render passes, for example after a resize or asynchronous refresh.
 func Cancel() tea.Cmd { return cancelCommand(nil) }
+
+// CancelWith clears capture before forwarding a resolved domain command. The
+// command is executed only when the mailbox drains it inside ordered Update.
+func CancelWith(followup tea.Cmd) tea.Cmd {
+	return func() tea.Msg {
+		var message tea.Msg
+		if followup != nil {
+			message = followup()
+		}
+		return interactionMsg{kind: interactionCancel, followup: message}
+	}
+}
+
+// ResetHover clears both the active owner's hover feedback and its retained
+// observation. Capture is deliberately left to Cancel.
+func ResetHover() tea.Cmd {
+	return func() tea.Msg { return interactionMsg{kind: interactionResetHover} }
+}
 
 type region struct {
 	rect   Rect
@@ -201,6 +320,162 @@ type wheelRegion struct {
 type Map struct {
 	regions []region
 	wheels  []wheelRegion
+}
+
+// Snapshot is an immutable copy of one rendered pointer map.
+type Snapshot struct {
+	regions []region
+	wheels  []wheelRegion
+}
+
+type controlBinding struct {
+	id     ControlID
+	action Action
+}
+
+type wheelBinding struct {
+	intent  WheelIntent
+	rebuild func(int) tea.Msg
+}
+
+// Topology is the immutable semantic half of one published pointer map. It
+// deliberately carries no rectangles: stale input may rebind a stable control
+// or wheel identity to the current action and bounds, but it may never repeat a
+// coordinate lookup against a frame the terminal did not display.
+type Topology struct {
+	controls []controlBinding
+	wheels   []wheelBinding
+}
+
+// Topology returns the stable controls and wheel bounds owned by this map.
+// Later registrations win just as they do in the hit map.
+func (m Map) Topology() Topology { return m.Snapshot().Topology() }
+
+// Topology returns the stable controls and wheel bounds owned by this snapshot.
+func (s Snapshot) Topology() Topology {
+	topology := Topology{controls: make([]controlBinding, 0, len(s.regions))}
+	for _, candidate := range s.regions {
+		if candidate.id == "" || candidate.action == nil {
+			continue
+		}
+		topology.controls = append(topology.controls, controlBinding{id: candidate.id, action: candidate.action})
+	}
+	for _, candidate := range s.wheels {
+		if candidate.action == nil {
+			continue
+		}
+		message, ok := candidate.action(0).(WheelMessage)
+		if !ok || message == nil {
+			continue
+		}
+		intent := message.PointerWheelIntent()
+		if intent.Key == "" {
+			continue
+		}
+		topology.wheels = append(topology.wheels, wheelBinding{
+			intent:  intent,
+			rebuild: func(target int) tea.Msg { return message.PointerWheelTarget(target) },
+		})
+	}
+	return topology
+}
+
+// Merge returns an immutable union in which bindings from other take
+// precedence. It is used by composite surfaces such as the board, whose hover
+// and activation maps share one published owner.
+func (t Topology) Merge(other Topology) Topology {
+	return Topology{
+		controls: append(append([]controlBinding(nil), t.controls...), other.controls...),
+		wheels:   append(append([]wheelBinding(nil), t.wheels...), other.wheels...),
+	}
+}
+
+// WithWheel returns a topology extended with one current absolute wheel
+// binding. Custom surfaces whose wheel resolver does not use Map.AddWheel use
+// this without exposing their geometry.
+func (t Topology) WithWheel(intent WheelIntent, rebuild func(int) tea.Msg) Topology {
+	if intent.Key == "" || rebuild == nil {
+		return t
+	}
+	next := Topology{
+		controls: append([]controlBinding(nil), t.controls...),
+		wheels:   append([]wheelBinding(nil), t.wheels...),
+	}
+	next.wheels = append(next.wheels, wheelBinding{intent: intent, rebuild: rebuild})
+	return next
+}
+
+// HasControl reports whether the current published owner still exposes id.
+func (t Topology) HasControl(id ControlID) bool {
+	_, ok := t.control(id)
+	return ok
+}
+
+func (t Topology) control(id ControlID) (Action, bool) {
+	if id == "" {
+		return nil, false
+	}
+	for index := len(t.controls) - 1; index >= 0; index-- {
+		candidate := t.controls[index]
+		if candidate.id == id && candidate.action != nil {
+			return candidate.action, true
+		}
+	}
+	return nil, false
+}
+
+// RebindExact validates a stale exact interaction by stable ID and, for a
+// release, replaces the old frame's activation closure with the current one.
+// Coordinates are retained only as action arguments; they are never resolved.
+func (t Topology) RebindExact(message tea.Msg) (tea.Msg, bool) {
+	event, ok := message.(interactionMsg)
+	if !ok || (event.kind != interactionPress && event.kind != interactionRelease) {
+		return nil, false
+	}
+	action, found := t.control(event.id)
+	if !found {
+		return nil, false
+	}
+	if event.kind == interactionRelease {
+		event.activate = action
+	}
+	return event, true
+}
+
+// RebindWheel rebuilds target against the current binding for key. The caller
+// owns accumulation; topology owns the current absolute bounds and message.
+func (t Topology) RebindWheel(key string, target int) (tea.Msg, WheelIntent, bool) {
+	if key == "" {
+		return nil, WheelIntent{}, false
+	}
+	for index := len(t.wheels) - 1; index >= 0; index-- {
+		candidate := t.wheels[index]
+		if candidate.intent.Key != key || candidate.rebuild == nil {
+			continue
+		}
+		intent := candidate.intent
+		target = min(max(target, intent.Min), intent.Max)
+		return candidate.rebuild(target), intent, true
+	}
+	return nil, WheelIntent{}, false
+}
+
+// SameControls reports semantic topology parity without comparing closures.
+func (t Topology) SameControls(other Topology) bool {
+	if len(t.controls) != len(other.controls) || len(t.wheels) != len(other.wheels) {
+		return false
+	}
+	for index := range t.controls {
+		if t.controls[index].id != other.controls[index].id {
+			return false
+		}
+	}
+	for index := range t.wheels {
+		if t.wheels[index].intent != other.wheels[index].intent {
+			return false
+		}
+	}
+	return true
 }
 
 type handlerSnapshot struct {
@@ -232,18 +507,33 @@ func (m *Map) AddControl(id ControlID, rect Rect, action Action) {
 
 // AddBackdrop registers the portion of bounds outside pane as one action.
 func (m *Map) AddBackdrop(bounds, pane Rect, action Action) {
+	m.AddBackdropControl("", bounds, pane, action)
+}
+
+// AddBackdropControl registers a stable tracked dismissal region outside pane.
+// One identity spans the four non-overlapping strips, so capture survives a
+// handler replacement between press and release.
+func (m *Map) AddBackdropControl(id ControlID, bounds, pane Rect, action Action) {
 	if bounds.empty() || action == nil {
 		return
 	}
 	pane = pane.intersect(bounds)
 	if pane.empty() {
-		m.Add(bounds, action)
+		m.addBackdropRegion(id, bounds, action)
 		return
 	}
-	m.Add(Rect{X0: bounds.X0, Y0: bounds.Y0, X1: bounds.X1, Y1: pane.Y0}, action)
-	m.Add(Rect{X0: bounds.X0, Y0: pane.Y1, X1: bounds.X1, Y1: bounds.Y1}, action)
-	m.Add(Rect{X0: bounds.X0, Y0: pane.Y0, X1: pane.X0, Y1: pane.Y1}, action)
-	m.Add(Rect{X0: pane.X1, Y0: pane.Y0, X1: bounds.X1, Y1: pane.Y1}, action)
+	m.addBackdropRegion(id, Rect{X0: bounds.X0, Y0: bounds.Y0, X1: bounds.X1, Y1: pane.Y0}, action)
+	m.addBackdropRegion(id, Rect{X0: bounds.X0, Y0: pane.Y1, X1: bounds.X1, Y1: bounds.Y1}, action)
+	m.addBackdropRegion(id, Rect{X0: bounds.X0, Y0: pane.Y0, X1: pane.X0, Y1: pane.Y1}, action)
+	m.addBackdropRegion(id, Rect{X0: pane.X1, Y0: pane.Y0, X1: bounds.X1, Y1: pane.Y1}, action)
+}
+
+func (m *Map) addBackdropRegion(id ControlID, rect Rect, action Action) {
+	if id == "" {
+		m.Add(rect, action)
+		return
+	}
+	m.AddControl(id, rect, action)
 }
 
 // AddWheel registers a wheel zone. The action receives -1 for up and +1 for down.
@@ -259,7 +549,18 @@ func (m *Map) AddWheel(rect Rect, action func(delta int) tea.Msg) {
 // and 9 of spec section 10.5.2 drive after the content moved under a still
 // pointer.
 func (m Map) Resolve(point Point) (ControlID, bool) {
-	id := resolveHover(m.regions, point)
+	return m.Snapshot().Resolve(point)
+}
+
+func (m Map) Snapshot() Snapshot {
+	return Snapshot{
+		regions: append([]region(nil), m.regions...),
+		wheels:  append([]wheelRegion(nil), m.wheels...),
+	}
+}
+
+func (s Snapshot) Resolve(point Point) (ControlID, bool) {
+	id := resolveHover(s.regions, point)
 	return id, id != ""
 }
 
@@ -279,9 +580,13 @@ func resolveHover(regions []region, point Point) ControlID {
 
 // Handler returns the immutable render snapshot's mouse callback.
 func (m Map) Handler() func(tea.MouseMsg) tea.Cmd {
+	return m.Snapshot().Handler()
+}
+
+func (s Snapshot) Handler() func(tea.MouseMsg) tea.Cmd {
 	snapshot := &handlerSnapshot{
-		regions: append([]region(nil), m.regions...),
-		wheels:  append([]wheelRegion(nil), m.wheels...),
+		regions: s.regions,
+		wheels:  s.wheels,
 		pressed: -1,
 	}
 	for _, candidate := range snapshot.regions {

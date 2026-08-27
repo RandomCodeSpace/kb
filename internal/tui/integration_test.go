@@ -250,8 +250,10 @@ func TestIntegratedMouseHitAndReleaseProtocols(t *testing.T) {
 			t.Fatalf("active pointer release %v = %T", button, release())
 		}
 	}
-	if release := boardMouseHandler(nil, false)(tea.MouseReleaseMsg{Button: tea.MouseNone}); release != nil {
-		t.Fatalf("inactive X10 release emitted %#v", release())
+	if release := boardMouseHandler(nil, false)(tea.MouseReleaseMsg{Button: tea.MouseNone}); release == nil {
+		t.Fatal("X10 release did not reach model-owned capture validation")
+	} else if message, ok := release().(boardPointerUpMsg); !ok || !message.resolved || message.valid {
+		t.Fatalf("X10 release resolved as %#v", message)
 	}
 }
 

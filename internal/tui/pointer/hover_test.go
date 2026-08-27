@@ -338,8 +338,8 @@ func TestClearHoverLeavesThePressAlone(t *testing.T) {
 	if !cleared.IsPressed(rowTwo) {
 		t.Fatal("clearing hover cleared the press")
 	}
-	if _, ok := cleared.HoverPoint(); ok {
-		t.Fatal("a cleared hover still reports a point to re-resolve from")
+	if point, ok := cleared.HoverPoint(); !ok || point != (pointer.Point{X: 10, Y: 5}) {
+		t.Fatalf("cleared hover observation = %+v/%t, want retained stationary cell", point, ok)
 	}
 	if cleared.IsHovered("") {
 		t.Fatal("the empty control id reported itself as hovered")

@@ -1173,11 +1173,11 @@ func TestPointerWheelScrollRevealsSaveControl(t *testing.T) {
 	model := newTestEditor(newTestStore(t), "u")
 	model.OpenAdd(board.StatusTodo)
 	model.title.SetValue("scroll save")
-	handler := model.MouseHandler(width, height)
-	if handler == nil {
+	if model.MouseHandler(width, height) == nil {
 		t.Fatal("open editor returned no mouse handler")
 	}
 	for i := 0; i < 32; i++ {
+		handler := model.MouseHandler(width, height)
 		command := handler(tea.MouseWheelMsg{X: width / 2, Y: height / 2, Button: tea.MouseWheelDown})
 		if command == nil {
 			t.Fatalf("wheel command missing at iteration %d", i)

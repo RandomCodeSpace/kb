@@ -35,12 +35,9 @@ func boardHitFor(t *testing.T, model Model, want func(boardHit) bool) boardHit {
 func hoverBoard(t *testing.T, model *Model, x, y int) {
 	t.Helper()
 	rebuildTestView(model)
-	handler := requireMouseHandler(t, model.View().OnMouse, "board")
-	command := handler(tea.MouseMotionMsg{X: x, Y: y, Button: tea.MouseNone})
-	if command == nil {
-		t.Fatalf("bare motion at %d,%d produced no hover", x, y)
+	if trailing := updateRootPointerTest(t, model, tea.MouseMotionMsg{X: x, Y: y, Button: tea.MouseNone}); trailing != nil {
+		updateTestModel(t, model, trailing())
 	}
-	updateTestModel(t, model, command())
 }
 
 // TestBoardCardHoverRaisesItsRailAndNothingElse is spec section 10.5.1: where an

@@ -955,7 +955,7 @@ func (m Model) taskActionSurface(background string) pointer.Surface {
 			)
 		}
 	}
-	return pointer.Surface{Content: content, Pointer: hits.Handler()}
+	return pointer.Surface{Content: content, Pointer: hits.Handler(), Topology: hits.Topology()}
 }
 
 // actionRowContent insets every dialog row to the panel width. A section-free

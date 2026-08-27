@@ -145,8 +145,8 @@ func TestDetailMouseWheelStopsAtUpperBound(t *testing.T) {
 	m.Open(fullTask())
 	m.Resize(80, 12)
 	m.bodyLines = make([]string, 30)
-	handler := m.MouseHandler(80, 12)
 	for range 100 {
+		handler := m.MouseHandler(80, 12)
 		if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command != nil {
 			m.Update(busyResult(t, command))
 		}
@@ -154,7 +154,7 @@ func TestDetailMouseWheelStopsAtUpperBound(t *testing.T) {
 	if m.scrollOffset() != m.maxScroll() {
 		t.Fatalf("wheel down upper bound = %d, want %d", m.scrollOffset(), m.maxScroll())
 	}
-	if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command != nil {
+	if command := m.MouseHandler(80, 12)(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command != nil {
 		m.Update(busyResult(t, command))
 	}
 	if m.scrollOffset() != m.maxScroll() {

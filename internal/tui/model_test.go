@@ -511,7 +511,7 @@ func TestModelLoadsRoutesAndRenders(t *testing.T) {
 	updated, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
 	m = updated.(Model)
 	wide := m.View()
-	if !wide.AltScreen || wide.MouseMode != tea.MouseModeCellMotion {
+	if !wide.AltScreen || wide.MouseMode != tea.MouseModeAllMotion {
 		t.Fatalf("view terminal modes = alt:%v mouse:%v", wide.AltScreen, wide.MouseMode)
 	}
 	for _, want := range []string{"kb / Work / alice", "▸● 1 TO DO", "one", "DOING", "DONE", "ready"} {
@@ -637,6 +637,15 @@ func requireMouseCommand(t *testing.T, command tea.Cmd, action string) tea.Cmd {
 	return command
 }
 
+func updateRootPointerTest(t *testing.T, model *Model, message tea.MouseMsg) tea.Cmd {
+	t.Helper()
+	handler := requireMouseHandler(t, model.View().OnMouse, "root")
+	if command := handler(message); command != nil {
+		t.Fatalf("%T escaped the synchronous pointer mailbox", message)
+	}
+	return updateTestModel(t, model, message)
+}
+
 // reverseVideoPattern matches the SGR reverse attribute in any parameter
 // position. A themed control carries its colors in the same sequence, so the
 // composed frame emits "...;7m" rather than a standalone "\x1b[7m".
@@ -658,22 +667,22 @@ func pointerCommandForLabel(t *testing.T, model *Model, label string) tea.Cmd {
 		line := lines[row]
 		if index := strings.Index(line, label); index >= 0 {
 			x := ansi.StringWidth(line[:index])
-			press := requireMouseCommand(t,
-				handler(tea.MouseClickMsg{X: x, Y: row, Button: tea.MouseLeft}),
-				"press "+label,
-			)
-			if command := updateTestModel(t, model, press()); command != nil {
+			press := tea.MouseClickMsg{X: x, Y: row, Button: tea.MouseLeft}
+			if command := handler(press); command != nil {
+				t.Fatalf("press %q escaped the synchronous pointer mailbox", label)
+			}
+			if command := updateTestModel(t, model, press); command != nil {
 				t.Fatalf("press %q returned domain command", label)
 			}
 			pressedView := model.View()
 			if !containsReverseVideo(pressedView.Content) {
 				t.Fatalf("press %q did not render feedback", label)
 			}
-			release := requireMouseCommand(t,
-				requireMouseHandler(t, pressedView.OnMouse, label)(tea.MouseReleaseMsg{X: x, Y: row, Button: tea.MouseLeft}),
-				"click "+label,
-			)
-			return updateTestModel(t, model, release())
+			release := tea.MouseReleaseMsg{X: x, Y: row, Button: tea.MouseLeft}
+			if command := requireMouseHandler(t, pressedView.OnMouse, label)(release); command != nil {
+				t.Fatalf("release %q escaped the synchronous pointer mailbox", label)
+			}
+			return func() tea.Msg { return release }
 		}
 	}
 	t.Fatalf("rendered label %q not found:\n%s", label, ansi.Strip(view.Content))
@@ -765,8 +774,10 @@ func TestRootRoutesPointerPressFeedbackToEveryTopmostOwner(t *testing.T) {
 				continue
 			}
 			x := ansi.StringWidth(line[:index])
-			command := requireMouseCommand(t, before.OnMouse(tea.MouseClickMsg{X: x, Y: row, Button: tea.MouseLeft}), "press "+label)
-			if next := updateTestModel(t, m, command()); next != nil {
+			if command := before.OnMouse(tea.MouseClickMsg{X: x, Y: row, Button: tea.MouseLeft}); command != nil {
+				t.Fatalf("press %q escaped the synchronous pointer mailbox", label)
+			}
+			if next := updateTestModel(t, m, tea.MouseClickMsg{X: x, Y: row, Button: tea.MouseLeft}); next != nil {
 				t.Fatalf("press %q returned domain command", label)
 			}
 			if after := m.View().Content; after == before.Content {
@@ -887,19 +898,13 @@ func TestBoardPrimaryControlsRenderPressAndActivateOnRelease(t *testing.T) {
 			}
 			x, y := target.x0, target.y0
 			rebuildTestView(&m)
-			press := requireMouseCommand(t, m.View().OnMouse(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}), "board press")
-			if command := updateTestModel(t, &m, press()); command != nil || !m.pointerState.IsPressed(id) {
+			if command := updateRootPointerTest(t, &m, tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}); command != nil || !m.pointerState.IsPressed(id) {
 				t.Fatalf("board press command=%v pressed=%v", command, m.pointerState.IsPressed(id))
 			}
 			if !strings.Contains(m.View().Content, "\x1b[7m") {
 				t.Fatal("board control press produced no visible feedback")
 			}
-			release := requireMouseCommand(t, m.View().OnMouse(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseNone}), "board release")
-			activate := updateTestModel(t, &m, release())
-			if activate == nil {
-				t.Fatal("board release produced no domain action")
-			}
-			updateTestModel(t, &m, activate())
+			_ = updateRootPointerTest(t, &m, tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseNone})
 			if !test.check(m) || m.pointerState.IsPressed(id) {
 				t.Fatalf("board release state did not activate %s", test.name)
 			}
@@ -927,8 +932,7 @@ func TestBoardCardLabelsHavePerRegionPressedIdentity(t *testing.T) {
 	firstID := boardHitControlID(first)
 	secondID := boardCardLabelControlID(m.board.Tasks[1].ID, "shared")
 	rebuildTestView(&m)
-	press := requireMouseCommand(t, m.View().OnMouse(tea.MouseClickMsg{X: first.x0, Y: first.y0, Button: tea.MouseLeft}), "card label press")
-	if command := updateTestModel(t, &m, press()); command != nil {
+	if command := updateRootPointerTest(t, &m, tea.MouseClickMsg{X: first.x0, Y: first.y0, Button: tea.MouseLeft}); command != nil {
 		t.Fatalf("card label press returned domain command %v", command)
 	}
 	if !m.pointerState.IsPressed(firstID) || m.pointerState.IsPressed(secondID) {
@@ -956,14 +960,13 @@ func TestBoardReleaseClearsPressedControlRemovedByRefresh(t *testing.T) {
 		t.Fatal("temporary card label was not rendered")
 	}
 	rebuildTestView(&m)
-	press := requireMouseCommand(t, m.View().OnMouse(tea.MouseClickMsg{X: label.x0, Y: label.y0, Button: tea.MouseLeft}), "temporary label press")
-	updateTestModel(t, &m, press())
+	updateRootPointerTest(t, &m, tea.MouseClickMsg{X: label.x0, Y: label.y0, Button: tea.MouseLeft})
 	if !m.pointerState.Active() {
 		t.Fatal("temporary label did not own the press")
 	}
 	m.board.Tasks[0].Tags = nil
-	release := requireMouseCommand(t, m.View().OnMouse(tea.MouseReleaseMsg{X: label.x0, Y: label.y0, Button: tea.MouseNone}), "removed label release")
-	updateTestModel(t, &m, release())
+	rebuildTestView(&m)
+	updateRootPointerTest(t, &m, tea.MouseReleaseMsg{X: label.x0, Y: label.y0, Button: tea.MouseNone})
 	if m.pointerState.Active() {
 		t.Fatal("removed control left pressed state stuck")
 	}
@@ -1008,16 +1011,13 @@ func TestBoardMouseWheelScrollsHoveredColumn(t *testing.T) {
 	m := mouseRoutingTestModel(t)
 
 	beforeBoard := ansi.Strip(m.View().Content)
-	boardMouse := requireMouseHandler(t, m.View().OnMouse, "board")
 	// The column group is centered inside the frame (spec section 2.5), so the
 	// hovered cell is the middle of the frame rather than its left edge.
-	scrollDown := requireMouseCommand(t,
-		boardMouse(tea.MouseWheelMsg{X: 40, Y: 4, Button: tea.MouseWheelDown}),
-		"board wheel down",
-	)
+	scrollDown := updateRootPointerTest(t, &m,
+		tea.MouseWheelMsg{X: 40, Y: 4, Button: tea.MouseWheelDown})
 	// The wheel arms the scroll-activity linger of spec section 10.3.4, which
 	// is a timer and not a domain command.
-	assertNoDomainMessage(t, "board wheel", updateTestModel(t, &m, scrollDown()))
+	assertNoDomainMessage(t, "board wheel", scrollDown)
 	if !m.boardView.manualScroll[0] || m.boardView.scrolls[0] == 0 {
 		t.Fatalf("board scroll state = manual %v offset %d", m.boardView.manualScroll[0], m.boardView.scrolls[0])
 	}
@@ -1025,11 +1025,7 @@ func TestBoardMouseWheelScrollsHoveredColumn(t *testing.T) {
 	if afterBoard == beforeBoard || strings.Contains(afterBoard, "Card 0") {
 		t.Fatalf("board did not scroll the hovered column:\n%s", afterBoard)
 	}
-	if command := m.View().OnMouse(tea.MouseWheelMsg{X: 40, Y: 4, Button: tea.MouseWheelUp}); command == nil {
-		t.Fatal("board wheel up was ignored")
-	} else {
-		updateTestModel(t, &m, command())
-	}
+	updateRootPointerTest(t, &m, tea.MouseWheelMsg{X: 40, Y: 4, Button: tea.MouseWheelUp})
 	if m.boardView.scrolls[0] != 0 {
 		t.Fatalf("board wheel up offset = %d", m.boardView.scrolls[0])
 	}
@@ -1039,12 +1035,12 @@ func TestBoardMouseWheelAtTopDoesNothing(t *testing.T) {
 	m := mouseRoutingTestModel(t)
 	m.boardView.manualScroll[0] = true
 	m.boardView.scrolls[0] = 0
-	handler := requireMouseHandler(t, m.View().OnMouse, "board top scroll")
-	if command := handler(tea.MouseWheelMsg{X: 1, Y: 4, Button: tea.MouseWheelUp}); command != nil {
-		t.Fatalf("top-bound wheel up returned %v", command)
-	}
-	if command := handler(tea.MouseWheelMsg{X: 1, Y: 0, Button: tea.MouseWheelUp}); command != nil {
-		t.Fatalf("header wheel returned %v", command)
+	before := m.RenderPlanStats()
+	updateRootPointerTest(t, &m, tea.MouseWheelMsg{X: 1, Y: 4, Button: tea.MouseWheelUp})
+	updateRootPointerTest(t, &m, tea.MouseWheelMsg{X: 1, Y: 0, Button: tea.MouseWheelUp})
+	after := m.RenderPlanStats()
+	if after.PublishedFrames != before.PublishedFrames || m.boardView.scrolls[0] != 0 {
+		t.Fatal("boundary wheel changed board state")
 	}
 }
 
@@ -1062,14 +1058,11 @@ func TestBoardPointerMotionCancelsControlPress(t *testing.T) {
 	if target.kind != boardHitFilterText {
 		t.Fatal("filter text control was not rendered")
 	}
-	view := m.View()
-	press := requireMouseCommand(t, view.OnMouse(tea.MouseClickMsg{X: target.x0, Y: target.y0, Button: tea.MouseLeft}), "filter press")
-	updateTestModel(t, &m, press())
+	updateRootPointerTest(t, &m, tea.MouseClickMsg{X: target.x0, Y: target.y0, Button: tea.MouseLeft})
 	if !m.pointerState.Active() {
 		t.Fatal("filter press did not enter feedback state")
 	}
-	motion := requireMouseCommand(t, m.View().OnMouse(tea.MouseMotionMsg{X: target.x0 + 1, Y: target.y0, Button: tea.MouseLeft}), "filter motion")
-	updateTestModel(t, &m, motion())
+	updateRootPointerTest(t, &m, tea.MouseMotionMsg{X: target.x0 + 1, Y: target.y0, Button: tea.MouseLeft})
 	if m.pointerState.Active() {
 		t.Fatal("pointer motion left filter feedback pressed")
 	}
@@ -1084,38 +1077,18 @@ func TestDetailOverlayMouseWheelAndOutsideClick(t *testing.T) {
 	}
 	updateTestModel(t, &m, load())
 	detailBefore := ansi.Strip(m.View().Content)
-	detailMouse := requireMouseHandler(t, m.View().OnMouse, "detail")
-	if command := detailMouse(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown}); command != nil {
-		updateTestModel(t, &m, command())
-	}
-	if command := detailMouse(tea.MouseClickMsg{X: 40, Y: 5, Button: tea.MouseLeft}); command != nil {
-		updateTestModel(t, &m, command())
-	}
+	updateRootPointerTest(t, &m, tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown})
+	updateRootPointerTest(t, &m, tea.MouseClickMsg{X: 40, Y: 5, Button: tea.MouseLeft})
 	if !m.detail.IsOpen() {
 		t.Fatal("click inside detail dismissed it")
 	}
-	detailScroll := requireMouseCommand(t,
-		detailMouse(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}),
-		"detail wheel down",
-	)
-	followup := updateTestModel(t, &m, detailScroll())
-	if followup == nil {
-		t.Fatal("detail wheel did not produce scroll action")
-	}
-	updateTestModel(t, &m, followup())
+	updateRootPointerTest(t, &m, tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown})
 	detailAfter := ansi.Strip(m.View().Content)
 	if detailAfter == detailBefore {
 		t.Fatal("detail wheel did not change the viewport")
 	}
-	dismiss := requireMouseHandler(t, m.View().OnMouse, "detail backdrop")
-	if command := dismiss(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command != nil {
-		t.Fatalf("detail backdrop activated on press: %v", command)
-	}
-	if command := dismiss(tea.MouseReleaseMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command == nil {
-		t.Fatal("outside click was ignored")
-	} else {
-		updateTestModel(t, &m, command())
-	}
+	updateRootPointerTest(t, &m, tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
+	updateRootPointerTest(t, &m, tea.MouseReleaseMsg{X: 0, Y: 0, Button: tea.MouseLeft})
 	if m.detail.IsOpen() {
 		t.Fatal("outside click did not close detail")
 	}

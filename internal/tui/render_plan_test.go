@@ -38,13 +38,16 @@ func TestUpdatePublishesColdEquivalentRetainedView(t *testing.T) {
 	message := tea.MouseClickMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseLeft}
 	gotCommand := got.OnMouse(message)
 	wantCommand := want.OnMouse(message)
-	if gotCommand == nil || wantCommand == nil {
-		t.Fatal("cold or retained pointer map did not resolve a visible card")
+	if gotCommand != nil || wantCommand == nil {
+		t.Fatal("retained pointer map escaped its mailbox or cold map missed a visible card")
 	}
-	gotPress, gotOK := gotCommand().(boardPointerDownMsg)
 	wantPress, wantOK := wantCommand().(boardPointerDownMsg)
-	if !gotOK || !wantOK || gotPress != wantPress {
-		t.Fatalf("retained pointer result = %#v, cold pointer result = %#v", gotPress, wantPress)
+	if !wantOK {
+		t.Fatalf("cold pointer result = %#v", wantCommand())
+	}
+	model, _ = model.updateWithCommands(message)
+	if model.move.lifted == nil || model.move.lifted.taskID != wantPress.taskID {
+		t.Fatalf("retained pointer selected %#v, cold pointer result = %#v", model.move.lifted, wantPress)
 	}
 }
 

@@ -733,8 +733,12 @@ func TestMouseReleaseProtocolsClickAndDrag(t *testing.T) {
 					})
 					updateTestModel(t, &m, motion())
 				}
+				releaseX, releaseY := source.x0+1, source.y0
+				if drag {
+					releaseX, releaseY = destination.x0+1, destination.y0
+				}
 				release := active(tea.MouseReleaseMsg{
-					X: destination.x0 + 1, Y: destination.y0, Button: protocol.button,
+					X: releaseX, Y: releaseY, Button: protocol.button,
 				})
 				if release == nil {
 					t.Fatalf("%s release was ignored", protocol.name)
@@ -754,8 +758,10 @@ func TestMouseReleaseProtocolsClickAndDrag(t *testing.T) {
 			})
 		}
 	}
-	if command := boardMouseHandler(nil, false)(tea.MouseReleaseMsg{Button: tea.MouseNone}); command != nil {
-		t.Fatalf("unrelated X10 release produced %v", command)
+	if command := boardMouseHandler(nil, false)(tea.MouseReleaseMsg{Button: tea.MouseNone}); command == nil {
+		t.Fatal("X10 release did not reach model-owned capture validation")
+	} else if message, ok := command().(boardPointerUpMsg); !ok || !message.resolved || message.valid {
+		t.Fatalf("X10 release resolved as %#v", message)
 	}
 }
 

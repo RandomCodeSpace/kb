@@ -53,6 +53,10 @@ type RenderPlanStats struct {
 	Builds                         uint64              `json:"builds"`
 	PublishedFrames                uint64              `json:"published_frames"`
 	DiscardedEvents                uint64              `json:"discarded_events"`
+	PointerEventsAccepted          uint64              `json:"pointer_events_accepted"`
+	PointerEventsDeferred          uint64              `json:"pointer_events_deferred"`
+	PointerTrailingFlushes         uint64              `json:"pointer_trailing_flushes"`
+	PointerIntentPending           bool                `json:"pointer_intent_pending"`
 	StaleWorkerResults             uint64              `json:"stale_worker_results"`
 	StaleGeometryRootResults       uint64              `json:"stale_geometry_root_results"`
 	ProjectionBuilds               uint64              `json:"projection_builds"`
@@ -82,7 +86,9 @@ type RenderPlanStats struct {
 // join this root in later slices without widening that interface.
 type renderPlan struct {
 	view       tea.View
+	resolver   func(tea.MouseMsg) tea.Cmd
 	semantics  renderSnapshotSemantics
+	pointer    pointer.State
 	projection renderProjection
 	geometry   renderGeometry
 	worker     geometryWorkerState
@@ -151,14 +157,18 @@ type columnRenderSemantics struct {
 }
 
 type renderSnapshotSemantics struct {
-	handler renderHandlerTopology
-	hits    []boardHit
-	columns [len(boardStatuses)]columnRenderSemantics
+	handler    renderHandlerTopology
+	ownerEpoch uint64
+	topology   pointer.Topology
+	hits       []boardHit
+	columns    [len(boardStatuses)]columnRenderSemantics
 }
 
 func (p renderPlan) semanticallyMatches(snapshot coldRenderSnapshot) bool {
 	return p.view.Content == snapshot.view.Content && p.view.AltScreen == snapshot.view.AltScreen &&
 		p.view.MouseMode == snapshot.view.MouseMode && p.semantics.handler == snapshot.semantics.handler &&
+		p.semantics.ownerEpoch == snapshot.semantics.ownerEpoch &&
+		p.semantics.topology.SameControls(snapshot.semantics.topology) &&
 		p.semantics.columns == snapshot.semantics.columns && slices.Equal(p.semantics.hits, snapshot.semantics.hits)
 }
 
@@ -190,8 +200,10 @@ func (p renderPlan) rebuild(model Model, impact renderImpact, checkSource bool) 
 	trace := renderVisitTrace{}
 	model.renderTrace = &trace
 	snapshot := model.renderRetainedSnapshot()
+	snapshot = model.reresolveBoardHover(snapshot)
 	p.view = snapshot.view
 	p.semantics = snapshot.semantics
+	p.pointer = model.pointerState
 	p.stats.Builds++
 	p.stats.PublishedFrames++
 	p.stats.InstalledSnapshotID++
@@ -306,9 +318,35 @@ func (m *Model) rebuildRenderPlanAfterUpdate(impact renderImpact, checkSource bo
 		current = *m.current
 	}
 	next := current.rebuild(*m, impact, checkSource)
+	m.pointerState = next.pointer
+	m.installPointerHandler(&next)
 	m.current = &next
 	m.preparedProjection = nil
 	m.publishKeyboardAdmissionSnapshot()
+}
+
+func (m *Model) installPointerHandler(plan *renderPlan) {
+	if plan == nil {
+		return
+	}
+	if m.pointerOwner != plan.semantics.handler || m.pointerOwnerEpoch != plan.semantics.ownerEpoch || m.pointerOwnerSeq == 0 {
+		m.pointerMailbox.reset()
+		m.pointerAdmission.resetAll()
+		m.pointerOwner = plan.semantics.handler
+		m.pointerOwnerEpoch = plan.semantics.ownerEpoch
+		m.pointerOwnerSeq++
+		m.pointerState = m.pointerState.ClearCapture()
+	}
+	if plan.view.OnMouse == nil {
+		plan.resolver = nil
+		return
+	}
+	route := pointerRouteIdentity{
+		owner: m.pointerOwner, ownerSession: m.pointerOwnerSeq,
+		geometry: plan.geometry.generation, snapshot: plan.stats.InstalledSnapshotID,
+	}
+	plan.resolver = plan.view.OnMouse
+	plan.view.OnMouse = m.pointerMailbox.wrap(plan.resolver, route)
 }
 
 // startGeometryWorker serializes the offscreen command chain. A superseding
@@ -396,6 +434,8 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 		trace := renderVisitTrace{}
 		model.renderTrace = &trace
 		snapshot := model.renderRetainedSnapshot()
+		snapshot = model.reresolveBoardHover(snapshot)
+		next.pointer = model.pointerState
 		next.stats.RenderedCardRecords += trace.cardRecords
 		if !next.semanticallyMatches(snapshot) {
 			next.view = snapshot.view
@@ -408,10 +448,44 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 			next.stats.HitRegions = uint64(len(snapshot.hitRegions))
 			next.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
 				next.projection.ownedBytesEstimate() + next.geometry.ownedBytesEstimate()
+			m.installPointerHandler(&next)
 		}
 	}
 	m.current = &next
+	m.pointerState = next.pointer
 	return m
+}
+
+func (m *Model) reresolveBoardHover(snapshot coldRenderSnapshot) coldRenderSnapshot {
+	if snapshot.semantics.handler != renderHandlerBoard {
+		return snapshot
+	}
+	point, ok := m.pointerState.HoverPoint()
+	if !ok {
+		return snapshot
+	}
+	next := m.pointerState.Hover(boardHoverControlAt(snapshot.hitRegions, point), point)
+	if next.Hovered() == m.pointerState.Hovered() {
+		return snapshot
+	}
+	m.pointerState = next
+	return m.renderRetainedSnapshot()
+}
+
+func boardHoverControlAt(hits []boardHit, point pointer.Point) pointer.ControlID {
+	for index := len(hits) - 1; index >= 0; index-- {
+		hit := hits[index]
+		if point.X < hit.x0 || point.X >= hit.x1 || point.Y < hit.y0 || point.Y >= hit.y1 {
+			continue
+		}
+		if id := boardHitControlID(hit); id != "" {
+			return id
+		}
+		if id := boardCardHoverID(hit); id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // RenderPlanStats returns a value copy so instrumentation cannot mutate the
@@ -419,13 +493,21 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 func (m Model) RenderPlanStats() RenderPlanStats {
 	if m.current == nil {
 		return RenderPlanStats{
-			AcceptedMessageID: m.acceptedMessageID,
-			DiscardedEvents:   m.inputAdmission.discardedEvents(),
+			AcceptedMessageID:      m.acceptedMessageID,
+			DiscardedEvents:        m.inputAdmission.discardedEvents() + m.pointerAdmission.discarded,
+			PointerEventsAccepted:  m.pointerAdmission.accepted,
+			PointerEventsDeferred:  m.pointerAdmission.deferred,
+			PointerTrailingFlushes: m.pointerAdmission.flushes,
+			PointerIntentPending:   m.pointerAdmission.havePending,
 		}
 	}
 	stats := m.current.stats
 	stats.AcceptedMessageID = m.acceptedMessageID
-	stats.DiscardedEvents += m.inputAdmission.discardedEvents()
+	stats.DiscardedEvents += m.inputAdmission.discardedEvents() + m.pointerAdmission.discarded
+	stats.PointerEventsAccepted = m.pointerAdmission.accepted
+	stats.PointerEventsDeferred = m.pointerAdmission.deferred
+	stats.PointerTrailingFlushes = m.pointerAdmission.flushes
+	stats.PointerIntentPending = m.pointerAdmission.havePending
 	return stats
 }
 

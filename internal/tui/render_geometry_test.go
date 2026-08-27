@@ -231,11 +231,11 @@ func TestOrdinaryInputVisitsOnlyVisibleOverscanRecords(t *testing.T) {
 			if cardHit.taskID == "" || scrollHit.maxScroll == 0 {
 				t.Fatal("fixture did not expose hover and scroll targets")
 			}
-			hover := model.View().OnMouse(tea.MouseMotionMsg{X: cardHit.x0, Y: cardHit.y0, Button: tea.MouseNone})
-			if hover == nil {
-				t.Fatal("visible card hover produced no command")
+			hover := tea.MouseMotionMsg{X: cardHit.x0, Y: cardHit.y0, Button: tea.MouseNone}
+			if command := model.View().OnMouse(hover); command != nil {
+				t.Fatal("visible card hover escaped the synchronous mailbox")
 			}
-			assertBoundedRender("hover", hover())
+			assertBoundedRender("hover", hover)
 			assertBoundedRender("scroll", boardColumnScrolledMsg{
 				status: scrollHit.status, offset: min(scrollHit.scroll+3, scrollHit.maxScroll), anchor: scrollHit.scrollDown,
 			})

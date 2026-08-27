@@ -306,8 +306,10 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	if selected, ok := m.selectedTask(); !ok || selected.ID != "doing-1" {
 		t.Fatalf("mouse selection = %+v,%v", selected, ok)
 	}
-	if command := boardMouseHandler(hits, false)(tea.MouseReleaseMsg{}); command != nil {
-		t.Fatalf("release produced command %v", command)
+	if command := boardMouseHandler(hits, false)(tea.MouseReleaseMsg{}); command == nil {
+		t.Fatal("release did not resolve for model-owned capture validation")
+	} else if message, ok := command().(boardPointerUpMsg); !ok || !message.resolved {
+		t.Fatalf("release resolved as %#v", message)
 	}
 	if command := boardMouseHandler(hits, false)(tea.MouseClickMsg{X: 999, Y: 999, Button: tea.MouseLeft}); command != nil {
 		t.Fatalf("off-board click produced command %v", command)

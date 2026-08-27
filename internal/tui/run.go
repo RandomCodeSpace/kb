@@ -109,23 +109,11 @@ func runProgram(
 	// it once after every setter and preference restore so the first View is the
 	// same complete snapshot the event loop will retain thereafter.
 	model.rebuildRenderPlan(renderImpactAll)
-	// Spec section 10.3.6: motion and wheel are coalesced at the program level,
-	// where the whole input stream is visible, rather than inside any one
-	// surface. The filter is built from the model's own Timing token, so a
-	// program running collapsed timing is not throttled at all.
-	coalescer := newInputCoalescer(model.themeStyles().Timing.InputCoalesce, nil, nil)
 	keyboard := newKeyboardAdmission(nil, model.inputAdmission, model.themeStyles().Timing)
 	filter := func(current tea.Model, message tea.Msg) tea.Msg {
-		message = keyboard.Filter(current, message)
-		if message == nil {
-			return nil
-		}
-		return coalescer.Filter(current, message)
+		return keyboard.Filter(current, message)
 	}
 	program := tea.NewProgram(model, append(options, tea.WithFilter(filter))...)
-	// A coalesced flush leaves as one message per notch, re-injected from off
-	// the loop the filter runs on.
-	coalescer.send = asyncSender(program.Send)
 	if _, err := program.Run(); err != nil {
 		return fmt.Errorf("tui: run: %w", err)
 	}

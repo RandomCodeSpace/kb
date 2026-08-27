@@ -108,8 +108,18 @@ type pointerClickMsg struct {
 
 type pointerWheelMsg struct {
 	session   uint64
-	delta     int
+	current   int
+	target    int
 	maxScroll int
+}
+
+func (m pointerWheelMsg) PointerWheelIntent() pointer.WheelIntent {
+	return pointer.WheelIntent{Key: "editor", Current: m.current, Target: m.target, Min: 0, Max: m.maxScroll}
+}
+
+func (m pointerWheelMsg) PointerWheelTarget(target int) tea.Msg {
+	m.target = min(max(target, 0), m.maxScroll)
+	return m
 }
 
 type snapshot struct {
@@ -606,7 +616,7 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 			return nil
 		}
 		m.manualScroll = true
-		m.scroll = min(max(m.scroll+msg.delta, 0), msg.maxScroll)
+		m.scroll = min(max(msg.target, 0), msg.maxScroll)
 		return nil
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
