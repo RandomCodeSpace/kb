@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -12,6 +13,49 @@ import (
 )
 
 var renderPlanViewSink tea.View
+
+type poisonCardArtifactCache struct{}
+
+func (poisonCardArtifactCache) beginPass() { panic("cold oracle began a retained artifact pass") }
+func (poisonCardArtifactCache) lookup(cardArtifactKey) (cardRenderArtifact, bool) {
+	panic("cold oracle read a retained card artifact")
+}
+func (poisonCardArtifactCache) store(cardArtifactKey, cardRenderArtifact) {
+	panic("cold oracle wrote a retained card artifact")
+}
+
+func TestColdOracleBypassesRetainedCardArtifacts(t *testing.T) {
+	model := performanceModel(120, "", performanceWidth, performanceHeight)
+	model.cardArtifacts = poisonCardArtifactCache{}
+	if snapshot := model.renderColdSnapshot(); snapshot.view.Content == "" {
+		t.Fatal("cold oracle returned an empty frame")
+	}
+}
+
+func TestCardArtifactOwnedBytesChargesSliceCapacity(t *testing.T) {
+	tightLines := make([]string, 1, 1)
+	tightLines[0] = "x"
+	tightSpans := make([][]labelSpan, 1, 1)
+	tightSpans[0] = make([]labelSpan, 1, 1)
+	wideLines := make([]string, 1, 10)
+	wideLines[0] = "x"
+	wideSpans := make([][]labelSpan, 1, 10)
+	wideSpans[0] = make([]labelSpan, 1, 10)
+
+	key := cardArtifactKey{taskID: "task", status: board.StatusTodo}
+	tight := cardArtifactsOwnedBytesEstimate(map[cardArtifactKey]cardRenderArtifact{
+		key: {lines: tightLines, spans: tightSpans},
+	})
+	wide := cardArtifactsOwnedBytesEstimate(map[cardArtifactKey]cardRenderArtifact{
+		key: {lines: wideLines, spans: wideSpans},
+	})
+	wantDelta := uint64(9)*uint64(unsafe.Sizeof(string(""))) +
+		uint64(9)*uint64(unsafe.Sizeof([]labelSpan{})) +
+		uint64(9)*uint64(unsafe.Sizeof(labelSpan{}))
+	if wide-tight != wantDelta {
+		t.Fatalf("artifact capacity charge delta=%d, want %d", wide-tight, wantDelta)
+	}
+}
 
 func TestUpdatePublishesColdEquivalentRetainedView(t *testing.T) {
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)

@@ -988,16 +988,19 @@ func (m Model) renderVirtualColumn(
 	return renderedColumn{lines: lines, hits: hits}
 }
 
-type virtualCardRows struct {
-	lines []string
-	spans [][]labelSpan
-}
+type virtualCardRows = cardRenderArtifact
 
 func (m Model) renderVirtualCard(
 	projection *renderProjection,
 	column columnLayoutGeometry,
 	ordinal int,
 ) virtualCardRows {
+	key := m.cardArtifactKey(projection, column, ordinal)
+	if m.cardArtifacts != nil {
+		if artifact, ok := m.cardArtifacts.lookup(key); ok {
+			return artifact
+		}
+	}
 	if m.renderTrace != nil {
 		m.renderTrace.cardRecords++
 	}
@@ -1018,7 +1021,11 @@ func (m Model) renderVirtualCard(
 		}
 		lines[rowIndex] = line
 	}
-	return virtualCardRows{lines: lines, spans: rowSpans}
+	artifact := cardRenderArtifact{lines: lines, spans: rowSpans}
+	if m.cardArtifacts != nil {
+		m.cardArtifacts.store(key, artifact)
+	}
+	return artifact
 }
 
 func ansiCutWithPointer(m Model, taskID string, span labelSpan, line string) string {

@@ -208,9 +208,12 @@ func TestOrdinaryInputVisitsOnlyVisibleOverscanRecords(t *testing.T) {
 				model = updated.(Model)
 				after := model.RenderPlanStats()
 				visited := after.RenderedCardRecords - before.RenderedCardRecords
+				hits := after.NavigationArtifactHits - before.NavigationArtifactHits
+				misses := after.NavigationArtifactMisses - before.NavigationArtifactMisses
 				limit := visibleOverscanRecords(model)
-				if visited == 0 || visited > limit {
-					t.Fatalf("%s rendered %d card records, visible+overscan bound %d", name, visited, limit)
+				if visited != misses || visited > limit || visited == 0 && hits == 0 {
+					t.Fatalf("%s rendered=%d hits=%d misses=%d, visible+overscan bound %d",
+						name, visited, hits, misses, limit)
 				}
 				if after.SourceTaskComparisons != before.SourceTaskComparisons {
 					t.Fatalf("%s compared %d source tasks on an ordinary input",
@@ -240,6 +243,136 @@ func TestOrdinaryInputVisitsOnlyVisibleOverscanRecords(t *testing.T) {
 				status: scrollHit.status, offset: min(scrollHit.scroll+3, scrollHit.maxScroll), anchor: scrollHit.scrollDown,
 			})
 		})
+	}
+}
+
+func TestVerticalNavigationReusesExactCardArtifacts(t *testing.T) {
+	model := performanceModel(120, "", performanceWidth, performanceHeight)
+	before := model.RenderPlanStats()
+
+	updated, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	model = updated.(Model)
+	after := model.RenderPlanStats()
+
+	hits := after.NavigationArtifactHits - before.NavigationArtifactHits
+	misses := after.NavigationArtifactMisses - before.NavigationArtifactMisses
+	rendered := after.RenderedCardRecords - before.RenderedCardRecords
+	if hits == 0 || misses == 0 || rendered != misses || rendered >= uint64(visibleOverscanRecords(model)) {
+		t.Fatalf("vertical artifact reuse hits=%d misses=%d rendered=%d overscan=%d",
+			hits, misses, rendered, visibleOverscanRecords(model))
+	}
+	if after.NavigationArtifactPublications != before.NavigationArtifactPublications+1 {
+		t.Fatalf("artifact publications=%d, want one", after.NavigationArtifactPublications-before.NavigationArtifactPublications)
+	}
+	assertPerformanceColdOracleParity(t, model)
+}
+
+func TestHorizontalNavigationFallsBackFromCardArtifacts(t *testing.T) {
+	model := performanceModel(120, "", performanceWidth, performanceHeight)
+	before := model.RenderPlanStats()
+
+	updated, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	model = updated.(Model)
+	after := model.RenderPlanStats()
+
+	if after.NavigationArtifactFallbacks != before.NavigationArtifactFallbacks+1 {
+		t.Fatalf("horizontal artifact fallbacks=%d, want one",
+			after.NavigationArtifactFallbacks-before.NavigationArtifactFallbacks)
+	}
+	if hits := after.NavigationArtifactHits - before.NavigationArtifactHits; hits != 0 {
+		t.Fatalf("horizontal navigation reused %d artifacts across status selection", hits)
+	}
+	if misses, rendered := after.NavigationArtifactMisses-before.NavigationArtifactMisses,
+		after.RenderedCardRecords-before.RenderedCardRecords; misses == 0 || rendered != misses {
+		t.Fatalf("horizontal fallback misses=%d rendered=%d", misses, rendered)
+	}
+	assertPerformanceColdOracleParity(t, model)
+}
+
+func TestUsefulWheelReusesOverlapAndRegeneratesSnapshotTopology(t *testing.T) {
+	model := performanceModel(120, "", performanceWidth, performanceHeight)
+	columnIndex := statusIndexExact(board.StatusTodo)
+	column := model.current.geometry.columns[columnIndex]
+	start := column.windowStart(model.boardView, columnIndex, model.currentProjection())
+	target := min(start+3, max(column.totalRows()-column.contentHeight, 0))
+	if target == start {
+		t.Fatal("wheel fixture had no useful scroll target")
+	}
+	previous := model.View()
+	before := model.RenderPlanStats()
+
+	updated, _ := model.Update(boardColumnScrolledMsg{
+		status: board.StatusTodo,
+		offset: target,
+		anchor: column.anchorAt(target, model.currentProjection()),
+	})
+	model = updated.(Model)
+	after := model.RenderPlanStats()
+
+	if hits := after.NavigationArtifactHits - before.NavigationArtifactHits; hits == 0 {
+		t.Fatal("useful wheel reused no overlapping artifacts")
+	}
+	if misses, rendered := after.NavigationArtifactMisses-before.NavigationArtifactMisses,
+		after.RenderedCardRecords-before.RenderedCardRecords; rendered != misses {
+		t.Fatalf("wheel misses=%d rendered=%d", misses, rendered)
+	}
+	if previous.OnMouse == nil || model.View().OnMouse == nil ||
+		after.InstalledSnapshotID != before.InstalledSnapshotID+1 {
+		t.Fatal("wheel did not install a fresh routed pointer snapshot")
+	}
+	if model.current.semantics.columns[columnIndex].windowStart == start {
+		t.Fatal("wheel retained stale absolute column topology")
+	}
+	assertPerformanceColdOracleParity(t, model)
+}
+
+func TestCardArtifactRetentionPrunesDisjointWindows(t *testing.T) {
+	model := performanceModel(1000, "", 80, 24)
+	columnIndex := statusIndexExact(board.StatusTodo)
+	projection := model.currentProjection()
+	column := model.current.geometry.columns[columnIndex]
+	maximum := max(column.totalRows()-column.contentHeight, 0)
+	if maximum == 0 {
+		t.Fatal("artifact pruning fixture had no disjoint window")
+	}
+
+	assertBounded := func(label string) map[string]struct{} {
+		t.Helper()
+		limit := int(visibleOverscanRecords(model))
+		count := len(model.current.artifacts.records)
+		if count == 0 || count > limit {
+			t.Fatalf("%s retained %d artifacts, overscan bound %d", label, count, limit)
+		}
+		ids := make(map[string]struct{}, count)
+		for key := range model.current.artifacts.records {
+			if _, duplicate := ids[key.taskID]; duplicate {
+				t.Fatalf("%s retained multiple visual variants for %q", label, key.taskID)
+			}
+			ids[key.taskID] = struct{}{}
+		}
+		if model.RenderPlanStats().RetainedPlanOwnedBytesEstimate > 64<<20 {
+			t.Fatalf("%s retained estimate exceeded 64 MiB", label)
+		}
+		return ids
+	}
+
+	first := assertBounded("first")
+	for _, target := range []int{maximum, 0, maximum} {
+		updated, _ := model.Update(boardColumnScrolledMsg{
+			status: board.StatusTodo,
+			from:   model.boardView.scrolls[columnIndex],
+			offset: target,
+			anchor: column.anchorAt(target, projection),
+			max:    maximum,
+		})
+		model = updated.(Model)
+		assertPerformanceColdOracleParity(t, model)
+	}
+	last := assertBounded("last")
+	for id := range first {
+		if _, retained := last[id]; retained {
+			t.Fatalf("disjoint window retained stale artifact %q", id)
+		}
 	}
 }
 

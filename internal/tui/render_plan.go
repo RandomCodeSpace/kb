@@ -72,6 +72,10 @@ type RenderPlanStats struct {
 	MaxGeometryWorkerSliceNS       int64               `json:"max_geometry_worker_slice_ns"`
 	GeometryWorkerOverruns         uint64              `json:"geometry_worker_overruns"`
 	RenderedCardRecords            uint64              `json:"rendered_card_records"`
+	NavigationArtifactHits         uint64              `json:"navigation_artifact_hits"`
+	NavigationArtifactMisses       uint64              `json:"navigation_artifact_misses"`
+	NavigationArtifactPublications uint64              `json:"navigation_artifact_publications"`
+	NavigationArtifactFallbacks    uint64              `json:"navigation_artifact_fallbacks"`
 	SynchronousLayoutRecords       uint64              `json:"synchronous_layout_records"`
 	SynchronousIndexNodes          uint64              `json:"synchronous_index_nodes"`
 	GeometrySnapshotInstalls       uint64              `json:"geometry_snapshot_installs"`
@@ -103,6 +107,7 @@ type renderPlan struct {
 	projection renderProjection
 	geometry   renderGeometry
 	worker     geometryWorkerState
+	artifacts  retainedCardArtifacts
 	stats      RenderPlanStats
 }
 
@@ -127,6 +132,7 @@ type retainedRenderView struct {
 	preparedComparisons int
 	acceptedMessageID   uint64
 	renderTrace         *renderVisitTrace
+	cardArtifacts       cardArtifactCache
 }
 
 type renderVisitTrace struct{ cardRecords uint64 }
@@ -235,6 +241,11 @@ func (p renderPlan) rebuild(model Model, impact renderImpact, checkSource bool) 
 	model.current = &p
 	model.renderingProjection = &p.projection
 	model.renderingGeometry = &p.geometry
+	var artifactPublication *cardArtifactPublication
+	if baseImpact {
+		artifactPublication = newCardArtifactPublication(p.artifacts, model.cardArtifactDomain(&p.projection))
+		model.cardArtifacts = artifactPublication
+	}
 	trace := renderVisitTrace{}
 	model.renderTrace = &trace
 	if baseImpact {
@@ -245,6 +256,11 @@ func (p renderPlan) rebuild(model Model, impact renderImpact, checkSource bool) 
 		p.bases.haveNormal = true
 		p.bases.haveDimmed = false
 		p.stats.NormalBaseBuilds++
+		p.artifacts = artifactPublication.finish()
+		p.stats.NavigationArtifactHits += artifactPublication.hits
+		p.stats.NavigationArtifactMisses += artifactPublication.misses
+		p.stats.NavigationArtifactPublications++
+		p.stats.NavigationArtifactFallbacks += artifactPublication.fallbacks
 	}
 	base := p.bases.normal
 	if model.overlayOpen() {
@@ -272,7 +288,8 @@ func (p renderPlan) rebuild(model Model, impact renderImpact, checkSource bool) 
 	p.stats.ProjectedTasks = uint64(len(p.projection.board.Tasks))
 	p.refreshGeometryStats()
 	p.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
-		p.projection.ownedBytesEstimate() + p.geometry.ownedBytesEstimate() + p.bases.ownedBytesEstimate()
+		p.projection.ownedBytesEstimate() + p.geometry.ownedBytesEstimate() + p.bases.ownedBytesEstimate() +
+		p.artifacts.ownedBytesEstimate()
 	return p
 }
 
@@ -565,6 +582,10 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 		model.current = &next
 		model.renderingProjection = &next.projection
 		model.renderingGeometry = &next.geometry
+		artifactPublication := newCardArtifactPublication(
+			next.artifacts, model.cardArtifactDomain(&next.projection),
+		)
+		model.cardArtifacts = artifactPublication
 		trace := renderVisitTrace{}
 		model.renderTrace = &trace
 		base := model.renderBoardBase(false)
@@ -574,6 +595,11 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 		next.bases.haveNormal = true
 		next.bases.haveDimmed = false
 		next.stats.NormalBaseBuilds++
+		next.artifacts = artifactPublication.finish()
+		next.stats.NavigationArtifactHits += artifactPublication.hits
+		next.stats.NavigationArtifactMisses += artifactPublication.misses
+		next.stats.NavigationArtifactPublications++
+		next.stats.NavigationArtifactFallbacks += artifactPublication.fallbacks
 		if model.overlayOpen() {
 			next.bases.dimmed = model.renderBoardBase(true)
 			next.bases.haveDimmed = true
@@ -584,6 +610,9 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 		next.stats.OverlayCompositions++
 		next.pointer = model.pointerState
 		next.stats.RenderedCardRecords += trace.cardRecords
+		next.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
+			next.projection.ownedBytesEstimate() + next.geometry.ownedBytesEstimate() +
+			next.bases.ownedBytesEstimate() + next.artifacts.ownedBytesEstimate()
 		if !next.semanticallyMatches(snapshot) {
 			next.view = snapshot.view
 			next.semantics = snapshot.semantics
@@ -593,9 +622,6 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 			next.stats.InstalledForMessageID = m.acceptedMessageID
 			next.stats.ContentBytes = uint64(len(snapshot.view.Content))
 			next.stats.HitRegions = uint64(len(snapshot.hitRegions))
-			next.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
-				next.projection.ownedBytesEstimate() + next.geometry.ownedBytesEstimate() +
-				next.bases.ownedBytesEstimate()
 			m.installPointerHandler(&next)
 		}
 	}

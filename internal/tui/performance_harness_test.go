@@ -83,6 +83,10 @@ type performanceScenarioResult struct {
 	SourceTaskComparisons          uint64                        `json:"source_task_comparisons"`
 	ShippedIDVisits                uint64                        `json:"shipped_id_visits"`
 	RenderedCardRecords            uint64                        `json:"rendered_card_records"`
+	NavigationArtifactHits         uint64                        `json:"navigation_artifact_hits"`
+	NavigationArtifactMisses       uint64                        `json:"navigation_artifact_misses"`
+	NavigationArtifactPublications uint64                        `json:"navigation_artifact_publications"`
+	NavigationArtifactFallbacks    uint64                        `json:"navigation_artifact_fallbacks"`
 	SynchronousLayoutRecords       uint64                        `json:"synchronous_layout_records"`
 	TemporalScheduledTicks         uint64                        `json:"temporal_scheduled_ticks"`
 	TemporalStaleTicks             uint64                        `json:"temporal_stale_ticks"`
@@ -136,6 +140,7 @@ type performanceScenario struct {
 	requireFollowUp    bool
 	requireTemporal    bool
 	settleFollowUp     func(*testing.T, *Model, tea.Cmd)
+	validateSample     func(*testing.T, *Model, []performancePublicationStamp)
 }
 
 // TestLargeBoardPerformanceHarness is the machine-readable process-local gate.
@@ -249,6 +254,102 @@ func TestPerformanceMemoryGateUsesRetainedPlanEstimate(t *testing.T) {
 		}},
 	}
 	validatePerformanceReport(t, report)
+}
+
+func TestPerformanceLatencyExcludesSampleValidation(t *testing.T) {
+	validated := false
+	scenario := performanceScenario{
+		name:     "validation_outside_latency",
+		warmups:  1,
+		samples:  1,
+		newModel: func() Model { return performanceModel(17, "", performanceWidth, performanceHeight) },
+		admit: func(model *Model, _ int) []performancePublicationStamp {
+			return discardedPerformanceStamp(model)
+		},
+		validateSample: func(_ *testing.T, _ *Model, _ []performancePublicationStamp) {
+			time.Sleep(100 * time.Millisecond)
+			validated = true
+		},
+	}
+	result := runPerformanceScenario(t, 17, scenario)
+	if !validated {
+		t.Fatal("sample validation did not run")
+	}
+	if latency := time.Duration(result.Latency.P50NS); latency >= 50*time.Millisecond {
+		t.Fatalf("measured latency %s included the 100ms validation delay", latency)
+	}
+}
+
+func TestNavigationArtifactAcceptanceRejectsMissingOrUnboundedReuse(t *testing.T) {
+	held := performanceScenarioResult{
+		Name:                           "held_navigation",
+		Tasks:                          1000,
+		PublishedFrames:                202,
+		NavigationArtifactHits:         5050,
+		NavigationArtifactMisses:       909,
+		NavigationArtifactPublications: 202,
+		RenderedCardRecords:            909,
+	}
+	wheel := performanceScenarioResult{
+		Name:                           "useful_wheel",
+		Tasks:                          1000,
+		PublishedFrames:                101,
+		NavigationArtifactHits:         1414,
+		NavigationArtifactMisses:       101,
+		NavigationArtifactPublications: 101,
+		RenderedCardRecords:            101,
+	}
+	if violation := navigationArtifactAcceptanceViolation(held); violation != "" {
+		t.Fatalf("honest held artifacts rejected: %s", violation)
+	}
+	if violation := navigationArtifactAcceptanceViolation(wheel); violation != "" {
+		t.Fatalf("honest wheel artifacts rejected: %s", violation)
+	}
+
+	tests := []struct {
+		name   string
+		result performanceScenarioResult
+	}{
+		{name: "held zero hits", result: func() performanceScenarioResult {
+			result := held
+			result.NavigationArtifactHits = 0
+			return result
+		}()},
+		{name: "held excessive misses", result: func() performanceScenarioResult {
+			result := held
+			result.NavigationArtifactMisses = 5*result.PublishedFrames + 1
+			result.RenderedCardRecords = result.NavigationArtifactMisses
+			return result
+		}()},
+		{name: "held fallback", result: func() performanceScenarioResult {
+			result := held
+			result.NavigationArtifactFallbacks = 1
+			return result
+		}()},
+		{name: "wheel zero hits", result: func() performanceScenarioResult {
+			result := wheel
+			result.NavigationArtifactHits = 0
+			return result
+		}()},
+		{name: "wheel excessive misses", result: func() performanceScenarioResult {
+			result := wheel
+			result.NavigationArtifactMisses++
+			result.RenderedCardRecords = result.NavigationArtifactMisses
+			return result
+		}()},
+		{name: "wheel fallback", result: func() performanceScenarioResult {
+			result := wheel
+			result.NavigationArtifactFallbacks = 1
+			return result
+		}()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if violation := navigationArtifactAcceptanceViolation(test.result); violation == "" {
+				t.Fatal("invalid artifact counters passed acceptance")
+			}
+		})
+	}
 }
 
 func TestPerformanceAdmissionPreservesNonWorkerCommands(t *testing.T) {
@@ -536,7 +637,8 @@ func performanceScenarios(count int) []performanceScenario {
 			name: "useful_navigation",
 			newModel: func() Model {
 				model := base("")
-				model.boardView.rows[0] = min(1, taskCount(model.board, board.StatusTodo)-1)
+				model.boardView.setCursorAtFrom(model.currentProjection(), 0,
+					min(1, taskCount(model.board, board.StatusTodo)-1))
 				model.rebuildRenderPlan(renderImpactAll)
 				return model
 			},
@@ -553,7 +655,8 @@ func performanceScenarios(count int) []performanceScenario {
 			expectedZeroFrames: true,
 			newModel: func() Model {
 				model := base("")
-				model.boardView.rows[0] = taskCount(model.board, board.StatusTodo) - 1
+				model.boardView.setCursorAtFrom(model.currentProjection(), 0,
+					taskCount(model.board, board.StatusTodo)-1)
 				model.rebuildRenderPlan(renderImpactAll)
 				clampedClock.at = time.Unix(0, 0)
 				clampedAdmission = newKeyboardAdmission(clampedClock.now, model.inputAdmission, model.themeStyles().Timing)
@@ -561,6 +664,14 @@ func performanceScenarios(count int) []performanceScenario {
 			},
 			admit: func(model *Model, _ int) []performancePublicationStamp {
 				return admitPerformanceFilteredMessage(model, clampedAdmission, tea.KeyPressMsg{Code: tea.KeyDown})
+			},
+			validateSample: func(t *testing.T, _ *Model, stamps []performancePublicationStamp) {
+				t.Helper()
+				assertPerformanceAdmissionCounts(t, "clamped_navigation", stamps, 0, len(stamps))
+				if clampedAdmission.active || clampedAdmission.desiredTaskID != "" || clampedAdmission.desiredOrdinal != 0 {
+					t.Fatalf("clamped_navigation retained admission state: active=%t target=%q ordinal=%d",
+						clampedAdmission.active, clampedAdmission.desiredTaskID, clampedAdmission.desiredOrdinal)
+				}
 			},
 		},
 		{
@@ -574,7 +685,8 @@ func performanceScenarios(count int) []performanceScenario {
 			prepare: func(model *Model, sample int) {
 				heldAdmission.clear()
 				heldClock.at = time.Unix(int64(sample+1), 0)
-				model.boardView.rows[0] = min(1, taskCount(model.board, board.StatusTodo)-1)
+				model.boardView.setCursorAtFrom(model.currentProjection(), 0,
+					min(1, taskCount(model.board, board.StatusTodo)-1))
 				model.rebuildRenderPlan(renderImpactAll)
 			},
 			admit: func(model *Model, _ int) []performancePublicationStamp {
@@ -588,19 +700,41 @@ func performanceScenarios(count int) []performanceScenario {
 				}
 				return stamps
 			},
+			validateSample: func(t *testing.T, _ *Model, stamps []performancePublicationStamp) {
+				t.Helper()
+				assertPerformanceAdmissionCounts(t, "held_navigation", stamps, 2, 6)
+			},
 		},
 		{
-			name:            "useful_wheel",
-			newModel:        func() Model { return base("") },
+			name: "useful_wheel",
+			newModel: func() Model {
+				return performanceModel(count, "", 80, 24)
+			},
 			requireFollowUp: true,
 			settleFollowUp:  settlePerformancePointerScrollLinger,
 			prepare: func(model *Model, _ int) {
+				status := board.StatusTodo
+				column := statusIndex(status)
+				maximum := model.current.semantics.columns[column].maxScroll
+				reset := boardColumnScrolledMsg{
+					status: status,
+					from:   model.boardView.scrolls[column],
+					offset: 0,
+					anchor: model.boardScrollAnchor(status, 0),
+					max:    maximum,
+				}
+				*model, _ = model.updateWithCommands(reset)
 				model.pointerAdmission.resetCadence()
-				model.boardView.scrolls[0] = 0
-				model.rebuildRenderPlan(renderImpactAll)
 			},
 			admit: func(model *Model, _ int) []performancePublicationStamp {
 				return admitPerformancePointer(model, tea.MouseWheelMsg{X: 10, Y: 6, Button: tea.MouseWheelDown})
+			},
+			validateSample: func(t *testing.T, model *Model, stamps []performancePublicationStamp) {
+				t.Helper()
+				assertPerformanceAdmissionCounts(t, "useful_wheel", stamps, 1, 0)
+				if model.boardView.scrolls[statusIndex(board.StatusTodo)] <= 0 {
+					t.Fatal("useful_wheel did not change the published scroll target")
+				}
 			},
 		},
 		{
@@ -758,6 +892,7 @@ func performanceScenarios(count int) []performanceScenario {
 				model.watcher = stubVersionReader{version: 1}
 				model.haveVersion = true
 				model.dataVersion = 1
+				model.pollStarted = true
 				model.rebuildRenderPlan(renderImpactAll)
 				return model
 			},
@@ -828,7 +963,8 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 	var accepted, frames, discarded, stale uint64
 	var normalBases, dimmedBases, compositions, projectionBuilds, projectionVisits uint64
 	var sourceComparisons, shippedIDVisits uint64
-	var renderedCards, synchronousLayout, temporalScheduled, temporalStale, temporalVisits uint64
+	var renderedCards, artifactHits, artifactMisses, artifactPublications, artifactFallbacks uint64
+	var synchronousLayout, temporalScheduled, temporalStale, temporalVisits uint64
 	var temporalRecords, temporalNodes uint64
 	var trace []performancePublicationStamp
 	for sample := range samples {
@@ -842,6 +978,9 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		stamps := scenario.admit(&model, sample)
 		settlePerformanceStampCommands(t, &model, scenario, stamps)
 		latencies[sample] = time.Since(started)
+		if scenario.validateSample != nil {
+			scenario.validateSample(t, &model, stamps)
+		}
 		afterStats := model.RenderPlanStats()
 		runtime.ReadMemStats(&afterMemory)
 		allocations += afterMemory.Mallocs - beforeMemory.Mallocs
@@ -859,6 +998,10 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		sourceComparisons += afterStats.SourceTaskComparisons - beforeStats.SourceTaskComparisons
 		shippedIDVisits += afterStats.ShippedIDVisits - beforeStats.ShippedIDVisits
 		renderedCards += afterStats.RenderedCardRecords - beforeStats.RenderedCardRecords
+		artifactHits += afterStats.NavigationArtifactHits - beforeStats.NavigationArtifactHits
+		artifactMisses += afterStats.NavigationArtifactMisses - beforeStats.NavigationArtifactMisses
+		artifactPublications += afterStats.NavigationArtifactPublications - beforeStats.NavigationArtifactPublications
+		artifactFallbacks += afterStats.NavigationArtifactFallbacks - beforeStats.NavigationArtifactFallbacks
 		synchronousLayout += afterStats.SynchronousLayoutRecords - beforeStats.SynchronousLayoutRecords
 		temporalScheduled += afterStats.TemporalScheduledTicks - beforeStats.TemporalScheduledTicks
 		temporalStale += afterStats.TemporalStaleTicks - beforeStats.TemporalStaleTicks
@@ -907,6 +1050,10 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		SourceTaskComparisons:          sourceComparisons,
 		ShippedIDVisits:                shippedIDVisits,
 		RenderedCardRecords:            renderedCards,
+		NavigationArtifactHits:         artifactHits,
+		NavigationArtifactMisses:       artifactMisses,
+		NavigationArtifactPublications: artifactPublications,
+		NavigationArtifactFallbacks:    artifactFallbacks,
 		SynchronousLayoutRecords:       synchronousLayout,
 		TemporalScheduledTicks:         temporalScheduled,
 		TemporalStaleTicks:             temporalStale,
@@ -1044,6 +1191,31 @@ func admitPerformanceFilteredMessage(
 		return discardedPerformanceStamp(model)
 	}
 	return admitPerformanceMessage(model, filtered)
+}
+
+func assertPerformanceAdmissionCounts(
+	t *testing.T,
+	name string,
+	stamps []performancePublicationStamp,
+	wantAccepted, wantDiscarded int,
+) {
+	t.Helper()
+	accepted, published, discarded := 0, 0, 0
+	for _, stamp := range stamps {
+		if stamp.Accepted {
+			accepted++
+		}
+		if stamp.Published {
+			published++
+		}
+		if stamp.Discarded {
+			discarded++
+		}
+	}
+	if accepted != wantAccepted || published != wantAccepted || discarded != wantDiscarded {
+		t.Fatalf("%s admission accepted=%d published=%d discarded=%d, want %d/%d/%d",
+			name, accepted, published, discarded, wantAccepted, wantAccepted, wantDiscarded)
+	}
 }
 
 func admitPerformancePointer(model *Model, message tea.MouseMsg) []performancePublicationStamp {
@@ -1330,6 +1502,14 @@ func validatePerformanceReport(t *testing.T, report performanceReport) {
 		if result.ExpectedZeroFrames && result.PublishedFrames != 0 {
 			t.Errorf("%s/%d published %d frames, want zero", result.Name, result.Tasks, result.PublishedFrames)
 		}
+		if result.Name == "held_navigation" &&
+			(result.AcceptedMessages != 202 || result.PublishedFrames != 202 || result.DiscardedEvents != 606) {
+			t.Errorf("held_navigation/%d accepted=%d published=%d discarded=%d, want 202/202/606",
+				result.Tasks, result.AcceptedMessages, result.PublishedFrames, result.DiscardedEvents)
+		}
+		if violation := navigationArtifactAcceptanceViolation(result); violation != "" {
+			t.Errorf("%s/%d navigation artifact acceptance: %s", result.Name, result.Tasks, violation)
+		}
 		// The 64 MiB budget applies only to installed plan-owned data. Transient
 		// TotalAlloc remains diagnostic, and whole-process RSS belongs to the
 		// external gate; conflating the three produces very confident nonsense.
@@ -1346,6 +1526,44 @@ func validatePerformanceReport(t *testing.T, report performanceReport) {
 			t.Errorf("startup/%d p95=%s exceeds 700ms", result.Tasks, time.Duration(result.Latency.P95NS))
 		}
 	}
+}
+
+func navigationArtifactAcceptanceViolation(result performanceScenarioResult) string {
+	if result.Name != "held_navigation" && result.Name != "useful_wheel" {
+		return ""
+	}
+	if result.NavigationArtifactHits == 0 {
+		return "recorded zero reuse hits"
+	}
+	if result.NavigationArtifactPublications != result.PublishedFrames {
+		return fmt.Sprintf("artifact publications=%d, published frames=%d",
+			result.NavigationArtifactPublications, result.PublishedFrames)
+	}
+	if result.RenderedCardRecords != result.NavigationArtifactMisses {
+		return fmt.Sprintf("rendered cards=%d, misses=%d",
+			result.RenderedCardRecords, result.NavigationArtifactMisses)
+	}
+	if result.NavigationArtifactFallbacks != 0 {
+		return fmt.Sprintf("fallbacks=%d, want zero", result.NavigationArtifactFallbacks)
+	}
+	if result.NavigationArtifactHits <= result.NavigationArtifactMisses {
+		return fmt.Sprintf("hits=%d do not exceed misses=%d",
+			result.NavigationArtifactHits, result.NavigationArtifactMisses)
+	}
+	if result.Name == "held_navigation" {
+		minimum := 2 * result.PublishedFrames
+		maximum := 5 * result.PublishedFrames
+		if result.NavigationArtifactMisses < minimum || result.NavigationArtifactMisses > maximum {
+			return fmt.Sprintf("misses=%d outside held bound %d..%d",
+				result.NavigationArtifactMisses, minimum, maximum)
+		}
+		return ""
+	}
+	if result.NavigationArtifactMisses != result.PublishedFrames {
+		return fmt.Sprintf("misses=%d, want one entering-card miss per %d wheel frames",
+			result.NavigationArtifactMisses, result.PublishedFrames)
+	}
+	return ""
 }
 
 // TestLargeBoardStartupChild is invoked by the harness in a fresh test process.
@@ -1448,7 +1666,8 @@ func BenchmarkLargeBoardInputToFrame(b *testing.B) {
 	for _, count := range performanceCorpora[1:] {
 		b.Run(fmt.Sprintf("tasks_%04d", count), func(b *testing.B) {
 			model := performanceModel(count, "", performanceWidth, performanceHeight)
-			model.boardView.rows[0] = taskCount(model.board, board.StatusTodo) - 1
+			model.boardView.setCursorAtFrom(model.currentProjection(), 0,
+				taskCount(model.board, board.StatusTodo)-1)
 			model.rebuildRenderPlan(renderImpactAll)
 			admission := newKeyboardAdmission(time.Now, model.inputAdmission, model.themeStyles().Timing)
 			b.ReportAllocs()
