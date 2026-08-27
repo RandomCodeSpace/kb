@@ -10,6 +10,18 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
+type admissionWheelMsg struct {
+	intent pointer.WheelIntent
+	target int
+}
+
+func (m admissionWheelMsg) PointerWheelIntent() pointer.WheelIntent { return m.intent }
+
+func (m admissionWheelMsg) PointerWheelTarget(target int) tea.Msg {
+	m.target = target
+	return m
+}
+
 func pointerTestModel(t *testing.T, count int) (Model, *stepClock) {
 	t.Helper()
 	model := performanceModel(count, "", performanceWidth, performanceHeight)
@@ -219,6 +231,53 @@ func TestPointerWheelCancelsTrackedPressBeforeRelease(t *testing.T) {
 	}
 }
 
+func TestBoundaryWheelClearsTrackedControlPressOnce(t *testing.T) {
+	model := performanceModel(120, "", performanceWidth, performanceHeight)
+	control := pointerControlHit(t, model, board.StatusDoing)
+	boundary := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.kind == boardHitDefault && hit.taskID == "" && hit.status == board.StatusDoing && hit.scroll == 0
+	})
+	initialColumn := model.boardView.column
+	baseline := model.View().Content
+	handler := model.View().OnMouse
+	press := tea.MouseClickMsg{X: control.x0, Y: control.y0, Button: tea.MouseLeft}
+	if command := handler(press); command != nil {
+		t.Fatal("board control press escaped the synchronous mailbox")
+	}
+	model, _ = model.updateWithCommands(press)
+	if model.View().Content == baseline || !model.pointerState.Active() || model.pointerAdmission.captureKey == "" {
+		t.Fatalf("board control press did not publish tracked pressed feedback: changed=%t active=%t capture=%q", model.View().Content != baseline, model.pointerState.Active(), model.pointerAdmission.captureKey)
+	}
+
+	before := model.RenderPlanStats()
+	wheel := tea.MouseWheelMsg{X: boundary.x0, Y: boundary.y0, Button: tea.MouseWheelUp}
+	if command := handler(wheel); command != nil {
+		t.Fatal("stale boundary wheel escaped the synchronous mailbox")
+	}
+	model, _ = model.updateWithCommands(wheel)
+	after := model.RenderPlanStats()
+	if model.pointerState.Active() || model.pointerAdmission.captureKey != "" {
+		t.Fatal("boundary wheel retained the tracked control press")
+	}
+	if model.View().Content != baseline {
+		t.Fatal("boundary wheel did not publish the cleared visual")
+	}
+	if after.PublishedFrames != before.PublishedFrames+1 {
+		t.Fatalf("boundary rejection published %d frames, want exactly 1", after.PublishedFrames-before.PublishedFrames)
+	}
+	release := tea.MouseReleaseMsg{X: control.x0, Y: control.y0, Button: tea.MouseLeft}
+	if command := model.View().OnMouse(release); command != nil {
+		t.Fatal("release escaped the synchronous mailbox")
+	}
+	model, _ = model.updateWithCommands(release)
+	if model.boardView.column != initialColumn {
+		t.Fatal("release after boundary rejection activated the old board control")
+	}
+	if got := model.RenderPlanStats().PublishedFrames; got != after.PublishedFrames {
+		t.Fatalf("release after rejection published %d additional frames", got-after.PublishedFrames)
+	}
+}
+
 func TestMailboxMismatchRestoresBoardAndPublishesFailClosedFrame(t *testing.T) {
 	store := &moveTestStore{board: moveFixture()}
 	model := loadedMoveModel(store)
@@ -378,6 +437,163 @@ func TestOldFlushedBoundaryWheelRejectsDifferentHandlerGeneration(t *testing.T) 
 	}
 }
 
+func TestRenderedStaleWideWheelCannotReuseAcrossNarrowSourceGeneration(t *testing.T) {
+	const oldScroll = 6
+	const narrowWidth = 120
+	var model Model
+	var oldStatus board.Status
+	var wideHandler func(tea.MouseMsg) tea.Cmd
+	var raw tea.MouseWheelMsg
+	var column int
+	var commands modelUpdateCommands
+	found := false
+	for _, status := range boardStatuses {
+		candidateModel, _ := pointerTestModel(t, 120)
+		var candidate boardHit
+		var candidateOK bool
+		for _, current := range candidateModel.current.semantics.hits {
+			if current.kind == boardHitDefault && current.taskID == "" && current.status == status && current.maxScroll >= 9 {
+				candidate, candidateOK = current, true
+				break
+			}
+		}
+		if !candidateOK {
+			continue
+		}
+		column = statusIndex(status)
+		candidateModel.boardView.scrolls[column] = oldScroll
+		candidateModel.boardView.scrollAnchors[column] = candidateModel.boardScrollAnchor(status, oldScroll)
+		candidateModel.boardView.manualScroll[column] = true
+		candidateModel.rebuildRenderPlan(renderImpactAll)
+		for _, current := range candidateModel.current.semantics.hits {
+			if current.kind == boardHitDefault && current.taskID == "" && current.status == status &&
+				current.scroll == oldScroll && current.maxScroll >= 9 {
+				candidate = current
+				break
+			}
+		}
+		candidateWideHandler := candidateModel.View().OnMouse
+		narrow := candidateModel
+		narrow, commands = narrow.updateWithCommands(tea.WindowSizeMsg{Width: narrowWidth, Height: performanceHeight})
+		settlePerformanceGeometryCommand(t, &narrow, commands.geometry)
+		for y := candidate.y0; y < candidate.y1 && !found; y++ {
+			for x := candidate.x0; x < candidate.x1 && x < narrowWidth; x++ {
+				for _, current := range narrow.current.semantics.hits {
+					if current.kind != boardHitDefault || current.taskID != "" || current.status == status ||
+						x < current.x0 || x >= current.x1 || y < current.y0 || y >= current.y1 || current.scroll != 0 {
+						continue
+					}
+					raw = tea.MouseWheelMsg{X: x, Y: y, Button: tea.MouseWheelUp}
+					oldStatus, model, wideHandler = status, candidateModel, candidateWideHandler
+					found = true
+					break
+				}
+			}
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		t.Fatal("wide-to-narrow fixture has no cross-status boundary coordinate")
+	}
+
+	model, commands = model.updateWithCommands(tea.WindowSizeMsg{Width: narrowWidth, Height: performanceHeight})
+	settlePerformanceGeometryCommand(t, &model, commands.geometry)
+	beforeAccepted := model.pointerAdmission.accepted
+	model, commands = dispatchFlushedPointer(t, model, wideHandler, raw)
+	if model.pointerAdmission.accepted != beforeAccepted+1 || model.boardView.scrolls[column] != oldScroll-3 {
+		t.Fatalf("stale wide wheel for %s accepted=%d old-status scroll=%d, want accepted 1 and scroll %d",
+			oldStatus,
+			model.pointerAdmission.accepted-beforeAccepted, model.boardView.scrolls[column], oldScroll-3)
+	}
+	if !model.pointerAdmission.haveLast || model.pointerAdmission.lastIntent.sourceRoute == model.pointerAdmission.lastIntent.route {
+		t.Fatalf("translated wheel did not retain distinct source/current routes: lastIntent=%+v", model.pointerAdmission.lastIntent)
+	}
+	settlePerformanceGeometryCommand(t, &model, commands.geometry)
+
+	narrowHandler := model.View().OnMouse
+	if command := narrowHandler(raw); command != nil {
+		t.Fatal("narrow boundary handler unexpectedly resolved a wheel command")
+	}
+	beforePublished := model.RenderPlanStats().PublishedFrames
+	beforeOldScroll := model.boardView.scrolls[column]
+	model, _ = model.updateWithCommands(raw)
+	if model.pointerAdmission.accepted != beforeAccepted+1 ||
+		model.RenderPlanStats().PublishedFrames != beforePublished ||
+		model.boardView.scrolls[column] != beforeOldScroll {
+		t.Fatalf("current narrow boundary reused old source: accepted=%d published=%d old-status scroll=%d",
+			model.pointerAdmission.accepted-beforeAccepted,
+			model.RenderPlanStats().PublishedFrames-beforePublished,
+			model.boardView.scrolls[column])
+	}
+}
+
+func TestBoundaryWheelReuseRebindsExpandedCurrentBoundsBeforeAdvancing(t *testing.T) {
+	model, _ := pointerTestModel(t, 120)
+	hit := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.kind == boardHitDefault && hit.taskID == "" && hit.maxScroll >= 6
+	})
+	column := statusIndex(hit.status)
+	const oldMax = 3
+	const currentMax = 6
+	model.boardView.scrolls[column] = oldMax
+	model.boardView.scrollAnchors[column] = model.boardScrollAnchor(hit.status, oldMax)
+	model.boardView.manualScroll[column] = true
+	model.rebuildRenderPlan(renderImpactAll)
+
+	sourceRoute := model.pointerRoute()
+	raw := tea.MouseWheelMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseWheelDown}
+	candidate := pointerIntent{
+		message: boardColumnScrolledMsg{
+			status: hit.status,
+			from:   oldMax,
+			offset: oldMax,
+			max:    oldMax,
+		},
+		route:       sourceRoute,
+		sourceRoute: sourceRoute,
+		raw:         raw,
+		target: pointerTarget{
+			kind:      pointerTargetWheel,
+			wheelKey:  "board:" + string(hit.status),
+			position:  oldMax,
+			wheelStep: 3,
+		},
+		wheelDelta: 3,
+		advanced:   true,
+	}
+	model.pointerAdmission.pending = candidate
+	model.pointerAdmission.havePending = true
+
+	currentIntent := pointer.WheelIntent{
+		Key:     candidate.target.wheelKey,
+		Current: oldMax,
+		Target:  oldMax,
+		Min:     0,
+		Max:     currentMax,
+	}
+	nextPlan := *model.current
+	nextPlan.geometry.generation++
+	nextPlan.semantics.topology = pointer.Topology{}.WithWheel(currentIntent, func(target int) tea.Msg {
+		return boardColumnScrolledMsg{
+			status: hit.status,
+			from:   oldMax,
+			offset: min(max(target, 0), currentMax),
+			max:    currentMax,
+		}
+	})
+	model.current = &nextPlan
+
+	model, _, handled := model.reuseBoundaryWheel(raw, sourceRoute)
+	if !handled {
+		t.Fatal("expanded current bounds rejected a now-valid boundary wheel")
+	}
+	if got := model.boardView.scrolls[column]; got != currentMax {
+		t.Fatalf("expanded-boundary wheel scroll=%d, want current max %d", got, currentMax)
+	}
+}
+
 func TestOldFlushedBoundaryWheelRejectsDifferentModifiers(t *testing.T) {
 	model, _ := pointerTestModel(t, 120)
 	hit := pointerBoardHit(t, model, func(hit boardHit) bool {
@@ -457,6 +673,19 @@ func TestPointerWheelBurstFlushesOneLatestAbsoluteTarget(t *testing.T) {
 	if got := model.boardView.scrolls[column]; got != 3 {
 		t.Fatalf("pre-flush scroll = %d, want 3", got)
 	}
+	model, _ = model.admitResolvedPointer(boardColumnScrolledMsg{
+		status: hit.status,
+		from:   3,
+		offset: 6,
+		max:    12,
+	}, model.pointerRoute(), raw)
+	if !model.pointerAdmission.havePending || model.pointerAdmission.pending.target.position != 12 {
+		t.Fatalf("boundary event retired valid pending target = %+v, want absolute 12",
+			model.pointerAdmission.pending.target)
+	}
+	if got := model.boardView.scrolls[column]; got != 3 {
+		t.Fatalf("boundary event published scroll = %d, want deferred 3", got)
+	}
 
 	clock.advance(20 * time.Millisecond)
 	model, _ = model.updateWithCommands(pointerFlushMsg{sequence: model.pointerAdmission.sequence})
@@ -465,6 +694,93 @@ func TestPointerWheelBurstFlushesOneLatestAbsoluteTarget(t *testing.T) {
 	}
 	if model.pointerAdmission.havePending || model.pointerAdmission.timer {
 		t.Fatal("flush retained pending wheel state")
+	}
+}
+
+func TestPointerWheelRetainsStepAndRebuildsWrappedFollowups(t *testing.T) {
+	model, _ := pointerTestModel(t, 12)
+	route := model.pointerRoute()
+	key := "board:" + string(board.StatusTodo)
+	raw := tea.MouseWheelMsg{X: 4, Y: 5, Button: tea.MouseWheelDown, Mod: tea.ModCtrl}
+	model.pointerAdmission.pending = pointerIntent{
+		route:  route,
+		target: pointerTarget{kind: pointerTargetWheel, wheelKey: key, wheelStep: 3},
+	}
+	model.pointerAdmission.havePending = true
+	intent, ok := model.pointerIntent(boardColumnScrolledMsg{status: board.StatusTodo, from: 5, offset: 5, max: 20}, route, raw)
+	if !ok || intent.target.wheelStep != 3 || intent.wheelDelta != 3 {
+		t.Fatalf("previous pending wheel step = (%+v, %t), want signed step 3", intent, ok)
+	}
+	if got := model.previousWheelStep(route, key); got != 3 {
+		t.Fatalf("pending wheel step = %d, want 3", got)
+	}
+
+	model.pointerAdmission.havePending = false
+	model.pointerAdmission.haveLast = true
+	model.pointerAdmission.lastRoute = route
+	model.pointerAdmission.last = pointerTarget{kind: pointerTargetWheel, wheelKey: key, wheelStep: 4}
+	if got := model.previousWheelStep(route, key); got != 4 {
+		t.Fatalf("published wheel step = %d, want 4", got)
+	}
+	if got := model.previousWheelStep(route, "missing"); got != 0 {
+		t.Fatalf("unrelated wheel inherited step %d", got)
+	}
+
+	wrappedBoard := pointer.CancelWith(func() tea.Msg {
+		return boardColumnScrolledMsg{status: board.StatusTodo, from: 2, offset: 5, max: 6}
+	})()
+	wheel, rebuild, ok := model.resolveWheelIntent(wrappedBoard)
+	if !ok || wheel.Target != 5 {
+		t.Fatalf("wrapped board wheel = (%+v, %t)", wheel, ok)
+	}
+	rebuilt := rebuild(99)
+	observed, ok := pointer.ObserveInteraction(rebuilt)
+	boardFollowup, boardOK := observed.Followup.(boardColumnScrolledMsg)
+	if !ok || !boardOK || boardFollowup.offset != 6 {
+		t.Fatalf("wrapped board rebuild = observed:%+v board:%+v", observed, boardFollowup)
+	}
+
+	custom := admissionWheelMsg{intent: pointer.WheelIntent{Key: "custom", Current: 2, Target: 3, Min: 0, Max: 7}}
+	wrappedCustom := pointer.CancelWith(func() tea.Msg { return custom })()
+	_, rebuild, ok = model.resolveWheelIntent(wrappedCustom)
+	if !ok {
+		t.Fatal("wrapped custom wheel was not resolved")
+	}
+	rebuilt = rebuild(6)
+	observed, ok = pointer.ObserveInteraction(rebuilt)
+	customFollowup, customOK := observed.Followup.(admissionWheelMsg)
+	if !ok || !customOK || customFollowup.target != 6 {
+		t.Fatalf("wrapped custom rebuild = observed:%+v custom:%+v", observed, customFollowup)
+	}
+	if _, _, ok := model.resolveWheelIntent(admissionWheelMsg{}); ok {
+		t.Fatal("empty wheel key was admitted")
+	}
+}
+
+func TestPointerFlushInsideCoalesceWindowReschedulesPendingIntent(t *testing.T) {
+	model, clock := pointerTestModel(t, 12)
+	route := model.pointerRoute()
+	intent := pointerIntent{
+		message: boardColumnScrolledMsg{status: board.StatusTodo, from: 0, offset: 3, max: 9},
+		route:   route,
+		target: pointerTarget{kind: pointerTargetWheel, wheelKey: "board:" + string(board.StatusTodo),
+			position: 3, wheelStep: 3},
+		advanced: true,
+	}
+	model.pointerAdmission.pending = intent
+	model.pointerAdmission.havePending = true
+	model.pointerAdmission.timer = true
+	model.pointerAdmission.sequence = 4
+	model.pointerAdmission.haveLast = true
+	model.pointerAdmission.lastAt = clock.at
+	beforeFlushes := model.pointerAdmission.flushes
+
+	next, commands := model.flushPointerIntent(pointerFlushMsg{sequence: 4})
+	if !next.pointerAdmission.timer || !next.pointerAdmission.havePending || next.pointerAdmission.sequence != 5 ||
+		next.pointerAdmission.flushes != beforeFlushes || commands.followUp == nil {
+		t.Fatalf("early flush = timer:%t pending:%t sequence:%d flushes:%d followup:%v",
+			next.pointerAdmission.timer, next.pointerAdmission.havePending, next.pointerAdmission.sequence,
+			next.pointerAdmission.flushes-beforeFlushes, commands.followUp)
 	}
 }
 
@@ -654,6 +970,153 @@ func TestGeometryStaleDirectWheelRebindsCurrentAbsoluteBounds(t *testing.T) {
 	}
 }
 
+func TestGeometryStaleWheelClampsPendingCadenceToContractedBounds(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		button        tea.MouseButton
+		pending       int
+		oldTarget     int
+		wantScroll    int
+		wantPublished uint64
+	}{
+		{name: "inward", button: tea.MouseWheelUp, pending: 9, oldTarget: 6, wantScroll: 3, wantPublished: 1},
+		{name: "outward clamped", button: tea.MouseWheelDown, pending: 9, oldTarget: 9, wantScroll: 6, wantPublished: 0},
+		{name: "outward redundant", button: tea.MouseWheelDown, pending: 6, oldTarget: 9, wantScroll: 6, wantPublished: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model, _ := pointerTestModel(t, 120)
+			hit := pointerBoardHit(t, model, func(hit boardHit) bool {
+				return hit.kind == boardHitDefault && hit.taskID == "" && hit.maxScroll >= 9
+			})
+			column := statusIndex(hit.status)
+			const oldMax = 9
+			const currentMax = 6
+			model.boardView.scrolls[column] = currentMax
+			model.boardView.scrollAnchors[column] = model.boardScrollAnchor(hit.status, currentMax)
+			model.boardView.manualScroll[column] = true
+			model.rebuildRenderPlan(renderImpactAll)
+
+			staleRoute := model.pointerRoute()
+			raw := tea.MouseWheelMsg{X: hit.x0, Y: hit.y0, Button: test.button}
+			model.pointerAdmission.pending = pointerIntent{
+				message: boardColumnScrolledMsg{
+					status: hit.status,
+					from:   max(test.pending-3, 0),
+					offset: test.pending,
+					max:    oldMax,
+				},
+				route:       staleRoute,
+				sourceRoute: staleRoute,
+				raw:         raw,
+				target: pointerTarget{
+					kind:      pointerTargetWheel,
+					wheelKey:  "board:" + string(hit.status),
+					position:  test.pending,
+					wheelStep: 3,
+				},
+				wheelDelta: 3,
+				advanced:   true,
+			}
+			model.pointerAdmission.havePending = true
+
+			currentIntent := pointer.WheelIntent{
+				Key:     "board:" + string(hit.status),
+				Current: currentMax,
+				Target:  currentMax,
+				Min:     0,
+				Max:     currentMax,
+			}
+			nextPlan := *model.current
+			nextPlan.geometry.generation++
+			nextPlan.semantics.topology = pointer.Topology{}.WithWheel(currentIntent, func(target int) tea.Msg {
+				return boardColumnScrolledMsg{
+					status: hit.status,
+					from:   currentMax,
+					offset: min(max(target, 0), currentMax),
+					max:    currentMax,
+				}
+			})
+			model.current = &nextPlan
+			before := model.RenderPlanStats().InstalledSnapshotID
+
+			message := boardColumnScrolledMsg{
+				status: hit.status,
+				from:   oldMax,
+				offset: test.oldTarget,
+				max:    oldMax,
+			}
+			model, _ = model.admitResolvedPointer(message, staleRoute, raw)
+			if got := model.boardView.scrolls[column]; got != test.wantScroll {
+				t.Fatalf("contracted-bound wheel scroll=%d, want %d", got, test.wantScroll)
+			}
+			if got := model.RenderPlanStats().InstalledSnapshotID - before; got != test.wantPublished {
+				t.Fatalf("contracted-bound wheel published %d frames, want %d", got, test.wantPublished)
+			}
+			if model.pointerAdmission.havePending || model.pointerAdmission.timer {
+				t.Fatal("contracted-bound wheel retained stale pending travel")
+			}
+		})
+	}
+}
+
+func TestGeometryStaleWheelUsesCurrentPositionInsteadOfPriorGenerationLast(t *testing.T) {
+	model, _ := pointerTestModel(t, 120)
+	hit := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.kind == boardHitDefault && hit.taskID == "" && hit.maxScroll >= 12
+	})
+	column := statusIndex(hit.status)
+	const oldPosition = 9
+	const currentPosition = 6
+	const currentMax = 12
+	model.boardView.scrolls[column] = currentPosition
+	model.boardView.scrollAnchors[column] = model.boardScrollAnchor(hit.status, currentPosition)
+	model.boardView.manualScroll[column] = true
+	model.rebuildRenderPlan(renderImpactAll)
+
+	staleRoute := model.pointerRoute()
+	wheelKey := "board:" + string(hit.status)
+	model.pointerAdmission.last = pointerTarget{
+		kind:      pointerTargetWheel,
+		wheelKey:  wheelKey,
+		position:  oldPosition,
+		wheelStep: 3,
+	}
+	model.pointerAdmission.haveLast = true
+	model.pointerAdmission.lastRoute = staleRoute
+
+	currentIntent := pointer.WheelIntent{
+		Key:     wheelKey,
+		Current: currentPosition,
+		Target:  currentPosition,
+		Min:     0,
+		Max:     currentMax,
+	}
+	nextPlan := *model.current
+	nextPlan.geometry.generation++
+	nextPlan.semantics.topology = pointer.Topology{}.WithWheel(currentIntent, func(target int) tea.Msg {
+		return boardColumnScrolledMsg{
+			status: hit.status,
+			from:   currentPosition,
+			offset: min(max(target, 0), currentMax),
+			max:    currentMax,
+		}
+	})
+	model.current = &nextPlan
+
+	raw := tea.MouseWheelMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseWheelUp}
+	message := boardColumnScrolledMsg{
+		status: hit.status,
+		from:   oldPosition,
+		offset: oldPosition - 3,
+		max:    currentMax,
+	}
+	model, _ = model.admitResolvedPointer(message, staleRoute, raw)
+	if got := model.boardView.scrolls[column]; got != currentPosition-3 {
+		t.Fatalf("generation-stale last position produced scroll=%d, want current-relative %d",
+			got, currentPosition-3)
+	}
+}
+
 func TestGeometryStaleDirectDragCannotApplyRemovedStableTarget(t *testing.T) {
 	model, _ := pointerTestModel(t, 120)
 	source := pointerBoardHit(t, model, func(hit boardHit) bool {
@@ -771,5 +1234,219 @@ func TestStationaryBoardHoverReresolvesAfterWheelScroll(t *testing.T) {
 	}
 	if point, ok := model.pointerState.HoverPoint(); !ok || point.X != hit.x0 || point.Y != hit.y0 {
 		t.Fatalf("hover point moved during re-resolution: (%+v, %t)", point, ok)
+	}
+}
+
+func TestGeometryStaleBoardPressAndUnresolvedReleaseKeepCaptureOrdered(t *testing.T) {
+	store := &moveTestStore{board: moveFixture()}
+	model := loadedMoveModel(store)
+	model.width, model.height = performanceWidth, performanceHeight
+	model.rebuildRenderPlan(renderImpactAll)
+	handler := model.View().OnMouse
+	source := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.kind == boardHitDefault && hit.taskID == "a"
+	})
+	model.rebuildRenderPlan(renderImpactAll)
+
+	model, _ = dispatchFlushedPointer(t, model, handler,
+		tea.MouseClickMsg{X: source.x0, Y: source.y0, Button: tea.MouseLeft})
+	if model.pointerAdmission.captureKey != "board-card:a" || model.move.lifted == nil {
+		t.Fatalf("stale press capture=%q lifted=%v", model.pointerAdmission.captureKey, model.move.lifted)
+	}
+
+	model, _ = dispatchFlushedPointer(t, model, handler,
+		tea.MouseReleaseMsg{X: 0, Y: 0, Button: tea.MouseNone})
+	if model.pointerAdmission.captureKey != "" || model.move.lifted != nil || model.move.saving {
+		t.Fatalf("stale unresolved release capture=%q lifted=%v saving=%t",
+			model.pointerAdmission.captureKey, model.move.lifted, model.move.saving)
+	}
+}
+
+func TestGeometryStaleTrackedCancelClearsCapture(t *testing.T) {
+	model, _ := pointerTestModel(t, 120)
+	hit := pointerControlHit(t, model, board.StatusDoing)
+	handler := model.View().OnMouse
+	model, _ = dispatchFlushedPointer(t, model, handler,
+		tea.MouseClickMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseLeft})
+	if model.pointerAdmission.captureKey == "" || !model.pointerState.Active() {
+		t.Fatal("fixture did not acquire tracked capture")
+	}
+
+	model, _ = dispatchFlushedPointer(t, model, handler,
+		tea.MouseMotionMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseLeft})
+	if model.pointerAdmission.captureKey != "" || model.pointerState.Active() {
+		t.Fatal("geometry-stale cancel retained tracked capture")
+	}
+}
+
+func TestGeometryStaleUnstableBoardClickFailsClosed(t *testing.T) {
+	model, _ := pointerTestModel(t, 12)
+	var raw tea.MouseClickMsg
+	found := false
+	for _, hit := range model.current.semantics.hits {
+		if hit.kind != boardHitDefault || hit.taskID != "" {
+			continue
+		}
+		for y := hit.y0; y < hit.y1 && !found; y++ {
+			for x := hit.x0; x < hit.x1; x++ {
+				covered := false
+				for _, other := range model.current.semantics.hits {
+					if other.kind == boardHitDefault && other.taskID == "" {
+						continue
+					}
+					if x >= other.x0 && x < other.x1 && y >= other.y0 && y < other.y1 {
+						covered = true
+						break
+					}
+				}
+				if covered {
+					continue
+				}
+				raw = tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Fatal("fixture did not expose an untracked board column cell")
+	}
+	handler := model.View().OnMouse
+	model.rebuildRenderPlan(renderImpactAll)
+	beforeAccepted := model.pointerAdmission.accepted
+	beforeDiscarded := model.pointerAdmission.discarded
+	beforeColumn := model.boardView.column
+
+	model, _ = dispatchFlushedPointer(t, model, handler, raw)
+	if model.pointerAdmission.accepted != beforeAccepted ||
+		model.pointerAdmission.discarded != beforeDiscarded+1 || model.boardView.column != beforeColumn {
+		t.Fatalf("unstable stale click accepted=%d discarded=%d column=%d, want %d",
+			model.pointerAdmission.accepted-beforeAccepted,
+			model.pointerAdmission.discarded-beforeDiscarded, model.boardView.column, beforeColumn)
+	}
+}
+
+func TestPointerDragRequiresCapture(t *testing.T) {
+	t.Run("missing capture", func(t *testing.T) {
+		model, _ := pointerTestModel(t, 120)
+		hit := pointerBoardHit(t, model, func(hit boardHit) bool {
+			return hit.kind == boardHitDefault && hit.taskID != ""
+		})
+		before := model.pointerAdmission.discarded
+		model, _ = dispatchRenderedPointer(t, model,
+			tea.MouseMotionMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseLeft})
+		if model.pointerAdmission.discarded != before+1 || model.move.lifted != nil {
+			t.Fatalf("uncaptured drag discarded=%d lifted=%v",
+				model.pointerAdmission.discarded-before, model.move.lifted)
+		}
+	})
+}
+
+func TestPointerTargetSameDestination(t *testing.T) {
+	tests := []struct {
+		name  string
+		left  pointerTarget
+		right pointerTarget
+		want  bool
+	}{
+		{name: "equal drag insertion", left: pointerTarget{kind: pointerTargetDrag, status: board.StatusDoing, beforeTaskID: "b"},
+			right: pointerTarget{kind: pointerTargetDrag, status: board.StatusDoing, beforeTaskID: "b"}, want: true},
+		{name: "different drag status", left: pointerTarget{kind: pointerTargetDrag, status: board.StatusDoing, beforeTaskID: "b"},
+			right: pointerTarget{kind: pointerTargetDrag, status: board.StatusDone, beforeTaskID: "b"}},
+		{name: "different drag anchor", left: pointerTarget{kind: pointerTargetDrag, status: board.StatusDoing, beforeTaskID: "b"},
+			right: pointerTarget{kind: pointerTargetDrag, status: board.StatusDoing, beforeTaskID: "c"}},
+		{name: "unknown kind", left: pointerTarget{}, right: pointerTarget{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.left.sameDestination(test.right); got != test.want {
+				t.Fatalf("sameDestination(%+v, %+v) = %t, want %t", test.left, test.right, got, test.want)
+			}
+		})
+	}
+}
+
+func TestPointerCadenceExpiryRetiresPendingDestination(t *testing.T) {
+	model, clock := pointerTestModel(t, 120)
+	var hits []boardHit
+	seen := map[string]bool{}
+	for _, hit := range model.current.semantics.hits {
+		if hit.kind == boardHitDefault && hit.taskID != "" && !seen[hit.taskID] {
+			seen[hit.taskID] = true
+			hits = append(hits, hit)
+			if len(hits) == 3 {
+				break
+			}
+		}
+	}
+	if len(hits) != 3 {
+		t.Fatal("fixture did not expose three card destinations")
+	}
+	model, _ = dispatchRenderedPointer(t, model, tea.MouseMotionMsg{X: hits[0].x0, Y: hits[0].y0})
+	clock.advance(time.Millisecond)
+	model, _ = dispatchRenderedPointer(t, model, tea.MouseMotionMsg{X: hits[1].x0, Y: hits[1].y0})
+	if !model.pointerAdmission.havePending {
+		t.Fatal("fixture did not defer the second hover")
+	}
+	before := model.pointerAdmission.discarded
+	clock.advance(20 * time.Millisecond)
+	model, _ = dispatchRenderedPointer(t, model, tea.MouseMotionMsg{X: hits[2].x0, Y: hits[2].y0})
+	if model.pointerAdmission.havePending || model.pointerAdmission.timer ||
+		model.pointerAdmission.discarded != before+1 || model.pointerState.Hovered() != boardCardHoverID(hits[2]) {
+		t.Fatalf("expired cadence pending=%t timer=%t discarded=%d hovered=%q",
+			model.pointerAdmission.havePending, model.pointerAdmission.timer,
+			model.pointerAdmission.discarded-before, model.pointerState.Hovered())
+	}
+}
+
+func TestRetainedBoundaryWheelDoesNotInventPastMaximum(t *testing.T) {
+	model, _ := pointerTestModel(t, 120)
+	hit := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.kind == boardHitDefault && hit.taskID == "" && hit.maxScroll >= 6
+	})
+	column := statusIndex(hit.status)
+	model.boardView.scrolls[column] = hit.maxScroll
+	model.boardView.scrollAnchors[column] = model.boardScrollAnchor(hit.status, hit.maxScroll)
+	model.boardView.manualScroll[column] = true
+	model.rebuildRenderPlan(renderImpactAll)
+	hit = pointerBoardHit(t, model, func(candidate boardHit) bool {
+		return candidate.kind == boardHitDefault && candidate.taskID == "" && candidate.status == hit.status
+	})
+	raw := tea.MouseWheelMsg{X: hit.x0, Y: hit.y0, Button: tea.MouseWheelDown}
+	candidate := boundaryWheelCandidate(hit, model.pointerRoute(), raw)
+	candidate.message = boardColumnScrolledMsg{status: hit.status, from: hit.maxScroll - 3,
+		offset: hit.maxScroll, max: hit.maxScroll}
+	candidate.target.position = hit.maxScroll
+	model.pointerAdmission.pending = candidate
+	model.pointerAdmission.havePending = true
+	before := model.pointerAdmission.discarded
+
+	model, commands := dispatchRenderedPointer(t, model, raw)
+	if got := model.boardView.scrolls[column]; got != hit.maxScroll {
+		t.Fatalf("retained boundary wheel scrolled to %d, want %d", got, hit.maxScroll)
+	}
+	if model.pointerAdmission.havePending || commands.followUp != nil ||
+		model.pointerAdmission.discarded != before+1 {
+		t.Fatalf("retained boundary pending=%t followup=%v discarded=%d",
+			model.pointerAdmission.havePending, commands.followUp,
+			model.pointerAdmission.discarded-before)
+	}
+}
+
+func TestPointerWheelCellAxisIdentity(t *testing.T) {
+	left := tea.MouseWheelMsg{X: 4, Y: 7, Button: tea.MouseWheelLeft, Mod: tea.ModCtrl}
+	right := tea.MouseWheelMsg{X: 4, Y: 7, Button: tea.MouseWheelRight, Mod: tea.ModCtrl}
+	down := tea.MouseWheelMsg{X: 4, Y: 7, Button: tea.MouseWheelDown, Mod: tea.ModCtrl}
+	if !sameWheelCellAxisAndModifiers(left, right) {
+		t.Fatal("horizontal reversal lost cell and axis identity")
+	}
+	if sameWheelCellAxisAndModifiers(left, down) {
+		t.Fatal("horizontal and vertical wheels shared an axis")
+	}
+	if got := wheelAxis(tea.MouseLeft); got != 0 {
+		t.Fatalf("non-wheel button axis = %d, want 0", got)
+	}
+	if direction, ok := rawWheelDirection(tea.MouseMotionMsg{X: 4, Y: 7}); ok || direction != 0 {
+		t.Fatalf("motion wheel direction = (%d, %t), want rejected", direction, ok)
 	}
 }

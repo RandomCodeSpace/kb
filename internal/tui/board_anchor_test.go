@@ -2,7 +2,11 @@ package tui
 
 import (
 	"slices"
+	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 )
@@ -225,4 +229,138 @@ func TestBoardAdoptionPreservesSurvivingManualScrollAnchor(t *testing.T) {
 	if !state.manualScroll[done] || state.scrollAnchors[done].TaskID != "done-1" || state.scrollAnchors[done].IntraRow != 4 {
 		t.Fatalf("surviving scroll anchor = manual:%v anchor:%+v", state.manualScroll[done], state.scrollAnchors[done])
 	}
+}
+
+func TestDeletedTaskStaleScrollAnchorFallsForwardThroughCurrentGeometry(t *testing.T) {
+	model := performanceModel(120, "", 80, 24)
+	columnIndex := statusIndexExact(board.StatusTodo)
+	column := model.current.geometry.columns[columnIndex]
+	const deletedOrdinal = 10
+	if column.index.length <= deletedOrdinal+1 {
+		t.Fatalf("fixture has %d todo cards, want more than %d", column.index.length, deletedOrdinal+1)
+	}
+	offset := column.index.prefixAt(deletedOrdinal)
+	anchor := column.anchorAt(offset, model.currentProjection())
+	if anchor.IndexHint != deletedOrdinal || anchor.IntraRow != 0 {
+		t.Fatalf("stale anchor = %+v, want ordinal %d at card start", anchor, deletedOrdinal)
+	}
+	deletedTitle := taskTitleByID(t, model.board, anchor.TaskID)
+
+	refreshed := cloneBoard(model.board)
+	refreshed.Tasks = slices.DeleteFunc(refreshed.Tasks, func(task board.Task) bool {
+		return task.ID == anchor.TaskID
+	})
+	model, commands := model.updateWithCommands(boardLoadedMsg{board: refreshed})
+	settlePerformanceGeometryCommand(t, &model, commands.geometry)
+
+	var successor board.Task
+	ordinal := 0
+	for _, task := range refreshed.Tasks {
+		if task.Status != board.StatusTodo {
+			continue
+		}
+		if ordinal == deletedOrdinal {
+			successor = task
+			break
+		}
+		ordinal++
+	}
+	if successor.ID == "" {
+		t.Fatal("refresh fixture has no ordinal successor")
+	}
+
+	// A delayed wheel intent can still carry the task identity from the frame
+	// that existed before the refresh. Update must resolve its ordinal hint
+	// against the current projection rather than resurrecting the deleted ID.
+	model, commands = model.updateWithCommands(boardColumnScrolledMsg{
+		status: board.StatusTodo,
+		from:   model.boardView.scrolls[columnIndex],
+		offset: offset,
+		anchor: anchor,
+		max:    max(column.totalRows()-column.contentHeight, 0),
+	})
+	settlePerformanceGeometryCommand(t, &model, commands.geometry)
+	if got := model.boardView.scrollAnchors[columnIndex]; got != anchor {
+		t.Fatalf("stale scroll anchor = %+v, want authoritative %+v", got, anchor)
+	}
+	assertPerformanceColdOracleParity(t, model)
+
+	text := ansi.Strip(model.View().Content)
+	if !strings.Contains(text, successor.Title) {
+		t.Fatalf("fallback frame does not show ordinal successor %q:\n%s", successor.Title, text)
+	}
+	if strings.Contains(text, deletedTitle) {
+		t.Fatalf("fallback frame still shows deleted task %q:\n%s", deletedTitle, text)
+	}
+	pressRenderedTask(t, &model, successor)
+}
+
+func TestUnanchoredAbsoluteScrollClampsToBottomClickTopology(t *testing.T) {
+	model := performanceModel(120, "", 80, 24)
+	columnIndex := statusIndexExact(board.StatusTodo)
+	column := model.current.geometry.columns[columnIndex]
+	maximum := max(column.totalRows()-column.contentHeight, 0)
+	if maximum == 0 {
+		t.Fatal("absolute-scroll fixture has no overflow")
+	}
+	var first, last board.Task
+	for _, task := range model.board.Tasks {
+		if task.Status != board.StatusTodo {
+			continue
+		}
+		if first.ID == "" {
+			first = task
+		}
+		last = task
+	}
+
+	model, commands := model.updateWithCommands(boardColumnScrolledMsg{
+		status: board.StatusTodo,
+		from:   0,
+		offset: maximum + 1000,
+		max:    maximum,
+	})
+	settlePerformanceGeometryCommand(t, &model, commands.geometry)
+	assertPerformanceColdOracleParity(t, model)
+	text := ansi.Strip(model.View().Content)
+	if !strings.Contains(text, last.Title) {
+		t.Fatalf("clamped bottom frame does not show final todo card %q:\n%s", last.Title, text)
+	}
+	if strings.Contains(text, first.Title) {
+		t.Fatalf("clamped bottom frame still shows first todo card %q:\n%s", first.Title, text)
+	}
+	pressRenderedTask(t, &model, last)
+}
+
+func taskTitleByID(t *testing.T, current board.Board, taskID string) string {
+	t.Helper()
+	for _, task := range current.Tasks {
+		if task.ID == taskID {
+			return task.Title
+		}
+	}
+	t.Fatalf("board has no task %q", taskID)
+	return ""
+}
+
+// pressRenderedTask derives the coordinate from the immutable frame the user
+// can see, dispatches through that frame's published pointer handler, and then
+// verifies the board selected the exact task identity behind those cells.
+func pressRenderedTask(t *testing.T, model *Model, task board.Task) {
+	t.Helper()
+	view := model.View()
+	for y, line := range strings.Split(ansi.Strip(view.Content), "\n") {
+		index := strings.Index(line, task.Title)
+		if index < 0 {
+			continue
+		}
+		x := ansi.StringWidth(line[:index])
+		updateRootPointerTest(t, model, tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+		selected, ok := model.selectedTask()
+		if !ok || selected.ID != task.ID {
+			t.Fatalf("press on rendered task %q selected %+v, %t", task.ID, selected, ok)
+		}
+		return
+	}
+	t.Fatalf("published frame has no visible title for task %q:\n%s", task.ID, ansi.Strip(view.Content))
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 )
 
 type faultStore struct {
@@ -1193,6 +1194,31 @@ func TestPointerWheelScrollRevealsSaveControl(t *testing.T) {
 	model.Update(command())
 	if !model.saving {
 		t.Fatalf("scrolled save click did not activate: saving=%v status=%q", model.saving, model.statusMessage)
+	}
+}
+
+func TestPointerWheelMsgAdapterClamps(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		target, want int
+	}{
+		{name: "lower", target: -1, want: 0},
+		{name: "in-range", target: 4, want: 4},
+		{name: "upper", target: 99, want: 10},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			message := pointerWheelMsg{current: 2, target: 2, maxScroll: 10}
+			if got, want := message.PointerWheelIntent(), (pointer.WheelIntent{Key: "editor", Current: 2, Target: 2, Min: 0, Max: 10}); got != want {
+				t.Fatalf("wheel intent = %+v, want %+v", got, want)
+			}
+			rebuilt, ok := message.PointerWheelTarget(test.target).(pointerWheelMsg)
+			if !ok {
+				t.Fatal("wheel target did not rebuild a pointer wheel message")
+			}
+			if rebuilt.target != test.want {
+				t.Fatalf("target = %d, want %d", rebuilt.target, test.want)
+			}
+		})
 	}
 }
 

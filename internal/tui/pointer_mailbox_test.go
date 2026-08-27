@@ -2,9 +2,12 @@ package tui
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/board"
@@ -362,5 +365,339 @@ func TestEveryPublishedOwnerFailsClosedWhenStableControlIsRemoved(t *testing.T) 
 				t.Fatal("removed control retained capture")
 			}
 		})
+	}
+}
+
+func TestRenderedOverlayWheelsPublishAbsoluteOwnerTargets(t *testing.T) {
+	const width, height = 84, 10
+	tests := []struct {
+		name        string
+		owner       renderHandlerTopology
+		wheelKey    string
+		open        func(*Model, *storeFixture)
+		ownerView   func(*Model) string
+		assertAfter func(*testing.T, *Model, string)
+	}{
+		{
+			name: "palette", owner: renderHandlerPalette, wheelKey: "palette",
+			open:      func(m *Model, _ *storeFixture) { _ = m.openPalette() },
+			ownerView: func(m *Model) string { return m.palette.View(m.width, m.height) },
+			assertAfter: func(t *testing.T, m *Model, before string) {
+				after := ansi.Strip(m.palette.View(m.width, m.height))
+				if !strings.Contains(ansi.Strip(before), "1/") || !strings.Contains(after, "2/") {
+					t.Fatalf("palette wheel hint did not move exactly 1/ to 2/:\n%s", after)
+				}
+			},
+		},
+		{
+			name: "settings", owner: renderHandlerSettings, wheelKey: "settings",
+			open: func(m *Model, fixture *storeFixture) {
+				m.settings = newSettingsModel(fixture.store, "alice", context.Background())
+				loadSettingsForTest(t, m.settings)
+			},
+			ownerView: func(m *Model) string { return m.settings.View(m.width, m.height) },
+			assertAfter: func(t *testing.T, m *Model, _ string) {
+				if m.settings.focus != "ai:model" {
+					t.Fatalf("settings wheel focus = %q, want ai:model", m.settings.focus)
+				}
+				if view := ansi.Strip(m.settings.View(m.width, m.height)); !strings.Contains(view, settingsFocusBar()+"Model:") {
+					t.Fatalf("settings wheel target is not visibly focused:\n%s", view)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model := pointerOwnerModel(t, test.open)
+			model.width, model.height = width, height
+			model.rebuildRenderPlan(renderImpactAll)
+			if model.pointerOwner != test.owner {
+				t.Fatalf("published owner = %v, want %v", model.pointerOwner, test.owner)
+			}
+			ownerSession, ownerEpoch := model.pointerOwnerSeq, model.pointerOwnerEpoch
+			beforeOwner, beforeRoot := test.ownerView(&model), model.View().Content
+			model, _ = dispatchRenderedPointer(t, model, tea.MouseWheelMsg{
+				X: width / 2, Y: height / 2, Button: tea.MouseWheelDown,
+			})
+			last := model.pointerAdmission.last
+			if !model.pointerAdmission.haveLast || last.kind != pointerTargetWheel ||
+				last.wheelKey != test.wheelKey || last.position != 1 {
+				t.Fatalf("published wheel target = %+v, want %s at absolute 1", last, test.wheelKey)
+			}
+			if model.pointerOwnerSeq != ownerSession || model.pointerOwnerEpoch != ownerEpoch {
+				t.Fatalf("owner session changed (%d,%d) -> (%d,%d)", ownerSession, ownerEpoch,
+					model.pointerOwnerSeq, model.pointerOwnerEpoch)
+			}
+			if after := test.ownerView(&model); after == beforeOwner || model.View().Content == beforeRoot {
+				t.Fatal("wheel target did not change both owner and published root render")
+			}
+			test.assertAfter(t, &model, beforeOwner)
+		})
+	}
+}
+
+func TestNaturallyClosedEditorPublishesNoPointerSurface(t *testing.T) {
+	const width, height = 84, 10
+	model := pointerOwnerModel(t, func(m *Model, _ *storeFixture) {
+		_ = m.editor.OpenAdd(board.StatusTodo)
+	})
+	model.width, model.height = width, height
+	model.rebuildRenderPlan(renderImpactAll)
+	if surface := model.editor.PointerSurface(width, height); surface.Pointer == nil {
+		t.Fatal("open editor published no pointer surface")
+	}
+	model, _ = model.updateWithCommands(tea.KeyPressMsg{Code: tea.KeyEscape})
+	surface := model.editor.PointerSurface(width, height)
+	if model.editor.IsOpen() || surface.Content != "" || surface.Pointer != nil ||
+		!surface.Topology.SameControls(pointer.Topology{}) {
+		t.Fatal("naturally closed editor retained a pointer surface")
+	}
+}
+
+func TestRenderedBoardWheelCancelsLiftAndAdvancesColumn(t *testing.T) {
+	model := performanceModel(120, "", performanceWidth, performanceHeight)
+	source := pointerBoardHit(t, model, func(hit boardHit) bool { return hit.taskID != "" })
+	column := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.kind == boardHitDefault && hit.taskID == "" && hit.scroll == 0 && hit.maxScroll >= 3
+	})
+	handler := model.View().OnMouse
+	press := tea.MouseClickMsg{X: source.x0, Y: source.y0, Button: tea.MouseLeft}
+	if command := handler(press); command != nil {
+		t.Fatal("stale handler press escaped the synchronous mailbox")
+	}
+	model, _ = model.updateWithCommands(press)
+	if model.move.lifted == nil || model.pointerAdmission.captureKey == "" {
+		t.Fatal("board press did not acquire lift and capture")
+	}
+	beforeAccepted := model.pointerAdmission.accepted
+	wheel := tea.MouseWheelMsg{X: column.x0, Y: column.y0, Button: tea.MouseWheelDown}
+	if command := handler(wheel); command != nil {
+		t.Fatal("stale handler wheel escaped the synchronous mailbox")
+	}
+	var commands modelUpdateCommands
+	model, commands = model.updateWithCommands(wheel)
+	if model.move.lifted != nil || model.pointerAdmission.captureKey != "" || model.pointerState.Active() {
+		t.Fatal("board wheel retained lift or capture")
+	}
+	if model.pointerAdmission.accepted != beforeAccepted+1 {
+		t.Fatalf("wheel accepted %d events, want exactly 1", model.pointerAdmission.accepted-beforeAccepted)
+	}
+	if got := model.boardView.scrolls[statusIndex(column.status)]; got != 3 {
+		t.Fatalf("column scroll = %d, want absolute 3", got)
+	}
+	if !model.move.notice || model.noticeSeq == 0 || commands.followUp == nil {
+		t.Fatalf("wheel cancellation notice=%t sequence=%d command=%v", model.move.notice, model.noticeSeq, commands.followUp)
+	}
+	assertPerformanceColdOracleParity(t, model)
+}
+
+func TestRenderedBoardCurrentHandlerWheelCancelsLiftOnce(t *testing.T) {
+	model := performanceModel(120, "", performanceWidth, performanceHeight)
+	source := pointerBoardHit(t, model, func(hit boardHit) bool { return hit.taskID != "" })
+	column := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.kind == boardHitDefault && hit.taskID == "" && hit.scroll == 0 && hit.maxScroll >= 3
+	})
+	model, _ = dispatchRenderedPointer(t, model,
+		tea.MouseClickMsg{X: source.x0, Y: source.y0, Button: tea.MouseLeft})
+	if model.move.lifted == nil || model.pointerAdmission.captureKey == "" {
+		t.Fatal("board press did not acquire lift and capture")
+	}
+
+	beforeAccepted := model.pointerAdmission.accepted
+	model, _ = dispatchRenderedPointer(t, model,
+		tea.MouseWheelMsg{X: column.x0, Y: column.y0, Button: tea.MouseWheelDown})
+	if model.move.lifted != nil || model.pointerAdmission.captureKey != "" || model.pointerState.Active() ||
+		model.pointerAdmission.accepted != beforeAccepted+1 ||
+		model.boardView.scrolls[statusIndex(column.status)] != 3 {
+		t.Fatalf("current-handler wheel state: lifted=%v capture=%q active=%t accepted=%d scroll=%d",
+			model.move.lifted, model.pointerAdmission.captureKey, model.pointerState.Active(),
+			model.pointerAdmission.accepted-beforeAccepted,
+			model.boardView.scrolls[statusIndex(column.status)])
+	}
+}
+
+func TestRenderedBoardStaleWheelTranslationFailureCancelsDrag(t *testing.T) {
+	model := performanceModel(120, "", performanceWidth, performanceHeight)
+	canonical := cloneBoard(model.board)
+	source := pointerBoardHit(t, model, func(hit boardHit) bool { return hit.taskID != "" })
+	target := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.taskID != "" && hit.status != source.status
+	})
+	column := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.kind == boardHitDefault && hit.taskID == "" && hit.status != target.status && hit.maxScroll >= 3
+	})
+	handler := model.View().OnMouse
+	for _, raw := range []tea.MouseMsg{
+		tea.MouseClickMsg{X: source.x0, Y: source.y0, Button: tea.MouseLeft},
+		tea.MouseMotionMsg{X: target.x0, Y: target.y0, Button: tea.MouseLeft},
+	} {
+		if command := handler(raw); command != nil {
+			t.Fatal("stale drag handler escaped the synchronous mailbox")
+		}
+		model, _ = model.updateWithCommands(raw)
+	}
+	if model.move.lifted == nil || !model.move.lifted.dragged || reflect.DeepEqual(model.board, canonical) {
+		t.Fatal("fixture did not publish a dragged preview")
+	}
+
+	model, _ = model.updateWithCommands(tea.WindowSizeMsg{Width: 80, Height: performanceHeight})
+	if model.move.lifted == nil || model.move.lifted.fromMouse == false {
+		t.Fatal("resize unexpectedly cancelled the mouse lift")
+	}
+	beforeAccepted := model.pointerAdmission.accepted
+	beforeDiscarded := model.pointerAdmission.discarded
+	wheel := tea.MouseWheelMsg{X: column.x0, Y: column.y0, Button: tea.MouseWheelDown}
+	if command := handler(wheel); command != nil {
+		t.Fatal("stale wheel handler escaped the synchronous mailbox")
+	}
+	model, _ = model.updateWithCommands(wheel)
+	if model.move.lifted != nil || model.pointerAdmission.captureKey != "" || model.pointerState.Active() ||
+		model.pointerAdmission.accepted != beforeAccepted+1 ||
+		model.pointerAdmission.discarded != beforeDiscarded+1 ||
+		!reflect.DeepEqual(model.board, canonical) || !model.current.projection.matchesSource(canonical) ||
+		!model.move.notice {
+		t.Fatalf("failed translation state: lifted=%v capture=%q active=%t accepted=%d discarded=%d canonical=%t source=%t notice=%t",
+			model.move.lifted, model.pointerAdmission.captureKey, model.pointerState.Active(),
+			model.pointerAdmission.accepted-beforeAccepted,
+			model.pointerAdmission.discarded-beforeDiscarded,
+			reflect.DeepEqual(model.board, canonical), model.current.projection.matchesSource(canonical),
+			model.move.notice)
+	}
+}
+
+func TestRenderedBoardDraggedWheelRestoresCanonicalBeforeAbsoluteScroll(t *testing.T) {
+	model := performanceModel(120, "", performanceWidth, performanceHeight)
+	canonical := cloneBoard(model.board)
+	source := pointerBoardHit(t, model, func(hit boardHit) bool { return hit.taskID != "" })
+	target := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.taskID != "" && hit.status != source.status
+	})
+	column := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.kind == boardHitDefault && hit.taskID == "" && hit.scroll == 0 && hit.maxScroll >= 3
+	})
+	handler := model.View().OnMouse
+	press := tea.MouseClickMsg{X: source.x0, Y: source.y0, Button: tea.MouseLeft}
+	motion := tea.MouseMotionMsg{X: target.x0, Y: target.y0, Button: tea.MouseLeft}
+	wheel := tea.MouseWheelMsg{X: column.x0, Y: column.y0, Button: tea.MouseWheelDown}
+	var pendingGeometry tea.Cmd
+	for _, raw := range []tea.MouseMsg{press, motion} {
+		if command := handler(raw); command != nil {
+			t.Fatal("stale drag handler escaped the synchronous mailbox")
+		}
+		var next modelUpdateCommands
+		model, next = model.updateWithCommands(raw)
+		if next.geometry != nil {
+			pendingGeometry = next.geometry
+		}
+	}
+	if model.move.lifted == nil || !model.move.lifted.dragged || reflect.DeepEqual(model.board, canonical) {
+		t.Fatal("fixture did not publish a dragged preview")
+	}
+	beforeAccepted := model.pointerAdmission.accepted
+	if command := handler(wheel); command != nil {
+		t.Fatal("stale wheel handler escaped the synchronous mailbox")
+	}
+	model, commands := model.updateWithCommands(wheel)
+	if commands.geometry != nil {
+		pendingGeometry = commands.geometry
+	}
+	if pendingGeometry == nil {
+		t.Fatal("drag sequence did not retain its geometry worker")
+	}
+	settlePerformanceGeometryCommand(t, &model, pendingGeometry)
+
+	oracle := performanceModel(120, "", performanceWidth, performanceHeight)
+	if !oracle.boardView.focusTask(oracle.filteredBoard(), source.taskID) {
+		t.Fatal("canonical oracle could not focus the source card")
+	}
+	oracle, oracleCommands := oracle.updateWithCommands(boardColumnScrolledMsg{
+		status: column.status, from: column.scroll, offset: 3, max: column.maxScroll,
+	})
+	settlePerformanceGeometryCommand(t, &oracle, oracleCommands.geometry)
+
+	selected, selectedOK := model.selectedTask()
+	if model.pointerAdmission.accepted != beforeAccepted+1 || model.move.lifted != nil ||
+		!reflect.DeepEqual(model.board, canonical) || !selectedOK || selected.ID != source.taskID ||
+		model.boardView.scrolls != oracle.boardView.scrolls ||
+		model.boardView.scrollAnchors != oracle.boardView.scrollAnchors ||
+		!model.current.projection.matchesSource(canonical) {
+		t.Fatalf("dragged wheel state: accepted=%d lifted=%v canonical=%t selected=(%q,%t) scrolls=%v anchors=%+v source=%t",
+			model.pointerAdmission.accepted-beforeAccepted, model.move.lifted,
+			reflect.DeepEqual(model.board, canonical), selected.ID, selectedOK,
+			model.boardView.scrolls, struct {
+				Got, Want [len(boardStatuses)]boardTaskAnchor
+			}{model.boardView.scrollAnchors, oracle.boardView.scrollAnchors},
+			model.current.projection.matchesSource(canonical))
+	}
+	assertPerformanceColdOracleParity(t, model)
+}
+
+func TestRenderedBoardBoundaryWheelCancelsDragPreview(t *testing.T) {
+	store := &moveTestStore{board: moveFixture()}
+	model := loadedMoveModel(store)
+	model.width, model.height = performanceWidth, performanceHeight
+	model.rebuildRenderPlan(renderImpactAll)
+	canonical := cloneBoard(model.board)
+	source := pointerBoardHit(t, model, func(hit boardHit) bool { return hit.taskID == "a" })
+	target := pointerBoardHit(t, model, func(hit boardHit) bool { return hit.taskID == "y" })
+
+	model, _ = dispatchRenderedPointer(t, model,
+		tea.MouseClickMsg{X: source.x0, Y: source.y0, Button: tea.MouseLeft})
+	model, _ = dispatchRenderedPointer(t, model,
+		tea.MouseMotionMsg{X: target.x0, Y: target.y0, Button: tea.MouseLeft})
+	if model.move.lifted == nil || !model.move.lifted.dragged || reflect.DeepEqual(model.board, canonical) {
+		t.Fatal("fixture did not publish a mouse drag preview")
+	}
+	boundary := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.kind == boardHitDefault && hit.taskID == "" && hit.status == source.status && hit.scroll == 0
+	})
+
+	beforeAccepted := model.pointerAdmission.accepted
+	beforeDiscarded := model.pointerAdmission.discarded
+	beforeNoticeSeq := model.noticeSeq
+	model, commands := dispatchRenderedPointer(t, model,
+		tea.MouseWheelMsg{X: boundary.x0, Y: boundary.y0, Button: tea.MouseWheelUp})
+	selected, selectedOK := model.selectedTask()
+	geometrySource := pointerBoardHit(t, model, func(hit boardHit) bool { return hit.taskID == source.taskID })
+	if model.move.lifted != nil || model.pointerAdmission.captureKey != "" || model.pointerState.Active() ||
+		!reflect.DeepEqual(model.board, canonical) || !model.current.projection.matchesSource(canonical) ||
+		!selectedOK || selected.ID != source.taskID || selected.Status != source.status ||
+		geometrySource.status != source.status || model.pointerAdmission.accepted != beforeAccepted+1 ||
+		model.pointerAdmission.discarded != beforeDiscarded+1 ||
+		!model.move.notice || model.noticeSeq != beforeNoticeSeq+1 || commands.followUp == nil {
+		t.Fatalf("boundary wheel state: lifted=%v capture=%q active=%t canonical=%t source=%t focus=(%q,%s,%t) geometry=%s, want restored %q in %s",
+			model.move.lifted, model.pointerAdmission.captureKey, model.pointerState.Active(),
+			reflect.DeepEqual(model.board, canonical), model.current.projection.matchesSource(canonical),
+			selected.ID, selected.Status, selectedOK, geometrySource.status, source.taskID, source.status)
+	}
+	expiry := model.noticeSeq
+	model, _ = model.updateWithCommands(noticeExpiredMsg{seq: expiry})
+	if model.move.notice || model.noticeOwnsFooter() {
+		t.Fatalf("boundary wheel cancellation notice did not expire: notice=%t saving=%t owns=%t seq=%d",
+			model.move.notice, model.move.saving, model.noticeOwnsFooter(), model.noticeSeq)
+	}
+	assertPerformanceColdOracleParity(t, model)
+}
+
+func TestBoardWheelLeavesKeyboardLiftInProgress(t *testing.T) {
+	model := performanceModel(120, "", performanceWidth, performanceHeight)
+	source := pointerBoardHit(t, model, func(hit boardHit) bool { return hit.taskID != "" })
+	if !model.focusBoardTask(source.taskID) {
+		t.Fatal("fixture could not focus keyboard lift source")
+	}
+	task, ok := model.selectedTask()
+	if !ok || !model.move.beginVisible(model.board, model.filteredBoard(), task, model.boardView.visibleStatuses(), false) {
+		t.Fatal("fixture could not begin keyboard lift")
+	}
+	column := pointerBoardHit(t, model, func(hit boardHit) bool {
+		return hit.kind == boardHitDefault && hit.taskID == "" && hit.maxScroll >= 3
+	})
+	model, _ = model.updateWithCommands(boardColumnScrolledMsg{
+		status: column.status, from: column.scroll, offset: column.scroll + 3, max: column.maxScroll,
+	})
+	if model.move.lifted == nil || model.move.lifted.fromMouse ||
+		model.boardView.scrolls[statusIndex(column.status)] != column.scroll+3 {
+		t.Fatal("board wheel cancelled or failed to scroll during keyboard lift")
 	}
 }

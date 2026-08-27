@@ -94,6 +94,7 @@ type boardPointerUpMsg struct {
 	status       board.Status
 	beforeTaskID string
 }
+type boardPointerCancelMoveMsg struct{}
 type boardColumnScrolledMsg struct {
 	status board.Status
 	from   int

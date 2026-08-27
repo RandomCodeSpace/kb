@@ -47,13 +47,31 @@ func (t pointerTarget) sameDestination(other pointerTarget) bool {
 }
 
 type pointerIntent struct {
-	message    tea.Msg
-	target     pointerTarget
-	route      pointerRouteIdentity
-	raw        tea.MouseMsg
-	wheelDelta int
-	advanced   bool
+	message       tea.Msg
+	target        pointerTarget
+	route         pointerRouteIdentity
+	sourceRoute   pointerRouteIdentity
+	raw           tea.MouseMsg
+	wheelDelta    int
+	advanced      bool
+	pendingTravel bool
 }
+
+func (i pointerIntent) sameSourceGeneration(route pointerRouteIdentity) bool {
+	source := i.sourceRoute
+	if source == (pointerRouteIdentity{}) {
+		source = i.route
+	}
+	return source.sameGeneration(route)
+}
+
+type pointerWheelResolution uint8
+
+const (
+	pointerWheelResolved pointerWheelResolution = iota
+	pointerWheelStale
+	pointerWheelBoundary
+)
 
 type pointerAdmissionState struct {
 	sequence uint64
@@ -119,10 +137,17 @@ func (m Model) admitResolvedPointer(message tea.Msg, route pointerRouteIdentity,
 		m.discardPointer()
 		return m, modelUpdateCommands{}
 	}
+	if m.mouseLiftedForWheel(raw) {
+		if intent, ok := m.pointerIntent(message, route, raw); ok && intent.target.kind == pointerTargetWheel {
+			return m.admitCancelThenWheel(intent)
+		}
+		return m.cancelMouseLiftForDiscardedWheel(currentRoute)
+	}
 	if interaction, ok := pointer.ObserveInteraction(message); ok &&
 		interaction.Kind == pointer.InteractionCancel && interaction.Followup != nil {
-		if _, _, wheel := m.resolveWheelIntent(interaction.Followup); wheel {
-			return m.admitCancelThenWheel(message, interaction.Followup, route, raw)
+		if intent, ok := m.pointerIntent(interaction.Followup, route, raw); ok &&
+			intent.target.kind == pointerTargetWheel {
+			return m.admitCancelThenWheel(intent)
 		}
 	}
 	if intent, ok := m.pointerIntent(message, route, raw); ok {
@@ -141,6 +166,36 @@ func (m Model) admitResolvedPointer(message tea.Msg, route pointerRouteIdentity,
 	m.pointerAdmission.resetCadence()
 	m.preparePointerCapture(message, route)
 	return m.applyResolvedPointer(message, true)
+}
+
+func (m Model) mouseLiftedForWheel(raw tea.MouseMsg) bool {
+	_, wheel := raw.(tea.MouseWheelMsg)
+	return wheel && m.move.lifted != nil && m.move.lifted.fromMouse
+}
+
+func (m Model) clearPointerCaptureWithoutPublish(route pointerRouteIdentity) Model {
+	state := &m.pointerAdmission
+	preservingWheelCadence := state.captureKey == "" && !m.pointerState.Active() &&
+		(m.move.lifted == nil || !m.move.lifted.fromMouse) &&
+		((state.havePending && state.pending.target.kind == pointerTargetWheel) ||
+			(state.haveLast && state.last.kind == pointerTargetWheel))
+	if !preservingWheelCadence {
+		state.resetCadence()
+	}
+	message := pointer.Cancel()()
+	m.preparePointerCapture(message, route)
+	m, _ = m.route(message)
+	return m
+}
+
+func (m Model) cancelMouseLiftForDiscardedWheel(route pointerRouteIdentity) (Model, modelUpdateCommands) {
+	m = m.clearPointerCaptureWithoutPublish(route)
+	return m.applyDiscardedMouseLiftCancel()
+}
+
+func (m Model) applyDiscardedMouseLiftCancel() (Model, modelUpdateCommands) {
+	m.discardPointer()
+	return m.applyResolvedPointer(boardPointerCancelMoveMsg{}, true)
 }
 
 func (m Model) translateExactPointer(message tea.Msg, route pointerRouteIdentity) (tea.Msg, bool) {
@@ -206,32 +261,19 @@ func boardCaptureTaskID(key string) (string, bool) {
 	return key[len(prefix):], true
 }
 
-func (m Model) admitCancelThenWheel(
-	message tea.Msg,
-	followup tea.Msg,
-	route pointerRouteIdentity,
-	raw tea.MouseMsg,
-) (Model, modelUpdateCommands) {
-	hadCapture := m.pointerAdmission.captureKey != ""
-	m.pointerAdmission.resetCadence()
-	cancel := pointer.ReplaceFollowup(message, nil)
-	m.preparePointerCapture(cancel, route)
-	m, _ = m.applyResolvedPointer(cancel, false)
-	intent, ok := m.pointerIntent(followup, route, raw)
-	if !ok {
-		if hadCapture {
-			m.rebuildRenderPlanAfterUpdate(renderImpactPointer|renderImpactAppearance, false)
-			return m, modelUpdateCommands{geometry: m.startGeometryWorker()}
+func (m Model) admitCancelThenWheel(intent pointerIntent) (Model, modelUpdateCommands) {
+	hadMouseLift := m.move.lifted != nil && m.move.lifted.fromMouse
+	var resolution pointerWheelResolution
+	intent, resolution = m.resolvePointerWheelIntent(intent)
+	if resolution != pointerWheelResolved {
+		if hadMouseLift {
+			m = m.clearPointerCaptureWithoutPublish(intent.route)
+			return m.applyDiscardedMouseLiftCancel()
 		}
-		return m, modelUpdateCommands{}
+		return m.failClosedPointer()
 	}
-	before := m.RenderPlanStats().InstalledSnapshotID
-	next, commands := m.admitPointerIntent(intent)
-	if hadCapture && next.RenderPlanStats().InstalledSnapshotID == before {
-		next.rebuildRenderPlanAfterUpdate(renderImpactPointer|renderImpactAppearance, false)
-		commands.geometry = next.startGeometryWorker()
-	}
-	return next, commands
+	m = m.clearPointerCaptureWithoutPublish(intent.route)
+	return m.admitPointerIntent(intent)
 }
 
 func (m Model) exactPointerValid(message tea.Msg, route pointerRouteIdentity) bool {
@@ -285,16 +327,16 @@ func (m Model) pointerIntent(message tea.Msg, route pointerRouteIdentity, raw te
 			}
 			delta = direction * step
 		}
-		return pointerIntent{message: rebuild(wheel.Target), route: route, raw: raw, wheelDelta: delta,
+		return pointerIntent{message: rebuild(wheel.Target), route: route, sourceRoute: route, raw: raw, wheelDelta: delta,
 			target: pointerTarget{kind: pointerTargetWheel, wheelKey: wheel.Key,
 				position: wheel.Target, wheelStep: step}}, true
 	}
 	if interaction, ok := pointer.ObserveInteraction(message); ok && interaction.Kind == pointer.InteractionHover {
-		return pointerIntent{message: message, route: route, raw: raw,
+		return pointerIntent{message: message, route: route, sourceRoute: route, raw: raw,
 			target: pointerTarget{kind: pointerTargetHover, control: interaction.ID}}, true
 	}
 	if move, ok := message.(boardPointerMoveMsg); ok {
-		return pointerIntent{message: message, route: route, raw: raw,
+		return pointerIntent{message: message, route: route, sourceRoute: route, raw: raw,
 			target: pointerTarget{kind: pointerTargetDrag, status: move.status, beforeTaskID: move.beforeTaskID}}, true
 	}
 	return pointerIntent{}, false
@@ -321,24 +363,21 @@ func (m Model) reuseBoundaryWheel(raw tea.MouseMsg, route pointerRouteIdentity) 
 		candidates = append(candidates, state.lastIntent)
 	}
 	for _, candidate := range candidates {
-		if !candidate.route.sameGeneration(route) || candidate.target.kind != pointerTargetWheel ||
+		if !candidate.sameSourceGeneration(route) || candidate.target.kind != pointerTargetWheel ||
 			candidate.target.wheelKey == "" || !sameWheelCellAxisAndModifiers(candidate.raw, raw) {
 			continue
 		}
-		wheel, rebuild, ok := m.resolveWheelIntent(candidate.message)
+		wheel, _, ok := m.resolveWheelIntent(candidate.message)
 		if !ok || wheel.Key != candidate.target.wheelKey || candidate.target.wheelStep <= 0 {
 			continue
 		}
-		base := candidate.target.position
-		target := min(max(base+direction*candidate.target.wheelStep, wheel.Min), wheel.Max)
-		if target == base {
-			continue
-		}
-		candidate.message = rebuild(target)
 		candidate.raw = raw
 		candidate.wheelDelta = direction * candidate.target.wheelStep
-		candidate.target.position = target
-		candidate.advanced = true
+		candidate.advanced = false
+		candidate, resolution := m.resolvePointerWheelIntent(candidate)
+		if resolution != pointerWheelResolved {
+			continue
+		}
 		next, commands := m.admitPointerIntent(candidate)
 		return next, commands, true
 	}
@@ -427,7 +466,23 @@ func (m Model) admitPointerIntent(intent pointerIntent) (Model, modelUpdateComma
 		m.discardPointer()
 		return m, modelUpdateCommands{}
 	}
-	if !intent.route.sameGeneration(currentRoute) {
+	if intent.target.kind == pointerTargetWheel {
+		var resolution pointerWheelResolution
+		intent, resolution = m.resolvePointerWheelIntent(intent)
+		if resolution == pointerWheelStale {
+			return m.failClosedPointer()
+		}
+		if resolution == pointerWheelBoundary {
+			if state.havePending && state.pending.route.sameOwner(intent.route) &&
+				state.pending.target.kind == pointerTargetWheel &&
+				state.pending.target.wheelKey == intent.target.wheelKey &&
+				!intent.pendingTravel {
+				state.cancelPending()
+			}
+			m.discardPointer()
+			return m, modelUpdateCommands{}
+		}
+	} else if !intent.route.sameGeneration(currentRoute) {
 		translated, ok := m.translatePointerIntent(intent)
 		if !ok {
 			return m.failClosedPointer()
@@ -438,15 +493,6 @@ func (m Model) admitPointerIntent(intent pointerIntent) (Model, modelUpdateComma
 		(state.captureKey == "" || state.captureOwnerSession != intent.route.ownerSession) {
 		m.discardPointer()
 		return m, modelUpdateCommands{}
-	}
-	if intent.target.kind == pointerTargetWheel {
-		if !intent.advanced {
-			intent = m.advanceWheelIntent(intent)
-		}
-		if intent.message == nil {
-			m.discardPointer()
-			return m, modelUpdateCommands{}
-		}
 	}
 	if state.haveLast && state.lastRoute.sameOwner(intent.route) && intent.target.sameDestination(state.last) {
 		if intent.target.kind == pointerTargetHover {
@@ -482,6 +528,25 @@ func (m Model) admitPointerIntent(intent pointerIntent) (Model, modelUpdateComma
 	return m, modelUpdateCommands{followUp: theme.Tick(delay, pointerFlushMsg{sequence: state.sequence})}
 }
 
+func (m Model) resolvePointerWheelIntent(intent pointerIntent) (pointerIntent, pointerWheelResolution) {
+	currentRoute := m.pointerRoute()
+	if !intent.route.sameGeneration(currentRoute) {
+		translated, ok := m.translatePointerIntent(intent)
+		if !ok {
+			return pointerIntent{}, pointerWheelStale
+		}
+		translated.route = currentRoute
+		intent = translated
+	}
+	if !intent.advanced {
+		intent = m.advanceWheelIntent(intent)
+	}
+	if intent.message == nil {
+		return intent, pointerWheelBoundary
+	}
+	return intent, pointerWheelResolved
+}
+
 func (m Model) advanceWheelIntent(intent pointerIntent) pointerIntent {
 	wheel, rebuild, ok := m.resolveWheelIntent(intent.message)
 	if !ok {
@@ -491,15 +556,20 @@ func (m Model) advanceWheelIntent(intent pointerIntent) pointerIntent {
 	step := intent.wheelDelta
 	base := wheel.Current
 	state := &m.pointerAdmission
+	usedPending := false
 	if state.havePending && state.pending.route.sameOwner(intent.route) &&
 		state.pending.target.kind == pointerTargetWheel && state.pending.target.wheelKey == wheel.Key {
 		base = state.pending.target.position
-	} else if state.haveLast && state.lastRoute.sameOwner(intent.route) &&
+		usedPending = true
+	} else if state.haveLast && state.lastRoute.sameGeneration(intent.route) &&
 		state.last.kind == pointerTargetWheel && state.last.wheelKey == wheel.Key {
 		base = state.last.position
 	}
+	base = min(max(base, wheel.Min), wheel.Max)
+	intent.pendingTravel = usedPending && base != wheel.Current
 	target := min(max(base+step, wheel.Min), wheel.Max)
 	if target == base {
+		intent.target.position = base
 		intent.message = nil
 		return intent
 	}

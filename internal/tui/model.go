@@ -451,9 +451,15 @@ func (m Model) updateRawPointer(raw tea.MouseMsg) (Model, modelUpdateCommands) {
 	}
 	command, route, result := m.pointerMailbox.take(raw)
 	if result != pointerMailboxMatched || !route.sameOwner(m.pointerRoute()) {
+		if m.mouseLiftedForWheel(raw) {
+			return m.cancelMouseLiftForDiscardedWheel(m.pointerRoute())
+		}
 		return m.failClosedPointer()
 	}
 	if command == nil {
+		if m.mouseLiftedForWheel(raw) {
+			return m.cancelMouseLiftForDiscardedWheel(route)
+		}
 		if next, commands, ok := m.reuseBoundaryWheel(raw, route); ok {
 			return next, commands
 		}
@@ -1012,8 +1018,25 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 		}
 		m.clicks = m.clicks.Reset()
 		return m, m.startCardDrop()
+	case boardPointerCancelMoveMsg:
+		if m.move.lifted != nil && m.move.lifted.fromMouse {
+			m.cancelCardMove("")
+		}
 	case boardColumnScrolledMsg:
 		column := statusIndex(msg.status)
+		if m.move.lifted != nil && m.move.lifted.fromMouse {
+			dragged := m.move.lifted.dragged
+			liftedTaskID := m.move.lifted.taskID
+			if dragged {
+				for index, anchor := range m.boardView.scrollAnchors {
+					if anchor.TaskID == liftedTaskID {
+						m.boardView.scrollAnchors[index] = boardTaskAnchor{}
+					}
+				}
+				msg.anchor = boardTaskAnchor{}
+			}
+			m.cancelCardMove("")
+		}
 		m.boardView.scrolls[column] = max(msg.offset, 0)
 		m.boardView.scrollAnchors[column] = msg.anchor
 		m.boardView.manualScroll[column] = true
@@ -1117,7 +1140,7 @@ func isBoardPointerMessage(message tea.Msg) bool {
 	switch message.(type) {
 	case boardCardClickedMsg, boardColumnClickedMsg,
 		filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg, filterProjectClickedMsg,
-		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg,
+		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardPointerCancelMoveMsg, boardColumnScrolledMsg,
 		boardFooterClickedMsg:
 		return true
 	default:

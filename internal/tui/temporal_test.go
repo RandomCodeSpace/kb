@@ -2,10 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 )
@@ -270,4 +272,62 @@ func TestTemporalDeadlineIndexRefreshesMidnightFanoutWithoutLayoutWork(t *testin
 		t.Fatalf("midnight temporal fanout: before=%+v after=%+v", before, after)
 	}
 	assertPerformanceColdOracleParity(t, model)
+}
+
+func TestTemporalBoundaryReflowsRailedMetadataAndKeepsCardTargets(t *testing.T) {
+	now := time.Date(2026, 8, 27, 23, 0, 0, 0, time.UTC)
+	tasks := make([]board.Task, 20)
+	for index := range tasks {
+		tasks[index] = board.Task{
+			ID: fmt.Sprintf("clock-%02d", index), Seq: index + 1, Title: fmt.Sprintf("Clock %02d", index),
+			Status: board.StatusDoing, Position: index, MovedAt: now.Add(-23 * time.Hour),
+			Due: "2026-08-28", Effort: "XX",
+		}
+	}
+	model := temporalGeometryModel(t, board.Board{Title: "Clock", Tasks: tasks}, now, 16, 20)
+	beforeText := ansi.Strip(model.View().Content)
+	before := model.RenderPlanStats()
+	if !strings.Contains(beforeText, "23h") || strings.Contains(beforeText, "tomorrow") {
+		t.Fatalf("pre-boundary metadata did not stop before the due category:\n%s", beforeText)
+	}
+	if !strings.Contains(beforeText, model.themeStyles().Glyph.Track) {
+		t.Fatalf("compact overflow fixture rendered no scrollbar track:\n%s", beforeText)
+	}
+
+	deadline := model.temporalDeadline
+	wantDeadline := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+	if !deadline.Equal(wantDeadline) {
+		t.Fatalf("temporal deadline = %s, want %s", deadline, wantDeadline)
+	}
+	model.now = func() time.Time { return deadline }
+	model, commands := model.updateWithCommands(temporalTickMsg{
+		generation: model.temporalGeneration,
+		deadline:   deadline,
+	})
+	settlePerformanceGeometryCommand(t, &model, commands.geometry)
+
+	afterText := ansi.Strip(model.View().Content)
+	after := model.RenderPlanStats()
+	if !strings.Contains(afterText, "1d") || !strings.Contains(afterText, "today") ||
+		strings.Contains(afterText, "XX") {
+		t.Fatalf("post-boundary metadata did not expose exactly the due category:\n%s", afterText)
+	}
+	if after.TemporalRecordsRefreshed-before.TemporalRecordsRefreshed != uint64(len(tasks)) ||
+		after.PublishedFrames != before.PublishedFrames+1 {
+		t.Fatalf("temporal geometry was not invalidated once: before=%+v after=%+v", before, after)
+	}
+	pressRenderedTask(t, &model, tasks[1])
+}
+
+func temporalGeometryModel(t *testing.T, fixture board.Board, now time.Time, width, height int) Model {
+	t.Helper()
+	model := NewModel(stubBoardReader{board: fixture}, nil, "clock")
+	model.now = func() time.Time { return now }
+	model.renderedAt = now
+	var commands modelUpdateCommands
+	model, commands = model.updateWithCommands(boardLoadedMsg{board: fixture})
+	settlePerformanceGeometryCommand(t, &model, commands.geometry)
+	model, commands = model.updateWithCommands(tea.WindowSizeMsg{Width: width, Height: height})
+	settlePerformanceGeometryCommand(t, &model, commands.geometry)
+	return model
 }
