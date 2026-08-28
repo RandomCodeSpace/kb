@@ -263,14 +263,22 @@ func TestPointerSurfaceWheelAndIdleBackdropRespectPaneOwnership(t *testing.T) {
 		t.Fatal("detail wheel did not use its existing scroll path")
 	}
 
-	if command := surface.Pointer(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command != nil {
+	press := surface.Pointer(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
+	if press == nil {
+		t.Fatal("idle backdrop did not acquire capture")
+	}
+	if activation := m.Update(busyResult(t, press)); activation != nil || !m.IsOpen() {
 		t.Fatal("idle backdrop activated on press")
 	}
 	command := surface.Pointer(tea.MouseReleaseMsg{X: 0, Y: 0, Button: tea.MouseLeft})
 	if command == nil {
 		t.Fatal("idle backdrop did not request detail dismissal")
 	}
-	message, _ := m.ResolvePointerMessage(busyResult(t, command))
+	activation := m.Update(busyResult(t, command))
+	if activation == nil {
+		t.Fatal("idle backdrop release did not activate dismissal")
+	}
+	message, _ := m.ResolvePointerMessage(busyResult(t, activation))
 	m.Update(message)
 	if m.IsOpen() {
 		t.Fatal("idle backdrop did not close detail")

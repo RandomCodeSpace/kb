@@ -69,7 +69,11 @@ func (m *Model) expireNotice(message tea.Msg) bool {
 	}
 	m.actionNotice = false
 	if m.move.lifted == nil && !m.move.saving {
-		m.move.notice = false
+		if m.move.notice {
+			m.move.notice = false
+			m.move.status = ""
+			m.move.statusError = false
+		}
 	}
 	return true
 }

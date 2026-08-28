@@ -54,13 +54,24 @@ const (
 	boardToggledCancelled
 )
 
+// boardTaskAnchor is the durable position vocabulary for a board column. The
+// ordinal is only a deterministic fallback when the identity disappears;
+// IntraRow is used by scroll anchors and is clamped against current geometry.
+type boardTaskAnchor struct {
+	TaskID    string
+	IndexHint int
+	IntraRow  int
+}
+
 // boardViewState is the complete read-only board interaction state. Keeping it
 // together gives detail overlays one stable selectedTask seam without making
 // board rendering part of the root model's refresh machinery.
 type boardViewState struct {
 	column        int
-	rows          [len(boardStatuses)]int
-	scrolls       [len(boardStatuses)]int
+	rows          [len(boardStatuses)]int // cached ordinals; task identity is authoritative
+	cursors       [len(boardStatuses)]boardTaskAnchor
+	scrolls       [len(boardStatuses)]int // compatibility/raw fallback until an anchor exists
+	scrollAnchors [len(boardStatuses)]boardTaskAnchor
 	manualScroll  [len(boardStatuses)]bool
 	showCancelled bool
 }
@@ -77,10 +88,19 @@ type boardPointerMoveMsg struct {
 	status       board.Status
 	beforeTaskID string
 }
-type boardPointerUpMsg struct{}
+type boardPointerUpMsg struct {
+	resolved     bool
+	valid        bool
+	status       board.Status
+	beforeTaskID string
+}
+type boardPointerCancelMoveMsg struct{}
 type boardColumnScrolledMsg struct {
 	status board.Status
+	from   int
 	offset int
+	anchor boardTaskAnchor
+	max    int
 }
 
 type boardHitKind uint8
@@ -96,15 +116,17 @@ const (
 )
 
 type boardHit struct {
-	x0, x1    int
-	y0, y1    int
-	status    board.Status
-	taskID    string
-	kind      boardHitKind
-	tag       string
-	key       string
-	scroll    int
-	maxScroll int
+	x0, x1     int
+	y0, y1     int
+	status     board.Status
+	taskID     string
+	kind       boardHitKind
+	tag        string
+	key        string
+	scroll     int
+	maxScroll  int
+	scrollUp   boardTaskAnchor
+	scrollDown boardTaskAnchor
 }
 
 type renderedColumn struct {
@@ -125,43 +147,80 @@ func (s boardViewState) visibleStatuses() []board.Status {
 	return boardStatuses[:limit]
 }
 
+type boardNavigation interface {
+	statusCount(board.Status) int
+	taskAtStatus(board.Status, int) (board.Task, bool)
+	ordinalForTask(board.Status, string) (int, bool)
+	taskByID(string) (board.Task, bool)
+}
+
+type scannedBoardNavigation struct{ board board.Board }
+
+func (n scannedBoardNavigation) statusCount(status board.Status) int {
+	return taskCount(n.board, status)
+}
+
+func (n scannedBoardNavigation) taskAtStatus(status board.Status, ordinal int) (board.Task, bool) {
+	return taskAtStatusIndex(n.board, status, ordinal)
+}
+
+func (n scannedBoardNavigation) ordinalForTask(status board.Status, id string) (int, bool) {
+	return taskIndexFound(n.board, status, id)
+}
+
+func (n scannedBoardNavigation) taskByID(id string) (board.Task, bool) {
+	for _, task := range n.board.Tasks {
+		if task.ID == id {
+			return task, true
+		}
+	}
+	return board.Task{}, false
+}
+
 func (s *boardViewState) handleKey(key string, current board.Board) boardAction {
+	return s.handleNavigationKey(key, scannedBoardNavigation{current})
+}
+
+func (s *boardViewState) handleProjectionKey(key string, current *renderProjection) boardAction {
+	return s.handleNavigationKey(key, current)
+}
+
+func (s *boardViewState) handleNavigationKey(key string, current boardNavigation) boardAction {
+	s.restoreColumnCursorFrom(current, s.column)
 	switch key {
 	case "c":
 		s.showCancelled = !s.showCancelled
 		if !s.showCancelled && s.column == len(boardStatuses)-1 {
 			s.column--
 		}
-		s.clampRow(current)
-		s.manualScroll[s.column] = false
+		s.clampRowFrom(current)
 		return boardToggledCancelled
 	case "left", "h", "shift+tab":
-		s.moveColumn(-1, current)
-		s.manualScroll[s.column] = false
+		s.moveColumnFrom(-1, current)
 		return boardChanged
 	case "right", "l", "tab":
-		s.moveColumn(1, current)
-		s.manualScroll[s.column] = false
+		s.moveColumnFrom(1, current)
 		return boardChanged
 	case "up", "k":
 		if s.rows[s.column] > 0 {
 			s.rows[s.column]--
 		}
+		s.setCursorAtFrom(current, s.column, s.rows[s.column])
 		s.manualScroll[s.column] = false
 		return boardChanged
 	case "down", "j":
-		count := taskCount(current, boardStatuses[s.column])
+		count := current.statusCount(boardStatuses[s.column])
 		if s.rows[s.column]+1 < count {
 			s.rows[s.column]++
 		}
+		s.setCursorAtFrom(current, s.column, s.rows[s.column])
 		s.manualScroll[s.column] = false
 		return boardChanged
 	case "1", "2", "3", "4":
 		at := int(key[0] - '1')
 		if at < len(s.visibleStatuses()) {
 			s.column = at
-			s.clampRow(current)
-			s.manualScroll[s.column] = false
+			s.clampRowFrom(current)
 			return boardChanged
 		}
 	}
@@ -169,60 +228,89 @@ func (s *boardViewState) handleKey(key string, current board.Board) boardAction 
 }
 
 func (s *boardViewState) moveColumn(delta int, current board.Board) {
+	s.moveColumnFrom(delta, scannedBoardNavigation{current})
+}
+
+func (s *boardViewState) moveColumnFrom(delta int, current boardNavigation) {
 	count := len(s.visibleStatuses())
 	s.column = (s.column + delta + count) % count
-	s.clampRow(current)
+	s.clampRowFrom(current)
 }
 
 func (s *boardViewState) clampRow(current board.Board) {
-	count := taskCount(current, boardStatuses[s.column])
-	if count == 0 {
-		s.rows[s.column] = 0
-	} else if s.rows[s.column] >= count {
-		s.rows[s.column] = count - 1
-	}
+	s.clampRowFrom(scannedBoardNavigation{current})
+}
+
+func (s *boardViewState) clampRowFrom(current boardNavigation) {
+	s.restoreColumnCursorFrom(current, s.column)
 }
 
 func (s *boardViewState) focusColumn(status board.Status, current board.Board) {
+	s.focusColumnFrom(status, scannedBoardNavigation{current})
+}
+
+func (s *boardViewState) focusProjectionColumn(status board.Status, current *renderProjection) {
+	s.focusColumnFrom(status, current)
+}
+
+func (s *boardViewState) focusColumnFrom(status board.Status, current boardNavigation) {
 	for i, candidate := range s.visibleStatuses() {
 		if candidate == status {
 			s.column = i
-			s.clampRow(current)
-			s.manualScroll[s.column] = false
+			s.clampRowFrom(current)
 			return
 		}
 	}
 }
 
 func (s *boardViewState) focusTask(current board.Board, id string) bool {
-	for _, task := range current.Tasks {
-		if task.ID != id {
+	return s.focusTaskWithScroll(current, id, true)
+}
+
+func (s *boardViewState) focusTaskWithScroll(current board.Board, id string, resetScroll bool) bool {
+	return s.focusTaskWithScrollFrom(scannedBoardNavigation{current}, id, resetScroll)
+}
+
+func (s *boardViewState) focusProjectionTask(current *renderProjection, id string) bool {
+	return s.focusTaskWithScrollFrom(current, id, true)
+}
+
+func (s *boardViewState) focusTaskWithScrollFrom(current boardNavigation, id string, resetScroll bool) bool {
+	task, ok := current.taskByID(id)
+	if !ok || task.Status == board.StatusCancelled && !s.showCancelled {
+		return false
+	}
+	for i, status := range boardStatuses {
+		if status != task.Status {
 			continue
 		}
-		if task.Status == board.StatusCancelled && !s.showCancelled {
+		at, ok := current.ordinalForTask(task.Status, id)
+		if !ok {
 			return false
 		}
-		for i, status := range boardStatuses {
-			if status == task.Status {
-				s.column = i
-				s.rows[i] = taskIndex(current, task.Status, id)
-				s.manualScroll[i] = false
-				return true
-			}
+		s.column = i
+		s.rows[i] = at
+		s.cursors[i] = boardTaskAnchor{TaskID: id, IndexHint: at}
+		if resetScroll {
+			s.scrollAnchors[i] = boardTaskAnchor{TaskID: id, IndexHint: at}
+			s.manualScroll[i] = false
 		}
+		return true
 	}
 	return false
 }
 
 func (s *boardViewState) adoptBoard(previous, current board.Board) {
 	selected, hadSelection := s.selectedTask(previous)
+	for column, status := range boardStatuses {
+		s.captureColumnAnchors(previous, column, status)
+		s.restoreColumnCursor(current, column)
+		s.restoreColumnScroll(current, column)
+	}
 	if hadSelection {
 		for _, task := range current.Tasks {
-			if task.ID == selected.ID {
-				if s.focusTask(current, task.ID) {
-					return
-				}
-				break
+			if task.ID == selected.ID && s.focusTaskWithScroll(current, selected.ID, task.Status != selected.Status) {
+				return
 			}
 		}
 	}
@@ -232,26 +320,128 @@ func (s *boardViewState) adoptBoard(previous, current board.Board) {
 // normalizeSelection keeps refresh focus on a selectable visible card when
 // one exists. Ordinary column navigation may still focus an empty column.
 func (s *boardViewState) normalizeSelection(current board.Board) {
+	s.normalizeSelectionFrom(scannedBoardNavigation{current})
+}
+
+func (s *boardViewState) normalizeSelectionFrom(current boardNavigation) {
 	visible := s.visibleStatuses()
-	if taskCount(current, boardStatuses[s.column]) > 0 {
-		s.clampRow(current)
+	if current.statusCount(boardStatuses[s.column]) > 0 {
+		s.clampRowFrom(current)
 		return
 	}
 	for offset := 1; offset < len(visible); offset++ {
 		column := (s.column + offset) % len(visible)
-		if taskCount(current, visible[column]) == 0 {
+		if current.statusCount(visible[column]) == 0 {
 			continue
 		}
 		s.column = column
-		s.clampRow(current)
+		s.clampRowFrom(current)
 		return
 	}
-	s.clampRow(current)
+	s.clampRowFrom(current)
 }
 
 func (s boardViewState) selectedTask(current board.Board) (board.Task, bool) {
+	return s.selectedTaskFrom(scannedBoardNavigation{current})
+}
+
+func (s boardViewState) selectedProjectionTask(current *renderProjection) (board.Task, bool) {
+	return s.selectedTaskFrom(current)
+}
+
+func (s boardViewState) selectedTaskFrom(current boardNavigation) (board.Task, bool) {
 	status := boardStatuses[s.column]
-	want := s.rows[s.column]
+	if id := s.cursors[s.column].TaskID; id != "" {
+		if at, ok := current.ordinalForTask(status, id); ok && at == s.rows[s.column] {
+			return current.taskAtStatus(status, at)
+		}
+	}
+	return current.taskAtStatus(status, s.rows[s.column])
+}
+
+func (s *boardViewState) captureColumnAnchors(current board.Board, column int, status board.Status) {
+	if at, ok := taskIndexFound(current, status, s.cursors[column].TaskID); ok {
+		s.rows[column] = at
+		s.cursors[column].IndexHint = at
+	} else if task, ok := taskAtStatusIndex(current, status, s.rows[column]); ok {
+		s.cursors[column] = boardTaskAnchor{TaskID: task.ID, IndexHint: s.rows[column]}
+	}
+	if at, ok := taskIndexFound(current, status, s.scrollAnchors[column].TaskID); ok {
+		s.scrollAnchors[column].IndexHint = at
+	}
+}
+
+func (s *boardViewState) restoreColumnCursor(current board.Board, column int) {
+	s.restoreColumnCursorFrom(scannedBoardNavigation{current}, column)
+}
+
+func (s *boardViewState) restoreColumnCursorFrom(current boardNavigation, column int) {
+	status := boardStatuses[column]
+	if at, ok := current.ordinalForTask(status, s.cursors[column].TaskID); ok {
+		s.rows[column] = at
+		s.cursors[column].IndexHint = at
+		return
+	}
+	count := current.statusCount(status)
+	if count == 0 {
+		s.rows[column] = 0
+		return
+	}
+	hint := s.cursors[column].IndexHint
+	if s.cursors[column].TaskID == "" {
+		hint = s.rows[column]
+	}
+	s.setCursorAtFrom(current, column, min(max(hint, 0), count-1))
+}
+
+func (s *boardViewState) restoreColumnScroll(current board.Board, column int) {
+	anchor := &s.scrollAnchors[column]
+	status := boardStatuses[column]
+	if at, ok := taskIndexFound(current, status, anchor.TaskID); ok {
+		anchor.IndexHint = at
+		return
+	}
+	count := taskCount(current, status)
+	if count == 0 || anchor.TaskID == "" {
+		return
+	}
+	at := min(max(anchor.IndexHint, 0), count-1)
+	if task, ok := taskAtStatusIndex(current, status, at); ok {
+		*anchor = boardTaskAnchor{TaskID: task.ID, IndexHint: at, IntraRow: anchor.IntraRow}
+	}
+}
+
+func (s *boardViewState) setCursorAt(current board.Board, column, row int) {
+	s.setCursorAtFrom(scannedBoardNavigation{current}, column, row)
+}
+
+func (s *boardViewState) setCursorAtFrom(current boardNavigation, column, row int) {
+	status := boardStatuses[column]
+	task, ok := current.taskAtStatus(status, row)
+	if !ok {
+		s.rows[column] = 0
+		return
+	}
+	s.rows[column] = row
+	s.cursors[column] = boardTaskAnchor{TaskID: task.ID, IndexHint: row}
+}
+
+func (s boardViewState) selectedIndex(tasks []board.Task, status board.Status) int {
+	column := statusIndex(status)
+	if id := s.cursors[column].TaskID; id != "" {
+		for i, task := range tasks {
+			if task.ID == id && i == s.rows[column] {
+				return i
+			}
+		}
+	}
+	if len(tasks) == 0 {
+		return 0
+	}
+	return min(max(s.rows[column], 0), len(tasks)-1)
+}
+
+func taskAtStatusIndex(current board.Board, status board.Status, want int) (board.Task, bool) {
 	at := 0
 	for _, task := range current.Tasks {
 		if task.Status != status {
@@ -265,9 +455,58 @@ func (s boardViewState) selectedTask(current board.Board) (board.Task, bool) {
 	return board.Task{}, false
 }
 
+func taskIndexFound(current board.Board, status board.Status, id string) (int, bool) {
+	if id == "" {
+		return 0, false
+	}
+	index := 0
+	for _, task := range current.Tasks {
+		if task.Status != status {
+			continue
+		}
+		if task.ID == id {
+			return index, true
+		}
+		index++
+	}
+	return 0, false
+}
+
 // selectedTask is the narrow handoff used by the card-detail overlay.
 func (m Model) selectedTask() (board.Task, bool) {
+	if projection := m.currentProjection(); projection != nil {
+		selected, ok := m.boardView.selectedProjectionTask(projection)
+		if !ok {
+			return board.Task{}, false
+		}
+		if current, found := projection.sourceTaskByID(m.board, selected.ID); found {
+			return current, true
+		}
+		return selected, true
+	}
 	return m.boardView.selectedTask(m.filteredBoard())
+}
+
+func (m *Model) handleBoardNavigationKey(key string) boardAction {
+	if projection := m.currentProjection(); projection != nil {
+		return m.boardView.handleProjectionKey(key, projection)
+	}
+	return m.boardView.handleKey(key, m.filteredBoard())
+}
+
+func (m *Model) focusBoardTask(id string) bool {
+	if projection := m.currentProjection(); projection != nil {
+		return m.boardView.focusProjectionTask(projection, id)
+	}
+	return m.boardView.focusTask(m.filteredBoard(), id)
+}
+
+func (m *Model) focusBoardColumn(status board.Status) {
+	if projection := m.currentProjection(); projection != nil {
+		m.boardView.focusProjectionColumn(status, projection)
+		return
+	}
+	m.boardView.focusColumn(status, m.filteredBoard())
 }
 
 func taskCount(current board.Board, status board.Status) int {
@@ -654,7 +893,13 @@ func (m Model) renderFilterBar(width int) (string, []boardHit) {
 	}
 	appendPart(0, "[project: "+sanitizeTerminal(m.projects.label())+"]", projectStyle, boardHitProject, "")
 	if m.filter.active() {
-		count := fmt.Sprintf("%d of %d cards", len(m.filteredBoard().Tasks), len(m.projectBoard().Tasks))
+		var visible, projected int
+		if projection := m.currentProjection(); projection != nil {
+			visible, projected = len(projection.board.Tasks), projection.projected
+		} else {
+			visible, projected = len(m.filteredBoard().Tasks), len(m.projectBoard().Tasks)
+		}
+		count := fmt.Sprintf("%d of %d cards", visible, projected)
 		appendPart(1, count, styles.On(theme.FgMuted, theme.Canvas), boardHitDefault, "")
 	}
 	for _, tag := range labels {
@@ -780,6 +1025,12 @@ func (m Model) renderBoardColumn(status board.Status, width, height int) rendere
 // to. Depth is the shade step from the band to the panel body to the cards;
 // there is no border anywhere in it (spec section 2.2).
 func (m Model) renderBoardColumnAt(status board.Status, width, height int, density theme.Density) renderedColumn {
+	if m.renderingGeometry != nil && m.renderingProjection != nil {
+		column := m.renderingGeometry.columns[statusIndex(status)]
+		if column.status == status && column.width == width && column.panelHeight == height && column.density == density {
+			return m.renderVirtualColumn(m.renderingProjection, column)
+		}
+	}
 	styles := m.themeStyles()
 	metrics := styles.Metrics
 	index := statusIndex(status)
@@ -829,12 +1080,18 @@ func (m Model) renderBoardColumnAt(status board.Status, width, height int, densi
 	cardLines, owners, spans := m.renderTaskLines(tasks, status, bodyWidth, density)
 
 	maxScroll := max(len(cardLines)-contentHeight, 0)
-	start := visibleCardStart(cardLines, owners, m.boardView.rows[index], contentHeight)
+	start := visibleCardStart(cardLines, owners, m.boardView.selectedIndex(tasks, status), contentHeight)
 	if m.boardView.manualScroll[index] {
-		start = min(max(m.boardView.scrolls[index], 0), maxScroll)
+		if anchor := m.boardView.scrollAnchors[index]; anchor.TaskID != "" {
+			start = scrollOffsetForAnchor(owners, anchor, maxScroll)
+		} else {
+			start = min(max(m.boardView.scrolls[index], 0), maxScroll)
+		}
 	}
 	hits[0].scroll = start
 	hits[0].maxScroll = maxScroll
+	hits[0].scrollUp = scrollAnchorAt(owners, min(max(start-3, 0), maxScroll))
+	hits[0].scrollDown = scrollAnchorAt(owners, min(max(start+3, 0), maxScroll))
 	end := visibleCardEnd(owners, start, contentHeight)
 
 	rail := m.columnScrollbar(styles, railed, index, stack, contentHeight, start)
@@ -1048,54 +1305,160 @@ func visibleCardEnd(owners []string, start, height int) int {
 // and the render pass go through it, so the height the column packed against is
 // the height the card draws (spec section 2.5 as issue #243 re-cut it).
 func (m Model) cardOptsFor(styles *theme.Styles, tasks []board.Task, status board.Status, width int, density theme.Density) ([]widget.CardOpts, [][]string) {
-	index := statusIndex(status)
-	focused := m.boardView.column == index
-	selected := m.boardView.rows[index]
-	frameHeight := max(m.height, 8)
-	titleLines := styles.Metrics.TitleRows(frameHeight, density)
-	descLines := styles.Metrics.DescLines(frameHeight, density)
-	labelRows := styles.Metrics.LabelRows(frameHeight, density)
-	padRows := styles.Metrics.InnerPadRows(frameHeight, density)
-	metas := make([][]string, len(tasks))
-	for i, task := range tasks {
-		metas[i] = m.cardMeta(styles, task,
-			styles.Surface(focused && i == selected, density.Compact() && i%2 == 1), density)
-	}
-	depth := metaDepth(metas, styles.Metrics.CardInner(width, density))
+	depth := m.cardMetaDepth(tasks, width, density)
 	opts := make([]widget.CardOpts, 0, len(tasks))
 	orders := make([][]string, 0, len(tasks))
-	for i, task := range tasks {
-		// The project pill leads the label row: the row is rendered in survival
-		// order, so the card's mandatory scope is the label that stays on it
-		// when the row runs out of width (spec section 3.5).
-		ordered := project.Lead(task.Tags)
-		tags := make([]string, 0, len(ordered))
-		for _, tag := range ordered {
-			tags = append(tags, sanitizeTerminal(tag))
-		}
+	for i := range tasks {
+		card, ordered := m.cardOptsAt(styles, tasks, status, width, density, i, depth)
+		opts = append(opts, card)
 		orders = append(orders, ordered)
-		opts = append(opts, widget.CardOpts{
-			Title:      sanitizeTerminal(task.Title),
-			Emoji:      sanitizeTerminal(task.Emoji),
-			Seq:        seqLabel(task),
-			Desc:       sanitizeTerminalText(task.Desc),
-			Meta:       metas[i][:depth],
-			Labels:     tags,
-			Priority:   task.Prio,
-			Blocked:    task.Blocked,
-			Selected:   focused && i == selected,
-			Alt:        density.Compact() && i%2 == 1,
-			Width:      width,
-			TitleLines: titleLines,
-			DescLines:  descLines,
-			LabelRows:  labelRows,
-			PadRows:    padRows,
-			Density:    density,
-			Hovered:    m.pointerState.IsHovered(boardCardControlID(task.ID)),
-			HoverTag:   m.hoveredCardTag(task.ID, ordered),
-		})
 	}
 	return opts, orders
+}
+
+// cardOptsAt builds the render options for one card. The cold renderer calls
+// it for every task; the retained renderer and geometry worker call it only
+// for the bounded records they actually need. Keeping one builder is the
+// differential contract -- virtualizing a second approximation would be fast
+// right up to the first wrong pointer row.
+func (m Model) cardOptsAt(
+	styles *theme.Styles,
+	tasks []board.Task,
+	status board.Status,
+	width int,
+	density theme.Density,
+	ordinal int,
+	depth int,
+) (widget.CardOpts, []string) {
+	if ordinal < 0 || ordinal >= len(tasks) {
+		return widget.CardOpts{}, nil
+	}
+	focused := m.boardView.column == statusIndex(status)
+	selected := m.boardView.selectedIndex(tasks, status)
+	return m.cardOptsForTask(styles, tasks[ordinal], width, density, ordinal, depth,
+		focused && ordinal == selected)
+}
+
+func (m Model) cardOptsForTask(
+	styles *theme.Styles,
+	task board.Task,
+	width int,
+	density theme.Density,
+	ordinal int,
+	depth int,
+	selected bool,
+) (widget.CardOpts, []string) {
+	frameHeight := max(m.height, 8)
+	surface := styles.Surface(selected, density.Compact() && ordinal%2 == 1)
+	meta := m.cardMeta(styles, task, surface, density)
+	depth = min(max(depth, 1), len(meta))
+
+	// The project pill leads the label row: the row is rendered in survival
+	// order, so the card's mandatory scope is the label that stays on it when
+	// the row runs out of width (spec section 3.5).
+	ordered := project.Lead(task.Tags)
+	tags := make([]string, 0, len(ordered))
+	for _, tag := range ordered {
+		tags = append(tags, sanitizeTerminal(tag))
+	}
+	return widget.CardOpts{
+		Title:      sanitizeTerminal(task.Title),
+		Emoji:      sanitizeTerminal(task.Emoji),
+		Seq:        seqLabel(task),
+		Desc:       sanitizeTerminalText(task.Desc),
+		Meta:       meta[:depth],
+		Labels:     tags,
+		Priority:   task.Prio,
+		Blocked:    task.Blocked,
+		Selected:   selected,
+		Alt:        density.Compact() && ordinal%2 == 1,
+		Width:      width,
+		TitleLines: styles.Metrics.TitleRows(frameHeight, density),
+		DescLines:  styles.Metrics.DescLines(frameHeight, density),
+		LabelRows:  styles.Metrics.LabelRows(frameHeight, density),
+		PadRows:    styles.Metrics.InnerPadRows(frameHeight, density),
+		Density:    density,
+		Hovered:    m.pointerState.IsHovered(boardCardControlID(task.ID)),
+		HoverTag:   m.hoveredCardTag(task.ID, ordered),
+	}, ordered
+}
+
+// cardMetaDepth resolves the column-wide survival depth without styling every
+// offscreen card. ANSI attributes do not occupy cells; the widths below are
+// the plain anatomy costs of the same widgets cardMeta later draws for the
+// bounded render window.
+func (m Model) cardMetaDepth(tasks []board.Task, width int, density theme.Density) int {
+	return m.cardMetaDepthFor(width, density, len(tasks), func(index int) board.Task { return tasks[index] })
+}
+
+func (m Model) cardMetaDepthFor(
+	width int,
+	density theme.Density,
+	count int,
+	taskAt func(int) board.Task,
+) int {
+	inner := m.themeStyles().Metrics.CardInner(width, density)
+	depth := cardMetaSlots
+	for depth > 1 {
+		fits := true
+		for index := 0; index < count; index++ {
+			task := taskAt(index)
+			if metaWidthPrefix(m.cardMetaWidths(task, density), depth) > inner {
+				fits = false
+				break
+			}
+		}
+		if fits {
+			break
+		}
+		depth--
+	}
+	return depth
+}
+
+func (m Model) cardMetaWidths(task board.Task, density theme.Density) [cardMetaSlots]int {
+	styles := m.themeStyles()
+	flat := density.Compact()
+	pad := 2
+	if flat {
+		pad = 0
+	}
+	widths := [cardMetaSlots]int{
+		1 + pad,
+		ansi.StringWidth(ageChip(task, m.renderedAt)),
+		0,
+		0,
+	}
+	if task.Due != "" {
+		label, overdue := dueChip(sanitizeTerminal(task.Due), m.renderedAt)
+		widths[2] = ansi.StringWidth(label)
+		if overdue {
+			widths[2] = ansi.StringWidth(styles.Glyph.MarkDue+label) + pad
+		}
+	}
+	effort := sanitizeTerminal(task.Effort)
+	if effort != "" {
+		if _, onScale := theme.EffortSlot(effort); onScale {
+			widths[3] = ansi.StringWidth(effort) + pad
+		} else {
+			widths[3] = ansi.StringWidth(styles.Glyph.Diamond + " " + effort)
+		}
+	}
+	return widths
+}
+
+func metaWidthPrefix(widths [cardMetaSlots]int, depth int) int {
+	width := 0
+	for _, entry := range widths[:min(max(depth, 0), len(widths))] {
+		if entry == 0 {
+			continue
+		}
+		if width > 0 {
+			width++
+		}
+		width += entry
+	}
+	return width
 }
 
 func (m Model) renderTaskLines(tasks []board.Task, status board.Status, width int, density theme.Density) ([]string, []string, [][]labelSpan) {
@@ -1332,6 +1695,95 @@ func visibleCardStart(lines, owners []string, selected, height int) int {
 	return min(max(start, 0), len(lines)-height)
 }
 
+func scrollAnchorAt(owners []string, offset int) boardTaskAnchor {
+	if len(owners) == 0 {
+		return boardTaskAnchor{}
+	}
+	offset = min(max(offset, 0), len(owners)-1)
+	ownerRow := offset
+	for ownerRow >= 0 && owners[ownerRow] == "" {
+		ownerRow--
+	}
+	if ownerRow < 0 {
+		ownerRow = offset
+		for ownerRow < len(owners) && owners[ownerRow] == "" {
+			ownerRow++
+		}
+		if ownerRow == len(owners) {
+			return boardTaskAnchor{}
+		}
+		offset = ownerRow
+	}
+	id := owners[ownerRow]
+	first := ownerRow
+	for first > 0 && owners[first-1] == id {
+		first--
+	}
+	hint := 0
+	last := ""
+	for _, owner := range owners[:first] {
+		if owner != "" && owner != last {
+			hint++
+		}
+		last = owner
+	}
+	return boardTaskAnchor{TaskID: id, IndexHint: hint, IntraRow: offset - first}
+}
+
+func scrollOffsetForAnchor(owners []string, anchor boardTaskAnchor, maxScroll int) int {
+	first := -1
+	for row, owner := range owners {
+		if owner == anchor.TaskID {
+			first = row
+			break
+		}
+	}
+	if first < 0 {
+		first, end, ok := scrollOrdinalSpan(owners, anchor.IndexHint)
+		if !ok {
+			return 0
+		}
+		intra := min(max(anchor.IntraRow, 0), end-first-1)
+		return min(max(first+intra, 0), maxScroll)
+	}
+	end := first + 1
+	for end < len(owners) && (owners[end] == anchor.TaskID || owners[end] == "") {
+		end++
+	}
+	intra := min(max(anchor.IntraRow, 0), end-first-1)
+	return min(max(first+intra, 0), maxScroll)
+}
+
+// scrollOrdinalSpan resolves a task ordinal through the current terminal-row
+// geometry. The ordinal is clamped so a removed task chooses its successor, or
+// its predecessor when it was the final task in the column. The span includes
+// trailing separator rows because scrollAnchorAt assigns those rows to the
+// preceding task.
+func scrollOrdinalSpan(owners []string, ordinal int) (first, end int, ok bool) {
+	ordinal = max(ordinal, 0)
+	candidate, lastStart, current := -1, -1, -1
+	for row, owner := range owners {
+		if owner == "" || (row > 0 && owners[row-1] == owner) {
+			continue
+		}
+		if candidate >= 0 {
+			return candidate, row, true
+		}
+		current++
+		lastStart = row
+		if current == ordinal {
+			candidate = row
+		}
+	}
+	if candidate >= 0 {
+		return candidate, len(owners), true
+	}
+	if lastStart < 0 {
+		return 0, 0, false
+	}
+	return lastStart, len(owners), true
+}
+
 // joinColumns lays the panels out side by side with a Canvas gutter and the
 // page margin of spec section 2.5, and moves every hit region onto the frame.
 func joinColumns(styles *theme.Styles, columns []renderedColumn, layout boardLayout, width int) ([]string, []boardHit) {
@@ -1371,7 +1823,7 @@ func joinColumns(styles *theme.Styles, columns []renderedColumn, layout boardLay
 }
 
 func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.Cmd {
-	pointerActive := len(active) > 0 && active[0]
+	_ = active // capture is authoritative in Model, not in a rendered closure.
 	return func(message tea.MouseMsg) tea.Cmd {
 		mouse := message.Mouse()
 		if _, wheel := message.(tea.MouseWheelMsg); wheel {
@@ -1394,13 +1846,32 @@ func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.C
 				if offset == hit.scroll {
 					return nil
 				}
-				return func() tea.Msg { return boardColumnScrolledMsg{status: hit.status, offset: offset} }
+				anchor := hit.scrollDown
+				if delta < 0 {
+					anchor = hit.scrollUp
+				}
+				return func() tea.Msg {
+					return boardColumnScrolledMsg{status: hit.status, from: hit.scroll,
+						offset: offset, anchor: anchor, max: hit.maxScroll}
+				}
 			}
 			return nil
 		}
 		if _, release := message.(tea.MouseReleaseMsg); release {
-			if mouse.Button == tea.MouseLeft || (mouse.Button == tea.MouseNone && pointerActive) {
-				return func() tea.Msg { return boardPointerUpMsg{} }
+			if mouse.Button == tea.MouseLeft || mouse.Button == tea.MouseNone {
+				result := boardPointerUpMsg{resolved: true}
+				for index := len(hits) - 1; index >= 0; index-- {
+					hit := hits[index]
+					if hit.kind != boardHitDefault || mouse.X < hit.x0 || mouse.X >= hit.x1 ||
+						mouse.Y < hit.y0 || mouse.Y >= hit.y1 {
+						continue
+					}
+					result.valid = true
+					result.status = hit.status
+					result.beforeTaskID = hit.taskID
+					break
+				}
+				return func() tea.Msg { return result }
 			}
 			return nil
 		}
@@ -1454,8 +1925,13 @@ func boardMouseHandler(hits []boardHit, active ...bool) func(tea.MouseMsg) tea.C
 }
 
 func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.State) func(tea.MouseMsg) tea.Cmd {
+	return boardPointerSurface(hits, active, state).Pointer
+}
+
+func boardPointerSurface(hits []boardHit, active bool, state pointer.State) pointer.Surface {
 	base := boardMouseHandler(hits, active)
 	var controls, hovers pointer.Map
+	topology := pointer.Topology{}
 	gesture := state.Active()
 	for _, hit := range hits {
 		rect := pointer.Rect{X0: hit.x0, Y0: hit.y0, X1: hit.x1, Y1: hit.y1}
@@ -1479,6 +1955,20 @@ func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.S
 		controls.AddControl(id, rect, deliver)
 		hovers.AddControl(id, rect, deliver)
 	}
+	topology = controls.Topology().Merge(hovers.Topology())
+	for _, hit := range hits {
+		if hit.kind != boardHitDefault || hit.taskID != "" || hit.maxScroll <= 0 {
+			continue
+		}
+		current := hit
+		intent := pointer.WheelIntent{Key: "board:" + string(current.status), Current: current.scroll,
+			Target: current.scroll, Min: 0, Max: current.maxScroll}
+		topology = topology.WithWheel(intent, func(target int) tea.Msg {
+			target = min(max(target, 0), current.maxScroll)
+			return boardColumnScrolledMsg{status: current.status, from: current.scroll,
+				offset: target, max: current.maxScroll}
+		})
+	}
 	controlHandler := controls.Handler()
 	hoverHandler := hovers.Handler()
 	controlHit := func(mouse tea.Mouse) bool {
@@ -1490,9 +1980,16 @@ func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.S
 		}
 		return false
 	}
-	return func(message tea.MouseMsg) tea.Cmd {
+	handler := func(message tea.MouseMsg) tea.Cmd {
 		mouse := message.Mouse()
 		switch message.(type) {
+		case tea.MouseWheelMsg:
+			command := base(message)
+			if gesture {
+				gesture = false
+				return pointer.CancelWith(command)
+			}
+			return command
 		case tea.MouseClickMsg:
 			if controlHit(mouse) {
 				gesture = true
@@ -1520,6 +2017,7 @@ func boardMouseHandlerWithFeedback(hits []boardHit, active bool, state pointer.S
 		}
 		return base(message)
 	}
+	return pointer.Surface{Pointer: handler, Topology: topology}
 }
 
 // boardCardHoverID is the hover identity of one card body row, empty for a hit
@@ -1598,6 +2096,12 @@ func ageChip(task board.Task, now time.Time) string {
 	reference := task.CreatedAt
 	if task.Status == board.StatusDoing {
 		reference = task.MovedAt
+	}
+	if reference.IsZero() {
+		if task.Status == board.StatusDoing {
+			return "1h"
+		}
+		return "new"
 	}
 	elapsed := now.Sub(reference)
 	if elapsed < 0 {

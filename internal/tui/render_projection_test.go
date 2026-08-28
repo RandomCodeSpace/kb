@@ -1,0 +1,353 @@
+package tui
+
+import (
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+	"unsafe"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/RandomCodeSpace/kb/internal/board"
+)
+
+var filterProjectionMatchSink bool
+
+func projectionFixture() board.Board {
+	return board.Board{Title: "Projection", Tasks: []board.Task{
+		{ID: "todo-alpha", Title: "Alpha API", Desc: "Unicode İ", Status: board.StatusTodo, Tags: []string{"project::alpha", "backend"}, Checks: []board.Check{{Text: "ship", Done: true}}},
+		{ID: "doing-beta", Title: "Beta UI", Desc: "layout", Status: board.StatusDoing, Tags: []string{"project::beta", "frontend"}},
+		{ID: "done-alpha", Title: "Done", Desc: "backend migration", Status: board.StatusDone, Tags: []string{"project::alpha", "database"}},
+		{ID: "cancelled", Title: "Retired", Status: board.StatusCancelled, Tags: []string{"ops"}},
+	}}
+}
+
+func TestRenderProjectionMatchesLegacyProjectAndFilterSemantics(t *testing.T) {
+	tests := []struct {
+		name       string
+		project    projectSwitcher
+		filterText string
+		filterTags []string
+	}{
+		{name: "all"},
+		{name: "project", project: projectSwitcher{name: "alpha"}},
+		{name: "text", filterText: "BACKEND"},
+		{name: "tag", filterTags: []string{"frontend"}},
+		{name: "composed", project: projectSwitcher{name: "alpha"}, filterText: "migration", filterTags: []string{"database"}},
+		{name: "empty", filterText: "absent"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model := Model{board: projectionFixture(), filter: newBoardFilterState(), projects: test.project}
+			model.filter.restore(boardFilter{Text: test.filterText, Tags: test.filterTags})
+			want := model.filter.project(model.projectBoard())
+			projection, _, _ := (renderProjection{}).rebuild(model)
+			if !reflect.DeepEqual(projection.board, want) {
+				t.Fatalf("projection = %#v, want legacy %#v", projection.board, want)
+			}
+			for status, indexes := range projection.statuses {
+				for _, index := range indexes {
+					if index < 0 || index >= len(projection.board.Tasks) || projection.board.Tasks[index].Status != boardStatuses[status] {
+						t.Fatalf("status %q index %d points outside its exact column", boardStatuses[status], index)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRenderProjectionSnapshotsNestedTaskData(t *testing.T) {
+	model := Model{board: projectionFixture(), filter: newBoardFilterState()}
+	projection, _, _ := (renderProjection{}).rebuild(model)
+
+	model.board.Tasks[0].Tags[0] = "project::mutated"
+	model.board.Tasks[0].Checks[0].Text = "mutated"
+	if got := projection.tasks[0].task.Tags[0]; got != "project::alpha" {
+		t.Fatalf("published tag aliased mutable source: %q", got)
+	}
+	if got := projection.tasks[0].task.Checks[0].Text; got != "ship" {
+		t.Fatalf("published check aliased mutable source: %q", got)
+	}
+	if projection.matchesModel(model) {
+		t.Fatal("mutated source incorrectly matched the installed immutable projection")
+	}
+}
+
+func TestSearchNormalizationDoesNotReuseDisplaySanitization(t *testing.T) {
+	raw := "Alpha\x1b[31m"
+	search := normalizeSearchValue(raw)
+	display := normalizeSearchValue(sanitizeTerminal(raw))
+	if search == display || !strings.Contains(search, "\x1b") || strings.Contains(display, "\x1b") {
+		t.Fatalf("search=%q display=%q; search normalization was coupled to terminal sanitization", search, display)
+	}
+}
+
+func TestRenderPlanRetainsOnlyTheCurrentProjection(t *testing.T) {
+	model := Model{board: projectionFixture(), filter: newBoardFilterState()}
+	projection, _, _ := (renderProjection{}).rebuild(model)
+	model.filter.restore(boardFilter{Text: "beta"})
+	projection, _, changed := projection.rebuild(model)
+	if !changed || len(projection.board.Tasks) != 1 || projection.board.Tasks[0].ID != "doing-beta" {
+		t.Fatalf("current projection = %#v, changed=%v", projection.board.Tasks, changed)
+	}
+	if len(projection.tasks) != len(model.board.Tasks) {
+		t.Fatalf("task derivations = %d, want one current source snapshot of %d", len(projection.tasks), len(model.board.Tasks))
+	}
+}
+
+func TestSameContentReloadRebindsProjectionSourceForOrdinaryInput(t *testing.T) {
+	model := performanceModel(120, "", performanceWidth, performanceHeight)
+	reloaded := cloneBoard(model.board)
+	if unsafe.SliceData(reloaded.Tasks) == unsafe.SliceData(model.board.Tasks) {
+		t.Fatal("test reload reused the source task backing array")
+	}
+	beforeReload := model.RenderPlanStats()
+	updated, _ := model.Update(boardLoadedMsg{board: reloaded})
+	model = updated.(Model)
+	afterReload := model.RenderPlanStats()
+	if afterReload.SourceTaskComparisons != beforeReload.SourceTaskComparisons+uint64(len(reloaded.Tasks)) {
+		t.Fatalf("reload source comparisons=%d, want one proof over %d tasks",
+			afterReload.SourceTaskComparisons-beforeReload.SourceTaskComparisons, len(reloaded.Tasks))
+	}
+	if !model.current.projection.matchesSourceIdentity(model.board) {
+		t.Fatal("semantically identical reload did not rebind projection source identity")
+	}
+	beforeInput := model.RenderPlanStats()
+	for index := 0; index < 8; index++ {
+		code := tea.KeyDown
+		if index%2 == 1 {
+			code = tea.KeyUp
+		}
+		updated, _ = model.Update(tea.KeyPressMsg{Code: code})
+		model = updated.(Model)
+	}
+	afterInput := model.RenderPlanStats()
+	if afterInput.SourceTaskComparisons != beforeInput.SourceTaskComparisons {
+		t.Fatalf("ordinary inputs rescanned %d tasks after source rebind",
+			afterInput.SourceTaskComparisons-beforeInput.SourceTaskComparisons)
+	}
+}
+
+func TestRenderProjectionReconcilesSourceByTaskIdentity(t *testing.T) {
+	model := performanceModel(1000, "keep17", performanceWidth, performanceHeight)
+	current := model.current.projection
+	unchangedTags := unsafe.SliceData(current.tasks[0].task.Tags)
+
+	nextBoard := cloneBoard(model.board)
+	nextBoard.Tasks = append(nextBoard.Tasks, board.Task{
+		ID: "nonmatching", Title: "ordinary external insert", Desc: "outside active query",
+		Status: board.StatusTodo, Tags: []string{"performance", "dev"},
+	})
+	model.board = nextBoard
+	reconciled, delta := current.reconcileSource(model)
+	if !delta.SourceChanged || !delta.CurrentChanged || delta.DerivedTasks != 1 {
+		t.Fatalf("nonmatching delta = %+v", delta)
+	}
+	if reconciled.generation != current.generation+1 {
+		t.Fatalf("metadata-changing projection generation = %d, want %d", reconciled.generation, current.generation+1)
+	}
+	if unsafe.SliceData(reconciled.tasks[0].task.Tags) != unchangedTags {
+		t.Fatal("unchanged task derivation was rebuilt")
+	}
+	if !reconciled.matchesSourceIdentity(nextBoard) || len(reconciled.tasks) != len(nextBoard.Tasks) {
+		t.Fatalf("reconciled source identity/tasks = %t/%d", reconciled.matchesSourceIdentity(nextBoard), len(reconciled.tasks))
+	}
+
+	changedBoard := cloneBoard(nextBoard)
+	changedBoard.Tasks[0].Title = "keep17 externally changed"
+	model.board = changedBoard
+	changed, delta := reconciled.reconcileSource(model)
+	if !delta.SourceChanged || !delta.CurrentChanged || delta.DerivedTasks != 1 {
+		t.Fatalf("matching delta = %+v", delta)
+	}
+	if changed.generation != reconciled.generation+1 {
+		t.Fatalf("matching projection generation = %d, want %d", changed.generation, reconciled.generation+1)
+	}
+	if got, ok := changed.taskByID(changedBoard.Tasks[0].ID); !ok || got.Title != "keep17 externally changed" {
+		t.Fatalf("matching changed task = %+v, %t", got, ok)
+	}
+}
+
+func TestRenderProjectionTaskRevisionLifecycle(t *testing.T) {
+	model := performanceModel(17, "", performanceWidth, performanceHeight)
+	projection := model.current.projection
+	original := model.board.Tasks[0]
+	originalRevision, ok := projection.taskRenderRevision(original.ID)
+	if !ok || originalRevision == 0 {
+		t.Fatalf("initial render revision = %d, %t", originalRevision, ok)
+	}
+
+	insertedBoard := cloneBoard(model.board)
+	insertedBoard.Tasks = append(insertedBoard.Tasks, board.Task{
+		ID: "inserted", Title: "Inserted", Status: board.StatusTodo,
+	})
+	model.board = insertedBoard
+	inserted, _ := projection.reconcileSource(model)
+	if revision, ok := inserted.taskRenderRevision(original.ID); !ok || revision != originalRevision {
+		t.Fatalf("unchanged task revision = %d, %t; want %d", revision, ok, originalRevision)
+	}
+	insertedRevision, ok := inserted.taskRenderRevision("inserted")
+	if !ok || insertedRevision <= originalRevision {
+		t.Fatalf("inserted task revision = %d, %t; want newer than %d", insertedRevision, ok, originalRevision)
+	}
+
+	changedBoard := cloneBoard(insertedBoard)
+	changedBoard.Tasks[0].Title += " changed"
+	model.board = changedBoard
+	changed, _ := inserted.reconcileSource(model)
+	changedRevision, ok := changed.taskRenderRevision(original.ID)
+	if !ok || changedRevision <= insertedRevision {
+		t.Fatalf("changed task revision = %d, %t; want newer than %d", changedRevision, ok, insertedRevision)
+	}
+
+	deletedBoard := cloneBoard(changedBoard)
+	deletedBoard.Tasks = deletedBoard.Tasks[1:]
+	model.board = deletedBoard
+	deleted, _ := changed.reconcileSource(model)
+	if revision, ok := deleted.taskRenderRevision(original.ID); ok || revision != 0 {
+		t.Fatalf("deleted task revision = %d, %t; want missing", revision, ok)
+	}
+
+	recreatedBoard := cloneBoard(deletedBoard)
+	recreatedBoard.Tasks = append(recreatedBoard.Tasks, original)
+	model.board = recreatedBoard
+	recreated, _ := deleted.reconcileSource(model)
+	recreatedRevision, ok := recreated.taskRenderRevision(original.ID)
+	if !ok || recreatedRevision <= changedRevision {
+		t.Fatalf("recreated task revision = %d, %t; want newer than %d", recreatedRevision, ok, changedRevision)
+	}
+}
+
+func TestRenderProjectionTaskRevisionFailsClosedAtExhaustion(t *testing.T) {
+	model := Model{board: projectionFixture(), filter: newBoardFilterState(), projects: projectSwitcher{all: true}}
+	projection := renderProjection{nextRenderRevision: ^uint64(0)}
+	projection, _, _ = projection.rebuild(model)
+	for _, task := range model.board.Tasks {
+		if revision, ok := projection.taskRenderRevision(task.ID); ok || revision != 0 {
+			t.Fatalf("exhausted revision for %q = %d, %t; want uncacheable", task.ID, revision, ok)
+		}
+	}
+}
+
+func TestRenderProjectionTaskRevisionSurvivesOutOfScopeFrames(t *testing.T) {
+	model := Model{board: projectionFixture(), filter: newBoardFilterState(), projects: projectSwitcher{all: true}}
+	projection, _, _ := (renderProjection{}).rebuild(model)
+	want, ok := projection.taskRenderRevision("doing-beta")
+	if !ok {
+		t.Fatal("beta task had no initial render revision")
+	}
+
+	model.projects = projectSwitcher{name: "alpha"}
+	alpha, _, _ := projection.rebuildSource(model, true)
+	if _, visible := alpha.taskByID("doing-beta"); visible {
+		t.Fatal("beta task remained visible in alpha scope")
+	}
+	if got, ok := alpha.taskRenderRevision("doing-beta"); !ok || got != want {
+		t.Fatalf("out-of-scope revision = %d, %t; want %d", got, ok, want)
+	}
+
+	model.projects = projectSwitcher{name: "beta"}
+	beta, _, _ := alpha.rebuildSource(model, true)
+	if _, visible := beta.taskByID("doing-beta"); !visible {
+		t.Fatal("beta task did not return in beta scope")
+	}
+	if got, ok := beta.taskRenderRevision("doing-beta"); !ok || got != want {
+		t.Fatalf("later-frame revision = %d, %t; want %d", got, ok, want)
+	}
+}
+
+func TestProjectionCachesSelectedInclusiveToolbarLabels(t *testing.T) {
+	model := Model{board: projectionFixture(), filter: newBoardFilterState(), projects: projectSwitcher{all: true}}
+	model.filter.restore(boardFilter{Tags: []string{"missing-but-selected"}})
+	projection, _, _ := (renderProjection{}).rebuild(model)
+	labels := projection.filterLabels()
+	if !slices.Contains(labels, "missing-but-selected") {
+		t.Fatalf("toolbar labels=%v, want selected label retained", labels)
+	}
+	first := unsafe.SliceData(labels)
+	if allocations := testing.AllocsPerRun(1000, func() {
+		if unsafe.SliceData(projection.filterLabels()) != first {
+			t.Fatal("cached toolbar labels changed backing storage")
+		}
+	}); allocations != 0 {
+		t.Fatalf("cached toolbar label reads allocated %v times", allocations)
+	}
+}
+
+func TestFilterInputPerformsOneProjectionPassAndNoSourceScan(t *testing.T) {
+	for _, count := range []int{120, 500, 1000} {
+		t.Run(integerLabel(count), func(t *testing.T) {
+			t.Run("typing", func(t *testing.T) {
+				model := performanceModel(count, "", performanceWidth, performanceHeight)
+				_ = model.filter.focusText()
+				before := model.RenderPlanStats()
+				updated, _ := model.Update(tea.KeyPressMsg{Code: 'k', Text: "keep17"})
+				model = updated.(Model)
+				assertSingleFilterProjectionPass(t, model, before, count)
+				if got := len(model.filteredBoard().Tasks); got != 17 {
+					t.Fatalf("typed projection contains %d tasks, want 17", got)
+				}
+			})
+
+			t.Run("label-toggle", func(t *testing.T) {
+				model := performanceModel(count, "", performanceWidth, performanceHeight)
+				before := model.RenderPlanStats()
+				updated, _ := model.Update(filterLabelClickedMsg{tag: "performance"})
+				model = updated.(Model)
+				assertSingleFilterProjectionPass(t, model, before, count)
+				if got := len(model.filteredBoard().Tasks); got != count {
+					t.Fatalf("label projection contains %d tasks, want %d", got, count)
+				}
+			})
+		})
+	}
+}
+
+func assertSingleFilterProjectionPass(t *testing.T, model Model, before RenderPlanStats, taskCount int) {
+	t.Helper()
+	after := model.RenderPlanStats()
+	if delta := after.SourceTaskComparisons - before.SourceTaskComparisons; delta != 0 {
+		t.Fatalf("filter input scanned %d source tasks", delta)
+	}
+	if delta := after.ProjectionBuilds - before.ProjectionBuilds; delta != 1 {
+		t.Fatalf("filter input built %d projections, want 1", delta)
+	}
+	if delta := after.ProjectionTaskVisits - before.ProjectionTaskVisits; delta != uint64(taskCount) {
+		t.Fatalf("filter input visited %d projection tasks, want %d", delta, taskCount)
+	}
+	if model.preparedProjection != nil {
+		t.Fatal("consumed filter projection remained attached to the model")
+	}
+	if !model.current.projection.matchesProjectionKey(model) {
+		t.Fatal("installed projection does not match the current filter key")
+	}
+}
+
+func TestOverlayProjectionIdentityDoesNotScaleWithSelectedTags(t *testing.T) {
+	model := performanceModel(17, "", performanceWidth, performanceHeight)
+	projection := model.current.projection
+	measure := func(tags int) testing.BenchmarkResult {
+		selected, retained := make([]string, tags), make([]string, tags)
+		for index := range tags {
+			selected[index], retained[index] = "selected", "selected"
+		}
+		candidate := model
+		candidate.filter.tags = selected
+		current := projection
+		current.key.filter.Tags = retained
+		return testing.Benchmark(func(b *testing.B) {
+			for range b.N {
+				filterProjectionMatchSink = current.matchesProjectionKey(candidate)
+			}
+		})
+	}
+
+	constant := measure(1)
+	large := measure(100000)
+	limit := max(constant.NsPerOp()*8, int64(5000))
+	if large.NsPerOp() > limit {
+		t.Fatalf("overlay projection identity scales with selected tags: one=%dns 100000=%dns limit=%dns",
+			constant.NsPerOp(), large.NsPerOp(), limit)
+	}
+}

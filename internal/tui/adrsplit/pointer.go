@@ -13,15 +13,33 @@ type pointerActionMsg struct {
 	target      string
 	session     uint64
 	generation  uint64
+	scroll      int
 	scrollDelta int
 	maxScroll   int
+}
+
+func (m pointerActionMsg) PointerWheelIntent() pointer.WheelIntent {
+	return pointer.WheelIntent{Key: "adr", Current: m.scroll,
+		Target: min(max(m.scroll+m.scrollDelta, 0), m.maxScroll), Min: 0, Max: m.maxScroll}
+}
+
+func (m pointerActionMsg) PointerWheelTarget(target int) tea.Msg {
+	target = min(max(target, 0), m.maxScroll)
+	m.scrollDelta = target - m.scroll
+	return m
 }
 
 // MouseHandler returns a release-only immutable map derived from the current
 // rendered frame. Updating the model remains the caller's responsibility.
 func (m *Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
+	return m.PointerSurface(width, height).Pointer
+}
+
+// PointerSurface publishes the rendered handler together with its immutable
+// stable-control topology for root-level stale-generation admission.
+func (m *Model) PointerSurface(width, height int) pointer.Surface {
 	if !m.open {
-		return nil
+		return pointer.Surface{}
 	}
 	snapshot := *m
 	frame := snapshot.layout(max(width, 1), max(height, 1))
@@ -62,17 +80,22 @@ func (m *Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 		}
 	}
 	if snapshot.operation == "" && !snapshot.adding {
-		hitMap.AddBackdrop(pointer.Rect{X1: max(width, 1), Y1: max(height, 1)}, pane, action("backdrop"))
+		hitMap.AddBackdropControl(controlID("backdrop"),
+			pointer.Rect{X1: max(width, 1), Y1: max(height, 1)}, pane, action("backdrop"))
 	}
 	if snapshot.stage == stageReview && snapshot.operation == "" && !snapshot.adding && !snapshot.guardClose {
 		maxScroll := max(len(frame.rows)-frame.bodyHeight, 0)
 		body := pointer.Rect{X0: pane.X0, Y0: pane.Y0 + 1, X1: pane.X1, Y1: max(pane.Y1-1, pane.Y0+1)}
 		hitMap.AddWheel(body, func(delta int) tea.Msg {
-			return pointerActionMsg{target: "scroll", session: session, generation: generation, scrollDelta: delta * 3, maxScroll: maxScroll}
+			return pointerActionMsg{target: "scroll", session: session, generation: generation,
+				scroll: frame.scroll, scrollDelta: delta * 3, maxScroll: maxScroll}
 		})
 	}
-	return hitMap.Handler()
+	return pointer.Surface{Pointer: hitMap.Handler(), Topology: hitMap.Topology()}
 }
+
+// PointerSession identifies this open ADR owner across harmless renders.
+func (m Model) PointerSession() uint64 { return m.session }
 
 func controlID(target string) pointer.ControlID { return pointer.ControlID("adrsplit." + target) }
 

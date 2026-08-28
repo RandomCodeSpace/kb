@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"time"
+	"unsafe"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
@@ -47,8 +48,9 @@ type dataVersionReader interface {
 }
 
 type boardLoadedMsg struct {
-	board board.Board
-	err   error
+	board      board.Board
+	err        error
+	generation uint64
 }
 
 type dataVersionMsg struct {
@@ -62,61 +64,81 @@ type pollTickMsg struct{}
 // dimensions, and all message routing; commands perform IO and only return
 // messages, so Update remains deterministic.
 type Model struct {
-	store             boardReader
-	moveStore         taskMoveStore
-	actionStore       taskActionStore
-	watcher           dataVersionReader
-	user              string
-	dataDir           string
-	board             board.Board
-	styles            *theme.Styles
-	boardView         boardViewState
-	filter            boardFilterState
-	projects          projectSwitcher
-	activeProject     string
-	detail            carddetail.Model
-	editor            cardeditor.Model
-	adr               adrsplit.Model
-	issueImport       issueimport.Model
-	palette           cmdpalette.Model
-	selectAfterLoad   string
-	width             int
-	height            int
-	loading           bool
-	haveBoardSnapshot bool
-	reloadPending     bool
-	loadErr           error
-	pollErr           error
-	dataVersion       int64
-	haveVersion       bool
-	stopped           bool
-	helpOpen          bool
-	isDark            bool
-	profile           colorprofile.Profile
-	readContext       context.Context
-	now               func() time.Time
-	renderedAt        time.Time
-	savePreferences   func(tuiPreferences) error
-	preferenceErr     error
-	prefSaving        bool
-	prefPending       *tuiPreferences
-	settings          *settingsModel
-	settingsNew       func() *settingsModel
-	move              cardMoveState
-	action            taskActionState
-	taskActionSession uint64
-	pointerState      pointer.State
-	clicks            pointer.Clicks
-	spin              spinner.Model
-	scroll            boardScrollState
-	celebrate         shipCelebration
-	celebrateGen      uint64
-	grace             graceState
-	actionStatus      string
-	actionStatusError bool
-	actionNotice      bool
-	noticeSeq         uint64
-	shipped           shippedRecord
+	store                       boardReader
+	moveStore                   taskMoveStore
+	actionStore                 taskActionStore
+	watcher                     dataVersionReader
+	user                        string
+	dataDir                     string
+	board                       board.Board
+	styles                      *theme.Styles
+	boardView                   boardViewState
+	filter                      boardFilterState
+	projects                    projectSwitcher
+	activeProject               string
+	detail                      carddetail.Model
+	editor                      cardeditor.Model
+	adr                         adrsplit.Model
+	issueImport                 issueimport.Model
+	palette                     cmdpalette.Model
+	selectAfterLoad             string
+	width                       int
+	height                      int
+	loading                     bool
+	haveBoardSnapshot           bool
+	reloadPending               bool
+	loadErr                     error
+	pollErr                     error
+	dataVersion                 int64
+	haveVersion                 bool
+	pollStarted                 bool
+	loadGeneration              uint64
+	activeLoadGen               uint64
+	watcherPollFastPaths        uint64
+	watcherVersionFastPaths     uint64
+	watcherStaleLoadFastPaths   uint64
+	watcherLifecycleFallbacks   uint64
+	renderImpactClassifications uint64
+	stopped                     bool
+	helpOpen                    bool
+	isDark                      bool
+	profile                     colorprofile.Profile
+	readContext                 context.Context
+	now                         func() time.Time
+	renderedAt                  time.Time
+	temporalSchedule            temporalScheduler
+	temporalGeneration          uint64
+	temporalVisualGeneration    uint64
+	temporalDeadline            time.Time
+	temporalScheduleInput       temporalScheduleInput
+	haveTemporalScheduleInput   bool
+	savePreferences             func(tuiPreferences) error
+	preferenceErr               error
+	prefSaving                  bool
+	prefPending                 *tuiPreferences
+	settings                    *settingsModel
+	settingsNew                 func() *settingsModel
+	move                        cardMoveState
+	action                      taskActionState
+	taskActionSession           uint64
+	pointerState                pointer.State
+	clicks                      pointer.Clicks
+	spin                        spinner.Model
+	scroll                      boardScrollState
+	celebrate                   shipCelebration
+	celebrateGen                uint64
+	grace                       graceState
+	actionStatus                string
+	actionStatusError           bool
+	actionNotice                bool
+	noticeSeq                   uint64
+	shipped                     shippedRecord
+	inputAdmission              *inputAdmissionStats
+	pointerMailbox              *pointerMailbox
+	pointerOwner                renderHandlerTopology
+	pointerOwnerEpoch           uint64
+	pointerOwnerSeq             uint64
+	pointerAdmission            pointerAdmissionState
 
 	// The brand mark of spec section 10.6. The stretch and the reveal seed are
 	// rolled once in newModel and are plain fields, so a test pins them by
@@ -126,12 +148,23 @@ type Model struct {
 	brandSeed    int64
 	brandFrame   int
 	brandGen     uint32
+
+	// renderPlan is the sole complete-frame publication point. It is copied
+	// with Model, so content and the pointer closure derived from its hit map
+	// advance atomically through Update.
+	retainedRenderView
 }
 
 // SetVersion records the build version the launch screen's meta row prints.
 // The TUI cannot reach package main's build info, so the string arrives on
 // tui.Run and is stored here (spec section 10.6.5).
-func (m *Model) SetVersion(version string) { m.version = version }
+func (m *Model) SetVersion(version string) {
+	m.version = version
+	// The version changes terminal content and can change row geometry. Until
+	// render records report their own dependencies, a root setter must be just
+	// as conservative as Update.
+	m.rebuildRenderPlan(renderImpactAll)
+}
 
 // applyStyles adopts a rebuilt design system and hands it to every sub-model
 // the root owns.
@@ -159,6 +192,7 @@ func (m *Model) SetActiveProject(name string) {
 	m.activeProject = name
 	m.projects.restore(projectSwitcher{}, name)
 	m.editor.SetProjectDefault(m.projectDefault())
+	m.rebuildRenderPlan(renderImpactAll)
 }
 
 func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
@@ -204,34 +238,44 @@ func newModel(
 	// target, which is the correct assumption until the terminal answers.
 	styles := theme.NewFor(true, colorprofile.TrueColor)
 	brandStretch, brandSeed := widget.RollBrand(styles.Metrics)
-	return Model{
-		store:       store,
-		styles:      styles,
-		isDark:      true,
-		profile:     colorprofile.TrueColor,
-		moveStore:   moveStore,
-		actionStore: actionStore,
-		watcher:     watcher,
-		user:        user,
-		board:       board.Board{Title: "Board"},
-		filter:      newBoardFilterState(),
-		projects:    projectSwitcher{all: true},
-		detail:      carddetail.New(detailReader, user, styles),
-		editor:      cardeditor.New(editorStore, user),
-		palette:     cmdpalette.New(),
-		width:       defaultWidth,
-		height:      defaultHeight,
-		loading:     watcher == nil,
-		readContext: ctx,
-		now:         now,
-		renderedAt:  now(),
-		action:      newTaskActionState(),
-		spin:        spinner.New(spinner.WithSpinner(styles.Spinner)),
+	model := Model{
+		store:          store,
+		styles:         styles,
+		isDark:         true,
+		profile:        colorprofile.TrueColor,
+		moveStore:      moveStore,
+		actionStore:    actionStore,
+		watcher:        watcher,
+		user:           user,
+		board:          board.Board{Title: "Board"},
+		filter:         newBoardFilterState(),
+		projects:       projectSwitcher{all: true},
+		detail:         carddetail.New(detailReader, user, styles),
+		editor:         cardeditor.New(editorStore, user),
+		palette:        cmdpalette.New(),
+		width:          defaultWidth,
+		height:         defaultHeight,
+		loading:        watcher == nil,
+		readContext:    ctx,
+		now:            now,
+		renderedAt:     now(),
+		action:         newTaskActionState(),
+		spin:           spinner.New(spinner.WithSpinner(styles.Spinner)),
+		inputAdmission: &inputAdmissionStats{},
+		pointerMailbox: newPointerMailbox(),
 
 		brandStretch: brandStretch,
 		brandSeed:    brandSeed,
 		brandGen:     1,
 	}
+	if watcher == nil {
+		// Init is a value receiver, so the no-watcher startup generation must be
+		// established before it creates the first load command.
+		model.loadGeneration = 1
+		model.activeLoadGen = 1
+	}
+	model.rebuildRenderPlan(renderImpactAll)
+	return model
 }
 
 // Init loads the first board snapshot and starts the external-write watcher.
@@ -239,7 +283,7 @@ func (m Model) Init() tea.Cmd {
 	if m.stopped {
 		return nil
 	}
-	start := m.loadBoard()
+	start := m.loadBoard(m.activeLoadGen)
 	if m.watcher != nil {
 		// Establish the connection-local baseline before loading. If these ran
 		// concurrently, a commit between the stale load and a later baseline
@@ -258,7 +302,271 @@ func (m Model) Init() tea.Cmd {
 // them: the destructive-prompt grace, the double-click window, and the footer
 // notice TTL. Each expires because a message arrived, never because a render
 // read a clock.
+type modelUpdateCommands struct {
+	followUp tea.Cmd
+	geometry tea.Cmd
+	temporal tea.Cmd
+}
+
+func (commands modelUpdateCommands) command() tea.Cmd {
+	return batchCommands(commands.followUp, commands.geometry, commands.temporal)
+}
+
 func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	next, commands := m.updateWithCommands(message)
+	return next, commands.command()
+}
+
+// updateWithCommands keeps application follow-ups separate from the offscreen
+// geometry chain. Production batches both in their original order; the
+// performance harness uses the explicit seam to settle geometry without
+// guessing which opaque tea.Cmd happens to own the worker token.
+func (m Model) updateWithCommands(message tea.Msg) (Model, modelUpdateCommands) {
+	if tick, ok := message.(temporalTickMsg); ok && !m.matchesTemporalTick(tick) {
+		m.mutateRenderPlanStats(func(stats *RenderPlanStats) { stats.TemporalStaleTicks++ })
+		return m, modelUpdateCommands{}
+	}
+	if flush, ok := message.(pointerFlushMsg); ok {
+		return m.flushPointerIntent(flush)
+	}
+	if raw, ok := message.(tea.MouseMsg); ok {
+		return m.updateRawPointer(raw)
+	}
+	if intent, ok := message.(boardNavigationIntentMsg); ok && !m.matchesBoardNavigationIntent(intent) {
+		m.inputAdmission.discard()
+		return m, modelUpdateCommands{}
+	}
+	// This identity belongs to admission, not publication. Keeping the two
+	// counters separate lets the performance harness observe coalesced, delayed,
+	// and stale publications once those later phases become asynchronous.
+	m.acceptedMessageID++
+	if commands, handled := m.fastWatcherLifecycle(message); handled {
+		return m, commands
+	}
+	checkSource := m.current == nil || !m.current.projection.matchesSourceIdentity(m.board)
+	if batch, ok := message.(geometryBatchMsg); ok {
+		next := m.installGeometryBatch(batch)
+		next.acceptedMessageID = m.acceptedMessageID
+		commands := modelUpdateCommands{geometry: next.startGeometryWorker()}
+		next.publishKeyboardAdmissionSnapshot()
+		return next, commands
+	}
+	beforeBoard := m.board
+	next, command := m.update(message)
+	next.acceptedMessageID = m.acceptedMessageID
+	next.renderImpactClassifications++
+	impact := renderImpactAfterUpdate(message, m, next)
+	if impact != 0 {
+		next.rebuildRenderPlanAfterUpdate(impact, checkSource || !sameBoardSourceIdentity(beforeBoard, next.board))
+	} else {
+		// Admission state belongs to Update even when the accepted message has no
+		// render effect. Keep the immutable input snapshot current and continue an
+		// already-active geometry chain without manufacturing a frame.
+		next.adoptPreparedProjectionWithoutFrame()
+		next.publishKeyboardAdmissionSnapshot()
+	}
+	if next.stopped {
+		next.resetPointerPipeline()
+	}
+	return next, modelUpdateCommands{
+		followUp: command,
+		geometry: next.startGeometryWorker(),
+		temporal: next.reconcileTemporalSchedule(),
+	}
+}
+
+// fastWatcherLifecycle handles settled watcher messages before the generic
+// root router and render-impact classifier. Only strictly stale board-load
+// results enter this seam; any result that can install source state stays generic.
+func (m *Model) fastWatcherLifecycle(message tea.Msg) (modelUpdateCommands, bool) {
+	settledPlainBoard := m.settledWatcherPlainBoard(false)
+	switch msg := message.(type) {
+	case pollTickMsg:
+		if !settledPlainBoard || m.watcher == nil {
+			m.watcherLifecycleFallbacks++
+			return modelUpdateCommands{}, false
+		}
+		m.watcherPollFastPaths++
+		return modelUpdateCommands{
+			followUp: m.readDataVersion(),
+			geometry: m.startGeometryWorker(),
+			temporal: m.reconcileTemporalSchedule(),
+		}, true
+	case dataVersionMsg:
+		if !settledPlainBoard || msg.err != nil || m.watcher == nil || !m.pollStarted ||
+			!m.haveVersion || !m.haveBoardSnapshot || m.loadErr != nil || m.pollErr != nil ||
+			m.move.saving || m.action.busy || m.move.lifted != nil {
+			m.watcherLifecycleFallbacks++
+			return modelUpdateCommands{}, false
+		}
+		m.watcherVersionFastPaths++
+		followUp := m.observeDataVersion(msg)
+		return modelUpdateCommands{
+			followUp: followUp,
+			geometry: m.startGeometryWorker(),
+			temporal: m.reconcileTemporalSchedule(),
+		}, true
+	case boardLoadedMsg:
+		// Only a generation proven older than the newest requested load belongs
+		// to this lifecycle seam. Current results still take the generic path and
+		// remain the sole place that can install board data.
+		if msg.generation == 0 || msg.generation >= m.loadGeneration {
+			return modelUpdateCommands{}, false
+		}
+		settledStaleLoad := m.settledWatcherPlainBoard(true)
+		if !settledStaleLoad || !m.loading || m.activeLoadGen == 0 || msg.generation != m.activeLoadGen {
+			m.watcherLifecycleFallbacks++
+			return modelUpdateCommands{}, false
+		}
+		m.watcherStaleLoadFastPaths++
+		followUp := m.finishBoardLoad(msg)
+		m.adoptPreparedProjectionWithoutFrame()
+		m.publishKeyboardAdmissionSnapshot()
+		return modelUpdateCommands{
+			followUp: followUp,
+			geometry: m.startGeometryWorker(),
+			temporal: m.reconcileTemporalSchedule(),
+		}, true
+	default:
+		return modelUpdateCommands{}, false
+	}
+}
+
+// settledWatcherPlainBoard is pointer-local because this predicate sits on a
+// repeated lifecycle hot path. Calling the root's value-receiver overlay and
+// launch helpers here would copy the entire Model for every watcher message.
+func (m *Model) settledWatcherPlainBoard(allowLaunch bool) bool {
+	if m.stopped || m.current == nil || m.preparedProjection != nil || m.helpOpen ||
+		m.detail.IsOpen() || m.settings != nil || m.adr.IsOpen() || m.editor.IsOpen() ||
+		m.action.open() || m.issueImport.IsOpen() || m.palette.IsOpen() {
+		return false
+	}
+	return allowLaunch || !m.loading || m.haveBoardSnapshot
+}
+
+func (m Model) updateRawPointer(raw tea.MouseMsg) (Model, modelUpdateCommands) {
+	if m.stopped {
+		m.resetPointerPipeline()
+		return m, modelUpdateCommands{}
+	}
+	command, route, result := m.pointerMailbox.take(raw)
+	if result != pointerMailboxMatched || !route.sameOwner(m.pointerRoute()) {
+		if m.mouseLiftedForWheel(raw) {
+			return m.cancelMouseLiftForDiscardedWheel(m.pointerRoute())
+		}
+		return m.failClosedPointer()
+	}
+	if command == nil {
+		if m.mouseLiftedForWheel(raw) {
+			return m.cancelMouseLiftForDiscardedWheel(route)
+		}
+		if next, commands, ok := m.reuseBoundaryWheel(raw, route); ok {
+			return next, commands
+		}
+		if _, wheel := raw.(tea.MouseWheelMsg); wheel {
+			m.pointerAdmission.cancelPending()
+		}
+		m.discardPointer()
+		return m, modelUpdateCommands{}
+	}
+	// Execute after the mailbox mutex is released. Pointer lifecycle and its
+	// exact activation remain ordered inside this raw Update.
+	resolved := command()
+	if resolved == nil {
+		return m, modelUpdateCommands{}
+	}
+	return m.admitResolvedPointer(resolved, route, raw)
+}
+
+func (m Model) applyResolvedPointer(message tea.Msg, publish bool) (Model, modelUpdateCommands) {
+	before := m
+	beforeBoard := m.board
+	m.pointerAdmission.accepted++
+	m.acceptedMessageID++
+	var command tea.Cmd
+	if pointer.IsMessage(message) {
+		m, command = m.route(message)
+		if command != nil {
+			activation := command()
+			if activation != nil {
+				m.acceptedMessageID++
+				m, command = m.update(activation)
+			} else {
+				command = nil
+			}
+		}
+	} else {
+		m, command = m.update(message)
+	}
+	checkSource := m.current == nil || !m.current.projection.matchesSourceIdentity(beforeBoard) ||
+		!sameBoardSourceIdentity(beforeBoard, m.board)
+	if publish {
+		m.renderImpactClassifications++
+		m.rebuildRenderPlanAfterUpdate(renderImpactAfterUpdate(message, before, m), checkSource)
+	}
+	if m.stopped {
+		m.resetPointerPipeline()
+	}
+	return m, modelUpdateCommands{
+		followUp: command,
+		geometry: m.startGeometryWorker(),
+		temporal: m.reconcileTemporalSchedule(),
+	}
+}
+
+func (m *Model) resetPointerPipeline() {
+	m.pointerMailbox.reset()
+	m.pointerAdmission.resetAll()
+	m.pointerState = m.pointerState.ClearCapture().ClearHoverObservation()
+	m.clicks = m.clicks.Reset()
+	if m.move.lifted != nil && m.move.lifted.fromMouse {
+		m.cancelCardMove("pointer input lost")
+	}
+}
+
+func (m Model) failClosedPointer() (Model, modelUpdateCommands) {
+	_, rootHoverObserved := m.pointerState.HoverPoint()
+	hadHoverObservation := m.pointerAdmission.hoverObserved || rootHoverObserved
+	hadHoverVisual := m.pointerAdmission.hoverControl != "" || m.pointerState.Hovered() != ""
+	hadActiveState := m.pointerAdmission.captureKey != "" || m.pointerState.Active() ||
+		(m.move.lifted != nil && m.move.lifted.fromMouse) || hadHoverVisual
+	m.discardPointer()
+	if hadHoverObservation {
+		if reset := pointer.ResetHover(); reset != nil {
+			if message := reset(); message != nil {
+				m, _ = m.route(message)
+			}
+		}
+	}
+	if cancel := pointer.Cancel(); cancel != nil {
+		if message := cancel(); message != nil {
+			m, _ = m.route(message)
+		}
+	}
+	beforeBoard := m.board
+	m.resetPointerPipeline()
+	if !hadActiveState {
+		return m, modelUpdateCommands{}
+	}
+	sourceChanged := !sameBoardSourceIdentity(beforeBoard, m.board)
+	impact := renderImpactPointer | renderImpactAppearance
+	if sourceChanged {
+		impact |= renderImpactTasks | renderImpactProjection | renderImpactLayout
+	}
+	m.rebuildRenderPlanAfterUpdate(impact, sourceChanged)
+	return m, modelUpdateCommands{geometry: m.startGeometryWorker(), temporal: m.reconcileTemporalSchedule()}
+}
+
+func (m Model) pointerRoute() pointerRouteIdentity {
+	route := pointerRouteIdentity{owner: m.pointerOwner, ownerSession: m.pointerOwnerSeq}
+	if m.current != nil {
+		route.geometry = m.current.geometry.generation
+		route.snapshot = m.current.stats.InstalledSnapshotID
+	}
+	return route
+}
+
+func (m Model) update(message tea.Msg) (Model, tea.Cmd) {
 	if m.stopped {
 		return m, nil
 	}
@@ -518,6 +826,9 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 		}
 	}
 	switch msg := message.(type) {
+	case boardNavigationIntentMsg:
+		m.applyBoardNavigationIntent(msg)
+		return m, nil
 	case tea.KeyPressMsg:
 		if msg.String() == ctrlCKey {
 			if m.settings != nil {
@@ -623,7 +934,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			}
 			return m, nil
 		default:
-			if m.boardView.handleKey(msg.String(), m.filteredBoard()) == boardToggledCancelled {
+			if m.handleBoardNavigationKey(msg.String()) == boardToggledCancelled {
 				return m, m.queuePreferences()
 			}
 		}
@@ -635,7 +946,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			m.cancelCardMove("focus changed")
 		}
 		m.filter.blur()
-		if m.boardView.focusTask(m.filteredBoard(), msg.taskID) {
+		if m.focusBoardTask(msg.taskID) {
 			if task, ok := m.selectedTask(); ok {
 				m.detail.Resize(m.width, m.height)
 				return m, m.detail.Open(task)
@@ -651,7 +962,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			m.cancelCardMove("focus changed")
 		}
 		m.filter.blur()
-		m.boardView.focusColumn(msg.status, m.filteredBoard())
+		m.focusBoardColumn(msg.status)
 	case boardPointerDownMsg:
 		if m.loading || m.move.saving {
 			return m, nil
@@ -660,7 +971,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			m.cancelCardMove("focus changed")
 		}
 		m.filter.blur()
-		if !m.boardView.focusTask(m.filteredBoard(), msg.taskID) {
+		if !m.focusBoardTask(msg.taskID) {
 			return m, nil
 		}
 		if task, ok := m.selectedTask(); ok {
@@ -675,6 +986,16 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 		if m.move.lifted == nil || !m.move.lifted.fromMouse {
 			return m, nil
 		}
+		if msg.resolved {
+			if !msg.valid {
+				m.cancelCardMove("pointer released outside a drop target")
+				return m, nil
+			}
+			if preview, handled := m.move.previewMouse(msg.status, msg.beforeTaskID); handled {
+				m.board = preview
+				m.boardView.focusTask(m.filteredBoard(), m.move.lifted.taskID)
+			}
+		}
 		if !m.move.lifted.dragged {
 			taskID := m.move.lifted.taskID
 			// Spec section 10.3.5: the classifier runs on the completed
@@ -688,7 +1009,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			m.clicks = clicks
 			m.cancelCardMove("")
 			m.move.status = ""
-			m.boardView.focusTask(m.filteredBoard(), taskID)
+			m.focusBoardTask(taskID)
 			if task, ok := m.selectedTask(); ok {
 				m.detail.Resize(m.width, m.height)
 				return m, batchCommands(window, m.detail.Open(task))
@@ -697,9 +1018,27 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 		}
 		m.clicks = m.clicks.Reset()
 		return m, m.startCardDrop()
+	case boardPointerCancelMoveMsg:
+		if m.move.lifted != nil && m.move.lifted.fromMouse {
+			m.cancelCardMove("")
+		}
 	case boardColumnScrolledMsg:
 		column := statusIndex(msg.status)
+		if m.move.lifted != nil && m.move.lifted.fromMouse {
+			dragged := m.move.lifted.dragged
+			liftedTaskID := m.move.lifted.taskID
+			if dragged {
+				for index, anchor := range m.boardView.scrollAnchors {
+					if anchor.TaskID == liftedTaskID {
+						m.boardView.scrollAnchors[index] = boardTaskAnchor{}
+					}
+				}
+				msg.anchor = boardTaskAnchor{}
+			}
+			m.cancelCardMove("")
+		}
 		m.boardView.scrolls[column] = max(msg.offset, 0)
+		m.boardView.scrollAnchors[column] = msg.anchor
 		m.boardView.manualScroll[column] = true
 		return m, batchCommands(detailCmd, m.armScrollLinger(column))
 	case cardMoveStoredMsg:
@@ -781,9 +1120,15 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 		next := m.finishBoardLoad(msg)
 		return m, batchCommands(detailCmd, next)
 	case pollTickMsg:
-		m.renderedAt = m.now()
-		m.normalizeShippedAt(m.renderedAt)
 		return m, m.readDataVersion()
+	case temporalTickMsg:
+		m.temporalDeadline = time.Time{}
+		m.renderedAt = m.now()
+		if m.renderedAt.Before(msg.deadline) {
+			m.renderedAt = msg.deadline
+		}
+		m.normalizeShippedAt(m.renderedAt)
+		m.temporalVisualGeneration++
 	case dataVersionMsg:
 		next := m.observeDataVersion(msg)
 		return m, next
@@ -795,7 +1140,7 @@ func isBoardPointerMessage(message tea.Msg) bool {
 	switch message.(type) {
 	case boardCardClickedMsg, boardColumnClickedMsg,
 		filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg, filterProjectClickedMsg,
-		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardColumnScrolledMsg,
+		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg, boardPointerCancelMoveMsg, boardColumnScrolledMsg,
 		boardFooterClickedMsg:
 		return true
 	default:
@@ -813,7 +1158,7 @@ func (m *Model) updateDetail(message tea.Msg) tea.Cmd {
 
 func isBoardUserInput(message tea.Msg) bool {
 	switch message.(type) {
-	case tea.KeyPressMsg, boardCardClickedMsg, boardColumnClickedMsg,
+	case tea.KeyPressMsg, boardNavigationIntentMsg, boardCardClickedMsg, boardColumnClickedMsg,
 		boardPointerDownMsg, boardPointerMoveMsg, boardPointerUpMsg,
 		boardColumnScrolledMsg, filterTextClickedMsg, filterLabelClickedMsg, filterClearClickedMsg,
 		filterProjectClickedMsg:
@@ -836,7 +1181,7 @@ func (m *Model) observeDataVersion(msg dataVersionMsg) tea.Cmd {
 		if !m.haveVersion || m.loadErr != nil {
 			load = m.startBoardLoad()
 		}
-		return m.pollAfter(load)
+		return m.continuePollingAfter(load)
 	}
 
 	m.pollErr = nil
@@ -851,19 +1196,57 @@ func (m *Model) observeDataVersion(msg dataVersionMsg) tea.Cmd {
 	case m.loadErr != nil:
 		load = m.startBoardLoad()
 	}
+	return m.continuePollingAfter(load)
+}
+
+func (m Model) continuePollingAfter(load tea.Cmd) tea.Cmd {
+	if !m.pollStarted {
+		if load == nil {
+			return nil
+		}
+		// Keep the initial load lazy and distinguishable from the poll chain. A
+		// one-command batch still runs after Update publishes its current frame.
+		return func() tea.Msg { return tea.BatchMsg{load} }
+	}
 	return m.pollAfter(load)
 }
 
 // finishBoardLoad commits only successful snapshots. A pending freshness
 // obligation starts one serialized successor without creating another poll.
 func (m *Model) finishBoardLoad(msg boardLoadedMsg) tea.Cmd {
+	generation := msg.generation
+	if generation == 0 {
+		// Package-local callers predating generation-tagged IO inject a settled
+		// snapshot directly. Production load commands always carry a generation.
+		generation = m.activeLoadGen
+		if generation == 0 {
+			generation = m.loadGeneration
+		}
+	}
+	if m.activeLoadGen != 0 && generation != m.activeLoadGen {
+		return nil
+	}
 	m.loading = false
+	m.activeLoadGen = 0
+	if generation != 0 && generation < m.loadGeneration {
+		// A newer freshness obligation arrived while this serialized read was in
+		// flight. Never flash the older board; immediately spend the single
+		// successor slot on the newest requested generation.
+		m.reloadPending = false
+		return m.startBoardLoadGeneration(m.loadGeneration)
+	}
 	m.loadErr = msg.err
 	var detailCmd tea.Cmd
 	if msg.err == nil {
 		m.haveBoardSnapshot = true
 		previous := m.filteredBoard()
 		m.board = msg.board
+		if m.current != nil {
+			prepared, delta := m.current.projection.reconcileSource(*m)
+			m.preparedProjection = &prepared
+			m.preparedDerivations = delta.DerivedTasks
+			m.preparedComparisons = len(m.board.Tasks)
+		}
 		filtered := m.filteredBoard()
 		m.boardView.adoptBoard(previous, filtered)
 		if m.selectAfterLoad != "" {
@@ -874,11 +1257,15 @@ func (m *Model) finishBoardLoad(msg boardLoadedMsg) tea.Cmd {
 		}
 		detailCmd = batchCommands(m.reconcileDetail(), m.reconcileEditor())
 	}
-	if !m.reloadPending {
-		return detailCmd
+	if m.reloadPending {
+		m.reloadPending = false
+		return batchCommands(detailCmd, m.startBoardLoadGeneration(m.loadGeneration))
 	}
-	m.reloadPending = false
-	return batchCommands(detailCmd, m.startBoardLoad())
+	if m.watcher != nil && !m.pollStarted {
+		m.pollStarted = true
+		return batchCommands(detailCmd, m.schedulePoll())
+	}
+	return detailCmd
 }
 
 func (m *Model) reconcileEditor() tea.Cmd {
@@ -907,19 +1294,39 @@ func (m *Model) reconcileDetail() tea.Cmd {
 // active load already satisfies that obligation, so it does not queue another.
 func (m *Model) startBoardLoad() tea.Cmd {
 	if m.writeBusy() {
+		m.loadGeneration++
 		m.reloadPending = true
 		return nil
 	}
 	if m.loading {
 		return nil
 	}
+	m.loadGeneration++
+	return m.startBoardLoadGeneration(m.loadGeneration)
+}
+
+func (m *Model) startBoardLoadGeneration(generation uint64) tea.Cmd {
+	if generation == 0 {
+		m.loadGeneration++
+		generation = m.loadGeneration
+	}
+	if m.writeBusy() {
+		m.reloadPending = true
+		return nil
+	}
+	if m.loading {
+		m.reloadPending = true
+		return nil
+	}
 	m.loading = true
-	return m.loadBoard()
+	m.activeLoadGen = generation
+	return m.loadBoard(generation)
 }
 
 // requireFreshBoard records a new baseline/change obligation while a load is
 // active. Multiple obligations coalesce into one serialized successor.
 func (m *Model) requireFreshBoard() tea.Cmd {
+	m.loadGeneration++
 	if m.writeBusy() {
 		m.reloadPending = true
 		return nil
@@ -931,7 +1338,7 @@ func (m *Model) requireFreshBoard() tea.Cmd {
 		m.reloadPending = true
 		return nil
 	}
-	return m.startBoardLoad()
+	return m.startBoardLoadGeneration(m.loadGeneration)
 }
 
 func (m Model) writeBusy() bool { return m.move.saving || m.action.busy }
@@ -1018,78 +1425,169 @@ func (m Model) backdrop() Model {
 	return m
 }
 
-// View renders the responsive read-only board and wires view-derived mouse hit
-// regions back into the update loop. Editing behavior arrives in later slices.
-func (m Model) View() tea.View {
-	backdrop := m.backdrop()
-	var content string
-	var hits []boardHit
+// renderColdView is the differential oracle retained until the production
+// render plan has passed every parity gate.
+func (m Model) renderColdView() tea.View { return m.renderColdSnapshot().view }
+
+func (m Model) renderColdSnapshot() coldRenderSnapshot {
+	// The oracle is the full-board renderer. Keep the accepted immutable
+	// projection so both paths consume identical tasks, but explicitly remove
+	// retained geometry before entering the shared frame composer.
+	m.renderingGeometry = nil
+	m.cardArtifacts = nil
+	base := m.renderBoardBase(m.overlayOpen())
+	return m.composeSnapshot(base)
+}
+
+func (m Model) renderRetainedSnapshot() coldRenderSnapshot {
+	base := m.renderBoardBase(m.overlayOpen())
+	return m.composeSnapshot(base)
+}
+
+type boardRenderBase struct {
+	content string
+	hits    []boardHit
+	columns [len(boardStatuses)]columnRenderSemantics
+	pointer pointer.State
+}
+
+func (b boardRenderBase) ownedBytesEstimate() uint64 {
+	estimate := uint64(len(b.content)) + uint64(cap(b.hits))*uint64(unsafe.Sizeof(boardHit{}))
+	for _, hit := range b.hits {
+		estimate += uint64(len(hit.status) + len(hit.taskID) + len(hit.tag) + len(hit.key))
+	}
+	return estimate
+}
+
+func (m Model) renderBoardBase(dimmed bool) boardRenderBase {
+	backdrop := m
+	if dimmed {
+		// Retain the normal board artifacts only. Dimmed bases already have their
+		// own bounded retained frame and are rendered lazily on overlay open.
+		backdrop.cardArtifacts = nil
+		if styles := m.themeStyles().Dimmed; styles != nil {
+			backdrop.styles = styles
+		}
+	} else if backdrop.cardArtifacts != nil {
+		backdrop.cardArtifacts.beginPass()
+	}
+	base := boardRenderBase{pointer: m.pointerState}
 	if m.launching() {
 		// Spec section 10.6.7: the launch screen owns the frame until the first
 		// board snapshot lands, and it carries no hit regions because it
 		// carries no controls.
-		content = backdrop.renderLaunch()
+		base.content = backdrop.renderLaunch()
 	} else {
-		content, hits = backdrop.renderBoard()
+		base.content, base.hits = backdrop.renderBoard()
+		base.hits = append([]boardHit(nil), base.hits...)
 	}
+	if m.renderingGeometry != nil && m.renderingProjection != nil {
+		base.columns = m.renderingGeometry.renderSemantics(m.boardView, m.renderingProjection)
+	}
+	return base
+}
+
+func (m Model) composeSnapshot(base boardRenderBase) coldRenderSnapshot {
+	content := base.content
+	hits := base.hits
+	handler := renderHandlerNone
 	var overlayMouse func(tea.MouseMsg) tea.Cmd
+	var overlayTopology pointer.Topology
+	var ownerEpoch uint64
 	if m.helpOpen {
 		surface := m.keyboardHelpSurface(content)
 		content = surface.Content
 		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		handler = renderHandlerHelp
 		hits = nil
 	}
 	if m.detail.IsOpen() {
 		surface := m.detail.PointerSurface(content, m.width, m.height)
 		content = surface.Content
 		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		ownerEpoch = m.detail.PointerSession()
+		handler = renderHandlerDetail
 		hits = nil
 	}
 	if m.settings != nil {
 		surface := m.settings.Surface(content, m.width, m.height)
 		content = surface.Content
 		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		handler = renderHandlerSettings
 		hits = nil
 	}
 	if m.adr.IsOpen() {
 		content = m.adr.Overlay(content, m.width, m.height)
-		overlayMouse = m.adr.MouseHandler(m.width, m.height)
+		surface := m.adr.PointerSurface(m.width, m.height)
+		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		ownerEpoch = m.adr.PointerSession()
+		handler = renderHandlerADR
 		hits = nil
 	}
 	if m.editor.IsOpen() {
 		content = m.editor.Overlay(content, m.width, m.height)
-		overlayMouse = m.editor.MouseHandler(m.width, m.height)
+		surface := m.editor.PointerSurface(m.width, m.height)
+		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		ownerEpoch = m.editor.PointerSession()
+		handler = renderHandlerEditor
 		hits = nil
 	}
 	if m.action.open() {
 		surface := m.taskActionSurface(content)
 		content = surface.Content
 		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		ownerEpoch = m.taskActionSession
+		handler = renderHandlerAction
 		hits = nil
 	}
 	if m.issueImport.IsOpen() {
 		content = m.issueImport.Overlay(content, m.width, m.height)
-		overlayMouse = m.issueImport.MouseHandler(m.width, m.height)
+		surface := m.issueImport.PointerSurface(m.width, m.height)
+		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		ownerEpoch = m.issueImport.PointerSession()
+		handler = renderHandlerIssueImport
 		hits = nil
 	}
 	if m.palette.IsOpen() {
 		content = m.palette.Overlay(content, m.width, m.height)
-		overlayMouse = m.palette.MouseHandler(m.width, m.height)
+		surface := m.palette.PointerSurface(m.width, m.height)
+		overlayMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		ownerEpoch = m.palette.PointerSession()
+		handler = renderHandlerPalette
 		hits = nil
 	}
 	view := tea.NewView(content)
 	view.AltScreen = true
-	view.MouseMode = tea.MouseModeCellMotion
+	// All-motion is safe only after semantic admission has resolved same-target
+	// observations to the retained no-op path.
+	view.MouseMode = tea.MouseModeAllMotion
+	view.KeyboardEnhancements.ReportEventTypes = true
 	if overlayMouse != nil {
 		view.OnMouse = overlayMouse
-		return view
+		return coldRenderSnapshot{view: view, semantics: renderSnapshotSemantics{
+			handler: handler, ownerEpoch: ownerEpoch, topology: overlayTopology,
+		}}
 	}
 	if !m.helpOpen && m.settings == nil && !m.editor.IsOpen() && !m.adr.IsOpen() && !m.action.open() &&
 		!m.issueImport.IsOpen() && !m.palette.IsOpen() && !m.detail.OwnsInput() {
 		pointerActive := m.move.lifted != nil && m.move.lifted.fromMouse
-		view.OnMouse = boardMouseHandlerWithFeedback(hits, pointerActive, m.pointerState)
+		immutableHits := append([]boardHit(nil), hits...)
+		surface := boardPointerSurface(immutableHits, pointerActive, m.pointerState)
+		view.OnMouse = surface.Pointer
+		overlayTopology = surface.Topology
+		hits = immutableHits
+		handler = renderHandlerBoard
 	}
-	return view
+	semantics := renderSnapshotSemantics{handler: handler, topology: overlayTopology, hits: hits, columns: base.columns}
+	return coldRenderSnapshot{view: view, hitRegions: hits, semantics: semantics}
 }
 
 func (m *Model) handleBoardFooterClick(key string) tea.Cmd {
@@ -1184,10 +1682,10 @@ func (m Model) taskByID(id string) (board.Task, bool) {
 	return board.Task{}, false
 }
 
-func (m Model) loadBoard() tea.Cmd {
+func (m Model) loadBoard(generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		loaded, err := m.store.Board(m.user)
-		return boardLoadedMsg{board: loaded, err: err}
+		return boardLoadedMsg{board: loaded, err: err, generation: generation}
 	}
 }
 

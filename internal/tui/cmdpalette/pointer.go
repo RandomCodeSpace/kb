@@ -30,6 +30,22 @@ type pointerActionMsg struct {
 	generation uint64
 }
 
+type pointerWheelMsg struct {
+	generation uint64
+	current    int
+	target     int
+	max        int
+}
+
+func (m pointerWheelMsg) PointerWheelIntent() pointer.WheelIntent {
+	return pointer.WheelIntent{Key: "palette", Current: m.current, Target: m.target, Min: 0, Max: m.max}
+}
+
+func (m pointerWheelMsg) PointerWheelTarget(target int) tea.Msg {
+	m.target = min(max(target, 0), m.max)
+	return m
+}
+
 // machine is the mouse-mode state machine of spec section 10.5.2 for this
 // surface. The palette's result list is an overlay choice surface, which is
 // exactly the scope ratified call 9 gives the machine.
@@ -51,8 +67,14 @@ func (m Model) acting() int { return m.machine().Acting(m.pointerState) }
 // consumes the motion - clearing its own hover - so the board underneath can
 // never light a card beneath a dimmed backdrop.
 func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
+	return m.PointerSurface(width, height).Pointer
+}
+
+// PointerSurface publishes the rendered handler together with its immutable
+// stable-control topology for root-level stale-generation admission.
+func (m Model) PointerSurface(width, height int) pointer.Surface {
 	if !m.open {
-		return nil
+		return pointer.Surface{}
 	}
 	width, height = max(width, 1), max(height, 1)
 	panel := m.layout(width, height)
@@ -66,7 +88,7 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 	// palette is always a fresh search, so the query a dismissal drops is the
 	// same query the next open would have cleared anyway.
 	generation := m.generation
-	hitMap.AddBackdrop(bounds, pane, func(pointer.Point) tea.Msg {
+	hitMap.AddBackdropControl(pointer.ControlID("palette.backdrop"), bounds, pane, func(pointer.Point) tea.Msg {
 		return pointerActionMsg{dismiss: true, generation: generation}
 	})
 	// Body row 0 is the query field, which is not activatable and so, per spec
@@ -87,8 +109,17 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 			return pointerActionMsg{entry: entry, generation: generation}
 		})
 	}
-	return hitMap.Handler()
+	maxEntry := max(len(m.entries)-1, 0)
+	hitMap.AddWheel(pane, func(delta int) tea.Msg {
+		return pointerWheelMsg{generation: generation, current: m.cursor,
+			target: min(max(m.cursor+delta, 0), maxEntry), max: maxEntry}
+	})
+	return pointer.Surface{Pointer: hitMap.Handler(), Topology: hitMap.Topology()}
 }
+
+// PointerSession identifies the current filtered palette owner. Query changes
+// advance it because row identities may be replaced while the palette stays open.
+func (m Model) PointerSession() uint64 { return m.generation }
 
 // pointerAction runs one activation from the map of the frame it was built in.
 func (m *Model) pointerAction(msg pointerActionMsg) tea.Cmd {

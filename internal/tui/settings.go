@@ -69,7 +69,21 @@ type settingsPointerMsg struct {
 	owner  *settingsModel
 	target string
 }
-type settingsWheelMsg struct{ delta int }
+type settingsWheelMsg struct {
+	owner         *settingsModel
+	current       int
+	target        int
+	maxFocusIndex int
+}
+
+func (m settingsWheelMsg) PointerWheelIntent() pointer.WheelIntent {
+	return pointer.WheelIntent{Key: "settings", Current: m.current, Target: m.target, Min: 0, Max: m.maxFocusIndex}
+}
+
+func (m settingsWheelMsg) PointerWheelTarget(target int) tea.Msg {
+	m.target = min(max(target, 0), m.maxFocusIndex)
+	return m
+}
 
 type integrationSettingsRow struct {
 	id        string
@@ -270,8 +284,17 @@ func (m *settingsModel) Update(message tea.Msg) tea.Cmd {
 		}
 		return m.updatePointer(msg.target)
 	case settingsWheelMsg:
-		if m.loaded && m.busy == "" && msg.delta != 0 {
-			m.moveFocus(msg.delta)
+		if msg.owner == m && m.loaded && m.busy == "" {
+			targets := m.focusTargets()
+			if len(targets) == 0 {
+				return nil
+			}
+			at := min(max(msg.target, 0), len(targets)-1)
+			if m.focus != targets[at] {
+				m.disarmRemove()
+				m.focus = targets[at]
+				m.applyFocus()
+			}
 		}
 		return nil
 	case tea.KeyPressMsg:

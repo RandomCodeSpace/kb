@@ -580,3 +580,42 @@ func TestFailedPreferenceWriteRetriesEqualPendingSnapshot(t *testing.T) {
 		t.Fatalf("retry completion = saving:%v err:%v writes:%d command:%v", m.prefSaving, m.preferenceErr, writes, next)
 	}
 }
+
+func TestFilterProjectionRevisionTracksEveryMutationBoundary(t *testing.T) {
+	state := newBoardFilterState()
+	initial := state.projectionRevision
+	state.restore(boardFilter{Text: "keep", Tags: []string{"bug", "bug"}})
+	if state.projectionRevision != initial+1 {
+		t.Fatalf("restore revision = %d, want %d", state.projectionRevision, initial+1)
+	}
+	state.restore(boardFilter{Text: "keep", Tags: []string{"bug"}})
+	if state.projectionRevision != initial+1 {
+		t.Fatalf("identical restore revision = %d, want unchanged", state.projectionRevision)
+	}
+	if !state.toggleTag("feature") || state.projectionRevision != initial+2 {
+		t.Fatalf("tag add revision = %d", state.projectionRevision)
+	}
+	if !state.toggleTag("feature") || state.projectionRevision != initial+3 {
+		t.Fatalf("tag remove revision = %d", state.projectionRevision)
+	}
+	if !state.clear() || state.projectionRevision != initial+4 {
+		t.Fatalf("clear revision = %d", state.projectionRevision)
+	}
+
+	model := performanceModel(17, "", 80, 24)
+	before := model.filter.projectionRevision
+	model.filter.focus = filterText
+	model.filter.input.Focus()
+	handled, _ := model.handleFilterKey(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	preparedMatches := model.preparedProjection != nil && model.preparedProjection.matchesProjectionKey(model)
+	if !handled || model.filter.projectionRevision != before+1 || !preparedMatches {
+		t.Fatalf("text mutation revision=%d handled=%t prepared-match=%t",
+			model.filter.projectionRevision, handled, preparedMatches)
+	}
+
+	before = model.filter.projectionRevision
+	model.adoptPreferences(tuiPreferences{Filter: boardFilter{Text: "restored", Tags: []string{"saved"}}})
+	if model.filter.projectionRevision != before+1 {
+		t.Fatalf("preference restore revision = %d, want %d", model.filter.projectionRevision, before+1)
+	}
+}

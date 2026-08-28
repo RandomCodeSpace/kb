@@ -136,17 +136,12 @@ func TestChordOpensAndClosesThePalette(t *testing.T) {
 // the board never sees the motion under it.
 func TestPaletteReceivesMouseBeforeTheBoard(t *testing.T) {
 	m := openFilteredPalette(t)
-	handler := m.View().OnMouse
-	if handler == nil {
+	if m.View().OnMouse == nil {
 		t.Fatal("the open palette installed no pointer handler")
 	}
 	x, y := paletteRowCell(t, &m)
 	before := m.View().Content
-	command := handler(tea.MouseMotionMsg{X: x, Y: y})
-	if command == nil {
-		t.Fatal("motion over a result row produced no feedback")
-	}
-	updateTestModel(t, &m, command())
+	updateRootPointerTest(t, &m, tea.MouseMotionMsg{X: x, Y: y})
 	after := m.View().Content
 	if before == after {
 		t.Fatal("the root routed the palette's hover somewhere else: the frame did not change")
@@ -195,20 +190,11 @@ func paletteRowCell(t *testing.T, m *Model) (int, int) {
 // commits is replayed as the key the board's own handler already matches.
 func TestPaletteClickRunsTheActionThroughTheRoot(t *testing.T) {
 	m := openFilteredPalette(t)
-	handler := m.View().OnMouse
 	x, y := paletteRowCell(t, &m)
-	if command := handler(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}); command != nil {
-		updateTestModel(t, &m, command())
+	updateRootPointerTest(t, &m, tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if activation := updateRootPointerTest(t, &m, tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft}); activation != nil {
+		updateTestModel(t, &m, activation())
 	}
-	command := handler(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
-	if command == nil {
-		t.Fatal("releasing on a result row produced nothing")
-	}
-	activation := updateTestModel(t, &m, command())
-	if activation == nil {
-		t.Fatal("the release produced no activation")
-	}
-	updateTestModel(t, &m, activation())
 	if m.palette.IsOpen() {
 		t.Error("clicking a result row left the palette open")
 	}
@@ -218,15 +204,8 @@ func TestPaletteClickRunsTheActionThroughTheRoot(t *testing.T) {
 // panel the palette's own rather than a hole through to the board.
 func TestPaletteBackdropClickDismissesThroughTheRoot(t *testing.T) {
 	m := openFilteredPalette(t)
-	handler := m.View().OnMouse
-	if command := handler(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft}); command != nil {
-		updateTestModel(t, &m, command())
-	}
-	command := handler(tea.MouseReleaseMsg{X: 0, Y: 0, Button: tea.MouseLeft})
-	if command == nil {
-		t.Fatal("releasing on the backdrop produced nothing")
-	}
-	if activation := updateTestModel(t, &m, command()); activation != nil {
+	updateRootPointerTest(t, &m, tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
+	if activation := updateRootPointerTest(t, &m, tea.MouseReleaseMsg{X: 0, Y: 0, Button: tea.MouseLeft}); activation != nil {
 		updateTestModel(t, &m, activation())
 	}
 	if m.palette.IsOpen() {

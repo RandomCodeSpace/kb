@@ -402,6 +402,7 @@ func TestWatcherChangeCancelsUnsavedPreviewBeforeRefresh(t *testing.T) {
 	m := loadedMoveModel(s)
 	m.watcher = stubVersionReader{version: 2}
 	m.haveVersion, m.dataVersion = true, 1
+	m.pollStarted = true
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyDown})
 	command := updateTestModel(t, &m, dataVersionMsg{version: 2})
@@ -416,6 +417,8 @@ func TestWatcherChangeCancelsUnsavedPreviewBeforeRefresh(t *testing.T) {
 func TestMoveSerializesWatcherRefreshBehindStoreWrite(t *testing.T) {
 	s := &moveTestStore{board: moveFixture()}
 	m := loadedMoveModel(s)
+	m.watcher = stubVersionReader{version: 2}
+	m.haveVersion, m.dataVersion, m.pollStarted = true, 1, true
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeySpace})
 	drop := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if command := updateTestModel(t, &m, dataVersionMsg{version: 2}); command == nil {
@@ -733,8 +736,12 @@ func TestMouseReleaseProtocolsClickAndDrag(t *testing.T) {
 					})
 					updateTestModel(t, &m, motion())
 				}
+				releaseX, releaseY := source.x0+1, source.y0
+				if drag {
+					releaseX, releaseY = destination.x0+1, destination.y0
+				}
 				release := active(tea.MouseReleaseMsg{
-					X: destination.x0 + 1, Y: destination.y0, Button: protocol.button,
+					X: releaseX, Y: releaseY, Button: protocol.button,
 				})
 				if release == nil {
 					t.Fatalf("%s release was ignored", protocol.name)
@@ -754,8 +761,10 @@ func TestMouseReleaseProtocolsClickAndDrag(t *testing.T) {
 			})
 		}
 	}
-	if command := boardMouseHandler(nil, false)(tea.MouseReleaseMsg{Button: tea.MouseNone}); command != nil {
-		t.Fatalf("unrelated X10 release produced %v", command)
+	if command := boardMouseHandler(nil, false)(tea.MouseReleaseMsg{Button: tea.MouseNone}); command == nil {
+		t.Fatal("X10 release did not reach model-owned capture validation")
+	} else if message, ok := command().(boardPointerUpMsg); !ok || !message.resolved || message.valid {
+		t.Fatalf("X10 release resolved as %#v", message)
 	}
 }
 

@@ -52,6 +52,8 @@ func TestAgeChipParity(t *testing.T) {
 		{"done", board.StatusDone, now.Add(-10 * day), now, "shipped"},
 		{"cancelled uses created", board.StatusCancelled, now.Add(-24 * time.Hour), now, "1d"},
 		{"future clamps", board.StatusTodo, now.Add(time.Hour), now, "new"},
+		{"todo missing timestamp", board.StatusTodo, time.Time{}, time.Time{}, "new"},
+		{"doing missing timestamp", board.StatusDoing, time.Time{}, time.Time{}, "1h"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -306,8 +308,10 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	if selected, ok := m.selectedTask(); !ok || selected.ID != "doing-1" {
 		t.Fatalf("mouse selection = %+v,%v", selected, ok)
 	}
-	if command := boardMouseHandler(hits, false)(tea.MouseReleaseMsg{}); command != nil {
-		t.Fatalf("release produced command %v", command)
+	if command := boardMouseHandler(hits, false)(tea.MouseReleaseMsg{}); command == nil {
+		t.Fatal("release did not resolve for model-owned capture validation")
+	} else if message, ok := command().(boardPointerUpMsg); !ok || !message.resolved {
+		t.Fatalf("release resolved as %#v", message)
 	}
 	if command := boardMouseHandler(hits, false)(tea.MouseClickMsg{X: 999, Y: 999, Button: tea.MouseLeft}); command != nil {
 		t.Fatalf("off-board click produced command %v", command)
@@ -523,7 +527,7 @@ func TestViewIsByteStableAcrossMovingWallClock(t *testing.T) {
 	}
 }
 
-func TestPollTickRefreshesRenderTimeAtRolloverBoundary(t *testing.T) {
+func TestTemporalTickPublishesRolloverAtSemanticBoundary(t *testing.T) {
 	before := time.Date(2026, 8, 18, 23, 59, 59, 0, time.UTC)
 	after := before.Add(time.Second)
 	m := newTestRootModel(stubBoardReader{}, stubVersionReader{}, "alice")
@@ -531,12 +535,18 @@ func TestPollTickRefreshesRenderTimeAtRolloverBoundary(t *testing.T) {
 	m.width, m.height = 100, 12
 	m.renderedAt = before
 	m.now = func() time.Time { return after }
-	m.shipped = shippedRecord{Date: "2026-08-18", IDs: []string{"shipped"}}
+	m.adoptShippedAt(shippedRecord{Date: "2026-08-18", IDs: []string{"shipped"}}, before)
 	m.board = board.Board{Title: "Clock", Tasks: []board.Task{{
 		ID: "task", Title: "Task", Status: board.StatusTodo, Due: "2026-08-18",
 		CreatedAt: before.Add(-23*time.Hour - 59*time.Minute - 59*time.Second),
 		MovedAt:   before.Add(-23*time.Hour - 59*time.Minute - 59*time.Second),
 	}}}
+	rebuildTestView(&m)
+	var armed temporalTickMsg
+	m.temporalSchedule = func(_ time.Duration, message temporalTickMsg) tea.Cmd {
+		armed = message
+		return func() tea.Msg { return message }
+	}
 
 	initial := plain(m.View().Content)
 	for _, want := range []string{"new", "today", "× 1 shipped today"} {
@@ -544,12 +554,20 @@ func TestPollTickRefreshesRenderTimeAtRolloverBoundary(t *testing.T) {
 			t.Fatalf("pre-tick render missing %q:\n%s", want, initial)
 		}
 	}
-	command := updateTestModel(t, &m, pollTickMsg{})
-	if command == nil {
-		t.Fatal("poll tick did not schedule its data-version read")
+	if command := m.reconcileTemporalSchedule(); command == nil || !armed.deadline.Equal(after) {
+		t.Fatalf("temporal arm = %+v command=%v, want deadline %s", armed, command, after)
+	}
+	beforeStats := m.RenderPlanStats()
+	next, commands := m.updateWithCommands(armed)
+	m = next
+	if commands.temporal == nil {
+		t.Fatal("temporal tick did not schedule its semantic successor")
 	}
 	if !m.renderedAt.Equal(after) {
-		t.Fatalf("poll timestamp = %s, want %s", m.renderedAt, after)
+		t.Fatalf("temporal timestamp = %s, want %s", m.renderedAt, after)
+	}
+	if got := m.RenderPlanStats().PublishedFrames; got != beforeStats.PublishedFrames+1 {
+		t.Fatalf("temporal rollover published %d frames, want one", got-beforeStats.PublishedFrames)
 	}
 
 	rolled := plain(m.View().Content)

@@ -363,3 +363,39 @@ func TestTinyFrameStillRenders(t *testing.T) {
 		}
 	}
 }
+
+func TestPointerWheelGenerationAndTarget(t *testing.T) {
+	m := openModel(t)
+	if len(m.entries) < 2 {
+		t.Fatalf("open palette has %d entries, want at least 2", len(m.entries))
+	}
+	max := len(m.entries) - 1
+	generation := m.PointerSession()
+	for _, test := range []struct {
+		name         string
+		target, want int
+	}{
+		{name: "below", target: -1, want: 0},
+		{name: "in range", target: 1, want: 1},
+		{name: "above", target: max + 1, want: max},
+	} {
+		got, ok := (pointerWheelMsg{generation: generation, max: max}).PointerWheelTarget(test.target).(pointerWheelMsg)
+		if !ok || got.target != test.want {
+			t.Errorf("%s target became %#v, want %d", test.name, got, test.want)
+		}
+	}
+	wheel := pointerWheelMsg{generation: generation, target: max, max: max}
+	m.Update(wheel)
+	if m.cursor != max {
+		t.Errorf("current-generation wheel set cursor to %d, want %d", m.cursor, max)
+	}
+	typeQuery(m, "ship")
+	before := m.cursor
+	m.Update(wheel)
+	if m.cursor != before {
+		t.Errorf("stale wheel changed cursor to %d, want %d", m.cursor, before)
+	}
+	if got := m.PointerSession(); got != m.generation {
+		t.Errorf("pointer session is %d, want current generation %d", got, m.generation)
+	}
+}

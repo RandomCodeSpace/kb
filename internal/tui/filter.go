@@ -2,6 +2,7 @@ package tui
 
 import (
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -30,11 +31,29 @@ const (
 const filterMarkField = "filter"
 
 type boardFilterState struct {
-	input      textinput.Model
-	tags       []string
-	focus      filterFocus
-	labelIndex int
-	mark       formview.Mark
+	input              textinput.Model
+	tags               []string
+	projectionRevision uint64
+	focus              filterFocus
+	labelIndex         int
+	mark               formview.Mark
+}
+
+type boardFilterVisualIdentity struct {
+	focus         filterFocus
+	labelIndex    int
+	position      int
+	inputFocused  bool
+	virtualCursor bool
+	marked        bool
+}
+
+func (s *boardFilterState) visualIdentity() boardFilterVisualIdentity {
+	return boardFilterVisualIdentity{
+		focus: s.focus, labelIndex: s.labelIndex, position: s.input.Position(),
+		inputFocused: s.input.Focused(), virtualCursor: s.input.VirtualCursor(),
+		marked: s.mark.Active(filterMarkField),
+	}
 }
 
 func newBoardFilterState() boardFilterState {
@@ -50,8 +69,14 @@ func (s boardFilterState) value() boardFilter {
 }
 
 func (s *boardFilterState) restore(value boardFilter) {
+	beforeText := s.input.Value()
+	beforeTags := s.tags
+	tags := normalizedFilterTags(value.Tags)
 	s.input.SetValue(value.Text)
-	s.tags = normalizedFilterTags(value.Tags)
+	s.tags = tags
+	if beforeText != value.Text || !slices.Equal(beforeTags, tags) {
+		s.projectionRevision++
+	}
 }
 
 func normalizedFilterTags(tags []string) []string {
@@ -92,6 +117,7 @@ func (s *boardFilterState) clear() bool {
 	}
 	s.input.SetValue("")
 	s.tags = nil
+	s.projectionRevision++
 	return true
 }
 
@@ -102,10 +128,12 @@ func (s *boardFilterState) toggleTag(tag string) bool {
 	for i, selected := range s.tags {
 		if selected == tag {
 			s.tags = append(s.tags[:i], s.tags[i+1:]...)
+			s.projectionRevision++
 			return true
 		}
 	}
 	s.tags = append(s.tags, tag)
+	s.projectionRevision++
 	return true
 }
 
@@ -185,17 +213,68 @@ func boardLabels(current board.Board) []string {
 // filteredBoard is what the board renders: the project scope first, then the
 // text and label filter over what it left.
 func (m Model) filteredBoard() board.Board {
+	if m.renderingProjection != nil {
+		return m.renderingProjection.board
+	}
+	if m.preparedProjection != nil && m.preparedProjection.matchesProjectionKey(m) {
+		return m.preparedProjection.board
+	}
+	if m.current != nil && m.current.projection.matchesProjectionKey(m) {
+		return m.current.projection.board
+	}
 	return m.filter.project(m.projectBoard())
+}
+
+// currentProjection is the O(1) navigation/render lookup. The source identity
+// check rejects board replacements made during Update; deep source comparison
+// remains at explicit render-plan rebuild boundaries where data actually
+// changed.
+func (m Model) currentProjection() *renderProjection {
+	if m.renderingProjection != nil {
+		return m.renderingProjection
+	}
+	if m.preparedProjection != nil && m.preparedProjection.matchesProjectionKey(m) {
+		return m.preparedProjection
+	}
+	if m.current != nil && m.current.projection.matchesProjectionKey(m) {
+		return &m.current.projection
+	}
+	return nil
+}
+
+// prepareFilterProjection performs the one projection pass inherently required
+// by a changed query. rebuildRenderPlanAfterUpdate consumes the prepared value
+// instead of pointlessly walking the same derivations again.
+func (m *Model) prepareFilterProjection() *renderProjection {
+	if m.current == nil || !m.current.projection.matchesSourceIdentity(m.board) {
+		m.preparedProjection = nil
+		m.preparedDerivations = 0
+		m.preparedComparisons = 0
+		return nil
+	}
+	prepared, _, _ := m.current.projection.rebuildSource(*m, false)
+	m.preparedProjection = &prepared
+	m.preparedDerivations = 0
+	m.preparedComparisons = 0
+	return &prepared
 }
 
 func (m *Model) mutateFilter(change func(*boardFilterState)) tea.Cmd {
 	previous := m.filteredBoard()
 	before := m.filter.value()
+	beforeRevision := m.filter.projectionRevision
 	change(&m.filter)
 	if reflect.DeepEqual(before, m.filter.value()) {
 		return nil
 	}
-	m.boardView.adoptBoard(previous, m.filteredBoard())
+	if m.filter.projectionRevision == beforeRevision {
+		m.filter.projectionRevision++
+	}
+	if prepared := m.prepareFilterProjection(); prepared != nil {
+		m.boardView.adoptBoard(previous, prepared.board)
+	} else {
+		m.boardView.adoptBoard(previous, m.filteredBoard())
+	}
 	return m.queuePreferences()
 }
 
@@ -286,11 +365,19 @@ func (m *Model) filterTextChanged(previous board.Board, before string, inputCmd 
 	if before == m.filter.input.Value() {
 		return inputCmd
 	}
-	m.boardView.adoptBoard(previous, m.filteredBoard())
+	m.filter.projectionRevision++
+	if prepared := m.prepareFilterProjection(); prepared != nil {
+		m.boardView.adoptBoard(previous, prepared.board)
+	} else {
+		m.boardView.adoptBoard(previous, m.filteredBoard())
+	}
 	return batchCommands(inputCmd, m.queuePreferences())
 }
 
 func (m Model) filterLabels() []string {
+	if projection := m.currentProjection(); projection != nil {
+		return projection.filterLabels()
+	}
 	labels := boardLabels(m.projectBoard())
 	seen := make(map[string]struct{}, len(labels))
 	for _, label := range labels {

@@ -635,7 +635,36 @@ func TestPointerWheelReachesShortReviewRowsAndBackdropGuardIsExplicit(t *testing
 	m.rows = rowsFromDrafts(drafts)
 	m.focus = "include:0"
 
-	for range 32 {
+	wheel := m.MouseHandler(50, 10)(tea.MouseWheelMsg{X: 25, Y: 5, Button: tea.MouseWheelDown})
+	if wheel == nil {
+		t.Fatal("rendered ADR wheel had no action")
+	}
+	followup := m.Update(wheel())
+	if followup == nil {
+		t.Fatal("rendered ADR wheel did not forward its domain action")
+	}
+	followupMessage := followup()
+	rendered, ok := followupMessage.(pointerActionMsg)
+	if !ok {
+		t.Fatalf("rendered ADR wheel follow-up=%T", followupMessage)
+	}
+	wheelMessage := pointer.WheelMessage(rendered)
+	if intent := wheelMessage.PointerWheelIntent(); intent != (pointer.WheelIntent{Key: "adr", Current: 0, Target: 3, Min: 0, Max: 103}) {
+		t.Fatalf("rendered ADR wheel intent=%+v", intent)
+	}
+	if rendered.session != m.session || rendered.generation != m.generation {
+		t.Fatalf("rendered ADR wheel scope session=%d generation=%d, current=%d/%d", rendered.session, rendered.generation, m.session, m.generation)
+	}
+	if session := m.PointerSession(); session != rendered.session || session != m.session {
+		t.Fatalf("rendered ADR public session=%d, action=%d current=%d", session, rendered.session, m.session)
+	}
+	absolute := wheelMessage.PointerWheelTarget(11)
+	m.Update(absolute)
+	if session := m.PointerSession(); m.scroll != 11 || !m.manualScroll || m.focus != "include:0" || session != rendered.session || session != m.session {
+		t.Fatalf("absolute ADR wheel state scroll=%d manual=%v focus=%q public-session=%d current=%d rendered=%d", m.scroll, m.manualScroll, m.focus, session, m.session, rendered.session)
+	}
+
+	for range 29 {
 		pointerWheel(t, m, m.MouseHandler(50, 10), 25, 5, tea.MouseWheelDown)
 	}
 	if m.scroll == 0 || !m.manualScroll || m.focus != "include:0" {

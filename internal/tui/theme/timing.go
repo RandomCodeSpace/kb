@@ -32,17 +32,25 @@ type Timing struct {
 	// class-B effect that collapses to nothing at zero.
 	CelebrateSteps int
 
-	DialogGraceQuiet   time.Duration
-	DialogGraceMax     time.Duration
-	DialogGraceReopen  time.Duration
-	ScrollActiveLinger time.Duration
-	DoubleClickWindow  time.Duration
-	InputCoalesce      time.Duration
-	NoticeTTL          time.Duration
+	DialogGraceQuiet           time.Duration
+	DialogGraceMax             time.Duration
+	DialogGraceReopen          time.Duration
+	ScrollActiveLinger         time.Duration
+	DoubleClickWindow          time.Duration
+	InputCoalesce              time.Duration
+	KeyboardNavigationInterval time.Duration
+	KeyboardNavigationQuiet    time.Duration
+	NoticeTTL                  time.Duration
 
 	PollInterval  time.Duration
 	AutoShipDelay time.Duration
 	SimilarDelay  time.Duration
+
+	// GeometrySliceTarget is the preferred amount of offscreen layout work per
+	// worker command. GeometrySliceLimit is the hard ceiling used to report an
+	// overrun. Both are worker budgets, not paint-path timing.
+	GeometrySliceTarget time.Duration
+	GeometrySliceLimit  time.Duration
 }
 
 // DefaultTiming is the table of spec section 10.3.1. crush is the donor for
@@ -64,17 +72,22 @@ var DefaultTiming = Timing{
 	BrandBirthSteps: 12,
 	CelebrateSteps:  12,
 
-	DialogGraceQuiet:   425 * time.Millisecond,
-	DialogGraceMax:     1500 * time.Millisecond,
-	DialogGraceReopen:  500 * time.Millisecond,
-	ScrollActiveLinger: 2000 * time.Millisecond,
-	DoubleClickWindow:  400 * time.Millisecond,
-	InputCoalesce:      16 * time.Millisecond,
-	NoticeTTL:          5000 * time.Millisecond,
+	DialogGraceQuiet:           425 * time.Millisecond,
+	DialogGraceMax:             1500 * time.Millisecond,
+	DialogGraceReopen:          500 * time.Millisecond,
+	ScrollActiveLinger:         2000 * time.Millisecond,
+	DoubleClickWindow:          400 * time.Millisecond,
+	InputCoalesce:              16 * time.Millisecond,
+	KeyboardNavigationInterval: 50 * time.Millisecond,
+	KeyboardNavigationQuiet:    100 * time.Millisecond,
+	NoticeTTL:                  5000 * time.Millisecond,
 
 	PollInterval:  1000 * time.Millisecond,
 	AutoShipDelay: 350 * time.Millisecond,
 	SimilarDelay:  400 * time.Millisecond,
+
+	GeometrySliceTarget: 8 * time.Millisecond,
+	GeometrySliceLimit:  16 * time.Millisecond,
 }
 
 // TimingCollapsed is the test configuration: the struct zero value. Every

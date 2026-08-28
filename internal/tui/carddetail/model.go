@@ -58,7 +58,21 @@ type detailLoadedMsg struct {
 
 type markdownRenderer func(source string, width int) string
 
-type mouseScrollMsg struct{ delta int }
+type mouseScrollMsg struct {
+	current   int
+	target    int
+	maxScroll int
+}
+
+func (m mouseScrollMsg) PointerWheelIntent() pointer.WheelIntent {
+	return pointer.WheelIntent{Key: "detail", Current: m.current, Target: m.target, Min: 0, Max: m.maxScroll}
+}
+
+func (m mouseScrollMsg) PointerWheelTarget(target int) tea.Msg {
+	m.target = min(max(target, 0), m.maxScroll)
+	return m
+}
+
 type mouseDismissMsg struct{}
 
 type pointerControlMsg struct {
@@ -67,6 +81,27 @@ type pointerControlMsg struct {
 	driftSession    uint64
 	driftGeneration uint64
 	message         tea.Msg
+}
+
+func (m pointerControlMsg) PointerWheelIntent() pointer.WheelIntent {
+	wheel, ok := m.message.(pointer.WheelMessage)
+	if !ok || wheel == nil {
+		return pointer.WheelIntent{}
+	}
+	return wheel.PointerWheelIntent()
+}
+
+func (m pointerControlMsg) PointerWheelTarget(target int) tea.Msg {
+	wheel, ok := m.message.(pointer.WheelMessage)
+	if !ok || wheel == nil {
+		return nil
+	}
+	next := wheel.PointerWheelTarget(target)
+	if next == nil {
+		return nil
+	}
+	m.message = next
+	return m
 }
 
 // Model owns the overlay's task snapshot, enriched detail, and the bubbles
@@ -291,9 +326,12 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return nil
 	}
 	if pointer.IsMessage(message) {
+		pressed, hovered := m.pointerState.Pressed(), m.pointerState.Hovered()
 		next, command, _ := m.pointerState.Update(message)
 		m.pointerState = next
-		m.rebuildBody()
+		if next.Pressed() != pressed || next.Hovered() != hovered {
+			m.rebuildBody()
+		}
 		return command
 	}
 	switch msg := message.(type) {
@@ -338,7 +376,7 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		m.reconcileDeleteActionAfterRefresh()
 		m.rebuildBody()
 	case mouseScrollMsg:
-		m.scrollBy(msg.delta)
+		m.scrollBy(msg.target - m.scrollOffset())
 	case mouseDismissMsg:
 		m.Close()
 		return nil
@@ -416,6 +454,7 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 	paneWidth, paneHeight, _ := m.paneSize(width, height)
 	x0 := max((max(width, 1)-paneWidth)/2, 0)
 	y0 := max((max(height, 1)-paneHeight)/2, 0)
+	current, maxScroll := m.scrollOffset(), m.maxScroll()
 	return func(message tea.MouseMsg) tea.Cmd {
 		mouse := message.Mouse()
 		inside := mouse.X >= x0 && mouse.X < x0+paneWidth && mouse.Y >= y0 && mouse.Y < y0+paneHeight
@@ -432,7 +471,9 @@ func (m Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 			default:
 				return nil
 			}
-			return func() tea.Msg { return mouseScrollMsg{delta: delta} }
+			return func() tea.Msg {
+				return mouseScrollMsg{current: current, target: min(max(current+delta, 0), maxScroll), maxScroll: maxScroll}
+			}
 		}
 		if _, click := message.(tea.MouseClickMsg); click && mouse.Button == tea.MouseLeft && !inside {
 			return func() tea.Msg { return mouseDismissMsg{} }
@@ -555,9 +596,14 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 			message: message,
 		}
 	}
-	hitMap.AddWheel(pane, func(delta int) tea.Msg { return wrap(mouseScrollMsg{delta: delta * 3}) })
+	current, maxScroll := m.scrollOffset(), m.maxScroll()
+	hitMap.AddWheel(pane, func(delta int) tea.Msg {
+		return wrap(mouseScrollMsg{current: current,
+			target: min(max(current+delta*3, 0), maxScroll), maxScroll: maxScroll})
+	})
 	if m.action == actionNone && m.driftMode == driftNone {
-		hitMap.AddBackdrop(bounds, pane, func(pointer.Point) tea.Msg { return wrap(mouseDismissMsg{}) })
+		hitMap.AddBackdropControl(pointer.ControlID("detail.backdrop"), bounds, pane,
+			func(pointer.Point) tea.Msg { return wrap(mouseDismissMsg{}) })
 	}
 
 	inset := m.styles.Metrics.OverlayInsetX
@@ -671,8 +717,12 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 		layers = append(layers, lipgloss.NewLayer(widget.Overlay(m.styles, layout.opts)).X(x).Y(y).Z(1))
 	}
 	content := fitTerminal(lipgloss.NewCompositor(layers...).Render(), width, height)
-	return pointer.Surface{Content: content, Pointer: hitMap.Handler()}
+	return pointer.Surface{Content: content, Pointer: hitMap.Handler(), Topology: hitMap.Topology()}
 }
+
+// PointerSession identifies one open detail owner independently of harmless
+// render generations.
+func (m Model) PointerSession() uint64 { return m.pointerSession }
 
 // paneLayout is one resolved render pass: the panel the widget draws, whether
 // it is elevated, and the two widths the footer and its controls share so a

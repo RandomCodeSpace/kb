@@ -24,6 +24,7 @@ func goldenLaunchModel(width, height int) Model {
 	m.brandSeed = 42
 	m.brandFrame = m.themeStyles().Timing.BrandBirthSteps
 	m.version = "1.2.0"
+	rebuildTestView(&m)
 	return m
 }
 

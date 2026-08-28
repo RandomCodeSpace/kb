@@ -14,6 +14,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
@@ -145,8 +146,8 @@ func TestDetailMouseWheelStopsAtUpperBound(t *testing.T) {
 	m.Open(fullTask())
 	m.Resize(80, 12)
 	m.bodyLines = make([]string, 30)
-	handler := m.MouseHandler(80, 12)
 	for range 100 {
+		handler := m.MouseHandler(80, 12)
 		if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command != nil {
 			m.Update(busyResult(t, command))
 		}
@@ -154,11 +155,56 @@ func TestDetailMouseWheelStopsAtUpperBound(t *testing.T) {
 	if m.scrollOffset() != m.maxScroll() {
 		t.Fatalf("wheel down upper bound = %d, want %d", m.scrollOffset(), m.maxScroll())
 	}
-	if command := handler(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command != nil {
+	if command := m.MouseHandler(80, 12)(tea.MouseWheelMsg{X: 40, Y: 5, Button: tea.MouseWheelDown}); command != nil {
 		m.Update(busyResult(t, command))
 	}
 	if m.scrollOffset() != m.maxScroll() {
 		t.Fatalf("wheel down crossed upper bound = %d, want %d", m.scrollOffset(), m.maxScroll())
+	}
+}
+
+func TestMouseScrollPointerWheelTargetClamps(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		target, want int
+	}{
+		{name: "lower", target: -1, want: 0},
+		{name: "in-range", target: 4, want: 4},
+		{name: "upper", target: 99, want: 10},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			message, ok := (mouseScrollMsg{current: 2, target: 2, maxScroll: 10}).PointerWheelTarget(test.target).(mouseScrollMsg)
+			if !ok {
+				t.Fatal("wheel target did not rebuild a mouse scroll message")
+			}
+			if message.target != test.want {
+				t.Fatalf("target = %d, want %d", message.target, test.want)
+			}
+		})
+	}
+}
+
+func TestPointerControlWheelAdapter(t *testing.T) {
+	wheel := mouseScrollMsg{current: 2, target: 4, maxScroll: 10}
+	wrapped := pointerControlMsg{message: wheel}
+	if got, want := wrapped.PointerWheelIntent(), (pointer.WheelIntent{Key: "detail", Current: 2, Target: 4, Min: 0, Max: 10}); got != want {
+		t.Fatalf("wheel intent = %+v, want %+v", got, want)
+	}
+	rebuilt, ok := wrapped.PointerWheelTarget(99).(pointerControlMsg)
+	if !ok {
+		t.Fatal("wheel target did not rebuild pointer control message")
+	}
+	nested, ok := rebuilt.message.(mouseScrollMsg)
+	if !ok || nested.target != 10 {
+		t.Fatalf("nested wheel = %#v, want clamped target 10", rebuilt.message)
+	}
+
+	dismiss := pointerControlMsg{message: mouseDismissMsg{}}
+	if got := dismiss.PointerWheelIntent(); got != (pointer.WheelIntent{}) {
+		t.Fatalf("dismiss intent = %+v, want zero", got)
+	}
+	if got := dismiss.PointerWheelTarget(1); got != nil {
+		t.Fatalf("dismiss target = %#v, want nil", got)
 	}
 }
 

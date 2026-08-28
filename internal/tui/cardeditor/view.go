@@ -82,8 +82,14 @@ type pointerHit struct {
 // The root model can install this callback while the editor owns the screen;
 // the resulting message is routed through Update just like a key press.
 func (m *Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
+	return m.PointerSurface(width, height).Pointer
+}
+
+// PointerSurface publishes the rendered handler together with its immutable
+// stable-control topology for root-level stale-generation admission.
+func (m *Model) PointerSurface(width, height int) pointer.Surface {
 	if !m.open {
-		return nil
+		return pointer.Surface{}
 	}
 	session := m.session
 	var hitMap pointer.Map
@@ -96,14 +102,18 @@ func (m *Model) MouseHandler(width, height int) func(tea.MouseMsg) tea.Cmd {
 	frame := m.layout(width, height)
 	maxScroll := max(len(frame.rows)-frame.bodyHeight, 0)
 	hitMap.AddWheel(pointer.Rect{X0: frame.x, Y0: frame.y, X1: frame.x + frame.width, Y1: frame.y + frame.height}, func(delta int) tea.Msg {
-		return pointerWheelMsg{session: session, delta: delta, maxScroll: maxScroll}
+		return pointerWheelMsg{session: session, current: frame.scroll,
+			target: min(max(frame.scroll+delta, 0), maxScroll), maxScroll: maxScroll}
 	})
 	// Rows 6 and 9 of spec section 10.5.2: a wheel scroll or a resize moves the
 	// content under a pointer that has not moved, so hover is re-resolved from
 	// the retained point against the map this frame just built.
 	m.pointerState = m.pointerState.Reresolve(hitMap)
-	return hitMap.Handler()
+	return pointer.Surface{Pointer: hitMap.Handler(), Topology: hitMap.Topology()}
 }
+
+// PointerSession identifies this open editor owner across harmless renders.
+func (m Model) PointerSession() uint64 { return m.session }
 
 func (m Model) pointerHits(width, height int) []pointerHit {
 	frame := m.layout(width, height)
