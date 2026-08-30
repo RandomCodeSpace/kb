@@ -74,6 +74,13 @@ func requireRawChatToolResult(t *testing.T, result map[string]any) {
 	}
 }
 
+func TestNativeToolRejectsNonObjectArguments(t *testing.T) {
+	result := mustRunNativeTool(t, ProposeCardTool(NewCardCollector(1)), "not an object")
+	if got := fmt.Sprint(result["error"]); !strings.Contains(got, "expected a JSON object") {
+		t.Fatalf("native tool error = %q, want object validation", got)
+	}
+}
+
 func addToolTask(t *testing.T, st *store.Store, task board.Task) board.Task {
 	t.Helper()
 	created, err := st.AddTask("default", task)
