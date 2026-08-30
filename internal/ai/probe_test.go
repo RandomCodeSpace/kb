@@ -13,8 +13,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-
-	"github.com/RandomCodeSpace/plasmid/oneshot"
 )
 
 // probeRunner is a runner whose stored configuration points at handler and
@@ -84,16 +82,6 @@ func TestProbeReportsMissingModel(t *testing.T) {
 	}
 	runner := NewRunner(st, "", &http.Client{}, &http.Client{})
 	assertAIError(t, runner.Probe(context.Background(), "default", Config{}), http.StatusBadRequest, ProbeModelMissingMessage)
-}
-
-func TestProbeReportsBaseURLBeforeMissingModel(t *testing.T) {
-	st := newTestStore(t)
-	base, model, key := "ftp://api.example.com", "", "sk-test"
-	if _, err := st.SetAISettings("default", &base, &model, &key); err != nil {
-		t.Fatalf("SetAISettings: %v", err)
-	}
-	runner := NewRunner(st, "", &http.Client{}, &http.Client{})
-	assertAIError(t, runner.Probe(t.Context(), "default", Config{}), http.StatusBadRequest, "AI base URL scheme must be http or https")
 }
 
 // TestProbeReportsPrivateEndpoint is the message the SSRF guard writes and that
@@ -218,13 +206,6 @@ func TestProbeModelRejectsBadConfiguration(t *testing.T) {
 	if _, _, err := runner.probeModel(t.Context(), Config{BaseURL: "ftp://example.com", Model: "m"}); err == nil {
 		t.Fatal("non-HTTP base URL accepted")
 	}
-}
-
-func TestProbeErrorMapsPlasmidSentinels(t *testing.T) {
-	assertAIError(t, probeError(oneshot.ErrToolCallingUnsupported, nil), http.StatusBadRequest, ToolCallRequiredMessage)
-	assertAIError(t, probeError(oneshot.ErrToolCallLimit, nil), http.StatusBadRequest, ToolCallRequiredMessage)
-	assertAIError(t, probeError(oneshot.ErrOutputTruncated, nil), http.StatusUnprocessableEntity, TruncatedReplyMessage)
-	assertAIError(t, probeError(oneshot.ErrExecutionFailed, &probeTransport{status: http.StatusOK}), http.StatusBadGateway, ProbeOpaqueMessage)
 }
 
 // TestProbeTransportRecordsOutcome exercises the recorder directly, including

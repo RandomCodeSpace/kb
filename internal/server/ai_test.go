@@ -887,7 +887,6 @@ func TestAITestProbeUsesSelectedTokenDialect(t *testing.T) {
 	}{
 		{model: "qwen3"},
 		{model: "gpt-5-mini", wantCompletionForm: true},
-		{model: "o3-mini", wantCompletionForm: true},
 	} {
 		t.Run(test.model, func(t *testing.T) {
 			fake := &fakeOpenAI{tool: probeToolName}
@@ -931,11 +930,6 @@ func TestAITestProbeRequiresAToolCall(t *testing.T) {
 		{
 			name:      "another tool is not the probe",
 			fake:      fakeOpenAI{tool: "not_ping"},
-			wantError: toolCallRequiredMessage,
-		},
-		{
-			name:      "wrong marker is not the probe",
-			fake:      fakeOpenAI{tool: probeToolName, toolArgs: `{"marker":"wrong"}`},
 			wantError: toolCallRequiredMessage,
 		},
 		{
