@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/RandomCodeSpace/plasmid/oneshot"
 	"github.com/RandomCodeSpace/rig"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
@@ -329,6 +330,13 @@ func TestPublicToolConstructors(t *testing.T) {
 
 func TestClientConfigurationAndBudgetTransport(t *testing.T) {
 	runner := NewRunner(newTestStore(t), "", &http.Client{}, &http.Client{})
+	assertClientRejectsBadBaseURLs(t, runner)
+	assertBudgetFieldRename(t)
+	assertBudgetTransport(t)
+}
+
+func assertClientRejectsBadBaseURLs(t *testing.T, runner *Runner) {
+	t.Helper()
 	for _, base := range []string{"", "not a url", "ftp://example.com", "https://example.com?q=1", "https://u:p@example.com"} {
 		client, err := runner.Client(Config{BaseURL: base, Model: "m"})
 		if client != nil || err == nil {
@@ -338,6 +346,10 @@ func TestClientConfigurationAndBudgetTransport(t *testing.T) {
 	if got, err := endpoint("https://example.com/api"); err != nil || got != "https://example.com/api/v1/" {
 		t.Fatalf("endpoint = %q, %v", got, err)
 	}
+}
+
+func assertBudgetFieldRename(t *testing.T) {
+	t.Helper()
 	if got, ok := renameMaxTokens([]byte(`{"max_tokens":7,"model":"m"}`)); !ok || !strings.Contains(string(got), "max_completion_tokens") {
 		t.Fatalf("rename = %s, %t", got, ok)
 	}
@@ -346,7 +358,10 @@ func TestClientConfigurationAndBudgetTransport(t *testing.T) {
 			t.Errorf("renameMaxTokens(%s) unexpectedly rewrote", body)
 		}
 	}
+}
 
+func assertBudgetTransport(t *testing.T) {
+	t.Helper()
 	seen := make(chan *http.Request, 1)
 	transport := budgetFieldTransport{base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		seen <- req
@@ -383,7 +398,7 @@ func (failingReader) Close() error             { return nil }
 
 func TestProbeUsesDirectStoreConfiguration(t *testing.T) {
 	t.Run("success and supplied overlay", func(t *testing.T) {
-		fake := &scriptedOpenAI{replies: []fakeReply{{calls: []fakeToolCall{{name: "ping", args: `{}`}}}}}
+		fake := &scriptedOpenAI{replies: []fakeReply{{calls: []fakeToolCall{{name: "plasmid_ping", args: `{"marker":"plasmid-probe-v1"}`}}}}}
 		runner, closeUpstream := configuredRunner(t, fake, "stored-model")
 		defer closeUpstream()
 		if err := runner.Probe(context.Background(), "default", Config{Model: "candidate-model"}); err != nil {
@@ -409,7 +424,7 @@ func TestProbeUsesDirectStoreConfiguration(t *testing.T) {
 	})
 
 	t.Run("supplied endpoint and key", func(t *testing.T) {
-		fake := &scriptedOpenAI{replies: []fakeReply{{calls: []fakeToolCall{{name: "ping", args: `{}`}}}}}
+		fake := &scriptedOpenAI{replies: []fakeReply{{calls: []fakeToolCall{{name: "plasmid_ping", args: `{"marker":"plasmid-probe-v1"}`}}}}}
 		runner, closeUpstream := configuredRunner(t, fake, "stored")
 		defer closeUpstream()
 		stored := runner.aiClient
@@ -423,7 +438,7 @@ func TestProbeUsesDirectStoreConfiguration(t *testing.T) {
 	})
 
 	t.Run("maps output and upstream errors", func(t *testing.T) {
-		assertAIError(t, probeError(rig.ErrOutputLimit, nil), http.StatusUnprocessableEntity, TruncatedReplyMessage)
+		assertAIError(t, probeError(oneshot.ErrOutputTruncated, nil), http.StatusUnprocessableEntity, TruncatedReplyMessage)
 		assertAIError(t, probeError(errors.New("network"), nil), http.StatusBadGateway, ProbeOpaqueMessage)
 		if err := probeError(nil, nil); err != nil {
 			t.Fatal(err)
