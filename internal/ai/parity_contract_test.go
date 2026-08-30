@@ -57,7 +57,7 @@ func TestMigrationParityCapsDecompressedModelResponsesAtOneMiB(t *testing.T) {
 
 	runner := parityRunner(t, upstream.URL, upstream.Client(), upstream.Client())
 	_, err := runner.RunText(context.Background(), "default", "system", "prompt", 64)
-	assertAIError(t, err, http.StatusBadGateway, "upstream request failed")
+	assertAIError(t, err, http.StatusBadGateway, runResponseTooLargeMessage)
 	if strings.Contains(err.Error(), upstream.URL) {
 		t.Fatalf("response-limit error leaked the endpoint: %v", err)
 	}

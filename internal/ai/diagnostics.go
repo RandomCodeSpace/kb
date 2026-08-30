@@ -91,6 +91,19 @@ type observedModel struct {
 	observation *modelObservation
 }
 
+type toolCallRecoveryMarker interface {
+	MarkToolCallRecovery(map[string]any)
+}
+
+type observedRecoveringModel struct {
+	*observedModel
+	recovery toolCallRecoveryMarker
+}
+
+func (m *observedRecoveringModel) MarkToolCallRecovery(tools map[string]any) {
+	m.recovery.MarkToolCallRecovery(tools)
+}
+
 func (m *observedModel) GenerateContent(ctx context.Context, request *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		for response, err := range m.LLM.GenerateContent(ctx, request, stream) {
@@ -121,7 +134,11 @@ func (r *Runner) newObservedModel(ctx context.Context, cfg Config) (model.LLM, *
 	if err != nil {
 		return nil, nil, err
 	}
-	return &observedModel{LLM: built, observation: observation}, observation, nil
+	observed := &observedModel{LLM: built, observation: observation}
+	if recovery, ok := built.(toolCallRecoveryMarker); ok {
+		return &observedRecoveringModel{observedModel: observed, recovery: recovery}, observation, nil
+	}
+	return observed, observation, nil
 }
 
 func runFailureMessage(err error, observation *modelObservation) string {
