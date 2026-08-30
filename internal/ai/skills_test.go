@@ -2,12 +2,13 @@ package ai
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"google.golang.org/adk/v2/agent"
 )
 
 // newSkillsServer builds a server whose only interesting field is the skills
@@ -109,16 +110,26 @@ func TestLoadSkillToolKeepsTheCatalogContract(t *testing.T) {
 		{Name: "zeta", Body: "zeta body"},
 		{Name: "alpha", Body: "alpha body"},
 	})
-	if tool.Name != loadSkillToolName {
-		t.Fatalf("tool name = %q, want %q", tool.Name, loadSkillToolName)
+	if tool.Name() != loadSkillToolName {
+		t.Fatalf("tool name = %q, want %q", tool.Name(), loadSkillToolName)
 	}
-	got, err := tool.Run(context.Background(), json.RawMessage(`{"name":" alpha "}`))
+	got, err := runTool(t, tool, `{"name":" alpha "}`)
 	if err != nil || got != "alpha body" {
 		t.Fatalf("load alpha = %q, %v", got, err)
 	}
-	_, err = tool.Run(context.Background(), json.RawMessage(`{"name":"missing"}`))
+	_, err = runTool(t, tool, `{"name":"missing"}`)
 	if err == nil || err.Error() != `unknown skill "missing", available skills: alpha, zeta` {
 		t.Fatalf("unknown skill error = %q", err)
+	}
+
+	ctx := &agent.StrictContextMock{Ctx: context.Background()}
+	result, err := tool.Run(ctx, map[string]any{"name": "alpha"})
+	if err != nil || result["result"] != "alpha body" {
+		t.Fatalf("native load result = %#v, %v", result, err)
+	}
+	result, err = tool.Run(ctx, map[string]any{"name": "missing"})
+	if err != nil || result["error"] != `error: unknown skill "missing", available skills: alpha, zeta` {
+		t.Fatalf("native missing result = %#v, %v", result, err)
 	}
 }
 

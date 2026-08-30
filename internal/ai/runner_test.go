@@ -18,6 +18,7 @@ import (
 
 	"github.com/RandomCodeSpace/plasmid/oneshot"
 	"github.com/RandomCodeSpace/rig"
+	adktool "google.golang.org/adk/v2/tool"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 )
@@ -147,6 +148,44 @@ func TestRunnerReadOnlyScopeOmitsMutatingTools(t *testing.T) {
 	}
 	if !strings.Contains(request, `"max_completion_tokens":8192`) {
 		t.Errorf("request did not clamp and rename budget: %s", request)
+	}
+}
+
+func TestNativeToolScopesAndOrder(t *testing.T) {
+	runner, _ := newToolServer(t)
+	others := []Skill{{Name: "other", Body: "instructions"}}
+	tests := []struct {
+		name  string
+		scope Scope
+		want  []string
+	}{
+		{
+			name: "read only", scope: ScopeReadOnly,
+			want: []string{"propose_card", "find_similar", "list_tasks", "get_task", "load_skill"},
+		},
+		{
+			name: "full", scope: ScopeFull,
+			want: []string{"propose_card", "find_similar", "list_tasks", "get_task", "fetch_link", "update_task", "load_skill"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			native := runner.skillTools("default", test.scope, others, &cardCollector{max: 1})
+			if len(native) != len(test.want) {
+				t.Fatalf("native tools = %d, want %d", len(native), len(test.want))
+			}
+			bridged := bridgeRigTools(native)
+			for i, name := range test.want {
+				if native[i].Name() != name || bridged[i].Name != name {
+					t.Errorf("tool %d = native %q, bridge %q, want %q", i, native[i].Name(), bridged[i].Name, name)
+				}
+			}
+		})
+	}
+
+	withoutLoad := runner.skillTools("default", ScopeReadOnly, nil, &cardCollector{max: 1})
+	if got := withoutLoad[len(withoutLoad)-1].Name(); got == loadSkillToolName {
+		t.Fatalf("load_skill advertised without another skill: %v", withoutLoad)
 	}
 }
 
@@ -311,19 +350,23 @@ func TestRunnerHelpers(t *testing.T) {
 func TestPublicToolConstructors(t *testing.T) {
 	runner, st := newToolServer(t)
 	collector := NewCardCollector(1)
-	if _, err := ProposeCardTool(collector).Run(context.Background(), json.RawMessage(`{"title":"Public"}`)); err != nil {
+	propose, ok := ProposeCardTool(collector).(*kbTool)
+	if !ok {
+		t.Fatalf("ProposeCardTool = %T, want native kb tool", ProposeCardTool(collector))
+	}
+	if _, err := runTool(t, propose, `{"title":"Public"}`); err != nil {
 		t.Fatal(err)
 	}
 	if cards := collector.Cards(); len(cards) != 1 || cards[0].Title != "Public" {
 		t.Fatalf("cards = %+v", cards)
 	}
 	addToolTask(t, st, board.Task{Title: "Existing"})
-	for _, tool := range []rig.Tool{
+	for _, tool := range []adktool.Tool{
 		runner.FindSimilarTool("default"), runner.FetchLinkTool(), runner.ListTasksTool("default"),
 		runner.GetTaskTool("default"), runner.UpdateTaskTool("default"),
 	} {
-		if tool.Name == "" || tool.Run == nil {
-			t.Fatalf("invalid public tool: %+v", tool)
+		if tool.Name() == "" || strings.TrimSpace(tool.Description()) == "" {
+			t.Fatalf("invalid public tool: %T", tool)
 		}
 	}
 }

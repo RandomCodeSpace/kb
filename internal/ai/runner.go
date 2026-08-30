@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/RandomCodeSpace/rig"
+	"google.golang.org/adk/v2/tool"
 )
 
 // runnerSystemPrompt is the kb context every skill run starts from. It states
@@ -209,23 +210,7 @@ func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillNa
 	}
 
 	collector := &cardCollector{max: normalizeStoryCount(maxCards)}
-	tools := []rig.Tool{
-		proposeCardTool(collector),
-		r.findSimilarTool(user),
-		r.listTasksTool(user),
-		r.getTaskTool(user),
-	}
-	// The two tools that reach past a draft — a board write and an outbound
-	// request — are offered only to a run whose input the user authored.
-	if scope == ScopeFull {
-		tools = append(tools, r.fetchLinkTool(), r.updateTaskTool(user))
-	}
-	// The invoked skill is force-injected into the system prompt; only the
-	// others are loadable, so a run cannot lose its own instructions to a
-	// model that never calls load_skill.
-	if len(others) > 0 {
-		tools = append(tools, loadSkillTool(others))
-	}
+	tools := bridgeRigTools(r.skillTools(user, scope, others, collector))
 
 	result, err := client.Run(ctx, rig.RunRequest{
 		Model:         cfg.Model,
@@ -251,6 +236,48 @@ func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillNa
 		return RunResult{Cards: cards}, runnerError(err)
 	}
 	return RunResult{Cards: cards, Commentary: result.Text}, nil
+}
+
+// skillTools builds the exact native ADK declaration set for one skill run.
+// Tool authority and declaration order live here instead of in the runtime
+// adapter, so switching the loop cannot silently broaden a scope.
+func (r *Runner) skillTools(user string, scope Scope, others []Skill, collector *cardCollector) []tool.Tool {
+	tools := []tool.Tool{
+		proposeCardTool(collector),
+		r.findSimilarTool(user),
+		r.listTasksTool(user),
+		r.getTaskTool(user),
+	}
+	// The two tools that reach past a draft — a board write and an outbound
+	// request — are offered only to a run whose input the user authored.
+	if scope == ScopeFull {
+		tools = append(tools, r.fetchLinkTool(), r.updateTaskTool(user))
+	}
+	// The invoked skill is force-injected into the system prompt; only the
+	// others are loadable, so a run cannot lose its own instructions to a
+	// model that never calls load_skill.
+	if len(others) > 0 {
+		tools = append(tools, loadSkillTool(others))
+	}
+	return tools
+}
+
+// bridgeRigTools keeps the released Rig loop running until issue #264 switches
+// RunSkill to Plasmid. It translates only kb-owned native tools and disappears
+// with that switch; native declarations remain the source of truth.
+func bridgeRigTools(native []tool.Tool) []rig.Tool {
+	bridged := make([]rig.Tool, 0, len(native))
+	for _, value := range native {
+		kbValue, ok := value.(*kbTool)
+		if !ok {
+			panic(fmt.Sprintf("ai: transitional Rig bridge received %T", value))
+		}
+		bridged = append(bridged, rig.Tool{
+			Name: kbValue.Name(), Description: kbValue.Description(),
+			InputSchema: kbValue.inputSchema, Run: kbValue.run,
+		})
+	}
+	return bridged
 }
 
 // RunText performs one tool-free completion using stored configuration
@@ -349,9 +376,9 @@ func runnerSystem(skill Skill, others []Skill) string {
 
 func RunnerSystem(skill Skill, others []Skill) string { return runnerSystem(skill, others) }
 
-// loadSkillTool is the current runtime adapter for kb's skill catalogue. The
-// native ADK adapter replaces it when the rest of the domain tools move.
-func loadSkillTool(skills []Skill) rig.Tool {
+// loadSkillTool exposes kb's skill catalogue through the same native ADK tool
+// interface as the board tools.
+func loadSkillTool(skills []Skill) *kbTool {
 	bodies := make(map[string]string, len(skills))
 	names := make([]string, 0, len(skills))
 	for _, skill := range skills {
@@ -363,10 +390,10 @@ func loadSkillTool(skills []Skill) rig.Tool {
 	slices.Sort(names)
 	available := strings.Join(names, ", ")
 
-	return rig.Tool{
-		Name:        loadSkillToolName,
-		Description: "Load the full instructions for one of the skills listed in the system prompt. Call this before acting on a skill.",
-		InputSchema: map[string]any{
+	return newKBTool(
+		loadSkillToolName,
+		"Load the full instructions for one of the skills listed in the system prompt. Call this before acting on a skill.",
+		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"name": map[string]any{
@@ -377,7 +404,8 @@ func loadSkillTool(skills []Skill) rig.Tool {
 			"required":             []any{"name"},
 			"additionalProperties": false,
 		},
-		Run: func(_ context.Context, input json.RawMessage) (string, error) {
+		toolResultText,
+		func(_ context.Context, input json.RawMessage) (string, error) {
 			var args struct {
 				Name string `json:"name"`
 			}
@@ -393,7 +421,7 @@ func loadSkillTool(skills []Skill) rig.Tool {
 			}
 			return "", fmt.Errorf("unknown skill %q, available skills: %s", name, available)
 		},
-	}
+	)
 }
 
 // runnerError maps a loop failure onto the status the caller sees. The two
