@@ -46,6 +46,24 @@ func mustRunTool(t *testing.T, tool *kbTool, input string) string {
 	return out
 }
 
+type nativeRunnableTool interface {
+	tool.Tool
+	Run(agent.Context, any) (map[string]any, error)
+}
+
+func mustRunNativeTool(t *testing.T, toolValue tool.Tool, args any) map[string]any {
+	t.Helper()
+	runnable, ok := toolValue.(nativeRunnableTool)
+	if !ok {
+		t.Fatalf("%s = %T, want a native runnable tool", toolValue.Name(), toolValue)
+	}
+	result, err := runnable.Run(&agent.StrictContextMock{Ctx: context.Background()}, args)
+	if err != nil {
+		t.Fatalf("%s(%#v): unexpected execution error: %v", toolValue.Name(), args, err)
+	}
+	return result
+}
+
 func addToolTask(t *testing.T, st *store.Store, task board.Task) board.Task {
 	t.Helper()
 	created, err := st.AddTask("default", task)
@@ -147,6 +165,141 @@ func TestNativeToolFailuresAreModelVisible(t *testing.T) {
 	if err != nil || !strings.Contains(fmt.Sprint(absent["error"]), "card rejected") {
 		t.Fatalf("absent arguments = %#v, %v", absent, err)
 	}
+}
+
+func TestNativeProductionToolAdapterParity(t *testing.T) {
+	t.Run("propose_card converts defaults, result, error, and collection", func(t *testing.T) {
+		collector := NewCardCollector(2)
+		toolValue := ProposeCardTool(collector)
+
+		result := mustRunNativeTool(t, toolValue, map[string]any{"title": "  Native proposal  "})
+		if result["accepted"] != true || result["count"] != float64(1) {
+			t.Fatalf("propose_card result = %#v", result)
+		}
+		cards := collector.Cards()
+		if len(cards) != 1 || cards[0].Title != "Native proposal" || cards[0].Prio != board.PrioLow {
+			t.Fatalf("collected cards = %#v, want one trimmed card with the default priority", cards)
+		}
+
+		failure := mustRunNativeTool(t, toolValue, map[string]any{"title": "  "})
+		if !strings.Contains(fmt.Sprint(failure["error"]), "card rejected") {
+			t.Fatalf("propose_card failure = %#v", failure)
+		}
+		if cards = collector.Cards(); len(cards) != 1 {
+			t.Fatalf("rejected proposal changed the collector: %#v", cards)
+		}
+	})
+
+	t.Run("find_similar converts arguments, result, and error", func(t *testing.T) {
+		runner, st := newToolServer(t)
+		created := addToolTask(t, st, board.Task{Title: "Native needle"})
+		toolValue := runner.FindSimilarTool("default")
+
+		result := mustRunNativeTool(t, toolValue, map[string]any{"query": "  native needle  "})
+		items, ok := result["items"].([]any)
+		if !ok || len(items) != 1 {
+			t.Fatalf("find_similar items = %#v, want one native result", result["items"])
+		}
+		item, ok := items[0].(map[string]any)
+		if !ok || item["id"] != created.ID || item["title"] != created.Title {
+			t.Fatalf("find_similar item = %#v, want task %s", items[0], created.ID)
+		}
+
+		failure := mustRunNativeTool(t, toolValue, map[string]any{"query": "ab"})
+		if !strings.Contains(fmt.Sprint(failure["error"]), "at least 3 characters") {
+			t.Fatalf("find_similar failure = %#v", failure)
+		}
+	})
+
+	t.Run("fetch_link converts text result, error, and request side effect", func(t *testing.T) {
+		t.Setenv("KB_LINK_ALLOW_PRIVATE", "1")
+		var requests atomic.Int32
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("native\a\ntext"))
+		}))
+		defer upstream.Close()
+
+		runner, _ := newToolServer(t)
+		toolValue := runner.FetchLinkTool()
+		result := mustRunNativeTool(t, toolValue, map[string]any{"url": "  " + upstream.URL + "/doc  "})
+		if result["result"] != "native\ntext" || len(result) != 1 {
+			t.Fatalf("fetch_link result = %#v, want the ADK text wrapper", result)
+		}
+		if requests.Load() != 1 {
+			t.Fatalf("fetch_link requests = %d, want 1", requests.Load())
+		}
+
+		failure := mustRunNativeTool(t, toolValue, map[string]any{"url": "file:///etc/passwd"})
+		if !strings.Contains(fmt.Sprint(failure["error"]), "absolute http or https URL") {
+			t.Fatalf("fetch_link failure = %#v", failure)
+		}
+		if requests.Load() != 1 {
+			t.Fatalf("rejected fetch issued a request, count = %d", requests.Load())
+		}
+	})
+
+	t.Run("list_tasks converts absent filters, result, and error", func(t *testing.T) {
+		runner, st := newToolServer(t)
+		created := addToolTask(t, st, board.Task{Title: "Native listing", Status: board.StatusTodo})
+		toolValue := runner.ListTasksTool("default")
+
+		result := mustRunNativeTool(t, toolValue, nil)
+		tasks, ok := result["tasks"].([]any)
+		if !ok || len(tasks) != 1 {
+			t.Fatalf("list_tasks tasks = %#v, want one task with default filters", result["tasks"])
+		}
+		taskResult, ok := tasks[0].(map[string]any)
+		if !ok || taskResult["id"] != created.ID || taskResult["title"] != created.Title {
+			t.Fatalf("list_tasks task = %#v, want task %s", tasks[0], created.ID)
+		}
+
+		failure := mustRunNativeTool(t, toolValue, map[string]any{"status": "backlog"})
+		if !strings.Contains(fmt.Sprint(failure["error"]), "todo") {
+			t.Fatalf("list_tasks failure = %#v", failure)
+		}
+	})
+
+	t.Run("get_task converts reference, result, and error", func(t *testing.T) {
+		runner, st := newToolServer(t)
+		created := addToolTask(t, st, board.Task{Title: "Native lookup", Desc: "kept"})
+		toolValue := runner.GetTaskTool("default")
+
+		result := mustRunNativeTool(t, toolValue, map[string]any{"ref": "  #" + strconv.Itoa(created.Seq) + "  "})
+		if result["id"] != created.ID || result["title"] != created.Title || result["desc"] != "kept" {
+			t.Fatalf("get_task result = %#v, want task %s", result, created.ID)
+		}
+
+		failure := mustRunNativeTool(t, toolValue, map[string]any{"ref": ""})
+		if !strings.Contains(fmt.Sprint(failure["error"]), "ref must not be empty") {
+			t.Fatalf("get_task failure = %#v", failure)
+		}
+	})
+
+	t.Run("update_task converts omitted fields, result, error, and write", func(t *testing.T) {
+		runner, st := newToolServer(t)
+		created := addToolTask(t, st, board.Task{Title: "Before", Desc: "preserve", Prio: board.PrioMedium})
+		toolValue := runner.UpdateTaskTool("default")
+
+		result := mustRunNativeTool(t, toolValue, map[string]any{"ref": created.ID, "title": "  After  "})
+		if result["title"] != "After" || result["desc"] != "preserve" || result["prio"] != float64(board.PrioMedium) {
+			t.Fatalf("update_task result = %#v, want the title changed and omitted fields preserved", result)
+		}
+		stored, err := st.Task("default", created.ID)
+		if err != nil || stored.Title != "After" || stored.Desc != "preserve" || stored.Prio != board.PrioMedium {
+			t.Fatalf("stored task = %#v, %v", stored, err)
+		}
+
+		failure := mustRunNativeTool(t, toolValue, map[string]any{"ref": created.ID, "prio": 9})
+		if !strings.Contains(fmt.Sprint(failure["error"]), "invalid prio 9") {
+			t.Fatalf("update_task failure = %#v", failure)
+		}
+		stored, err = st.Task("default", created.ID)
+		if err != nil || stored.Prio != board.PrioMedium || stored.Title != "After" {
+			t.Fatalf("rejected update changed the task: %#v, %v", stored, err)
+		}
+	})
 }
 
 type scriptedNativeModel struct {
