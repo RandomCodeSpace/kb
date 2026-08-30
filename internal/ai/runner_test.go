@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/RandomCodeSpace/plasmid/oneshot"
+	plasmidopenai "github.com/RandomCodeSpace/plasmid/openai"
 	adktool "google.golang.org/adk/v2/tool"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
@@ -287,7 +289,7 @@ func TestRunnerErrorsAndPartialResults(t *testing.T) {
 		runner, closeUpstream := configuredRunner(t, fake, "m")
 		defer closeUpstream()
 		result, err := runner.RunSkill(context.Background(), "default", ScopeReadOnly, "adr-split", "input", 1, 10)
-		assertAIError(t, err, http.StatusBadGateway, "upstream request failed")
+		assertAIError(t, err, http.StatusBadGateway, runStatusMessage(http.StatusInternalServerError))
 		if result.Partial || len(result.Cards) != 1 {
 			t.Fatalf("result = %+v, want collected card without partial success", result)
 		}
@@ -306,15 +308,15 @@ func TestRunnerErrorsAndPartialResults(t *testing.T) {
 			{name: "returned text truncation", code: oneshot.CodeTextTruncated, sentinel: oneshot.ErrTextTruncated, wantPartial: true, wantMessage: TruncatedReplyMessage},
 			{name: "model call exhaustion", code: oneshot.CodeModelCallLimit, sentinel: oneshot.ErrModelCallLimit, wantPartial: true, wantMessage: SkillIterationLimitMessage},
 			{name: "tool call limit", code: oneshot.CodeToolCallLimit, sentinel: oneshot.ErrToolCallLimit, wantCode: http.StatusUnprocessableEntity, wantMessage: SkillIterationLimitMessage},
-			{name: "cancellation", code: oneshot.CodeCanceled, sentinel: oneshot.ErrCanceled, wantCode: http.StatusBadGateway, wantMessage: "upstream request failed"},
-			{name: "model panic", code: oneshot.CodeModelPanic, sentinel: oneshot.ErrModelPanic, wantCode: http.StatusBadGateway, wantMessage: "upstream request failed"},
-			{name: "tool panic", code: oneshot.CodeToolPanic, sentinel: oneshot.ErrToolPanic, wantCode: http.StatusBadGateway, wantMessage: "upstream request failed"},
-			{name: "cleanup", code: oneshot.CodeCleanupFailed, sentinel: oneshot.ErrCleanupFailed, wantCode: http.StatusBadGateway, wantMessage: "upstream request failed"},
-			{name: "execution", code: oneshot.CodeExecutionFailed, sentinel: oneshot.ErrExecutionFailed, wantCode: http.StatusBadGateway, wantMessage: "upstream request failed"},
+			{name: "cancellation", code: oneshot.CodeCanceled, sentinel: oneshot.ErrCanceled, wantCode: http.StatusBadGateway, wantMessage: runCancelledMessage},
+			{name: "model panic", code: oneshot.CodeModelPanic, sentinel: oneshot.ErrModelPanic, wantCode: http.StatusBadGateway, wantMessage: runExecutionFailedMessage},
+			{name: "tool panic", code: oneshot.CodeToolPanic, sentinel: oneshot.ErrToolPanic, wantCode: http.StatusBadGateway, wantMessage: runExecutionFailedMessage},
+			{name: "cleanup", code: oneshot.CodeCleanupFailed, sentinel: oneshot.ErrCleanupFailed, wantCode: http.StatusBadGateway, wantMessage: runExecutionFailedMessage},
+			{name: "execution", code: oneshot.CodeExecutionFailed, sentinel: oneshot.ErrExecutionFailed, wantCode: http.StatusBadGateway, wantMessage: runExecutionFailedMessage},
 		}
 		for _, test := range tests {
 			err := &oneshot.Error{Code: test.code, Err: test.sentinel}
-			result, mappedErr := mapSkillRunResult([]Draft{{Title: "Accepted"}}, oneshot.Result{Text: "partial text"}, err)
+			result, mappedErr := mapSkillRunResult([]Draft{{Title: "Accepted"}}, oneshot.Result{Text: "partial text"}, err, nil)
 			if len(result.Cards) != 1 || result.Partial != test.wantPartial {
 				t.Errorf("%s result = %+v, want one card and partial=%t", test.name, result, test.wantPartial)
 			}
@@ -327,21 +329,82 @@ func TestRunnerErrorsAndPartialResults(t *testing.T) {
 			assertAIError(t, mappedErr, test.wantCode, test.wantMessage)
 		}
 		for _, name := range []string{"transport", "provider"} {
-			result, err := mapSkillRunResult([]Draft{{Title: "Accepted"}}, oneshot.Result{}, errors.New(name+" failure"))
+			result, err := mapSkillRunResult([]Draft{{Title: "Accepted"}}, oneshot.Result{}, errors.New(name+" failure"), nil)
 			if result.Partial || len(result.Cards) != 1 {
 				t.Errorf("%s result = %+v, want hard failure with collected card", name, result)
 			}
-			assertAIError(t, err, http.StatusBadGateway, "upstream request failed")
+			assertAIError(t, err, http.StatusBadGateway, runExecutionFailedMessage)
 		}
 		mixed := errors.Join(
 			&oneshot.Error{Code: oneshot.CodeOutputTruncated, Err: oneshot.ErrOutputTruncated},
 			&oneshot.Error{Code: oneshot.CodeCleanupFailed, Err: oneshot.ErrCleanupFailed},
 		)
-		result, err := mapSkillRunResult([]Draft{{Title: "Accepted"}}, oneshot.Result{}, mixed)
+		result, err := mapSkillRunResult([]Draft{{Title: "Accepted"}}, oneshot.Result{}, mixed, nil)
 		if result.Partial {
 			t.Fatalf("cleanup plus truncation became partial success: %+v", result)
 		}
-		assertAIError(t, err, http.StatusBadGateway, "upstream request failed")
+		assertAIError(t, err, http.StatusBadGateway, runExecutionFailedMessage)
+	})
+}
+
+func TestRunFailureDiagnostics(t *testing.T) {
+	secret := "secret.example"
+	tests := []struct {
+		name        string
+		err         error
+		observation *modelObservation
+		want        string
+	}{
+		{name: "authentication", err: oneshot.ErrExecutionFailed, observation: &modelObservation{providerStatus: http.StatusUnauthorized}, want: probeStatusMessage(http.StatusUnauthorized)},
+		{name: "provider status", err: oneshot.ErrExecutionFailed, observation: &modelObservation{providerStatus: http.StatusInternalServerError}, want: probeStatusMessage(http.StatusInternalServerError)},
+		{name: "DNS", err: oneshot.ErrExecutionFailed, observation: &modelObservation{transportErr: &net.DNSError{Name: secret, IsNotFound: true}}, want: ProbeDNSMessage},
+		{name: "TLS", err: oneshot.ErrExecutionFailed, observation: &modelObservation{transportErr: tls.RecordHeaderError{Msg: secret}}, want: ProbeTLSMessage},
+		{name: "timeout", err: oneshot.ErrExecutionFailed, observation: &modelObservation{transportErr: &net.OpError{Op: "dial", Err: timeoutError{}}}, want: ProbeTimeoutMessage},
+		{name: "private address", err: oneshot.ErrExecutionFailed, observation: &modelObservation{transportErr: &net.OpError{Op: "dial", Err: ErrPrivateAddress}}, want: ErrPrivateAddress.Error()},
+		{name: "unreachable", err: oneshot.ErrExecutionFailed, observation: &modelObservation{transportErr: &net.OpError{Op: "dial", Err: errors.New(secret)}}, want: ProbeUnreachableMessage},
+		{name: "redirect", err: oneshot.ErrExecutionFailed, observation: &modelObservation{status: http.StatusFound, redirectFailure: true}, want: runRedirectMessage},
+		{name: "response too large", err: oneshot.ErrExecutionFailed, observation: &modelObservation{responseTooLarge: true}, want: runResponseTooLargeMessage},
+		{name: "invalid response", err: oneshot.ErrExecutionFailed, observation: &modelObservation{requestFailure: plasmidopenai.RequestFailureResponse}, want: runInvalidResponseMessage},
+		{name: "deadline", err: errors.Join(oneshot.ErrCanceled, context.DeadlineExceeded), want: runTimeoutMessage},
+		{name: "cancellation", err: errors.Join(oneshot.ErrCanceled, context.Canceled), want: runCancelledMessage},
+		{name: "no response", err: oneshot.ErrNoFinalResponse, want: runNoResponseMessage},
+		{name: "execution", err: oneshot.ErrExecutionFailed, want: runExecutionFailedMessage},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			message := runFailureMessage(test.err, test.observation)
+			if message != test.want || strings.Contains(message, secret) {
+				t.Fatalf("run failure message = %q, want %q without secret", message, test.want)
+			}
+		})
+	}
+}
+
+func TestRunTextReportsObservedFailures(t *testing.T) {
+	t.Run("oversized response", func(t *testing.T) {
+		fake := &scriptedOpenAI{replies: []fakeReply{{content: strings.Repeat("x", int(modelResponseLimit))}}}
+		runner, closeUpstream := configuredRunner(t, fake, "m")
+		defer closeUpstream()
+		_, err := runner.RunText(t.Context(), "default", "system", "prompt", 10)
+		assertAIError(t, err, http.StatusBadGateway, runResponseTooLargeMessage)
+	})
+
+	t.Run("disallowed redirect", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", "https://other.example/v1/chat/completions")
+			w.WriteHeader(http.StatusFound)
+		}))
+		defer upstream.Close()
+		client := upstream.Client()
+		client.CheckRedirect = sameHostRedirect
+		st := newTestStore(t)
+		base, model, key := upstream.URL, "m", "sk-test"
+		if _, err := st.SetAISettings("default", &base, &model, &key); err != nil {
+			t.Fatal(err)
+		}
+		runner := NewRunner(st, "", client, client)
+		_, err := runner.RunText(t.Context(), "default", "system", "prompt", 10)
+		assertAIError(t, err, http.StatusBadGateway, runRedirectMessage)
 	})
 }
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/RandomCodeSpace/plasmid/oneshot"
+	plasmidopenai "github.com/RandomCodeSpace/plasmid/openai"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -29,53 +30,8 @@ const (
 	ProbeOpaqueMessage       = "upstream request failed"
 )
 
-// probeTransport records what one probe's single round trip actually did.
-//
-// Plasmid reduces model failures to safe classifications. That is right for the
-// HTTP surface, which collapses every 502 to one message, and insufficient for
-// the local settings overlay, which must say whether the operator mistyped the
-// endpoint or key. Recording kb's transport outcome recovers the status or dial
-// error without parsing provider-controlled text.
-//
-// The model factory disables retries, so one probe is one round trip and the
-// recorded outcome is unambiguous.
-type probeTransport struct {
-	base   http.RoundTripper
-	status int
-	err    error
-}
-
-func (t *probeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	res, err := t.base.RoundTrip(req)
-	if err != nil {
-		t.err = err
-		return nil, err
-	}
-	t.status = res.StatusCode
-	return res, nil
-}
-
-// probeModel builds the Plasmid model one probe uses, wrapping the guarded
-// transport in a recorder. The clone keeps the client's timeout, redirect
-// policy and SSRF guard; only the observation is added.
-func (r *Runner) probeModel(ctx context.Context, cfg Config) (model.LLM, *probeTransport, error) {
-	recorder := &probeTransport{base: http.DefaultTransport}
-	client := &http.Client{}
-	if base := r.aiClient; base != nil {
-		clone := *base
-		if clone.Transport != nil {
-			recorder.base = clone.Transport
-		}
-		clone.Transport = recorder
-		client = &clone
-	} else {
-		client.Transport = recorder
-	}
-	built, err := newModelWithClient(ctx, cfg, client)
-	if err != nil {
-		return nil, nil, err
-	}
-	return built, recorder, nil
+func (r *Runner) probeModel(ctx context.Context, cfg Config) (model.LLM, *modelObservation, error) {
+	return r.newObservedModel(ctx, cfg)
 }
 
 // probeError turns a probe failure into something the operator can act on.
@@ -87,7 +43,7 @@ func (r *Runner) probeModel(ctx context.Context, cfg Config) (model.LLM, *probeT
 // the remote surface still answers with one opaque sentence. Only a failure
 // that describes the caller's own settings - a model field left blank, a
 // model that cannot call tools - carries a code that passes through.
-func probeError(err error, seen *probeTransport) error {
+func probeError(err error, observation *modelObservation) error {
 	switch {
 	case err == nil:
 		return nil
@@ -100,12 +56,22 @@ func probeError(err error, seen *probeTransport) error {
 	case errors.Is(err, context.DeadlineExceeded):
 		return upstreamError(ProbeTimeoutMessage, err)
 	}
-	if seen != nil {
+	seen := observation.snapshot()
+	if observation != nil {
+		if seen.responseTooLarge {
+			return upstreamError(runResponseTooLargeMessage, err)
+		}
+		if seen.redirectFailure {
+			return upstreamError(runRedirectMessage, err)
+		}
 		if seen.status != 0 && seen.status/100 != 2 {
 			return upstreamError(probeStatusMessage(seen.status), err)
 		}
-		if seen.err != nil {
-			return upstreamError(probeDialMessage(seen.err), err)
+		if seen.transportErr != nil {
+			return upstreamError(probeDialMessage(seen.transportErr), err)
+		}
+		if seen.requestFailure == plasmidopenai.RequestFailureResponse {
+			return upstreamError(runInvalidResponseMessage, err)
 		}
 	}
 	return upstreamError(ProbeOpaqueMessage, err)

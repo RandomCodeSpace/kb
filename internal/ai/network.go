@@ -63,6 +63,12 @@ func normalizeGuardHost(host string) string {
 // the transport and rig, none of which preserve error text.
 var ErrPrivateAddress = errors.New("AI endpoint resolves to a private address (set KB_AI_ALLOW_PRIVATE=1 for local model servers)")
 
+var errRedirectPolicy = errors.New("AI endpoint redirect violates policy")
+
+func redirectPolicyError(message string) error {
+	return fmt.Errorf("%w: %s", errRedirectPolicy, message)
+}
+
 func rejectPrivateAddress(_, address string, _ syscall.RawConn) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
@@ -104,19 +110,19 @@ func guardedTransport(allowHosts map[string]bool, allowAll bool) *http.Transport
 func sameHostRedirect(req *http.Request, via []*http.Request) error {
 	origin := via[0].URL
 	if origin.User != nil || req.URL.User != nil {
-		return errors.New("refusing redirect with URL credentials")
+		return redirectPolicyError("refusing redirect with URL credentials")
 	}
 	if !isHTTPURL(origin) || !isHTTPURL(req.URL) {
-		return errors.New("refusing redirect to non-HTTP(S) URL")
+		return redirectPolicyError("refusing redirect to non-HTTP(S) URL")
 	}
 	if normalizeGuardHost(req.URL.Hostname()) != normalizeGuardHost(origin.Hostname()) || req.URL.Port() != origin.Port() {
-		return errors.New("refusing cross-host redirect")
+		return redirectPolicyError("refusing cross-host redirect")
 	}
 	if strings.EqualFold(origin.Scheme, "https") && strings.EqualFold(req.URL.Scheme, "http") {
-		return errors.New("refusing HTTPS-to-HTTP redirect")
+		return redirectPolicyError("refusing HTTPS-to-HTTP redirect")
 	}
 	if len(via) >= 10 {
-		return errors.New("stopped after 10 redirects")
+		return redirectPolicyError("stopped after 10 redirects")
 	}
 	return nil
 }
