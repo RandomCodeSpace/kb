@@ -128,7 +128,7 @@ func TestProbeDialMessages(t *testing.T) {
 				t.Fatalf("probeDialMessage = %q, want %q", message, tc.want)
 			}
 			// The same error routed through probeError must keep the message.
-			seen := &probeTransport{err: tc.err}
+			seen := &modelObservation{transportErr: tc.err}
 			assertAIError(t, probeError(errors.New("ai backend: request failed"), seen), http.StatusBadGateway, tc.want)
 		})
 	}
@@ -137,9 +137,11 @@ func TestProbeDialMessages(t *testing.T) {
 func TestProbeErrorClassifiesContext(t *testing.T) {
 	assertAIError(t, probeError(fmt.Errorf("ai backend: %w", context.Canceled), nil), http.StatusBadGateway, ProbeCancelledMessage)
 	assertAIError(t, probeError(fmt.Errorf("ai backend: %w", context.DeadlineExceeded), nil), http.StatusBadGateway, ProbeTimeoutMessage)
+	assertAIError(t, probeError(errors.New("oversized"), &modelObservation{responseTooLarge: true}), http.StatusBadGateway, runResponseTooLargeMessage)
+	assertAIError(t, probeError(errors.New("redirected"), &modelObservation{redirectFailure: true}), http.StatusBadGateway, runRedirectMessage)
 	// A recorded 2xx with a failure after it is a reply kb could not use, not a
 	// transport problem: it stays opaque rather than blaming the endpoint.
-	assertAIError(t, probeError(errors.New("boom"), &probeTransport{status: http.StatusOK}), http.StatusBadGateway, ProbeOpaqueMessage)
+	assertAIError(t, probeError(errors.New("boom"), &modelObservation{status: http.StatusOK}), http.StatusBadGateway, ProbeOpaqueMessage)
 }
 
 func TestProbeCancellationMakesOneRequest(t *testing.T) {
@@ -224,11 +226,11 @@ func TestProbeTransportRecordsOutcome(t *testing.T) {
 		t.Fatalf("NewRequest: %v", err)
 	}
 	boom := errors.New("boom")
-	failing := &probeTransport{base: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, boom })}
-	if _, err := failing.RoundTrip(req); !errors.Is(err, boom) || !errors.Is(failing.err, boom) {
-		t.Fatalf("RoundTrip = %v, recorded %v", err, failing.err)
+	failing := &modelObservation{base: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, boom })}
+	if _, err := failing.RoundTrip(req); !errors.Is(err, boom) || !errors.Is(failing.transportErr, boom) {
+		t.Fatalf("RoundTrip = %v, recorded %v", err, failing.transportErr)
 	}
-	ok := &probeTransport{base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	ok := &modelObservation{base: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusTeapot, Body: http.NoBody}, nil
 	})}
 	if _, err := ok.RoundTrip(req); err != nil || ok.status != http.StatusTeapot {

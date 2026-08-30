@@ -95,7 +95,7 @@ func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillNa
 	if err != nil {
 		return RunResult{}, err
 	}
-	model, err := r.newModel(ctx, cfg)
+	model, observation, err := r.newObservedModel(ctx, cfg)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -123,10 +123,10 @@ func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillNa
 		MaxToolCallsPerResponse: maxToolCallsPerResponse,
 		ToolExecution:           oneshot.ToolExecutionSequential,
 	})
-	return mapSkillRunResult(collector.cards, result, err)
+	return mapSkillRunResult(collector.cards, result, err, observation)
 }
 
-func mapSkillRunResult(cards []Draft, result oneshot.Result, err error) (RunResult, error) {
+func mapSkillRunResult(cards []Draft, result oneshot.Result, err error, observation *modelObservation) (RunResult, error) {
 	if cards == nil {
 		cards = []Draft{}
 	}
@@ -139,7 +139,7 @@ func mapSkillRunResult(cards []Draft, result oneshot.Result, err error) (RunResu
 		if len(cards) > 0 && partialRun(err) {
 			return RunResult{Cards: cards, Commentary: partialRunCommentary(err), Partial: true}, nil
 		}
-		return RunResult{Cards: cards}, runnerError(err)
+		return RunResult{Cards: cards}, runnerError(err, observation)
 	}
 	return RunResult{Cards: cards, Commentary: result.Text}, nil
 }
@@ -175,7 +175,7 @@ func (r *Runner) RunText(ctx context.Context, user, system, prompt string, maxTo
 	if err != nil {
 		return "", err
 	}
-	model, err := r.newModel(ctx, cfg)
+	model, observation, err := r.newObservedModel(ctx, cfg)
 	if err != nil {
 		return "", err
 	}
@@ -190,7 +190,7 @@ func (r *Runner) RunText(ctx context.Context, user, system, prompt string, maxTo
 		ToolExecution:           oneshot.ToolExecutionSequential,
 	})
 	if err != nil {
-		return "", runnerError(err)
+		return "", runnerError(err, observation)
 	}
 	return result.Text, nil
 }
@@ -323,9 +323,9 @@ func loadSkillTool(skills []Skill) *kbTool {
 // never stopped calling tools — are reported as themselves; everything else is
 // an upstream problem, and writeAIError collapses those into one opaque
 // message so a configured endpoint cannot become a reachability oracle.
-func runnerError(err error) error {
+func runnerError(err error, observation *modelObservation) error {
 	if backendRunFailure(err) {
-		return &Error{Code: http.StatusBadGateway, Message: "upstream request failed", Cause: err}
+		return &Error{Code: http.StatusBadGateway, Message: runFailureMessage(err, observation), Cause: err}
 	}
 	switch {
 	case errors.Is(err, oneshot.ErrOutputTruncated), errors.Is(err, oneshot.ErrTextTruncated):
@@ -333,7 +333,7 @@ func runnerError(err error) error {
 	case errors.Is(err, oneshot.ErrModelCallLimit), errors.Is(err, oneshot.ErrToolCallLimit):
 		return &Error{Code: http.StatusUnprocessableEntity, Message: skillIterationLimitMessage}
 	}
-	return &Error{Code: http.StatusBadGateway, Message: "upstream request failed", Cause: err}
+	return &Error{Code: http.StatusBadGateway, Message: runFailureMessage(err, observation), Cause: err}
 }
 
 func backendRunFailure(err error) bool {
