@@ -1,12 +1,13 @@
 package ai
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/RandomCodeSpace/rig"
+	"testing/fstest"
 )
 
 // newSkillsServer builds a server whose only interesting field is the skills
@@ -23,13 +24,102 @@ func writeSkillFixture(t *testing.T, dir, file, content string) {
 	}
 }
 
-func skillFixtureByName(skills []rig.Skill, name string) (rig.Skill, bool) {
+func skillFixtureByName(skills []Skill, name string) (Skill, bool) {
 	for _, skill := range skills {
 		if skill.Name == name {
 			return skill, true
 		}
 	}
-	return rig.Skill{}, false
+	return Skill{}, false
+}
+
+func skillMapFile(body string) *fstest.MapFile {
+	return &fstest.MapFile{Data: []byte(body)}
+}
+
+func TestLoadSkillCatalogIsFlatSortedAndStrict(t *testing.T) {
+	t.Run("loads direct children in skill-name order", func(t *testing.T) {
+		catalogue := fstest.MapFS{
+			"skills/z.md":            skillMapFile("---\nname: alpha\ndescription: first\n---\nalpha body\n"),
+			"skills/a.md":            skillMapFile("---\r\nname: beta\r\ndescription: 'use when: second'\r\n---\r\nbeta body\r\n"),
+			"skills/notes.txt":       skillMapFile("ignored"),
+			"skills/nested/inner.md": skillMapFile("not valid, but not a direct child"),
+		}
+		skills, err := loadSkillCatalog(catalogue, "skills")
+		if err != nil {
+			t.Fatalf("loadSkillCatalog: %v", err)
+		}
+		if len(skills) != 2 || skills[0].Name != "alpha" || skills[1].Name != "beta" {
+			t.Fatalf("skills = %+v, want alpha then beta", skills)
+		}
+		if skills[1].Description != "use when: second" || skills[1].Body != "beta body" {
+			t.Errorf("beta = %+v, want quoted description and trimmed CRLF body", skills[1])
+		}
+	})
+
+	t.Run("duplicate and malformed files fail the whole catalogue", func(t *testing.T) {
+		catalogue := fstest.MapFS{
+			"skills/a.md": skillMapFile("---\nname: duplicate\ndescription: first\n---\nbody\n"),
+			"skills/b.md": skillMapFile("---\nname: duplicate\ndescription: second\n---\nbody\n"),
+			"skills/c.md": skillMapFile("missing frontmatter\n"),
+		}
+		skills, err := loadSkillCatalog(catalogue, "skills")
+		if err == nil {
+			t.Fatalf("loadSkillCatalog = %+v, want an error", skills)
+		}
+		if skills != nil {
+			t.Errorf("loadSkillCatalog returned %+v alongside the error", skills)
+		}
+		for _, want := range []string{"skills/b.md", "duplicate skill name", "skills/a.md", "skills/c.md", "opening delimiter"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err, want)
+			}
+		}
+	})
+}
+
+func TestMergeAndAdvertiseSkillsAreDeterministic(t *testing.T) {
+	base := []Skill{
+		{Name: "zeta", Description: "base zeta", Body: "base body"},
+		{Name: "alpha", Description: "base alpha", Body: "alpha body"},
+	}
+	overrides := []Skill{
+		{Name: "zeta", Description: "operator\n override", Body: "operator body"},
+		{Name: "middle", Description: "new skill", Body: "middle body"},
+	}
+	merged := mergeSkills(base, overrides)
+	if len(merged) != 3 || merged[0].Name != "alpha" || merged[1].Name != "middle" || merged[2].Name != "zeta" {
+		t.Fatalf("mergeSkills = %+v, want sorted alpha, middle, zeta", merged)
+	}
+	if merged[2].Description != "operator\n override" || merged[2].Body != "operator body" {
+		t.Errorf("zeta = %+v, want the complete override", merged[2])
+	}
+
+	want := advertiseSkillsHeader + "\n\n- alpha: base alpha\n- middle: new skill\n- zeta: operator override"
+	if got := advertiseSkills([]Skill{merged[2], merged[0], merged[1]}); got != want {
+		t.Errorf("advertiseSkills = %q, want %q", got, want)
+	}
+	if base[0].Name != "zeta" || overrides[0].Description != "operator\n override" {
+		t.Errorf("merge or advertise mutated its input: base=%+v overrides=%+v", base, overrides)
+	}
+}
+
+func TestLoadSkillToolKeepsTheCatalogContract(t *testing.T) {
+	tool := loadSkillTool([]Skill{
+		{Name: "zeta", Body: "zeta body"},
+		{Name: "alpha", Body: "alpha body"},
+	})
+	if tool.Name != loadSkillToolName {
+		t.Fatalf("tool name = %q, want %q", tool.Name, loadSkillToolName)
+	}
+	got, err := tool.Run(context.Background(), json.RawMessage(`{"name":" alpha "}`))
+	if err != nil || got != "alpha body" {
+		t.Fatalf("load alpha = %q, %v", got, err)
+	}
+	_, err = tool.Run(context.Background(), json.RawMessage(`{"name":"missing"}`))
+	if err == nil || err.Error() != `unknown skill "missing", available skills: alpha, zeta` {
+		t.Fatalf("unknown skill error = %q", err)
+	}
 }
 
 // TestLoadSkillsEmbedded pins the built-in catalogue: the embed directive has

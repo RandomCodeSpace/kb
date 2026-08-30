@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/RandomCodeSpace/rig"
@@ -222,7 +224,7 @@ func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillNa
 	// others are loadable, so a run cannot lose its own instructions to a
 	// model that never calls load_skill.
 	if len(others) > 0 {
-		tools = append(tools, rig.LoadSkillTool(others))
+		tools = append(tools, loadSkillTool(others))
 	}
 
 	result, err := client.Run(ctx, rig.RunRequest{
@@ -306,13 +308,13 @@ func partialRunCommentary(err error) string {
 }
 
 // splitSkills separates the invoked skill from the rest of the catalogue.
-func splitSkills(skills []rig.Skill, name string) (rig.Skill, []rig.Skill, bool) {
+func splitSkills(skills []Skill, name string) (Skill, []Skill, bool) {
 	name = strings.TrimSpace(name)
 	var (
-		selected rig.Skill
+		selected Skill
 		found    bool
 	)
-	others := make([]rig.Skill, 0, len(skills))
+	others := make([]Skill, 0, len(skills))
 	for _, skill := range skills {
 		if !found && skill.Name == name {
 			selected, found = skill, true
@@ -323,16 +325,16 @@ func splitSkills(skills []rig.Skill, name string) (rig.Skill, []rig.Skill, bool)
 	return selected, others, found
 }
 
-func SplitSkills(skills []rig.Skill, name string) (rig.Skill, []rig.Skill, bool) {
+func SplitSkills(skills []Skill, name string) (Skill, []Skill, bool) {
 	return splitSkills(skills, name)
 }
 
 // runnerSystem assembles the system prompt: kb context, the catalogue of the
 // skills that stay loadable, then the invoked skill in full.
-func runnerSystem(skill rig.Skill, others []rig.Skill) string {
+func runnerSystem(skill Skill, others []Skill) string {
 	var b strings.Builder
 	b.WriteString(runnerSystemPrompt)
-	if advertisement := rig.Advertise(others); advertisement != "" {
+	if advertisement := advertiseSkills(others); advertisement != "" {
 		b.WriteString("\n\n")
 		b.WriteString(advertisement)
 	}
@@ -345,7 +347,54 @@ func runnerSystem(skill rig.Skill, others []rig.Skill) string {
 	return b.String()
 }
 
-func RunnerSystem(skill rig.Skill, others []rig.Skill) string { return runnerSystem(skill, others) }
+func RunnerSystem(skill Skill, others []Skill) string { return runnerSystem(skill, others) }
+
+// loadSkillTool is the current runtime adapter for kb's skill catalogue. The
+// native ADK adapter replaces it when the rest of the domain tools move.
+func loadSkillTool(skills []Skill) rig.Tool {
+	bodies := make(map[string]string, len(skills))
+	names := make([]string, 0, len(skills))
+	for _, skill := range skills {
+		if _, exists := bodies[skill.Name]; !exists {
+			names = append(names, skill.Name)
+		}
+		bodies[skill.Name] = skill.Body
+	}
+	slices.Sort(names)
+	available := strings.Join(names, ", ")
+
+	return rig.Tool{
+		Name:        loadSkillToolName,
+		Description: "Load the full instructions for one of the skills listed in the system prompt. Call this before acting on a skill.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{
+					"type":        "string",
+					"description": "Exact skill name as advertised in the system prompt.",
+				},
+			},
+			"required":             []any{"name"},
+			"additionalProperties": false,
+		},
+		Run: func(_ context.Context, input json.RawMessage) (string, error) {
+			var args struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return "", fmt.Errorf("invalid input, expected {\"name\": string}: %w", err)
+			}
+			name := strings.TrimSpace(args.Name)
+			if body, ok := bodies[name]; ok {
+				return body, nil
+			}
+			if len(names) == 0 {
+				return "", errors.New("no skills are available")
+			}
+			return "", fmt.Errorf("unknown skill %q, available skills: %s", name, available)
+		},
+	}
+}
 
 // runnerError maps a loop failure onto the status the caller sees. The two
 // outcomes a caller can act on — a reply cut off at the budget, and a loop that

@@ -26,6 +26,7 @@ const (
 
 type skillRunResult = kbai.RunResult
 type skillScope = kbai.Scope
+type skill = kbai.Skill
 
 const (
 	skillScopeReadOnly = kbai.ScopeReadOnly
@@ -56,15 +57,15 @@ func (s *server) rigClient(cfg aiConfig) (*rig.Client, error) {
 
 func skillBudget(maxTokens int64) int64 { return kbai.SkillBudget(maxTokens) }
 
-func splitSkills(skills []rig.Skill, name string) (rig.Skill, []rig.Skill, bool) {
+func splitSkills(skills []skill, name string) (skill, []skill, bool) {
 	return kbai.SplitSkills(skills, name)
 }
 
-func runnerSystem(skill rig.Skill, others []rig.Skill) string {
-	return kbai.RunnerSystem(skill, others)
+func runnerSystem(selected skill, others []skill) string {
+	return kbai.RunnerSystem(selected, others)
 }
 
-func (s *server) loadSkills() ([]rig.Skill, error) { return s.aiRunner().LoadSkills() }
+func (s *server) loadSkills() ([]skill, error) { return s.aiRunner().LoadSkills() }
 
 func (s *server) runSkillForRequest(w http.ResponseWriter, r *http.Request, user string, scope skillScope, skillName, input string, maxCards int, maxTokens int64) (skillRunResult, error) {
 	extendWriteDeadline(w)
