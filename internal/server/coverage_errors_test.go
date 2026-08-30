@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	kbai "github.com/RandomCodeSpace/kb/internal/ai"
 )
 
 type coverageReadCloser struct {
@@ -98,7 +100,7 @@ func TestStoredAIConfigAndSettingsHandlersMapClosedStore(t *testing.T) {
 	if _, err := s.storedAIConfig("u"); err == nil {
 		t.Fatal("storedAIConfig accepted a closed store")
 	}
-	if _, err := s.runSkill(context.Background(), "u", skillScopeReadOnly, "adr-split", "in", 1, aiStoriesMaxTokens); err == nil {
+	if _, err := s.runSkill(context.Background(), "u", kbai.ScopeReadOnly, "adr-split", "in", 1, aiStoriesMaxTokens); err == nil {
 		t.Fatal("runSkill accepted a closed store")
 	}
 

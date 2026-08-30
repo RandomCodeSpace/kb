@@ -2,12 +2,13 @@ package ai
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"google.golang.org/adk/v2/agent"
 )
 
 // newSkillsServer builds a server whose only interesting field is the skills
@@ -109,17 +110,24 @@ func TestLoadSkillToolKeepsTheCatalogContract(t *testing.T) {
 		{Name: "zeta", Body: "zeta body"},
 		{Name: "alpha", Body: "alpha body"},
 	})
-	if tool.Name != loadSkillToolName {
-		t.Fatalf("tool name = %q, want %q", tool.Name, loadSkillToolName)
+	if tool.Name() != loadSkillToolName {
+		t.Fatalf("tool name = %q, want %q", tool.Name(), loadSkillToolName)
 	}
-	got, err := tool.Run(context.Background(), json.RawMessage(`{"name":" alpha "}`))
+	got, err := runTool(t, tool, `{"name":" alpha "}`)
 	if err != nil || got != "alpha body" {
 		t.Fatalf("load alpha = %q, %v", got, err)
 	}
-	_, err = tool.Run(context.Background(), json.RawMessage(`{"name":"missing"}`))
+	_, err = runTool(t, tool, `{"name":"missing"}`)
 	if err == nil || err.Error() != `unknown skill "missing", available skills: alpha, zeta` {
 		t.Fatalf("unknown skill error = %q", err)
 	}
+
+	ctx := &agent.StrictContextMock{Ctx: context.Background()}
+	result, err := tool.Run(ctx, map[string]any{"name": "alpha"})
+	if err != nil {
+		t.Fatalf("native load result = %#v, %v", result, err)
+	}
+	requireRawChatToolResult(t, result)
 }
 
 // TestLoadSkillsEmbedded pins the built-in catalogue: the embed directive has
@@ -134,6 +142,11 @@ func TestLoadSkillsEmbedded(t *testing.T) {
 	if len(skills) == 0 {
 		t.Fatal("loadSkills returned no embedded skills")
 	}
+	for _, skill := range skills {
+		if strings.Contains(strings.ToLower(skill.Body), "any other tool") {
+			t.Errorf("skill %q forbids the tools the runner requires", skill.Name)
+		}
+	}
 
 	adr, ok := skillFixtureByName(skills, "adr-split")
 	if !ok {
@@ -147,6 +160,15 @@ func TestLoadSkillsEmbedded(t *testing.T) {
 	for _, want := range []string{"propose_card", "find_similar"} {
 		if !strings.Contains(adr.Body, want) {
 			t.Errorf("adr-split body does not mention %q", want)
+		}
+	}
+	story, ok := skillFixtureByName(skills, "story-draft")
+	if !ok {
+		t.Fatalf("embedded skills = %v, want story-draft", skills)
+	}
+	for _, want := range []string{"find_similar", "Always call it"} {
+		if !strings.Contains(story.Body, want) {
+			t.Errorf("story-draft body does not mention %q", want)
 		}
 	}
 }

@@ -4,14 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/RandomCodeSpace/rig"
+	"github.com/RandomCodeSpace/plasmid/oneshot"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/genai"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
@@ -23,18 +32,53 @@ func newToolServer(t *testing.T) (*Runner, *store.Store) {
 	return NewRunner(st, "", nil, nil), st
 }
 
-func runTool(t *testing.T, tool rig.Tool, input string) (string, error) {
+func runTool(t *testing.T, tool *kbTool, input string) (string, error) {
 	t.Helper()
-	return tool.Run(context.Background(), json.RawMessage(input))
+	return tool.run(context.Background(), json.RawMessage(input))
 }
 
-func mustRunTool(t *testing.T, tool rig.Tool, input string) string {
+func mustRunTool(t *testing.T, tool *kbTool, input string) string {
 	t.Helper()
 	out, err := runTool(t, tool, input)
 	if err != nil {
-		t.Fatalf("%s(%s): unexpected error: %v", tool.Name, input, err)
+		t.Fatalf("%s(%s): unexpected error: %v", tool.Name(), input, err)
 	}
 	return out
+}
+
+type nativeRunnableTool interface {
+	tool.Tool
+	Run(agent.Context, any) (map[string]any, error)
+}
+
+func mustRunNativeTool(t *testing.T, toolValue tool.Tool, args any) map[string]any {
+	t.Helper()
+	runnable, ok := toolValue.(nativeRunnableTool)
+	if !ok {
+		t.Fatalf("%s = %T, want a native runnable tool", toolValue.Name(), toolValue)
+	}
+	result, err := runnable.Run(&agent.StrictContextMock{Ctx: context.Background()}, args)
+	if err != nil {
+		t.Fatalf("%s(%#v): unexpected execution error: %v", toolValue.Name(), args, err)
+	}
+	return result
+}
+
+func requireRawChatToolResult(t *testing.T, result map[string]any) {
+	t.Helper()
+	if len(result) != 1 {
+		t.Fatalf("raw Chat tool result = %#v, want one private marker", result)
+	}
+	if _, err := json.Marshal(result); err == nil {
+		t.Fatalf("raw Chat tool result serialized outside Chat conversion: %#v", result)
+	}
+}
+
+func TestNativeToolRejectsNonObjectArguments(t *testing.T) {
+	result := mustRunNativeTool(t, ProposeCardTool(NewCardCollector(1)), "not an object")
+	if got := fmt.Sprint(result["error"]); !strings.Contains(got, "expected a JSON object") {
+		t.Fatalf("native tool error = %q, want object validation", got)
+	}
 }
 
 func addToolTask(t *testing.T, st *store.Store, task board.Task) board.Task {
@@ -52,7 +96,7 @@ func addToolTask(t *testing.T, st *store.Store, task board.Task) board.Task {
 func TestToolDefinitions(t *testing.T) {
 	s, _ := newToolServer(t)
 	nameRe := regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
-	tools := []rig.Tool{
+	tools := []*kbTool{
 		proposeCardTool(&cardCollector{max: 1}),
 		s.findSimilarTool("default"),
 		s.fetchLinkTool(),
@@ -66,25 +110,285 @@ func TestToolDefinitions(t *testing.T) {
 	}
 	seen := make(map[string]bool, len(tools))
 	for i, tool := range tools {
-		if tool.Name != want[i] {
-			t.Errorf("tool %d name = %q, want %q", i, tool.Name, want[i])
+		name := tool.Name()
+		if name != want[i] {
+			t.Errorf("tool %d name = %q, want %q", i, name, want[i])
 		}
-		if !nameRe.MatchString(tool.Name) {
-			t.Errorf("tool %q name is not wire-legal", tool.Name)
+		if !nameRe.MatchString(name) {
+			t.Errorf("tool %q name is not wire-legal", name)
 		}
-		if seen[tool.Name] {
-			t.Errorf("duplicate tool name %q", tool.Name)
+		if seen[name] {
+			t.Errorf("duplicate tool name %q", name)
 		}
-		seen[tool.Name] = true
-		if strings.TrimSpace(tool.Description) == "" {
-			t.Errorf("tool %q has no description", tool.Name)
+		seen[name] = true
+		if strings.TrimSpace(tool.Description()) == "" {
+			t.Errorf("tool %q has no description", name)
 		}
-		if tool.Run == nil {
-			t.Errorf("tool %q has no Run", tool.Name)
+		if tool.run == nil {
+			t.Errorf("tool %q has no Run", name)
 		}
-		if tool.InputSchema["type"] != "object" {
-			t.Errorf("tool %q schema type = %v, want object", tool.Name, tool.InputSchema["type"])
+		declaration := tool.Declaration()
+		schema, ok := declaration.ParametersJsonSchema.(map[string]any)
+		if !ok || schema["type"] != "object" {
+			t.Errorf("tool %q schema = %T %v, want object", name, declaration.ParametersJsonSchema, declaration.ParametersJsonSchema)
 		}
+	}
+	request := &model.LLMRequest{}
+	ctx := &agent.StrictContextMock{Ctx: context.Background()}
+	for _, tool := range tools {
+		if err := tool.ProcessRequest(ctx, request); err != nil {
+			t.Fatalf("pack %q: %v", tool.Name(), err)
+		}
+	}
+	if request.Config == nil || len(request.Config.Tools) != 1 {
+		t.Fatalf("packed tools = %#v, want one ADK function declaration group", request.Config)
+	}
+	declarations := request.Config.Tools[0].FunctionDeclarations
+	if len(declarations) != len(want) {
+		t.Fatalf("packed declarations = %d, want %d", len(declarations), len(want))
+	}
+	for i, declaration := range declarations {
+		if declaration.Name != want[i] {
+			t.Errorf("packed declaration %d = %q, want %q", i, declaration.Name, want[i])
+		}
+	}
+}
+
+func TestNativeProductionToolAdapterParity(t *testing.T) {
+	{
+		collector := NewCardCollector(2)
+		toolValue := ProposeCardTool(collector)
+
+		result := mustRunNativeTool(t, toolValue, map[string]any{"title": "  Native proposal  "})
+		if result["accepted"] != true || result["count"] != float64(1) {
+			t.Fatalf("propose_card result = %#v", result)
+		}
+		cards := collector.Cards()
+		if len(cards) != 1 || cards[0].Title != "Native proposal" || cards[0].Prio != board.PrioLow {
+			t.Fatalf("collected cards = %#v, want one trimmed card with the default priority", cards)
+		}
+	}
+
+	{
+		runner, st := newToolServer(t)
+		created := addToolTask(t, st, board.Task{Title: "Native needle"})
+		toolValue := runner.FindSimilarTool("default")
+
+		result := mustRunNativeTool(t, toolValue, map[string]any{"query": "  native needle  "})
+		items, ok := result["items"].([]any)
+		if !ok || len(items) != 1 {
+			t.Fatalf("find_similar items = %#v, want one native result", result["items"])
+		}
+		item, ok := items[0].(map[string]any)
+		if !ok || item["id"] != created.ID || item["title"] != created.Title {
+			t.Fatalf("find_similar item = %#v, want task %s", items[0], created.ID)
+		}
+	}
+
+	{
+		t.Setenv("KB_LINK_ALLOW_PRIVATE", "1")
+		var requests atomic.Int32
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("native\a\ntext"))
+		}))
+		defer upstream.Close()
+
+		runner, _ := newToolServer(t)
+		toolValue := runner.FetchLinkTool()
+		result := mustRunNativeTool(t, toolValue, map[string]any{"url": "  " + upstream.URL + "/doc  "})
+		requireRawChatToolResult(t, result)
+		if requests.Load() != 1 {
+			t.Fatalf("fetch_link requests = %d, want 1", requests.Load())
+		}
+	}
+
+	{
+		runner, st := newToolServer(t)
+		created := addToolTask(t, st, board.Task{Title: "Native listing", Status: board.StatusTodo})
+		toolValue := runner.ListTasksTool("default")
+
+		result := mustRunNativeTool(t, toolValue, nil)
+		tasks, ok := result["tasks"].([]any)
+		if !ok || len(tasks) != 1 {
+			t.Fatalf("list_tasks tasks = %#v, want one task with default filters", result["tasks"])
+		}
+		taskResult, ok := tasks[0].(map[string]any)
+		if !ok || taskResult["id"] != created.ID || taskResult["title"] != created.Title {
+			t.Fatalf("list_tasks task = %#v, want task %s", tasks[0], created.ID)
+		}
+	}
+
+	{
+		runner, st := newToolServer(t)
+		created := addToolTask(t, st, board.Task{Title: "Native lookup", Desc: "kept"})
+		toolValue := runner.GetTaskTool("default")
+
+		result := mustRunNativeTool(t, toolValue, map[string]any{"ref": "  #" + strconv.Itoa(created.Seq) + "  "})
+		if result["id"] != created.ID || result["title"] != created.Title || result["desc"] != "kept" {
+			t.Fatalf("get_task result = %#v, want task %s", result, created.ID)
+		}
+	}
+
+	{
+		runner, st := newToolServer(t)
+		created := addToolTask(t, st, board.Task{Title: "Before", Desc: "preserve", Prio: board.PrioMedium})
+		toolValue := runner.UpdateTaskTool("default")
+
+		result := mustRunNativeTool(t, toolValue, map[string]any{"ref": created.ID, "title": "  After  "})
+		if result["title"] != "After" || result["desc"] != "preserve" || result["prio"] != float64(board.PrioMedium) {
+			t.Fatalf("update_task result = %#v, want the title changed and omitted fields preserved", result)
+		}
+		stored, err := st.Task("default", created.ID)
+		if err != nil || stored.Title != "After" || stored.Desc != "preserve" || stored.Prio != board.PrioMedium {
+			t.Fatalf("stored task = %#v, %v", stored, err)
+		}
+
+		failure := mustRunNativeTool(t, toolValue, map[string]any{"ref": created.ID, "prio": 9})
+		if !strings.Contains(fmt.Sprint(failure["error"]), "invalid prio 9") {
+			t.Fatalf("update_task failure = %#v", failure)
+		}
+		stored, err = st.Task("default", created.ID)
+		if err != nil || stored.Prio != board.PrioMedium || stored.Title != "After" {
+			t.Fatalf("rejected update changed the task: %#v, %v", stored, err)
+		}
+	}
+}
+
+type scriptedNativeModel struct {
+	calls atomic.Int32
+	step  func(int, *model.LLMRequest) *model.LLMResponse
+}
+
+func (*scriptedNativeModel) Name() string { return "scripted-native" }
+
+func (m *scriptedNativeModel) GenerateContent(_ context.Context, request *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		call := int(m.calls.Add(1) - 1)
+		yield(m.step(call, request), nil)
+	}
+}
+
+func TestNativeToolsExecuteSequentiallyInResponseOrder(t *testing.T) {
+	started := make(chan string, 2)
+	releaseFirst := make(chan struct{})
+	var release sync.Once
+	releaseTool := func() { release.Do(func() { close(releaseFirst) }) }
+	t.Cleanup(releaseTool)
+
+	makeTool := func(name string) *kbTool {
+		return newKBTool(name, name+" tool", schemaObject(map[string]any{}), toolResultObject,
+			func(context.Context, json.RawMessage) (string, error) {
+				started <- name
+				if name == "first" {
+					<-releaseFirst
+				}
+				return `{"name":"` + name + `"}`, nil
+			})
+	}
+	modelValue := &scriptedNativeModel{step: func(call int, _ *model.LLMRequest) *model.LLMResponse {
+		if call == 0 {
+			return &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{ID: "first-call", Name: "first", Args: map[string]any{}}},
+				{FunctionCall: &genai.FunctionCall{ID: "second-call", Name: "second", Args: map[string]any{}}},
+			}}}
+		}
+		return &model.LLMResponse{Content: genai.NewContentFromText("done", genai.RoleModel)}
+	}}
+
+	type outcome struct {
+		result oneshot.Result
+		err    error
+	}
+	finished := make(chan outcome, 1)
+	go func() {
+		result, err := oneshot.Run(context.Background(), oneshot.Request{
+			Model: modelValue, Prompt: "run", Tools: []tool.Tool{makeTool("first"), makeTool("second")},
+			MaxOutputTokens: 64, MaxReturnedTextBytes: 1024, MaxModelCalls: 2,
+			MaxToolCallsPerResponse: 32, ToolExecution: oneshot.ToolExecutionSequential,
+		})
+		finished <- outcome{result: result, err: err}
+	}()
+
+	select {
+	case name := <-started:
+		if name != "first" {
+			t.Fatalf("first started tool = %q", name)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first tool did not start")
+	}
+	select {
+	case name := <-started:
+		t.Fatalf("tool %q started before first completed", name)
+	case <-time.After(200 * time.Millisecond):
+	}
+	releaseTool()
+	select {
+	case name := <-started:
+		if name != "second" {
+			t.Fatalf("second started tool = %q", name)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second tool did not start")
+	}
+	select {
+	case run := <-finished:
+		if run.err != nil || run.result.Text != "done" {
+			t.Fatalf("run = %#v, %v", run.result, run.err)
+		}
+		if len(run.result.ToolResults) != 2 || run.result.ToolResults[0].Name != "first" || run.result.ToolResults[1].Name != "second" {
+			t.Fatalf("tool results = %#v", run.result.ToolResults)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("native tool run did not finish")
+	}
+}
+
+func TestNativeCollectorCapReachesTheModel(t *testing.T) {
+	collector := &cardCollector{max: 1}
+	var sawCap atomic.Bool
+	modelValue := &scriptedNativeModel{step: func(call int, request *model.LLMRequest) *model.LLMResponse {
+		if call == 0 {
+			return &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{ID: "first", Name: "propose_card", Args: map[string]any{"title": "First"}}},
+				{FunctionCall: &genai.FunctionCall{ID: "second", Name: "propose_card", Args: map[string]any{"title": "Second"}}},
+			}}}
+		}
+		for _, content := range request.Contents {
+			if content == nil {
+				continue
+			}
+			for _, part := range content.Parts {
+				if part == nil || part.FunctionResponse == nil {
+					continue
+				}
+				failure, _ := part.FunctionResponse.Response["error"].(string)
+				if strings.Contains(failure, cardLimitReachedMessage) {
+					sawCap.Store(true)
+				}
+			}
+		}
+		return &model.LLMResponse{Content: genai.NewContentFromText("recovered", genai.RoleModel)}
+	}}
+
+	result, err := oneshot.Run(context.Background(), oneshot.Request{
+		Model: modelValue, Prompt: "propose", Tools: []tool.Tool{proposeCardTool(collector)},
+		MaxOutputTokens: 64, MaxReturnedTextBytes: 1024, MaxModelCalls: 2,
+		MaxToolCallsPerResponse: 32, ToolExecution: oneshot.ToolExecutionSequential,
+	})
+	if err != nil || result.Text != "recovered" {
+		t.Fatalf("run = %#v, %v", result, err)
+	}
+	if !sawCap.Load() {
+		t.Fatal("collector cap did not reach the next model request")
+	}
+	if len(collector.cards) != 1 || collector.cards[0].Title != "First" {
+		t.Fatalf("collector = %#v, want only the first proposal", collector.cards)
+	}
+	if result.Metadata.ToolCalls != 2 {
+		t.Fatalf("tool calls = %d, want both proposals accounted", result.Metadata.ToolCalls)
 	}
 }
 
@@ -132,7 +436,7 @@ func TestProposeCardTool(t *testing.T) {
 	// A field the model may not name is a field it never fills: source has to
 	// be declared, and the schema has to stay closed so nothing else is.
 	t.Run("declares source without opening the schema", func(t *testing.T) {
-		schema := proposeCardTool(&cardCollector{max: 1}).InputSchema
+		schema := proposeCardTool(&cardCollector{max: 1}).inputSchema
 		props, ok := schema["properties"].(map[string]any)
 		if !ok {
 			t.Fatalf("schema properties = %T, want a map", schema["properties"])

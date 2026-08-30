@@ -236,8 +236,10 @@ func TestAIStoriesRunsWithoutMutatingTools(t *testing.T) {
 	if len(reqs) < 2 {
 		t.Fatalf("upstream rounds = %d, want the refusal fed back", len(reqs))
 	}
-	if !strings.Contains(string(reqs[1]), "unknown tool") {
-		t.Errorf("the refused call was not reported to the model: %s", reqs[1])
+	for _, name := range []string{"update_task", "fetch_link"} {
+		if !strings.Contains(string(reqs[1]), "tool '"+name+"' not found") {
+			t.Errorf("the refused %s call was not reported to the model: %s", name, reqs[1])
+		}
 	}
 }
 

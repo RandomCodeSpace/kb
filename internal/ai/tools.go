@@ -13,7 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/RandomCodeSpace/rig"
+	"google.golang.org/adk/v2/tool"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
@@ -53,9 +53,9 @@ const cardLimitReachedMessage = "card limit reached; stop proposing"
 
 const CardLimitReachedMessage = cardLimitReachedMessage
 
-// cardCollector accumulates what propose_card accepted for one run. The rig
-// loop executes tool calls sequentially within a single run, so the slice
-// needs no lock; one collector must not be shared across runs.
+// cardCollector accumulates what propose_card accepted for one run. Plasmid's
+// one-shot loop executes tool calls sequentially for kb, so the slice needs no
+// lock; one collector must not be shared across runs.
 type cardCollector struct {
 	max   int
 	cards []Draft
@@ -82,12 +82,12 @@ func (c *cardCollector) atCap() bool {
 // model's prose as JSON. Refusals are errors the model sees and can act on --
 // silently dropping a proposal past the cap would leave the model believing it
 // delivered work it did not.
-func proposeCardTool(c *cardCollector) rig.Tool {
-	return rig.Tool{
-		Name: "propose_card",
-		Description: "Propose one kanban card. Call this once per card; the cards are collected " +
+func proposeCardTool(c *cardCollector) *kbTool {
+	return newKBTool(
+		"propose_card",
+		"Propose one kanban card. Call this once per card; the cards are collected "+
 			"server-side and returned to the user, so never repeat them in your reply.",
-		InputSchema: schemaObject(map[string]any{
+		schemaObject(map[string]any{
 			"title":  schemaString("short imperative card title"),
 			"emoji":  schemaString("single emoji that suits the work, or an empty string"),
 			"desc":   schemaString("markdown description: context and rationale"),
@@ -98,7 +98,8 @@ func proposeCardTool(c *cardCollector) rig.Tool {
 			"checks": schemaChecks("acceptance criteria as checklist items"),
 			"source": schemaInt("1-based Source number of the forge issue this card came from; only when the input is numbered forge issues"),
 		}, "title"),
-		Run: func(_ context.Context, input json.RawMessage) (string, error) {
+		toolResultObject,
+		func(_ context.Context, input json.RawMessage) (string, error) {
 			if c.atCap() {
 				return "", errors.New(cardLimitReachedMessage)
 			}
@@ -116,22 +117,23 @@ func proposeCardTool(c *cardCollector) rig.Tool {
 				Count    int  `json:"count"`
 			}{Accepted: true, Count: len(c.cards)})
 		},
-	}
+	)
 }
 
-func ProposeCardTool(c *CardCollector) rig.Tool { return proposeCardTool(c) }
+func ProposeCardTool(c *CardCollector) tool.Tool { return proposeCardTool(c) }
 
 // findSimilarTool exposes the duplicate check the UI runs before a card is
 // created, scoped to user's board.
-func (r *Runner) findSimilarTool(user string) rig.Tool {
-	return rig.Tool{
-		Name: "find_similar",
-		Description: "Search existing cards and import history for work that already covers a " +
+func (r *Runner) findSimilarTool(user string) *kbTool {
+	return newKBTool(
+		"find_similar",
+		"Search existing cards and import history for work that already covers a "+
 			"proposal. Call this before proposing a card. Returns cheap stubs.",
-		InputSchema: schemaObject(map[string]any{
+		schemaObject(map[string]any{
 			"query": schemaString("free text matched against card titles, descriptions, tags, and import history"),
 		}, "query"),
-		Run: func(_ context.Context, input json.RawMessage) (string, error) {
+		toolResultObject,
+		func(_ context.Context, input json.RawMessage) (string, error) {
 			var args struct {
 				Query string `json:"query"`
 			}
@@ -155,10 +157,10 @@ func (r *Runner) findSimilarTool(user string) rig.Tool {
 			}
 			return marshalToolResult(out)
 		},
-	}
+	)
 }
 
-func (r *Runner) FindSimilarTool(user string) rig.Tool { return r.findSimilarTool(user) }
+func (r *Runner) FindSimilarTool(user string) tool.Tool { return r.findSimilarTool(user) }
 
 // fetchLinkTool reads one http(s) document the model asked for. The request
 // goes through s.linkClient, whose SSRF guard is governed by its own
@@ -170,15 +172,16 @@ func (r *Runner) FindSimilarTool(user string) rig.Tool { return r.findSimilarToo
 // into a host reachability oracle for whoever writes the document it reads.
 //
 // Depends on the linkClient field on server, owned by the runner change.
-func (r *Runner) fetchLinkTool() rig.Tool {
-	return rig.Tool{
-		Name: "fetch_link",
-		Description: "Fetch one http(s) document and return its text. Use it to read a " +
+func (r *Runner) fetchLinkTool() *kbTool {
+	return newKBTool(
+		"fetch_link",
+		"Fetch one http(s) document and return its text. Use it to read a "+
 			"specification or issue the user referenced by URL.",
-		InputSchema: schemaObject(map[string]any{
+		schemaObject(map[string]any{
 			"url": schemaString("absolute http or https URL"),
 		}, "url"),
-		Run: func(ctx context.Context, input json.RawMessage) (string, error) {
+		toolResultText,
+		func(ctx context.Context, input json.RawMessage) (string, error) {
 			var args struct {
 				URL string `json:"url"`
 			}
@@ -187,10 +190,10 @@ func (r *Runner) fetchLinkTool() rig.Tool {
 			}
 			return r.fetchLink(ctx, strings.TrimSpace(args.URL))
 		},
-	}
+	)
 }
 
-func (r *Runner) FetchLinkTool() rig.Tool { return r.fetchLinkTool() }
+func (r *Runner) FetchLinkTool() tool.Tool { return r.fetchLinkTool() }
 
 func (r *Runner) fetchLink(ctx context.Context, raw string) (string, error) {
 	u, err := url.Parse(raw)
@@ -246,18 +249,19 @@ func fetchLinkTextual(header string) bool {
 }
 
 // listTasksTool mirrors the MCP tool of the same name, scoped to user's board.
-func (r *Runner) listTasksTool(user string) rig.Tool {
-	return rig.Tool{
-		Name: "list_tasks",
-		Description: "List kanban tasks on the board, ordered by column (todo, doing, done, " +
-			"cancelled) then position. Optional filters: one column (status), free text over " +
+func (r *Runner) listTasksTool(user string) *kbTool {
+	return newKBTool(
+		"list_tasks",
+		"List kanban tasks on the board, ordered by column (todo, doing, done, "+
+			"cancelled) then position. Optional filters: one column (status), free text over "+
 			"title/description/tags (search), and exact labels that must all be present (tags).",
-		InputSchema: schemaObject(map[string]any{
+		schemaObject(map[string]any{
 			"status": schemaEnum("column filter; omit for all columns", "todo", "doing", "done", "cancelled"),
 			"search": schemaString("free text matched against title, description, and tags"),
 			"tags":   schemaStrings("exact label filters; a task must carry every listed tag"),
 		}),
-		Run: func(_ context.Context, input json.RawMessage) (string, error) {
+		toolResultObject,
+		func(_ context.Context, input json.RawMessage) (string, error) {
 			var args struct {
 				Status string   `json:"status"`
 				Search string   `json:"search"`
@@ -287,20 +291,21 @@ func (r *Runner) listTasksTool(user string) rig.Tool {
 			}
 			return marshalToolResult(out)
 		},
-	}
+	)
 }
 
-func (r *Runner) ListTasksTool(user string) rig.Tool { return r.listTasksTool(user) }
+func (r *Runner) ListTasksTool(user string) tool.Tool { return r.listTasksTool(user) }
 
 // getTaskTool fetches one task in full by any reference the store resolves.
-func (r *Runner) getTaskTool(user string) rig.Tool {
-	return rig.Tool{
-		Name:        "get_task",
-		Description: "Fetch one task in full by its stable number (12 or #12), UUID, or unique UUID prefix.",
-		InputSchema: schemaObject(map[string]any{
+func (r *Runner) getTaskTool(user string) *kbTool {
+	return newKBTool(
+		"get_task",
+		"Fetch one task in full by its stable number (12 or #12), UUID, or unique UUID prefix.",
+		schemaObject(map[string]any{
 			"ref": schemaString("task number (12 or #12), UUID, or unique UUID prefix"),
 		}, "ref"),
-		Run: func(_ context.Context, input json.RawMessage) (string, error) {
+		toolResultObject,
+		func(_ context.Context, input json.RawMessage) (string, error) {
 			var args struct {
 				Ref string `json:"ref"`
 			}
@@ -317,10 +322,10 @@ func (r *Runner) getTaskTool(user string) rig.Tool {
 			}
 			return marshalToolResult(toToolTask(t))
 		},
-	}
+	)
 }
 
-func (r *Runner) GetTaskTool(user string) rig.Tool { return r.getTaskTool(user) }
+func (r *Runner) GetTaskTool(user string) tool.Tool { return r.getTaskTool(user) }
 
 // toolUpdateArgs distinguishes a field the model supplied from one it left
 // out: a nil pointer is an absent key, and a pointer to the zero value is an
@@ -341,12 +346,12 @@ type toolUpdateArgs struct {
 
 // updateTaskTool edits an existing card. Only supplied fields change; tags and
 // checks replace the whole list when given.
-func (r *Runner) updateTaskTool(user string) rig.Tool {
-	return rig.Tool{
-		Name: "update_task",
-		Description: "Update fields of one existing task. Only the fields you supply change; " +
+func (r *Runner) updateTaskTool(user string) *kbTool {
+	return newKBTool(
+		"update_task",
+		"Update fields of one existing task. Only the fields you supply change; "+
 			"tags and checks replace the whole list when given. An empty string clears a field.",
-		InputSchema: schemaObject(map[string]any{
+		schemaObject(map[string]any{
 			"ref":     schemaString("task number (12 or #12), UUID, or unique UUID prefix"),
 			"title":   schemaString("new title"),
 			"desc":    schemaString("new markdown description (empty string clears it)"),
@@ -358,7 +363,8 @@ func (r *Runner) updateTaskTool(user string) rig.Tool {
 			"checks":  schemaChecks("replacement checklist"),
 			"blocked": schemaBool("true to flag the task blocked, false to clear the flag"),
 		}, "ref"),
-		Run: func(_ context.Context, input json.RawMessage) (string, error) {
+		toolResultObject,
+		func(_ context.Context, input json.RawMessage) (string, error) {
 			var args toolUpdateArgs
 			if err := json.Unmarshal(input, &args); err != nil {
 				return "", errors.New("invalid input: expected a JSON object matching the tool schema")
@@ -377,10 +383,10 @@ func (r *Runner) updateTaskTool(user string) rig.Tool {
 			}
 			return marshalToolResult(toToolTask(t))
 		},
-	}
+	)
 }
 
-func (r *Runner) UpdateTaskTool(user string) rig.Tool { return r.updateTaskTool(user) }
+func (r *Runner) UpdateTaskTool(user string) tool.Tool { return r.updateTaskTool(user) }
 
 // patch builds the store patch, sanitizing every model-supplied string the way
 // the draft coercion does: a title carrying a newline would otherwise

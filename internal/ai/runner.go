@@ -1,18 +1,17 @@
 package ai
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"slices"
 	"strings"
 
-	"github.com/RandomCodeSpace/rig"
+	"github.com/RandomCodeSpace/plasmid/oneshot"
+	"google.golang.org/adk/v2/tool"
 )
 
 // runnerSystemPrompt is the kb context every skill run starts from. It states
@@ -36,7 +35,9 @@ const RunnerSystemPrompt = runnerSystemPrompt
 // bounds the whole loop and the response write deadline is extended past it
 // per request, leaving room to write the answer after the last round.
 const (
-	skillMaxIterations = 12
+	skillMaxIterations      = 12
+	maxToolCallsPerResponse = 32
+	maxReturnedTextBytes    = 1 << 20
 )
 
 const SkillMaxIterations = skillMaxIterations
@@ -58,107 +59,7 @@ const (
 	SkillIterationLimitMessage = skillIterationLimitMessage
 )
 
-// rigClient builds the agent-loop client for cfg. The transport stays this
-// server's SSRF-guarded aiClient; rig owns the ambient credential scrub and
-// the response size cap.
-func (r *Runner) rigClient(cfg Config) (*rig.Client, error) {
-	return r.rigClientWith(cfg, r.loopClient(cfg.Model))
-}
-
-// rigClientWith is rigClient over a caller-supplied transport carrier, so the
-// probe can observe its own round trip without duplicating the configuration
-// checks every run shares.
-func (r *Runner) rigClientWith(cfg Config, httpClient *http.Client) (*rig.Client, error) {
-	if strings.TrimSpace(cfg.BaseURL) == "" {
-		return nil, &Error{Code: http.StatusBadRequest, Message: "AI base URL not configured"}
-	}
-	base, err := endpoint(cfg.BaseURL)
-	if err != nil {
-		return nil, &Error{Code: http.StatusBadRequest, Message: err.Error()}
-	}
-	client, err := rig.NewClient(base, cfg.Key, rig.WithHTTPClient(httpClient))
-	if err != nil {
-		return nil, &Error{Code: http.StatusBadRequest, Message: err.Error()}
-	}
-	return client, nil
-}
-
-// Client builds the rig client for a resolved configuration.
-func (r *Runner) Client(cfg Config) (*rig.Client, error) { return r.rigClient(cfg) }
-
-// loopClient is the HTTP client one run's completions go through. rig always
-// states the output budget as max_tokens, which the o-series and gpt-5 models
-// reject outright, and it offers no hook for the other field name -- so for
-// exactly the models the single-shot path sends max_completion_tokens to, the
-// request body is rewritten on the way out. Every other model keeps the shared
-// client untouched.
-func (r *Runner) loopClient(model string) *http.Client {
-	if r.aiClient == nil || !usesMaxCompletionTokens(model) {
-		return r.aiClient
-	}
-	clone := *r.aiClient
-	clone.Transport = budgetFieldTransport{base: r.aiClient.Transport}
-	return &clone
-}
-
-// budgetFieldTransport renames the output budget field of one completion
-// request. It sits above the guarded transport, so the SSRF policy, timeout
-// and redirect rules are unchanged; only the body it forwards differs.
-type budgetFieldTransport struct {
-	base http.RoundTripper
-}
-
-func (t budgetFieldTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	base := t.base
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	if req.Body == nil {
-		return base.RoundTrip(req)
-	}
-	body, err := io.ReadAll(req.Body)
-	req.Body.Close()
-	if err != nil {
-		return nil, err
-	}
-	if rewritten, ok := renameMaxTokens(body); ok {
-		body = rewritten
-	}
-	// RoundTrip must not modify its argument, and the body was consumed to
-	// read it, so the request is replaced rather than patched in place.
-	out := req.Clone(req.Context())
-	out.Body = io.NopCloser(bytes.NewReader(body))
-	out.ContentLength = int64(len(body))
-	out.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
-	return base.RoundTrip(out)
-}
-
-// renameMaxTokens moves the budget from max_tokens to max_completion_tokens.
-// A body that is not a JSON object, states no budget, or already states the
-// other field is left alone: the rewrite exists to fix one field name, not to
-// take over what the request says.
-func renameMaxTokens(body []byte) ([]byte, bool) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(body, &fields); err != nil {
-		return nil, false
-	}
-	budget, ok := fields["max_tokens"]
-	if !ok {
-		return nil, false
-	}
-	if _, exists := fields["max_completion_tokens"]; exists {
-		return nil, false
-	}
-	delete(fields, "max_tokens")
-	fields["max_completion_tokens"] = budget
-	out, err := json.Marshal(fields)
-	if err != nil {
-		return nil, false
-	}
-	return out, true
-}
-
-// skillRunResult is one completed run: the cards the model proposed through
+// RunResult is one completed run: the cards the model proposed through
 // propose_card, and its closing prose. Partial marks a run that hit a budget
 // with cards already collected — the cards are real, the set is not complete.
 // It stays off the wire: /api/ai/run-skill states the same fact in the
@@ -169,7 +70,7 @@ type RunResult struct {
 	Partial    bool    `json:"-"`
 }
 
-// skillScope selects what one run is allowed to do. The input of a run is
+// Scope selects what one run is allowed to do. The input of a run is
 // prompt, and prompt is instruction: /api/ai/stories splits a document that
 // can be a forge issue body and its comments, authored by anyone who can
 // comment on that issue. Such a run gets the read-only set — it proposes
@@ -194,7 +95,7 @@ func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillNa
 	if err != nil {
 		return RunResult{}, err
 	}
-	client, err := r.rigClient(cfg)
+	model, err := r.newModel(ctx, cfg)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -209,7 +110,45 @@ func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillNa
 	}
 
 	collector := &cardCollector{max: normalizeStoryCount(maxCards)}
-	tools := []rig.Tool{
+	tools := r.skillTools(user, scope, others, collector)
+
+	result, err := oneshot.Run(ctx, oneshot.Request{
+		Model:                   model,
+		Instruction:             runnerSystem(skill, others),
+		Prompt:                  input,
+		Tools:                   tools,
+		MaxOutputTokens:         int32(skillBudget(maxTokens)),
+		MaxReturnedTextBytes:    maxReturnedTextBytes,
+		MaxModelCalls:           skillMaxIterations,
+		MaxToolCallsPerResponse: maxToolCallsPerResponse,
+		ToolExecution:           oneshot.ToolExecutionSequential,
+	})
+	return mapSkillRunResult(collector.cards, result, err)
+}
+
+func mapSkillRunResult(cards []Draft, result oneshot.Result, err error) (RunResult, error) {
+	if cards == nil {
+		cards = []Draft{}
+	}
+	if err != nil {
+		// Cards the collector already accepted are work the model finished
+		// before the run hit a budget, and discarding them makes the whole run
+		// a loss. Only output bounds and model-call exhaustion carry partial
+		// work forward. Backend failures stay failures whatever the collector
+		// holds.
+		if len(cards) > 0 && partialRun(err) {
+			return RunResult{Cards: cards, Commentary: partialRunCommentary(err), Partial: true}, nil
+		}
+		return RunResult{Cards: cards}, runnerError(err)
+	}
+	return RunResult{Cards: cards, Commentary: result.Text}, nil
+}
+
+// skillTools builds the exact native ADK declaration set for one skill run.
+// Tool authority and declaration order live here instead of in the runtime
+// adapter, so switching the loop cannot silently broaden a scope.
+func (r *Runner) skillTools(user string, scope Scope, others []Skill, collector *cardCollector) []tool.Tool {
+	tools := []tool.Tool{
 		proposeCardTool(collector),
 		r.findSimilarTool(user),
 		r.listTasksTool(user),
@@ -226,31 +165,7 @@ func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillNa
 	if len(others) > 0 {
 		tools = append(tools, loadSkillTool(others))
 	}
-
-	result, err := client.Run(ctx, rig.RunRequest{
-		Model:         cfg.Model,
-		System:        runnerSystem(skill, others),
-		Prompt:        input,
-		Tools:         tools,
-		MaxTokens:     skillBudget(maxTokens),
-		MaxIterations: skillMaxIterations,
-	})
-	cards := collector.cards
-	if cards == nil {
-		cards = []Draft{}
-	}
-	if err != nil {
-		// Cards the collector already accepted are work the model finished
-		// before the run hit a budget, and discarding them makes the whole run
-		// a loss. Only the two budgets carry partial work forward: a transport
-		// failure says nothing about what the endpoint did with the run, so it
-		// stays a failure whatever the collector holds.
-		if len(cards) > 0 && partialRun(err) {
-			return RunResult{Cards: cards, Commentary: partialRunCommentary(err), Partial: true}, nil
-		}
-		return RunResult{Cards: cards}, runnerError(err)
-	}
-	return RunResult{Cards: cards, Commentary: result.Text}, nil
+	return tools
 }
 
 // RunText performs one tool-free completion using stored configuration
@@ -260,11 +175,20 @@ func (r *Runner) RunText(ctx context.Context, user, system, prompt string, maxTo
 	if err != nil {
 		return "", err
 	}
-	client, err := r.rigClient(cfg)
+	model, err := r.newModel(ctx, cfg)
 	if err != nil {
 		return "", err
 	}
-	result, err := client.Run(ctx, rig.RunRequest{Model: cfg.Model, System: system, Prompt: prompt, MaxTokens: skillBudget(maxTokens), MaxIterations: 1})
+	result, err := oneshot.Run(ctx, oneshot.Request{
+		Model:                   model,
+		Instruction:             system,
+		Prompt:                  prompt,
+		MaxOutputTokens:         int32(skillBudget(maxTokens)),
+		MaxReturnedTextBytes:    maxReturnedTextBytes,
+		MaxModelCalls:           1,
+		MaxToolCallsPerResponse: maxToolCallsPerResponse,
+		ToolExecution:           oneshot.ToolExecutionSequential,
+	})
 	if err != nil {
 		return "", runnerError(err)
 	}
@@ -290,18 +214,21 @@ func skillBudget(maxTokens int64) int64 {
 // SkillBudget clamps a requested completion budget to the supported range.
 func SkillBudget(maxTokens int64) int64 { return skillBudget(maxTokens) }
 
-// partialRun reports whether a failed loop still produced usable work: a reply
-// cut off at the token budget and a loop stopped at the round cap both end a
-// run that already ran, unlike a transport or context failure.
+// partialRun reports whether a failed loop still produced usable work. Tool
+// call limits and execution failures do not prove that the collected set is a
+// valid prefix, so only output bounds and model-call exhaustion qualify.
 func partialRun(err error) bool {
-	return errors.Is(err, rig.ErrOutputLimit) || errors.Is(err, rig.ErrIterationLimit)
+	if backendRunFailure(err) || errors.Is(err, oneshot.ErrToolCallLimit) {
+		return false
+	}
+	return errors.Is(err, oneshot.ErrOutputTruncated) || errors.Is(err, oneshot.ErrTextTruncated) || errors.Is(err, oneshot.ErrModelCallLimit)
 }
 
 // partialRunCommentary stands in for the closing prose the run never wrote, so
 // a caller that reads the commentary learns the run was cut short rather than
 // reading an empty summary as "nothing more to say".
 func partialRunCommentary(err error) string {
-	if errors.Is(err, rig.ErrOutputLimit) {
+	if errors.Is(err, oneshot.ErrOutputTruncated) || errors.Is(err, oneshot.ErrTextTruncated) {
 		return TruncatedReplyMessage
 	}
 	return skillIterationLimitMessage
@@ -325,10 +252,6 @@ func splitSkills(skills []Skill, name string) (Skill, []Skill, bool) {
 	return selected, others, found
 }
 
-func SplitSkills(skills []Skill, name string) (Skill, []Skill, bool) {
-	return splitSkills(skills, name)
-}
-
 // runnerSystem assembles the system prompt: kb context, the catalogue of the
 // skills that stay loadable, then the invoked skill in full.
 func runnerSystem(skill Skill, others []Skill) string {
@@ -347,11 +270,9 @@ func runnerSystem(skill Skill, others []Skill) string {
 	return b.String()
 }
 
-func RunnerSystem(skill Skill, others []Skill) string { return runnerSystem(skill, others) }
-
-// loadSkillTool is the current runtime adapter for kb's skill catalogue. The
-// native ADK adapter replaces it when the rest of the domain tools move.
-func loadSkillTool(skills []Skill) rig.Tool {
+// loadSkillTool exposes kb's skill catalogue through the same native ADK tool
+// interface as the board tools.
+func loadSkillTool(skills []Skill) *kbTool {
 	bodies := make(map[string]string, len(skills))
 	names := make([]string, 0, len(skills))
 	for _, skill := range skills {
@@ -363,10 +284,10 @@ func loadSkillTool(skills []Skill) rig.Tool {
 	slices.Sort(names)
 	available := strings.Join(names, ", ")
 
-	return rig.Tool{
-		Name:        loadSkillToolName,
-		Description: "Load the full instructions for one of the skills listed in the system prompt. Call this before acting on a skill.",
-		InputSchema: map[string]any{
+	return newKBTool(
+		loadSkillToolName,
+		"Load the full instructions for one of the skills listed in the system prompt. Call this before acting on a skill.",
+		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"name": map[string]any{
@@ -377,7 +298,8 @@ func loadSkillTool(skills []Skill) rig.Tool {
 			"required":             []any{"name"},
 			"additionalProperties": false,
 		},
-		Run: func(_ context.Context, input json.RawMessage) (string, error) {
+		toolResultText,
+		func(_ context.Context, input json.RawMessage) (string, error) {
 			var args struct {
 				Name string `json:"name"`
 			}
@@ -393,7 +315,7 @@ func loadSkillTool(skills []Skill) rig.Tool {
 			}
 			return "", fmt.Errorf("unknown skill %q, available skills: %s", name, available)
 		},
-	}
+	)
 }
 
 // runnerError maps a loop failure onto the status the caller sees. The two
@@ -402,11 +324,25 @@ func loadSkillTool(skills []Skill) rig.Tool {
 // an upstream problem, and writeAIError collapses those into one opaque
 // message so a configured endpoint cannot become a reachability oracle.
 func runnerError(err error) error {
+	if backendRunFailure(err) {
+		return &Error{Code: http.StatusBadGateway, Message: "upstream request failed", Cause: err}
+	}
 	switch {
-	case errors.Is(err, rig.ErrOutputLimit):
+	case errors.Is(err, oneshot.ErrOutputTruncated), errors.Is(err, oneshot.ErrTextTruncated):
 		return &Error{Code: http.StatusUnprocessableEntity, Message: TruncatedReplyMessage}
-	case errors.Is(err, rig.ErrIterationLimit):
+	case errors.Is(err, oneshot.ErrModelCallLimit), errors.Is(err, oneshot.ErrToolCallLimit):
 		return &Error{Code: http.StatusUnprocessableEntity, Message: skillIterationLimitMessage}
 	}
 	return &Error{Code: http.StatusBadGateway, Message: "upstream request failed", Cause: err}
+}
+
+func backendRunFailure(err error) bool {
+	return errors.Is(err, oneshot.ErrInvalidArgument) ||
+		errors.Is(err, oneshot.ErrCanceled) ||
+		errors.Is(err, oneshot.ErrModelPanic) ||
+		errors.Is(err, oneshot.ErrToolPanic) ||
+		errors.Is(err, oneshot.ErrToolCallingUnsupported) ||
+		errors.Is(err, oneshot.ErrNoFinalResponse) ||
+		errors.Is(err, oneshot.ErrExecutionFailed) ||
+		errors.Is(err, oneshot.ErrCleanupFailed)
 }

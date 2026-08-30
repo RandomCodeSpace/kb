@@ -15,18 +15,24 @@ import (
 	"github.com/RandomCodeSpace/plasmid/oneshot"
 )
 
-const parityProbeMaxOutputTokens = int32(256)
-
 // TestPlasmidOneShotAPI freezes the published API this migration is allowed
-// to target. It does not switch the runtime while Rig remains the reference.
+// to target.
 func TestPlasmidOneShotAPI(t *testing.T) {
-	request := oneshot.ProbeRequest{MaxOutputTokens: parityProbeMaxOutputTokens}
-	if request.MaxOutputTokens != parityProbeMaxOutputTokens {
-		t.Fatalf("probe output budget = %d, want %d", request.MaxOutputTokens, parityProbeMaxOutputTokens)
+	request := oneshot.Request{
+		MaxOutputTokens:         int32(maxTokensCeiling),
+		MaxReturnedTextBytes:    maxReturnedTextBytes,
+		MaxModelCalls:           skillMaxIterations,
+		MaxToolCallsPerResponse: maxToolCallsPerResponse,
+		ToolExecution:           oneshot.ToolExecutionSequential,
 	}
-	var probe func(context.Context, oneshot.ProbeRequest) (oneshot.Result, error) = oneshot.Probe
-	if probe == nil {
-		t.Fatal("oneshot.Probe is nil")
+	if request.MaxOutputTokens != maxTokensCeiling || request.MaxReturnedTextBytes != 1<<20 ||
+		request.MaxModelCalls != 12 || request.MaxToolCallsPerResponse != 32 ||
+		request.ToolExecution != oneshot.ToolExecutionSequential {
+		t.Fatalf("one-shot controls = %+v", request)
+	}
+	var run func(context.Context, oneshot.Request) (oneshot.Result, error) = oneshot.Run
+	if run == nil {
+		t.Fatal("oneshot.Run is nil")
 	}
 }
 
