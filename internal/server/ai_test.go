@@ -847,8 +847,17 @@ func TestAITestEndpoint(t *testing.T) {
 	if !res.OK || res.Error != "" {
 		t.Errorf("test = %+v, want ok:true", res)
 	}
-	// It was a tool-call probe with room to answer, not a 1-token ping.
 	sent := decodeAIRequest(t, fake.reqBody)
+	assertProbeWireRequest(t, sent)
+	if fake.auth != "Bearer sk-t" {
+		t.Errorf("Authorization = %q, want Bearer sk-t", fake.auth)
+	}
+}
+
+func assertProbeWireRequest(t *testing.T, sent wireChatRequest) {
+	t.Helper()
+	// It was a forced inert tool-call probe with room to answer, not a
+	// one-token text completion or an executable tool turn.
 	if *sent.MaxTokens != probeMaxTokens {
 		t.Errorf("max_tokens = %d, want %d", *sent.MaxTokens, probeMaxTokens)
 	}
@@ -874,9 +883,6 @@ func TestAITestEndpoint(t *testing.T) {
 	}
 	if len(sent.Messages) != 1 || sent.Messages[0].Role != "user" {
 		t.Errorf("probe messages = %#v, want one user request and no tool result", sent.Messages)
-	}
-	if fake.auth != "Bearer sk-t" {
-		t.Errorf("Authorization = %q, want Bearer sk-t", fake.auth)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/RandomCodeSpace/plasmid/oneshot"
+	plasmidopenai "github.com/RandomCodeSpace/plasmid/openai"
 
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
@@ -100,20 +101,14 @@ func (r *Runner) Probe(ctx context.Context, user string, supplied Config) error 
 	if key := strings.TrimSpace(supplied.Key); key != "" {
 		cfg.Key = key
 	}
-	// A blank model is caught here rather than by the provider so the settings
-	// overlay keeps its existing message. Validate the endpoint first: a malformed
-	// base URL is the more structural mistake and would fail for every model.
-	if strings.TrimSpace(cfg.BaseURL) == "" {
-		return &Error{Code: http.StatusBadRequest, Message: "AI base URL not configured"}
-	}
-	if _, err := endpoint(cfg.BaseURL); err != nil {
-		return &Error{Code: http.StatusBadRequest, Message: err.Error(), Cause: err}
-	}
-	if strings.TrimSpace(cfg.Model) == "" {
-		return &Error{Code: http.StatusBadRequest, Message: ProbeModelMissingMessage}
-	}
 	modelValue, recorder, err := r.probeModel(ctx, cfg)
 	if err != nil {
+		// The provider validates the base URL before the model. Remap only its
+		// model validation so the settings overlay keeps the existing message.
+		var validationErr *plasmidopenai.ValidationError
+		if errors.As(err, &validationErr) && validationErr.Field == "model" {
+			return &Error{Code: http.StatusBadRequest, Message: ProbeModelMissingMessage, Cause: err}
+		}
 		return err
 	}
 	_, err = oneshot.Probe(ctx, oneshot.ProbeRequest{Model: modelValue, MaxOutputTokens: probeMaxOutputTokens})

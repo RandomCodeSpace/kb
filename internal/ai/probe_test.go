@@ -76,12 +76,20 @@ func TestProbeStatusMessageFallback(t *testing.T) {
 
 func TestProbeReportsMissingModel(t *testing.T) {
 	st := newTestStore(t)
-	base, model, key := "https://api.example.com/v1", "", "sk-test"
+	runner := NewRunner(st, "", &http.Client{}, &http.Client{})
+	assertAIError(t, runner.Probe(t.Context(), "default", Config{}), http.StatusBadRequest, "AI base URL not configured")
+
+	base, model, key := "ftp://api.example.com", "probe-model", "sk-test"
 	if _, err := st.SetAISettings("default", &base, &model, &key); err != nil {
 		t.Fatalf("SetAISettings: %v", err)
 	}
-	runner := NewRunner(st, "", &http.Client{}, &http.Client{})
-	assertAIError(t, runner.Probe(context.Background(), "default", Config{}), http.StatusBadRequest, ProbeModelMissingMessage)
+	assertAIError(t, runner.Probe(t.Context(), "default", Config{}), http.StatusBadRequest, "AI base URL scheme must be http or https")
+
+	base, model = "https://api.example.com/v1", ""
+	if _, err := st.SetAISettings("default", &base, &model, nil); err != nil {
+		t.Fatalf("SetAISettings: %v", err)
+	}
+	assertAIError(t, runner.Probe(t.Context(), "default", Config{}), http.StatusBadRequest, ProbeModelMissingMessage)
 }
 
 // TestProbeReportsPrivateEndpoint is the message the SSRF guard writes and that

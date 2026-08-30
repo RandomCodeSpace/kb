@@ -330,6 +330,13 @@ func TestPublicToolConstructors(t *testing.T) {
 
 func TestClientConfigurationAndBudgetTransport(t *testing.T) {
 	runner := NewRunner(newTestStore(t), "", &http.Client{}, &http.Client{})
+	assertClientRejectsBadBaseURLs(t, runner)
+	assertBudgetFieldRename(t)
+	assertBudgetTransport(t)
+}
+
+func assertClientRejectsBadBaseURLs(t *testing.T, runner *Runner) {
+	t.Helper()
 	for _, base := range []string{"", "not a url", "ftp://example.com", "https://example.com?q=1", "https://u:p@example.com"} {
 		client, err := runner.Client(Config{BaseURL: base, Model: "m"})
 		if client != nil || err == nil {
@@ -339,6 +346,10 @@ func TestClientConfigurationAndBudgetTransport(t *testing.T) {
 	if got, err := endpoint("https://example.com/api"); err != nil || got != "https://example.com/api/v1/" {
 		t.Fatalf("endpoint = %q, %v", got, err)
 	}
+}
+
+func assertBudgetFieldRename(t *testing.T) {
+	t.Helper()
 	if got, ok := renameMaxTokens([]byte(`{"max_tokens":7,"model":"m"}`)); !ok || !strings.Contains(string(got), "max_completion_tokens") {
 		t.Fatalf("rename = %s, %t", got, ok)
 	}
@@ -347,7 +358,10 @@ func TestClientConfigurationAndBudgetTransport(t *testing.T) {
 			t.Errorf("renameMaxTokens(%s) unexpectedly rewrote", body)
 		}
 	}
+}
 
+func assertBudgetTransport(t *testing.T) {
+	t.Helper()
 	seen := make(chan *http.Request, 1)
 	transport := budgetFieldTransport{base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		seen <- req
