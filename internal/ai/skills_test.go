@@ -142,6 +142,11 @@ func TestLoadSkillsEmbedded(t *testing.T) {
 	if len(skills) == 0 {
 		t.Fatal("loadSkills returned no embedded skills")
 	}
+	for _, skill := range skills {
+		if strings.Contains(strings.ToLower(skill.Body), "any other tool") {
+			t.Errorf("skill %q forbids the tools the runner requires", skill.Name)
+		}
+	}
 
 	adr, ok := skillFixtureByName(skills, "adr-split")
 	if !ok {
@@ -155,6 +160,15 @@ func TestLoadSkillsEmbedded(t *testing.T) {
 	for _, want := range []string{"propose_card", "find_similar"} {
 		if !strings.Contains(adr.Body, want) {
 			t.Errorf("adr-split body does not mention %q", want)
+		}
+	}
+	story, ok := skillFixtureByName(skills, "story-draft")
+	if !ok {
+		t.Fatalf("embedded skills = %v, want story-draft", skills)
+	}
+	for _, want := range []string{"find_similar", "Always call it"} {
+		if !strings.Contains(story.Body, want) {
+			t.Errorf("story-draft body does not mention %q", want)
 		}
 	}
 }

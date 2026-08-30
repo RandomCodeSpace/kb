@@ -1,7 +1,6 @@
 package ai
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,13 +43,14 @@ func (f *scriptedOpenAI) handler(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
 	f.reqs = append(f.reqs, body)
-	i := len(f.reqs) - 1
-	if i >= len(f.replies) {
-		i = len(f.replies) - 1
+	requestIndex := len(f.reqs) - 1
+	replyIndex := requestIndex
+	if replyIndex >= len(f.replies) {
+		replyIndex = len(f.replies) - 1
 	}
 	reply := fakeReply{content: "done"}
-	if i >= 0 {
-		reply = f.replies[i]
+	if replyIndex >= 0 {
+		reply = f.replies[replyIndex]
 	}
 	f.mu.Unlock()
 	if reply.status != 0 {
@@ -60,9 +60,9 @@ func (f *scriptedOpenAI) handler(w http.ResponseWriter, r *http.Request) {
 	message := map[string]any{"role": "assistant", "content": reply.content}
 	if len(reply.calls) > 0 {
 		calls := make([]any, 0, len(reply.calls))
-		for i, call := range reply.calls {
+		for callIndex, call := range reply.calls {
 			calls = append(calls, map[string]any{
-				"id": fmt.Sprintf("call-%d", i), "type": "function",
+				"id": fmt.Sprintf("call-%d-%d", requestIndex, callIndex), "type": "function",
 				"function": map[string]any{"name": call.name, "arguments": call.args},
 			})
 		}
@@ -123,8 +123,12 @@ func TestRunnerReadOnlyScopeOmitsMutatingTools(t *testing.T) {
 	fake := &scriptedOpenAI{replies: []fakeReply{{content: "done"}}}
 	runner, closeUpstream := configuredRunner(t, fake, "gpt-5-mini")
 	defer closeUpstream()
-	if _, err := runner.RunSkill(context.Background(), "default", ScopeReadOnly, "adr-split", "# ADR", 1, 99999); err != nil {
+	result, err := runner.RunSkill(context.Background(), "default", ScopeReadOnly, "adr-split", "# ADR", 1, 99999)
+	if err != nil {
 		t.Fatalf("RunSkill: %v", err)
+	}
+	if result.Cards == nil {
+		t.Fatal("RunSkill returned null cards")
 	}
 	request := string(fake.requests()[0])
 	var sent struct {
@@ -171,10 +175,9 @@ func TestNativeToolScopesAndOrder(t *testing.T) {
 		if len(native) != len(test.want) {
 			t.Fatalf("scope %d native tools = %d, want %d", test.scope, len(native), len(test.want))
 		}
-		bridged := bridgeRigTools(native)
 		for i, name := range test.want {
-			if native[i].Name() != name || bridged[i].Name != name {
-				t.Errorf("scope %d tool %d = native %q, bridge %q, want %q", test.scope, i, native[i].Name(), bridged[i].Name, name)
+			if native[i].Name() != name {
+				t.Errorf("scope %d tool %d = %q, want %q", test.scope, i, native[i].Name(), name)
 			}
 		}
 	}
@@ -277,10 +280,67 @@ func TestRunnerErrorsAndPartialResults(t *testing.T) {
 	})
 
 	t.Run("upstream failure", func(t *testing.T) {
-		fake := &scriptedOpenAI{replies: []fakeReply{{status: http.StatusInternalServerError}}}
+		fake := &scriptedOpenAI{replies: []fakeReply{
+			{calls: []fakeToolCall{{name: "propose_card", args: `{"title":"Not partial"}`}}},
+			{status: http.StatusInternalServerError},
+		}}
 		runner, closeUpstream := configuredRunner(t, fake, "m")
 		defer closeUpstream()
-		_, err := runner.RunSkill(context.Background(), "default", ScopeReadOnly, "adr-split", "input", 1, 10)
+		result, err := runner.RunSkill(context.Background(), "default", ScopeReadOnly, "adr-split", "input", 1, 10)
+		assertAIError(t, err, http.StatusBadGateway, "upstream request failed")
+		if result.Partial || len(result.Cards) != 1 {
+			t.Fatalf("result = %+v, want collected card without partial success", result)
+		}
+	})
+
+	t.Run("partial failure classification", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			code        oneshot.ErrorCode
+			sentinel    error
+			wantPartial bool
+			wantCode    int
+			wantMessage string
+		}{
+			{name: "output truncation", code: oneshot.CodeOutputTruncated, sentinel: oneshot.ErrOutputTruncated, wantPartial: true, wantMessage: TruncatedReplyMessage},
+			{name: "returned text truncation", code: oneshot.CodeTextTruncated, sentinel: oneshot.ErrTextTruncated, wantPartial: true, wantMessage: TruncatedReplyMessage},
+			{name: "model call exhaustion", code: oneshot.CodeModelCallLimit, sentinel: oneshot.ErrModelCallLimit, wantPartial: true, wantMessage: SkillIterationLimitMessage},
+			{name: "tool call limit", code: oneshot.CodeToolCallLimit, sentinel: oneshot.ErrToolCallLimit, wantCode: http.StatusUnprocessableEntity, wantMessage: SkillIterationLimitMessage},
+			{name: "cancellation", code: oneshot.CodeCanceled, sentinel: oneshot.ErrCanceled, wantCode: http.StatusBadGateway, wantMessage: "upstream request failed"},
+			{name: "model panic", code: oneshot.CodeModelPanic, sentinel: oneshot.ErrModelPanic, wantCode: http.StatusBadGateway, wantMessage: "upstream request failed"},
+			{name: "tool panic", code: oneshot.CodeToolPanic, sentinel: oneshot.ErrToolPanic, wantCode: http.StatusBadGateway, wantMessage: "upstream request failed"},
+			{name: "cleanup", code: oneshot.CodeCleanupFailed, sentinel: oneshot.ErrCleanupFailed, wantCode: http.StatusBadGateway, wantMessage: "upstream request failed"},
+			{name: "execution", code: oneshot.CodeExecutionFailed, sentinel: oneshot.ErrExecutionFailed, wantCode: http.StatusBadGateway, wantMessage: "upstream request failed"},
+		}
+		for _, test := range tests {
+			err := &oneshot.Error{Code: test.code, Err: test.sentinel}
+			result, mappedErr := mapSkillRunResult([]Draft{{Title: "Accepted"}}, oneshot.Result{Text: "partial text"}, err)
+			if len(result.Cards) != 1 || result.Partial != test.wantPartial {
+				t.Errorf("%s result = %+v, want one card and partial=%t", test.name, result, test.wantPartial)
+			}
+			if test.wantPartial {
+				if mappedErr != nil || result.Commentary != test.wantMessage {
+					t.Errorf("%s = %+v, %v, want successful partial with %q", test.name, result, mappedErr, test.wantMessage)
+				}
+				continue
+			}
+			assertAIError(t, mappedErr, test.wantCode, test.wantMessage)
+		}
+		for _, name := range []string{"transport", "provider"} {
+			result, err := mapSkillRunResult([]Draft{{Title: "Accepted"}}, oneshot.Result{}, errors.New(name+" failure"))
+			if result.Partial || len(result.Cards) != 1 {
+				t.Errorf("%s result = %+v, want hard failure with collected card", name, result)
+			}
+			assertAIError(t, err, http.StatusBadGateway, "upstream request failed")
+		}
+		mixed := errors.Join(
+			&oneshot.Error{Code: oneshot.CodeOutputTruncated, Err: oneshot.ErrOutputTruncated},
+			&oneshot.Error{Code: oneshot.CodeCleanupFailed, Err: oneshot.ErrCleanupFailed},
+		)
+		result, err := mapSkillRunResult([]Draft{{Title: "Accepted"}}, oneshot.Result{}, mixed)
+		if result.Partial {
+			t.Fatalf("cleanup plus truncation became partial success: %+v", result)
+		}
 		assertAIError(t, err, http.StatusBadGateway, "upstream request failed")
 	})
 }
@@ -312,8 +372,8 @@ func TestRunnerHelpers(t *testing.T) {
 		ask  int64
 		want int64
 	}{{-1, 1}, {42, 42}, {9000, maxTokensCeiling}} {
-		if got := SkillBudget(test.ask); got != test.want {
-			t.Errorf("SkillBudget(%d) = %d", test.ask, got)
+		if got := skillBudget(test.ask); got != test.want {
+			t.Errorf("skillBudget(%d) = %d", test.ask, got)
 		}
 	}
 	for _, test := range []struct {
@@ -324,9 +384,13 @@ func TestRunnerHelpers(t *testing.T) {
 			t.Errorf("usesMaxCompletionTokens(%q) = %t", test.model, got)
 		}
 	}
-	skill, others, found := SplitSkills([]Skill{{Name: "a"}, {Name: "b"}}, " b ")
-	if !found || skill.Name != "b" || len(others) != 1 || !strings.Contains(RunnerSystem(skill, others), "Skill: b") {
+	skill, others, found := splitSkills([]Skill{{Name: "a"}, {Name: "b"}}, " b ")
+	if !found || skill.Name != "b" || len(others) != 1 || !strings.Contains(runnerSystem(skill, others), "Skill: b") {
 		t.Fatalf("split/system = %+v %+v %t", skill, others, found)
+	}
+	only, others, found := splitSkills([]Skill{{Name: "only", Body: "instructions"}}, "only")
+	if !found || len(others) != 0 || strings.Contains(runnerSystem(only, others), "Available skills") {
+		t.Fatalf("single skill split/system = %+v %+v %t", only, others, found)
 	}
 	if _, _, found := splitSkills([]Skill{{Name: "a"}}, "missing"); found {
 		t.Fatal("missing skill found")
@@ -367,73 +431,9 @@ func TestPublicToolConstructors(t *testing.T) {
 	}
 }
 
-func TestClientConfigurationAndBudgetTransport(t *testing.T) {
-	runner := NewRunner(newTestStore(t), "", &http.Client{}, &http.Client{})
-	assertClientRejectsBadBaseURLs(t, runner)
-	assertBudgetFieldRename(t)
-	assertBudgetTransport(t)
-}
-
-func assertClientRejectsBadBaseURLs(t *testing.T, runner *Runner) {
-	t.Helper()
-	for _, base := range []string{"", "not a url", "ftp://example.com", "https://example.com?q=1", "https://u:p@example.com"} {
-		client, err := runner.Client(Config{BaseURL: base, Model: "m"})
-		if client != nil || err == nil {
-			t.Errorf("Client(%q) = %v, %v", base, client, err)
-		}
-	}
-	if got, err := endpoint("https://example.com/api"); err != nil || got != "https://example.com/api/v1/" {
-		t.Fatalf("endpoint = %q, %v", got, err)
-	}
-}
-
-func assertBudgetFieldRename(t *testing.T) {
-	t.Helper()
-	if got, ok := renameMaxTokens([]byte(`{"max_tokens":7,"model":"m"}`)); !ok || !strings.Contains(string(got), "max_completion_tokens") {
-		t.Fatalf("rename = %s, %t", got, ok)
-	}
-	for _, body := range []string{"[]", `{}`, `{"max_tokens":1,"max_completion_tokens":2}`} {
-		if _, ok := renameMaxTokens([]byte(body)); ok {
-			t.Errorf("renameMaxTokens(%s) unexpectedly rewrote", body)
-		}
-	}
-}
-
-func assertBudgetTransport(t *testing.T) {
-	t.Helper()
-	seen := make(chan *http.Request, 1)
-	transport := budgetFieldTransport{base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		seen <- req
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok"))}, nil
-	})}
-	req := httptest.NewRequest(http.MethodPost, "https://example.com", bytes.NewBufferString(`{"max_tokens":7}`))
-	if _, err := transport.RoundTrip(req); err != nil {
-		t.Fatal(err)
-	}
-	rewritten := <-seen
-	body, _ := io.ReadAll(rewritten.Body)
-	if rewritten.ContentLength != int64(len(body)) || !strings.Contains(string(body), "max_completion_tokens") || rewritten.GetBody == nil {
-		t.Fatalf("rewritten request = len %d body %s", rewritten.ContentLength, body)
-	}
-	noBody := httptest.NewRequest(http.MethodGet, "https://example.com", nil)
-	if _, err := transport.RoundTrip(noBody); err != nil {
-		t.Fatal(err)
-	}
-	badRead := httptest.NewRequest(http.MethodPost, "https://example.com", nil)
-	badRead.Body = failingReader{}
-	if _, err := transport.RoundTrip(badRead); err == nil {
-		t.Fatal("unreadable body accepted")
-	}
-}
-
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-type failingReader struct{}
-
-func (failingReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
-func (failingReader) Close() error             { return nil }
 
 func TestProbeUsesDirectStoreConfiguration(t *testing.T) {
 	t.Run("success and supplied overlay", func(t *testing.T) {

@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	kbai "github.com/RandomCodeSpace/kb/internal/ai"
 )
 
 // fakeToolCall is one tool call an assistant reply carries. args is the raw
@@ -45,7 +46,7 @@ type scriptedOpenAI struct {
 func (f *scriptedOpenAI) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		reply := f.next(body)
+		reply, requestIndex := f.next(body)
 		if reply.status != 0 {
 			http.Error(w, "upstream boom", reply.status)
 			return
@@ -53,9 +54,9 @@ func (f *scriptedOpenAI) handler() http.HandlerFunc {
 		message := map[string]any{"role": "assistant", "content": reply.content}
 		if len(reply.toolCalls) > 0 {
 			calls := make([]any, 0, len(reply.toolCalls))
-			for i, call := range reply.toolCalls {
+			for callIndex, call := range reply.toolCalls {
 				calls = append(calls, map[string]any{
-					"id":       fmt.Sprintf("call-%d", i+1),
+					"id":       fmt.Sprintf("call-%d-%d", requestIndex, callIndex),
 					"type":     "function",
 					"function": map[string]any{"name": call.name, "arguments": call.args},
 				})
@@ -73,17 +74,18 @@ func (f *scriptedOpenAI) handler() http.HandlerFunc {
 	}
 }
 
-func (f *scriptedOpenAI) next(body []byte) fakeReply {
+func (f *scriptedOpenAI) next(body []byte) (fakeReply, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reqs = append(f.reqs, body)
+	requestIndex := len(f.reqs) - 1
 	if len(f.replies) == 0 {
-		return fakeReply{content: "no reply scripted"}
+		return fakeReply{content: "no reply scripted"}, requestIndex
 	}
 	if len(f.reqs) <= len(f.replies) {
-		return f.replies[len(f.reqs)-1]
+		return f.replies[requestIndex], requestIndex
 	}
-	return f.replies[len(f.replies)-1]
+	return f.replies[len(f.replies)-1], requestIndex
 }
 
 func (f *scriptedOpenAI) requests() [][]byte {
@@ -139,9 +141,9 @@ func runSkillReq(t *testing.T, h http.Handler, body string) *httptest.ResponseRe
 	return doReq(t, h, http.MethodPost, "/api/ai/run-skill", body, nil)
 }
 
-func decodeSkillRun(t *testing.T, w *httptest.ResponseRecorder) skillRunResult {
+func decodeSkillRun(t *testing.T, w *httptest.ResponseRecorder) kbai.RunResult {
 	t.Helper()
-	var got skillRunResult
+	var got kbai.RunResult
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("run-skill JSON: %v (body=%s)", err, w.Body)
 	}
@@ -234,24 +236,6 @@ func TestRunSkillProposesCardsAcrossRounds(t *testing.T) {
 	}
 }
 
-// The one skill being run is not also loadable, so a catalogue of one leaves
-// nothing to advertise and no load_skill tool to call. The embedded catalogue
-// now carries several skills, so the single-skill case is exercised on the two
-// helpers the run composes rather than through a request.
-func TestRunSkillWithoutOtherSkillsOmitsLoadSkill(t *testing.T) {
-	only := skill{Name: "solo", Description: "the only skill", Body: "Do the thing."}
-	selected, others, found := splitSkills([]skill{only}, "solo")
-	if !found {
-		t.Fatal("splitSkills did not find the only skill")
-	}
-	if len(others) != 0 {
-		t.Fatalf("others = %v, want the invoked skill to be the whole catalogue", others)
-	}
-	if system := runnerSystem(selected, others); strings.Contains(system, "Available skills") {
-		t.Errorf("skills advertised with no other skills: %s", system)
-	}
-}
-
 // A run advertises every other skill and never the one it is running: the
 // invoked skill is force-injected, so a model that ignores load_skill cannot
 // lose its own instructions.
@@ -312,7 +296,7 @@ func TestRunSkillCapsProposedCards(t *testing.T) {
 	sent := decodeAIRequest(t, reqs[1])
 	refused := false
 	for _, msg := range sent.Messages {
-		if msg.Role == "tool" && strings.HasPrefix(msg.Content, "error: ") {
+		if msg.Role == "tool" && strings.Contains(msg.Content, "card limit reached") {
 			refused = true
 		}
 	}
@@ -469,38 +453,6 @@ func TestRunSkillRequiresAuth(t *testing.T) {
 	}
 }
 
-// A configuration problem is the caller's own settings, so it is reported as
-// a 400 rather than collapsed into the opaque upstream failure.
-func TestRigClientRejectsUnusableConfig(t *testing.T) {
-	st := newTestStore(t)
-	s := newServer(Config{}, st)
-
-	tests := []struct {
-		name string
-		cfg  aiConfig
-	}{
-		{name: "no base URL", cfg: aiConfig{model: "m"}},
-		{name: "blank base URL", cfg: aiConfig{baseURL: "   ", model: "m"}},
-		{name: "not a URL", cfg: aiConfig{baseURL: "not a url", model: "m"}},
-		{name: "wrong scheme", cfg: aiConfig{baseURL: "ftp://ai.invalid", model: "m"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client, err := s.rigClient(tt.cfg)
-			if client != nil {
-				t.Fatalf("rigClient returned a client for %+v", tt.cfg)
-			}
-			var ae *aiError
-			if !errors.As(err, &ae) || ae.code != http.StatusBadRequest {
-				t.Fatalf("rigClient error = %v, want a 400 aiError", err)
-			}
-		})
-	}
-	if client, err := s.rigClient(aiConfig{baseURL: "https://ai.invalid", model: "m", key: "k"}); client == nil || err != nil {
-		t.Fatalf("rigClient(valid) = %v, %v", client, err)
-	}
-}
-
 // A run outlives the server-wide write timeout, so the handler extends its own
 // write deadline. That only works if every writer between the connection and
 // the handler unwraps, which the logging wrapper is the one link in.
@@ -640,42 +592,6 @@ func TestRunSkillPartialResultsCoverOnlyBudgets(t *testing.T) {
 	}
 }
 
-// splitSkills keeps the invoked skill out of the loadable set, so a run cannot
-// spend a round loading instructions it already has.
-func TestSplitSkills(t *testing.T) {
-	catalogue := []skill{
-		{Name: "adr-split", Description: "split", Body: "split body"},
-		{Name: "extra", Description: "extra", Body: "extra body"},
-		{Name: "third", Description: "third", Body: "third body"},
-	}
-	tests := []struct {
-		name       string
-		want       string
-		wantOthers []string
-		wantFound  bool
-	}{
-		{name: "adr-split", want: "split body", wantOthers: []string{"extra", "third"}, wantFound: true},
-		{name: " extra ", want: "extra body", wantOthers: []string{"adr-split", "third"}, wantFound: true},
-		{name: "missing", wantOthers: []string{"adr-split", "extra", "third"}},
-		{name: "", wantOthers: []string{"adr-split", "extra", "third"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			skill, others, found := splitSkills(catalogue, tt.name)
-			if found != tt.wantFound || skill.Body != tt.want {
-				t.Fatalf("splitSkills(%q) = %+v, %t; want body %q, found %t", tt.name, skill, found, tt.want, tt.wantFound)
-			}
-			got := make([]string, 0, len(others))
-			for _, other := range others {
-				got = append(got, other.Name)
-			}
-			if strings.Join(got, ",") != strings.Join(tt.wantOthers, ",") {
-				t.Fatalf("others = %v, want %v", got, tt.wantOthers)
-			}
-		})
-	}
-}
-
 // Every budget that reaches the wire is clamped to the ceiling, whatever the
 // call site asked for. The constants are all under it today; the clamp is what
 // keeps a future flow from sending a budget a strict server rejects with a 400
@@ -691,9 +607,6 @@ func TestSkillRunBudgetIsClampedToTheCeiling(t *testing.T) {
 		{name: "in range", ask: aiStoryMaxTokens, want: aiStoryMaxTokens},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := skillBudget(tt.ask); got != tt.want {
-				t.Errorf("skillBudget(%d) = %d, want %d", tt.ask, got, tt.want)
-			}
 			fake := &scriptedOpenAI{replies: []fakeReply{{content: "Nothing to propose."}}}
 			upstream := httptest.NewServer(fake.handler())
 			defer upstream.Close()
@@ -702,7 +615,7 @@ func TestSkillRunBudgetIsClampedToTheCeiling(t *testing.T) {
 			s := newServer(Config{}, st)
 			configureAI(t, s.handler(), upstream.URL, "test-model", "sk-test")
 
-			if _, err := s.runSkill(context.Background(), "default", skillScopeReadOnly, "adr-split", "# ADR", 1, tt.ask); err != nil {
+			if _, err := s.runSkill(context.Background(), "default", kbai.ScopeReadOnly, "adr-split", "# ADR", 1, tt.ask); err != nil {
 				t.Fatalf("runSkill: %v", err)
 			}
 			reqs := fake.requests()
@@ -713,37 +626,5 @@ func TestSkillRunBudgetIsClampedToTheCeiling(t *testing.T) {
 				t.Errorf("wire budget = %d, want %d", got, tt.want)
 			}
 		})
-	}
-}
-
-// runnerSystemPrompt is prepended to every skill body in the same system
-// message, so a skill that forbids the tools it mandates leaves the run's
-// behaviour to the model. story-draft carries the extra rule that a
-// find_similar hit never cancels the proposal: POST /api/ai/story owes its
-// caller one card, and a run that proposes none is reported as an upstream
-// failure the user reads as "connection failed".
-func TestBuiltInSkillsAgreeWithTheRunnerRules(t *testing.T) {
-	st := newTestStore(t)
-	s := newServer(Config{}, st)
-	skills, err := s.loadSkills()
-	if err != nil {
-		t.Fatalf("loadSkills: %v", err)
-	}
-	if len(skills) == 0 {
-		t.Fatal("no built-in skills loaded")
-	}
-	for _, skill := range skills {
-		if strings.Contains(strings.ToLower(skill.Body), "any other tool") {
-			t.Errorf("skill %q forbids the tools runnerSystemPrompt mandates", skill.Name)
-		}
-	}
-	story, _, found := splitSkills(skills, storyDraftSkillName)
-	if !found {
-		t.Fatalf("skill %q is not in the built-in catalogue", storyDraftSkillName)
-	}
-	for _, want := range []string{"find_similar", "Always call it"} {
-		if !strings.Contains(story.Body, want) {
-			t.Errorf("story-draft body is missing %q: %s", want, story.Body)
-		}
 	}
 }

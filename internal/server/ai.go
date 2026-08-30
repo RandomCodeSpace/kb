@@ -392,7 +392,7 @@ func (s *server) handleAIStory(w http.ResponseWriter, r *http.Request, user stri
 	// One card, so the collector caps the run at one. The run is read-only:
 	// the card being updated is board text, and a draft the user has yet to
 	// accept is no reason to hand the loop a board write or an outbound fetch.
-	run, err := s.runSkillForRequest(w, r, user, skillScopeReadOnly, storyDraftSkillName, userMsg, 1, aiStoryMaxTokens)
+	run, err := s.runSkillForRequest(w, r, user, kbai.ScopeReadOnly, storyDraftSkillName, userMsg, 1, aiStoryMaxTokens)
 	if err != nil {
 		writeAIError(w, user, "story", err)
 		return
@@ -495,7 +495,7 @@ func (s *server) handleAIStories(w http.ResponseWriter, r *http.Request, user st
 	// run is read-only: the document may be a forge issue with third-party
 	// comments, so the loop that reads it gets no board write and no outbound
 	// fetch.
-	run, err := s.runSkillForRequest(w, r, user, skillScopeReadOnly, adrSplitSkillName, input.adr, req.Max, aiStoriesMaxTokens)
+	run, err := s.runSkillForRequest(w, r, user, kbai.ScopeReadOnly, adrSplitSkillName, input.adr, req.Max, aiStoriesMaxTokens)
 	if err != nil {
 		writeAIError(w, user, "stories", err)
 		return

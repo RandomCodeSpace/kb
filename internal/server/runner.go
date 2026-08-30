@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/RandomCodeSpace/rig"
-
 	kbai "github.com/RandomCodeSpace/kb/internal/ai"
 )
 
@@ -24,15 +22,6 @@ const (
 	cardLimitReachedMessage    = kbai.CardLimitReachedMessage
 )
 
-type skillRunResult = kbai.RunResult
-type skillScope = kbai.Scope
-type skill = kbai.Skill
-
-const (
-	skillScopeReadOnly = kbai.ScopeReadOnly
-	skillScopeFull     = kbai.ScopeFull
-)
-
 func (s *server) aiRunner() *kbai.Runner {
 	return kbai.NewRunner(s.store, s.cfg.SkillsDir, s.aiClient, s.linkClient)
 }
@@ -45,29 +34,12 @@ func serverAIError(err error) error {
 	return err
 }
 
-func (s *server) runSkill(ctx context.Context, user string, scope skillScope, skillName, input string, maxCards int, maxTokens int64) (skillRunResult, error) {
+func (s *server) runSkill(ctx context.Context, user string, scope kbai.Scope, skillName, input string, maxCards int, maxTokens int64) (kbai.RunResult, error) {
 	result, err := s.aiRunner().RunSkill(ctx, user, scope, skillName, input, maxCards, maxTokens)
 	return result, serverAIError(err)
 }
 
-func (s *server) rigClient(cfg aiConfig) (*rig.Client, error) {
-	client, err := s.aiRunner().Client(kbai.Config{BaseURL: cfg.baseURL, Model: cfg.model, Key: cfg.key})
-	return client, serverAIError(err)
-}
-
-func skillBudget(maxTokens int64) int64 { return kbai.SkillBudget(maxTokens) }
-
-func splitSkills(skills []skill, name string) (skill, []skill, bool) {
-	return kbai.SplitSkills(skills, name)
-}
-
-func runnerSystem(selected skill, others []skill) string {
-	return kbai.RunnerSystem(selected, others)
-}
-
-func (s *server) loadSkills() ([]skill, error) { return s.aiRunner().LoadSkills() }
-
-func (s *server) runSkillForRequest(w http.ResponseWriter, r *http.Request, user string, scope skillScope, skillName, input string, maxCards int, maxTokens int64) (skillRunResult, error) {
+func (s *server) runSkillForRequest(w http.ResponseWriter, r *http.Request, user string, scope kbai.Scope, skillName, input string, maxCards int, maxTokens int64) (kbai.RunResult, error) {
 	extendWriteDeadline(w)
 	ctx, cancel := context.WithTimeout(r.Context(), skillRunDeadline)
 	defer cancel()
@@ -106,7 +78,7 @@ func (s *server) handleAIRunSkill(w http.ResponseWriter, r *http.Request, user s
 		http.Error(w, "input too large (max 64 KiB)", http.StatusRequestEntityTooLarge)
 		return
 	}
-	result, err := s.runSkillForRequest(w, r, user, skillScopeFull, req.Skill, req.Input, req.Max, aiStoriesMaxTokens)
+	result, err := s.runSkillForRequest(w, r, user, kbai.ScopeFull, req.Skill, req.Input, req.Max, aiStoriesMaxTokens)
 	if err != nil {
 		writeAIError(w, user, "run-skill", err)
 		return
