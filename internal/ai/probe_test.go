@@ -137,6 +137,8 @@ func TestProbeDialMessages(t *testing.T) {
 func TestProbeErrorClassifiesContext(t *testing.T) {
 	assertAIError(t, probeError(fmt.Errorf("ai backend: %w", context.Canceled), nil), http.StatusBadGateway, ProbeCancelledMessage)
 	assertAIError(t, probeError(fmt.Errorf("ai backend: %w", context.DeadlineExceeded), nil), http.StatusBadGateway, ProbeTimeoutMessage)
+	assertAIError(t, probeError(errors.New("oversized"), &modelObservation{responseTooLarge: true}), http.StatusBadGateway, runResponseTooLargeMessage)
+	assertAIError(t, probeError(errors.New("redirected"), &modelObservation{redirectFailure: true}), http.StatusBadGateway, runRedirectMessage)
 	// A recorded 2xx with a failure after it is a reply kb could not use, not a
 	// transport problem: it stays opaque rather than blaming the endpoint.
 	assertAIError(t, probeError(errors.New("boom"), &modelObservation{status: http.StatusOK}), http.StatusBadGateway, ProbeOpaqueMessage)
