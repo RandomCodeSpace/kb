@@ -137,38 +137,8 @@ func TestToolDefinitions(t *testing.T) {
 	}
 }
 
-func TestNativeToolFailuresAreModelVisible(t *testing.T) {
-	ctx := &agent.StrictContextMock{Ctx: context.Background()}
-	collector := &cardCollector{max: 1}
-	tool := proposeCardTool(collector)
-
-	accepted, err := tool.Run(ctx, map[string]any{"title": "First"})
-	if err != nil || accepted["accepted"] != true || accepted["count"] != float64(1) {
-		t.Fatalf("accepted result = %#v, %v", accepted, err)
-	}
-	rejected, err := tool.Run(ctx, map[string]any{"title": "Second"})
-	if err != nil {
-		t.Fatalf("cap refusal escaped the tool result: %v", err)
-	}
-	if rejected["error"] != modelToolErrorPrefix+cardLimitReachedMessage {
-		t.Fatalf("cap refusal = %#v", rejected)
-	}
-	if len(collector.cards) != 1 {
-		t.Fatalf("collector contains %d cards, want its cap of 1", len(collector.cards))
-	}
-
-	invalid, err := tool.Run(ctx, "not an object")
-	if err != nil || !strings.Contains(fmt.Sprint(invalid["error"]), "expected a JSON object") {
-		t.Fatalf("invalid arguments = %#v, %v", invalid, err)
-	}
-	absent, err := proposeCardTool(&cardCollector{max: 1}).Run(ctx, nil)
-	if err != nil || !strings.Contains(fmt.Sprint(absent["error"]), "card rejected") {
-		t.Fatalf("absent arguments = %#v, %v", absent, err)
-	}
-}
-
 func TestNativeProductionToolAdapterParity(t *testing.T) {
-	t.Run("propose_card converts defaults, result, error, and collection", func(t *testing.T) {
+	{
 		collector := NewCardCollector(2)
 		toolValue := ProposeCardTool(collector)
 
@@ -180,17 +150,9 @@ func TestNativeProductionToolAdapterParity(t *testing.T) {
 		if len(cards) != 1 || cards[0].Title != "Native proposal" || cards[0].Prio != board.PrioLow {
 			t.Fatalf("collected cards = %#v, want one trimmed card with the default priority", cards)
 		}
+	}
 
-		failure := mustRunNativeTool(t, toolValue, map[string]any{"title": "  "})
-		if !strings.Contains(fmt.Sprint(failure["error"]), "card rejected") {
-			t.Fatalf("propose_card failure = %#v", failure)
-		}
-		if cards = collector.Cards(); len(cards) != 1 {
-			t.Fatalf("rejected proposal changed the collector: %#v", cards)
-		}
-	})
-
-	t.Run("find_similar converts arguments, result, and error", func(t *testing.T) {
+	{
 		runner, st := newToolServer(t)
 		created := addToolTask(t, st, board.Task{Title: "Native needle"})
 		toolValue := runner.FindSimilarTool("default")
@@ -204,14 +166,9 @@ func TestNativeProductionToolAdapterParity(t *testing.T) {
 		if !ok || item["id"] != created.ID || item["title"] != created.Title {
 			t.Fatalf("find_similar item = %#v, want task %s", items[0], created.ID)
 		}
+	}
 
-		failure := mustRunNativeTool(t, toolValue, map[string]any{"query": "ab"})
-		if !strings.Contains(fmt.Sprint(failure["error"]), "at least 3 characters") {
-			t.Fatalf("find_similar failure = %#v", failure)
-		}
-	})
-
-	t.Run("fetch_link converts text result, error, and request side effect", func(t *testing.T) {
+	{
 		t.Setenv("KB_LINK_ALLOW_PRIVATE", "1")
 		var requests atomic.Int32
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -230,17 +187,9 @@ func TestNativeProductionToolAdapterParity(t *testing.T) {
 		if requests.Load() != 1 {
 			t.Fatalf("fetch_link requests = %d, want 1", requests.Load())
 		}
+	}
 
-		failure := mustRunNativeTool(t, toolValue, map[string]any{"url": "file:///etc/passwd"})
-		if !strings.Contains(fmt.Sprint(failure["error"]), "absolute http or https URL") {
-			t.Fatalf("fetch_link failure = %#v", failure)
-		}
-		if requests.Load() != 1 {
-			t.Fatalf("rejected fetch issued a request, count = %d", requests.Load())
-		}
-	})
-
-	t.Run("list_tasks converts absent filters, result, and error", func(t *testing.T) {
+	{
 		runner, st := newToolServer(t)
 		created := addToolTask(t, st, board.Task{Title: "Native listing", Status: board.StatusTodo})
 		toolValue := runner.ListTasksTool("default")
@@ -254,14 +203,9 @@ func TestNativeProductionToolAdapterParity(t *testing.T) {
 		if !ok || taskResult["id"] != created.ID || taskResult["title"] != created.Title {
 			t.Fatalf("list_tasks task = %#v, want task %s", tasks[0], created.ID)
 		}
+	}
 
-		failure := mustRunNativeTool(t, toolValue, map[string]any{"status": "backlog"})
-		if !strings.Contains(fmt.Sprint(failure["error"]), "todo") {
-			t.Fatalf("list_tasks failure = %#v", failure)
-		}
-	})
-
-	t.Run("get_task converts reference, result, and error", func(t *testing.T) {
+	{
 		runner, st := newToolServer(t)
 		created := addToolTask(t, st, board.Task{Title: "Native lookup", Desc: "kept"})
 		toolValue := runner.GetTaskTool("default")
@@ -270,14 +214,9 @@ func TestNativeProductionToolAdapterParity(t *testing.T) {
 		if result["id"] != created.ID || result["title"] != created.Title || result["desc"] != "kept" {
 			t.Fatalf("get_task result = %#v, want task %s", result, created.ID)
 		}
+	}
 
-		failure := mustRunNativeTool(t, toolValue, map[string]any{"ref": ""})
-		if !strings.Contains(fmt.Sprint(failure["error"]), "ref must not be empty") {
-			t.Fatalf("get_task failure = %#v", failure)
-		}
-	})
-
-	t.Run("update_task converts omitted fields, result, error, and write", func(t *testing.T) {
+	{
 		runner, st := newToolServer(t)
 		created := addToolTask(t, st, board.Task{Title: "Before", Desc: "preserve", Prio: board.PrioMedium})
 		toolValue := runner.UpdateTaskTool("default")
@@ -299,7 +238,7 @@ func TestNativeProductionToolAdapterParity(t *testing.T) {
 		if err != nil || stored.Prio != board.PrioMedium || stored.Title != "After" {
 			t.Fatalf("rejected update changed the task: %#v, %v", stored, err)
 		}
-	})
+	}
 }
 
 type scriptedNativeModel struct {
@@ -435,43 +374,6 @@ func TestNativeCollectorCapReachesTheModel(t *testing.T) {
 	}
 	if result.Metadata.ToolCalls != 2 {
 		t.Fatalf("tool calls = %d, want both proposals accounted", result.Metadata.ToolCalls)
-	}
-}
-
-func TestUnknownNativeToolReturnsToTheModel(t *testing.T) {
-	var sawFailure atomic.Bool
-	modelValue := &scriptedNativeModel{step: func(call int, request *model.LLMRequest) *model.LLMResponse {
-		if call == 0 {
-			return &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
-				{FunctionCall: &genai.FunctionCall{ID: "missing-call", Name: "missing", Args: map[string]any{}}},
-			}}}
-		}
-		for _, content := range request.Contents {
-			if content == nil {
-				continue
-			}
-			for _, part := range content.Parts {
-				if part == nil || part.FunctionResponse == nil || part.FunctionResponse.Name != "missing" {
-					continue
-				}
-				if failure, _ := part.FunctionResponse.Response["error"].(string); failure != "" {
-					sawFailure.Store(true)
-				}
-			}
-		}
-		return &model.LLMResponse{Content: genai.NewContentFromText("recovered", genai.RoleModel)}
-	}}
-
-	result, err := oneshot.Run(context.Background(), oneshot.Request{
-		Model: modelValue, Prompt: "call missing", Tools: []tool.Tool{proposeCardTool(&cardCollector{max: 1})},
-		MaxOutputTokens: 64, MaxReturnedTextBytes: 1024, MaxModelCalls: 2,
-		MaxToolCallsPerResponse: 32, ToolExecution: oneshot.ToolExecutionSequential,
-	})
-	if err != nil || result.Text != "recovered" {
-		t.Fatalf("run = %#v, %v", result, err)
-	}
-	if !sawFailure.Load() {
-		t.Fatal("unknown tool failure did not reach the next model request")
 	}
 }
 

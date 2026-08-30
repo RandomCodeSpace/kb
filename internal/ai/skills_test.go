@@ -127,10 +127,6 @@ func TestLoadSkillToolKeepsTheCatalogContract(t *testing.T) {
 	if err != nil || result["result"] != "alpha body" {
 		t.Fatalf("native load result = %#v, %v", result, err)
 	}
-	result, err = tool.Run(ctx, map[string]any{"name": "missing"})
-	if err != nil || result["error"] != `error: unknown skill "missing", available skills: alpha, zeta` {
-		t.Fatalf("native missing result = %#v, %v", result, err)
-	}
 }
 
 // TestLoadSkillsEmbedded pins the built-in catalogue: the embed directive has

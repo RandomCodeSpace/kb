@@ -155,32 +155,29 @@ func TestNativeToolScopesAndOrder(t *testing.T) {
 	runner, _ := newToolServer(t)
 	others := []Skill{{Name: "other", Body: "instructions"}}
 	tests := []struct {
-		name  string
 		scope Scope
 		want  []string
 	}{
 		{
-			name: "read only", scope: ScopeReadOnly,
-			want: []string{"propose_card", "find_similar", "list_tasks", "get_task", "load_skill"},
+			scope: ScopeReadOnly,
+			want:  []string{"propose_card", "find_similar", "list_tasks", "get_task", "load_skill"},
 		},
 		{
-			name: "full", scope: ScopeFull,
-			want: []string{"propose_card", "find_similar", "list_tasks", "get_task", "fetch_link", "update_task", "load_skill"},
+			scope: ScopeFull,
+			want:  []string{"propose_card", "find_similar", "list_tasks", "get_task", "fetch_link", "update_task", "load_skill"},
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			native := runner.skillTools("default", test.scope, others, &cardCollector{max: 1})
-			if len(native) != len(test.want) {
-				t.Fatalf("native tools = %d, want %d", len(native), len(test.want))
+		native := runner.skillTools("default", test.scope, others, &cardCollector{max: 1})
+		if len(native) != len(test.want) {
+			t.Fatalf("scope %d native tools = %d, want %d", test.scope, len(native), len(test.want))
+		}
+		bridged := bridgeRigTools(native)
+		for i, name := range test.want {
+			if native[i].Name() != name || bridged[i].Name != name {
+				t.Errorf("scope %d tool %d = native %q, bridge %q, want %q", test.scope, i, native[i].Name(), bridged[i].Name, name)
 			}
-			bridged := bridgeRigTools(native)
-			for i, name := range test.want {
-				if native[i].Name() != name || bridged[i].Name != name {
-					t.Errorf("tool %d = native %q, bridge %q, want %q", i, native[i].Name(), bridged[i].Name, name)
-				}
-			}
-		})
+		}
 	}
 
 	withoutLoad := runner.skillTools("default", ScopeReadOnly, nil, &cardCollector{max: 1})
