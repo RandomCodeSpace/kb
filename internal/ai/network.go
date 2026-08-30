@@ -59,8 +59,8 @@ func normalizeGuardHost(host string) string {
 // ErrPrivateAddress is the SSRF guard refusing a dial. It is a sentinel rather
 // than an anonymous error because the message is the single most actionable
 // thing the connection test can say - a local model server is the common case -
-// and by the time the failure reaches the probe it has been through the dialer,
-// the transport and rig, none of which preserve error text.
+// and by the time the failure reaches the probe it has been through the dialer
+// and transport, neither of which preserves error text.
 var ErrPrivateAddress = errors.New("AI endpoint resolves to a private address (set KB_AI_ALLOW_PRIVATE=1 for local model servers)")
 
 var errRedirectPolicy = errors.New("AI endpoint redirect violates policy")
