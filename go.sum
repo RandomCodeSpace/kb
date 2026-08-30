@@ -16,8 +16,8 @@ cloud.google.com/go/compute/metadata v0.9.0 h1:pDUj4QMoPejqq20dK0Pg2N4yG9zIkYGdB
 cloud.google.com/go/compute/metadata v0.9.0/go.mod h1:E0bWwX5wTnLPedCKqk3pJmVgCBSM6qQI1yTBdEb3C10=
 github.com/MakeNowJust/heredoc v1.0.0 h1:cXCdzVdstXyiTqTvfqk9SDHpKNjxuom+DOlyEeQ4pzQ=
 github.com/MakeNowJust/heredoc v1.0.0/go.mod h1:mG5amYoWBHf8vpLOuehzbGGw0EHxpZZ6lCpQ4fNJ8LE=
-github.com/RandomCodeSpace/plasmid v0.1.2 h1:dHWRlJye6/BRaSO+R/vUpZv4fAOrTvhV9sTd3PmvoZg=
-github.com/RandomCodeSpace/plasmid v0.1.2/go.mod h1:5V0ptYSahdhhEMWQwjzb+Ti/2tYM+zZPs0n6wKaa+aY=
+github.com/RandomCodeSpace/plasmid v0.1.3 h1:CYLe62sfVrFhGFmDdJ0pXHsTJT2T+GYO1AuGeSl2Fc0=
+github.com/RandomCodeSpace/plasmid v0.1.3/go.mod h1:5V0ptYSahdhhEMWQwjzb+Ti/2tYM+zZPs0n6wKaa+aY=
 github.com/RandomCodeSpace/rig v0.2.0 h1:VJNRC2fB3KuVYmVyQ86Au8qF1Sv5PGpUazkoJ1H5Nh4=
 github.com/RandomCodeSpace/rig v0.2.0/go.mod h1:+YcCXgc5DuA4COoaFiMBU5kNGEIk1tR7jNo9BDFUg7U=
 github.com/alecthomas/assert/v2 v2.11.0 h1:2Q9r3ki8+JYXvGsDyBXwH3LcJ+WK5D0gc5E8vS6K3D0=

@@ -8,7 +8,7 @@ require (
 	charm.land/glamour/v2 v2.0.1
 	charm.land/huh/v2 v2.0.3
 	charm.land/lipgloss/v2 v2.0.6
-	github.com/RandomCodeSpace/plasmid v0.1.2
+	github.com/RandomCodeSpace/plasmid v0.1.3
 	github.com/RandomCodeSpace/rig v0.2.0
 	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/charmbracelet/x/ansi v0.11.8
