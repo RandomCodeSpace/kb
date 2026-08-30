@@ -9,7 +9,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/RandomCodeSpace/plasmid/oneshot"
 )
 
 // probeRunner is a runner whose stored configuration points at handler and
@@ -81,6 +84,16 @@ func TestProbeReportsMissingModel(t *testing.T) {
 	assertAIError(t, runner.Probe(context.Background(), "default", Config{}), http.StatusBadRequest, ProbeModelMissingMessage)
 }
 
+func TestProbeReportsBaseURLBeforeMissingModel(t *testing.T) {
+	st := newTestStore(t)
+	base, model, key := "ftp://api.example.com", "", "sk-test"
+	if _, err := st.SetAISettings("default", &base, &model, &key); err != nil {
+		t.Fatalf("SetAISettings: %v", err)
+	}
+	runner := NewRunner(st, "", &http.Client{}, &http.Client{})
+	assertAIError(t, runner.Probe(t.Context(), "default", Config{}), http.StatusBadRequest, "AI base URL scheme must be http or https")
+}
+
 // TestProbeReportsPrivateEndpoint is the message the SSRF guard writes and that
 // nothing downstream used to preserve. A local model server is the common
 // reason a connection test fails, so the test must say how to allow it.
@@ -131,44 +144,74 @@ func TestProbeErrorClassifiesContext(t *testing.T) {
 	assertAIError(t, probeError(errors.New("boom"), &probeTransport{status: http.StatusOK}), http.StatusBadGateway, ProbeOpaqueMessage)
 }
 
-// TestProbeClientPreservesGuardedTransport keeps the recorder from becoming a
+func TestProbeCancellationMakesOneRequest(t *testing.T) {
+	var calls atomic.Int32
+	started := make(chan struct{}, 1)
+	runner := probeRunner(t, func(_ http.ResponseWriter, request *http.Request) {
+		calls.Add(1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-request.Context().Done()
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- runner.Probe(ctx, "default", Config{}) }()
+	<-started
+	cancel()
+	err := <-done
+	assertAIError(t, err, http.StatusBadGateway, ProbeCancelledMessage)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1", got)
+	}
+}
+
+// TestProbeModelPreservesGuardedTransport keeps the recorder from becoming a
 // hole in the SSRF guard: the clone must dial through the client it wraps.
-func TestProbeClientPreservesGuardedTransport(t *testing.T) {
+func TestProbeModelPreservesGuardedTransport(t *testing.T) {
 	st := newTestStore(t)
 	runner := NewRunner(st, "", nil, nil)
-	client, recorder, err := runner.probeClient(Config{BaseURL: "https://api.example.com/v1", Model: "m"})
+	modelValue, recorder, err := runner.probeModel(t.Context(), Config{BaseURL: "https://api.example.com/v1", Model: "m"})
 	if err != nil {
-		t.Fatalf("probeClient: %v", err)
+		t.Fatalf("probeModel: %v", err)
 	}
-	if client == nil || recorder == nil || recorder.base == nil {
-		t.Fatal("probeClient returned an unwired recorder")
+	if modelValue == nil || recorder == nil || recorder.base == nil {
+		t.Fatal("probeModel returned an unwired recorder")
 	}
 	if _, ok := recorder.base.(*http.Transport); !ok {
 		t.Fatalf("recorder wraps %T, want the guarded *http.Transport", recorder.base)
 	}
 }
 
-// TestProbeClientWithoutHTTPClient covers a runner whose AI client is nil, the
+// TestProbeModelWithoutHTTPClient covers a runner whose AI client is nil, the
 // embedding seam NewRunner fills but a hand-built Runner may not.
-func TestProbeClientWithoutHTTPClient(t *testing.T) {
+func TestProbeModelWithoutHTTPClient(t *testing.T) {
 	runner := &Runner{}
-	_, recorder, err := runner.probeClient(Config{BaseURL: "https://api.example.com/v1", Model: "m"})
+	_, recorder, err := runner.probeModel(t.Context(), Config{BaseURL: "https://api.example.com/v1", Model: "m"})
 	if err != nil {
-		t.Fatalf("probeClient: %v", err)
+		t.Fatalf("probeModel: %v", err)
 	}
 	if recorder.base != http.DefaultTransport {
 		t.Fatalf("recorder.base = %#v, want http.DefaultTransport", recorder.base)
 	}
 }
 
-func TestProbeClientRejectsBadConfiguration(t *testing.T) {
+func TestProbeModelRejectsBadConfiguration(t *testing.T) {
 	runner := &Runner{}
-	if _, _, err := runner.probeClient(Config{Model: "m"}); err == nil {
+	if _, _, err := runner.probeModel(t.Context(), Config{Model: "m"}); err == nil {
 		t.Fatal("blank base URL accepted")
 	}
-	if _, _, err := runner.probeClient(Config{BaseURL: "ftp://example.com", Model: "m"}); err == nil {
+	if _, _, err := runner.probeModel(t.Context(), Config{BaseURL: "ftp://example.com", Model: "m"}); err == nil {
 		t.Fatal("non-HTTP base URL accepted")
 	}
+}
+
+func TestProbeErrorMapsPlasmidSentinels(t *testing.T) {
+	assertAIError(t, probeError(oneshot.ErrToolCallingUnsupported, nil), http.StatusBadRequest, ToolCallRequiredMessage)
+	assertAIError(t, probeError(oneshot.ErrToolCallLimit, nil), http.StatusBadRequest, ToolCallRequiredMessage)
+	assertAIError(t, probeError(oneshot.ErrOutputTruncated, nil), http.StatusUnprocessableEntity, TruncatedReplyMessage)
+	assertAIError(t, probeError(oneshot.ErrExecutionFailed, &probeTransport{status: http.StatusOK}), http.StatusBadGateway, ProbeOpaqueMessage)
 }
 
 // TestProbeTransportRecordsOutcome exercises the recorder directly, including

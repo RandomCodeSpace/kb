@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/RandomCodeSpace/plasmid/oneshot"
 	"github.com/RandomCodeSpace/rig"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
@@ -383,7 +384,7 @@ func (failingReader) Close() error             { return nil }
 
 func TestProbeUsesDirectStoreConfiguration(t *testing.T) {
 	t.Run("success and supplied overlay", func(t *testing.T) {
-		fake := &scriptedOpenAI{replies: []fakeReply{{calls: []fakeToolCall{{name: "ping", args: `{}`}}}}}
+		fake := &scriptedOpenAI{replies: []fakeReply{{calls: []fakeToolCall{{name: "plasmid_ping", args: `{"marker":"plasmid-probe-v1"}`}}}}}
 		runner, closeUpstream := configuredRunner(t, fake, "stored-model")
 		defer closeUpstream()
 		if err := runner.Probe(context.Background(), "default", Config{Model: "candidate-model"}); err != nil {
@@ -409,7 +410,7 @@ func TestProbeUsesDirectStoreConfiguration(t *testing.T) {
 	})
 
 	t.Run("supplied endpoint and key", func(t *testing.T) {
-		fake := &scriptedOpenAI{replies: []fakeReply{{calls: []fakeToolCall{{name: "ping", args: `{}`}}}}}
+		fake := &scriptedOpenAI{replies: []fakeReply{{calls: []fakeToolCall{{name: "plasmid_ping", args: `{"marker":"plasmid-probe-v1"}`}}}}}
 		runner, closeUpstream := configuredRunner(t, fake, "stored")
 		defer closeUpstream()
 		stored := runner.aiClient
@@ -423,7 +424,7 @@ func TestProbeUsesDirectStoreConfiguration(t *testing.T) {
 	})
 
 	t.Run("maps output and upstream errors", func(t *testing.T) {
-		assertAIError(t, probeError(rig.ErrOutputLimit, nil), http.StatusUnprocessableEntity, TruncatedReplyMessage)
+		assertAIError(t, probeError(oneshot.ErrOutputTruncated, nil), http.StatusUnprocessableEntity, TruncatedReplyMessage)
 		assertAIError(t, probeError(errors.New("network"), nil), http.StatusBadGateway, ProbeOpaqueMessage)
 		if err := probeError(nil, nil); err != nil {
 			t.Fatal(err)

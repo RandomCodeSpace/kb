@@ -10,7 +10,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/RandomCodeSpace/rig"
+	"github.com/RandomCodeSpace/plasmid/oneshot"
+	"google.golang.org/adk/v2/model"
 )
 
 // Probe failure messages. A connection test that cannot say what failed is a
@@ -18,6 +19,7 @@ import (
 // went wrong and the field that fixes it. They are shown verbatim in the
 // settings overlay, so they stay one short sentence with no secret in them.
 const (
+	probeMaxOutputTokens     = int32(256)
 	ProbeModelMissingMessage = "AI model not configured - fill in the model field"
 	ProbeTimeoutMessage      = "the AI endpoint did not answer before the test timed out"
 	ProbeCancelledMessage    = "the connection test was cancelled"
@@ -29,18 +31,14 @@ const (
 
 // probeTransport records what one probe's single round trip actually did.
 //
-// rig reduces every backend failure to an opaque sentence on purpose: a caller
-// must not be able to turn a configured endpoint into a reachability oracle.
-// The reduction is right for the HTTP surface, which keeps its own opacity by
-// collapsing every 502 to one message, and wrong for the settings overlay,
-// which runs on the operator's own machine against the endpoint they just
-// typed. Recording the outcome at the transport - which kb owns and rig does
-// not touch - recovers the status code and the dial error without parsing
-// rig's message text, and it is the only way kb's own SSRF-guard message
-// survives at all: rig replaces it with an unwrappable errors.New.
+// Plasmid reduces model failures to safe classifications. That is right for the
+// HTTP surface, which collapses every 502 to one message, and insufficient for
+// the local settings overlay, which must say whether the operator mistyped the
+// endpoint or key. Recording kb's transport outcome recovers the status or dial
+// error without parsing provider-controlled text.
 //
-// Retries are disabled in rig, so one probe is one round trip and the recorded
-// outcome is unambiguous.
+// The model factory disables retries, so one probe is one round trip and the
+// recorded outcome is unambiguous.
 type probeTransport struct {
 	base   http.RoundTripper
 	status int
@@ -57,13 +55,13 @@ func (t *probeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return res, nil
 }
 
-// probeClient builds the rig client one probe runs on, wrapping the guarded
+// probeModel builds the Plasmid model one probe uses, wrapping the guarded
 // transport in a recorder. The clone keeps the client's timeout, redirect
 // policy and SSRF guard; only the observation is added.
-func (r *Runner) probeClient(cfg Config) (*rig.Client, *probeTransport, error) {
+func (r *Runner) probeModel(ctx context.Context, cfg Config) (model.LLM, *probeTransport, error) {
 	recorder := &probeTransport{base: http.DefaultTransport}
 	client := &http.Client{}
-	if base := r.loopClient(cfg.Model); base != nil {
+	if base := r.aiClient; base != nil {
 		clone := *base
 		if clone.Transport != nil {
 			recorder.base = clone.Transport
@@ -73,7 +71,7 @@ func (r *Runner) probeClient(cfg Config) (*rig.Client, *probeTransport, error) {
 	} else {
 		client.Transport = recorder
 	}
-	built, err := r.rigClientWith(cfg, client)
+	built, err := newModelWithClient(ctx, cfg, client)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -93,9 +91,9 @@ func probeError(err error, seen *probeTransport) error {
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, rig.ErrNoToolCalling):
+	case errors.Is(err, oneshot.ErrToolCallingUnsupported), errors.Is(err, oneshot.ErrToolCallLimit):
 		return &Error{Code: http.StatusBadRequest, Message: ToolCallRequiredMessage, Cause: err}
-	case errors.Is(err, rig.ErrOutputLimit):
+	case errors.Is(err, oneshot.ErrOutputTruncated):
 		return &Error{Code: http.StatusUnprocessableEntity, Message: TruncatedReplyMessage, Cause: err}
 	case errors.Is(err, context.Canceled):
 		return upstreamError(ProbeCancelledMessage, err)

@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/RandomCodeSpace/plasmid/oneshot"
+
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -98,20 +100,24 @@ func (r *Runner) Probe(ctx context.Context, user string, supplied Config) error 
 	if key := strings.TrimSpace(supplied.Key); key != "" {
 		cfg.Key = key
 	}
-	client, recorder, err := r.probeClient(cfg)
-	if err != nil {
-		return err
+	// A blank model is caught here rather than by the provider so the settings
+	// overlay keeps its existing message. Validate the endpoint first: a malformed
+	// base URL is the more structural mistake and would fail for every model.
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		return &Error{Code: http.StatusBadRequest, Message: "AI base URL not configured"}
 	}
-	// A blank model is caught here rather than upstream: rig rejects it with an
-	// error that carries no sentinel and no round trip, which would leave the
-	// probe unable to tell it from an unreachable host. It is checked after the
-	// client is built so that a malformed base URL - the more structural of the
-	// two mistakes, and the one that would fail whatever the model said - is
-	// still the cause reported.
+	if _, err := endpoint(cfg.BaseURL); err != nil {
+		return &Error{Code: http.StatusBadRequest, Message: err.Error(), Cause: err}
+	}
 	if strings.TrimSpace(cfg.Model) == "" {
 		return &Error{Code: http.StatusBadRequest, Message: ProbeModelMissingMessage}
 	}
-	return probeError(client.ProbeToolCalling(ctx, cfg.Model), recorder)
+	modelValue, recorder, err := r.probeModel(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	_, err = oneshot.Probe(ctx, oneshot.ProbeRequest{Model: modelValue, MaxOutputTokens: probeMaxOutputTokens})
+	return probeError(err, recorder)
 }
 
 func endpoint(base string) (string, error) {

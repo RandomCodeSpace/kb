@@ -55,26 +55,29 @@ func TestAIEndpoint(t *testing.T) {
 	}
 }
 
-// probeToolName and probeMaxTokens mirror the connection probe rig puts on the
-// wire. Both are unexported there, so the shape the settings form depends on is
-// restated here and asserted rather than assumed.
+// These values mirror Plasmid's inert probe declaration. They are unexported
+// there, so the wire contract the settings form depends on is asserted here.
 const (
-	probeToolName  = "ping"
-	probeMaxTokens = 256
+	probeToolName    = "plasmid_ping"
+	probeMarkerName  = "marker"
+	probeMarkerValue = "plasmid-probe-v1"
+	probeMaxTokens   = 256
 )
 
 // fakeOpenAI records the last request and answers with content as the
 // assistant message, adding a tool call to tool when one is set.
 type fakeOpenAI struct {
-	auth    string
-	path    string
-	header  http.Header
-	reqBody []byte
-	content string
-	tool    string // when set, the reply calls this tool
-	finish  string // finish_reason; empty means "stop"
-	status  int    // 0 means 200
-	calls   int
+	auth      string
+	path      string
+	header    http.Header
+	reqBody   []byte
+	content   string
+	tool      string // when set, the reply calls this tool
+	toolArgs  string
+	extraTool string
+	finish    string // finish_reason; empty means "stop"
+	status    int    // 0 means 200
+	calls     int
 }
 
 func (f *fakeOpenAI) handler() http.HandlerFunc {
@@ -90,11 +93,23 @@ func (f *fakeOpenAI) handler() http.HandlerFunc {
 		}
 		message := map[string]any{"role": "assistant", "content": f.content}
 		if f.tool != "" {
-			message["tool_calls"] = []any{map[string]any{
+			arguments := f.toolArgs
+			if arguments == "" {
+				arguments = `{"marker":"plasmid-probe-v1"}`
+			}
+			calls := []any{map[string]any{
 				"id":       "call-1",
 				"type":     "function",
-				"function": map[string]any{"name": f.tool, "arguments": `{"message":"pong"}`},
+				"function": map[string]any{"name": f.tool, "arguments": arguments},
 			}}
+			if f.extraTool != "" {
+				calls = append(calls, map[string]any{
+					"id":       "call-2",
+					"type":     "function",
+					"function": map[string]any{"name": f.extraTool, "arguments": `{"marker":"plasmid-probe-v1"}`},
+				})
+			}
+			message["tool_calls"] = calls
 		}
 		finish := f.finish
 		if finish == "" {
@@ -127,6 +142,18 @@ type wireChatRequest struct {
 	ResponseFormat      *struct {
 		Type string `json:"type"`
 	} `json:"response_format"`
+	ToolChoice *struct {
+		Type         string `json:"type"`
+		AllowedTools struct {
+			Mode  string `json:"mode"`
+			Tools []struct {
+				Type     string `json:"type"`
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+		} `json:"allowed_tools"`
+	} `json:"tool_choice"`
 	Tools []struct {
 		Type     string `json:"type"`
 		Function struct {
@@ -831,8 +858,56 @@ func TestAITestEndpoint(t *testing.T) {
 	if sent.Tools[0].Type != "function" || sent.Tools[0].Function.Parameters["type"] != "object" {
 		t.Errorf("probe tool = %+v, want a function tool with an object schema", sent.Tools[0])
 	}
+	parameters := sent.Tools[0].Function.Parameters
+	properties, _ := parameters["properties"].(map[string]any)
+	marker, _ := properties[probeMarkerName].(map[string]any)
+	enum, _ := marker["enum"].([]any)
+	required, _ := parameters["required"].([]any)
+	if len(properties) != 1 || marker["type"] != "string" || len(enum) != 1 || enum[0] != probeMarkerValue ||
+		len(required) != 1 || required[0] != probeMarkerName || parameters["additionalProperties"] != false {
+		t.Errorf("probe parameters = %#v, want the exact inert marker schema", parameters)
+	}
+	if sent.ToolChoice == nil || sent.ToolChoice.Type != "allowed_tools" || sent.ToolChoice.AllowedTools.Mode != "required" ||
+		len(sent.ToolChoice.AllowedTools.Tools) != 1 || sent.ToolChoice.AllowedTools.Tools[0].Type != "function" ||
+		sent.ToolChoice.AllowedTools.Tools[0].Function.Name != probeToolName {
+		t.Errorf("tool_choice = %#v, want forced %q", sent.ToolChoice, probeToolName)
+	}
+	if len(sent.Messages) != 1 || sent.Messages[0].Role != "user" {
+		t.Errorf("probe messages = %#v, want one user request and no tool result", sent.Messages)
+	}
 	if fake.auth != "Bearer sk-t" {
 		t.Errorf("Authorization = %q, want Bearer sk-t", fake.auth)
+	}
+}
+
+func TestAITestProbeUsesSelectedTokenDialect(t *testing.T) {
+	for _, test := range []struct {
+		model              string
+		wantCompletionForm bool
+	}{
+		{model: "qwen3"},
+		{model: "gpt-5-mini", wantCompletionForm: true},
+		{model: "o3-mini", wantCompletionForm: true},
+	} {
+		t.Run(test.model, func(t *testing.T) {
+			fake := &fakeOpenAI{tool: probeToolName}
+			upstream := httptest.NewServer(fake.handler())
+			defer upstream.Close()
+
+			t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
+			h, _ := newTestServer(t, Config{})
+			configureAI(t, h, upstream.URL, test.model, "sk-t")
+			if result := postAITest(t, h, ""); !result.OK {
+				t.Fatalf("probe = %+v, want ok:true", result)
+			}
+			sent := decodeAIRequest(t, fake.reqBody)
+			if got := sent.MaxCompletionTokens != nil; got != test.wantCompletionForm || sent.budget() != probeMaxTokens {
+				t.Fatalf("max_completion_tokens=%t budget=%d, want %t and %d", got, sent.budget(), test.wantCompletionForm, probeMaxTokens)
+			}
+			if fake.calls != 1 {
+				t.Fatalf("upstream calls = %d, want 1", fake.calls)
+			}
+		})
 	}
 }
 
@@ -856,6 +931,21 @@ func TestAITestProbeRequiresAToolCall(t *testing.T) {
 		{
 			name:      "another tool is not the probe",
 			fake:      fakeOpenAI{tool: "not_ping"},
+			wantError: toolCallRequiredMessage,
+		},
+		{
+			name:      "wrong marker is not the probe",
+			fake:      fakeOpenAI{tool: probeToolName, toolArgs: `{"marker":"wrong"}`},
+			wantError: toolCallRequiredMessage,
+		},
+		{
+			name:      "malformed arguments stay opaque",
+			fake:      fakeOpenAI{tool: probeToolName, toolArgs: `{`},
+			wantError: connectionFailedMessage,
+		},
+		{
+			name:      "multiple calls fail the capability test",
+			fake:      fakeOpenAI{tool: probeToolName, extraTool: probeToolName},
 			wantError: toolCallRequiredMessage,
 		},
 		{
