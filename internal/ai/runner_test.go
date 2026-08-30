@@ -288,11 +288,11 @@ func TestRunnerHelpers(t *testing.T) {
 			t.Errorf("usesMaxCompletionTokens(%q) = %t", test.model, got)
 		}
 	}
-	skill, others, found := SplitSkills([]rig.Skill{{Name: "a"}, {Name: "b"}}, " b ")
+	skill, others, found := SplitSkills([]Skill{{Name: "a"}, {Name: "b"}}, " b ")
 	if !found || skill.Name != "b" || len(others) != 1 || !strings.Contains(RunnerSystem(skill, others), "Skill: b") {
 		t.Fatalf("split/system = %+v %+v %t", skill, others, found)
 	}
-	if _, _, found := splitSkills([]rig.Skill{{Name: "a"}}, "missing"); found {
+	if _, _, found := splitSkills([]Skill{{Name: "a"}}, "missing"); found {
 		t.Fatal("missing skill found")
 	}
 	for input, want := range map[int]int{0: 8, -1: 1, 1: 1, 999: 20} {

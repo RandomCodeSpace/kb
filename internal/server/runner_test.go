@@ -15,8 +15,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/RandomCodeSpace/rig"
 )
 
 // fakeToolCall is one tool call an assistant reply carries. args is the raw
@@ -241,20 +239,15 @@ func TestRunSkillProposesCardsAcrossRounds(t *testing.T) {
 // now carries several skills, so the single-skill case is exercised on the two
 // helpers the run composes rather than through a request.
 func TestRunSkillWithoutOtherSkillsOmitsLoadSkill(t *testing.T) {
-	only := rig.Skill{Name: "solo", Description: "the only skill", Body: "Do the thing."}
-	skill, others, found := splitSkills([]rig.Skill{only}, "solo")
+	only := skill{Name: "solo", Description: "the only skill", Body: "Do the thing."}
+	selected, others, found := splitSkills([]skill{only}, "solo")
 	if !found {
 		t.Fatal("splitSkills did not find the only skill")
 	}
 	if len(others) != 0 {
 		t.Fatalf("others = %v, want the invoked skill to be the whole catalogue", others)
 	}
-	// runSkill appends rig.LoadSkillTool only for a non-empty others, and an
-	// empty advertisement is what leaves the model nothing to load.
-	if advertisement := rig.Advertise(others); advertisement != "" {
-		t.Errorf("Advertise(none) = %q, want empty", advertisement)
-	}
-	if system := runnerSystem(skill, others); strings.Contains(system, "Available skills") {
+	if system := runnerSystem(selected, others); strings.Contains(system, "Available skills") {
 		t.Errorf("skills advertised with no other skills: %s", system)
 	}
 }
@@ -650,7 +643,7 @@ func TestRunSkillPartialResultsCoverOnlyBudgets(t *testing.T) {
 // splitSkills keeps the invoked skill out of the loadable set, so a run cannot
 // spend a round loading instructions it already has.
 func TestSplitSkills(t *testing.T) {
-	catalogue := []rig.Skill{
+	catalogue := []skill{
 		{Name: "adr-split", Description: "split", Body: "split body"},
 		{Name: "extra", Description: "extra", Body: "extra body"},
 		{Name: "third", Description: "third", Body: "third body"},
