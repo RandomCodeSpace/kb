@@ -3,8 +3,10 @@ package ai
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -149,9 +151,20 @@ func TestProbeCancellationMakesOneRequest(t *testing.T) {
 	started := make(chan struct{}, 1)
 	runner := probeRunner(t, func(_ http.ResponseWriter, request *http.Request) {
 		calls.Add(1)
+		body, readErr := io.ReadAll(request.Body)
+		var payload map[string]any
+		decodeErr := json.Unmarshal(body, &payload)
 		select {
 		case started <- struct{}{}:
 		default:
+		}
+		if readErr != nil {
+			t.Errorf("read probe request: %v", readErr)
+			return
+		}
+		if decodeErr != nil {
+			t.Errorf("decode probe request: %v", decodeErr)
+			return
 		}
 		<-request.Context().Done()
 	})
