@@ -9,7 +9,7 @@ There is no web UI, JavaScript bundle, or browser runtime in the binary.
 
 ## Install
 
-With Go 1.25.8 or newer, install the stable release:
+With Go 1.26.6 or newer, install the stable release:
 
 ```sh
 go install github.com/RandomCodeSpace/kb@v1.0.0
@@ -434,10 +434,10 @@ The local dry run creates a temporary annotated tag, builds and inspects all
 five binaries, verifies their checksums, and exercises the native binary. It
 then removes the temporary tag and proves that HEAD, the tree, the index, and
 status did not change. Release provenance is pinned to the exact Go directive;
-select Go 1.25.8 even when a newer compiler is installed:
+select Go 1.26.6 even when a newer compiler is installed:
 
 ```sh
-GOTOOLCHAIN=go1.25.8 bash scripts/release.sh v1.0.0 docs/releases/v1.0.0.md --dry-run
+GOTOOLCHAIN=go1.26.6 bash scripts/release.sh v1.0.0 docs/releases/v1.0.0.md --dry-run
 ```
 
 The release tag points directly at the clean source commit. There is no
