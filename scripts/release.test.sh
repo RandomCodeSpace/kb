@@ -53,7 +53,7 @@ case ${1:-} in
     case ${2:-} in
       GOOS) printf '%s\n' linux ;;
       GOARCH) printf '%s\n' amd64 ;;
-      GOVERSION) printf '%s\n' go1.25.8 ;;
+      GOVERSION) printf '%s\n' go1.26.6 ;;
       *) exit 64 ;;
     esac
     ;;
@@ -108,7 +108,7 @@ EOF
     revision=$(sed -n 's/^# fake-revision=//p' "$artifact")
     goos=$(sed -n 's/^# fake-goos=//p' "$artifact")
     goarch=$(sed -n 's/^# fake-goarch=//p' "$artifact")
-    printf '%s: go1.25.8\n' "$artifact"
+    printf '%s: go1.26.6\n' "$artifact"
     printf '\tpath\tgithub.com/RandomCodeSpace/kb\n'
     printf '\tmod\tgithub.com/RandomCodeSpace/kb\t%s\th1:fake\n' "$version"
     printf '\tbuild\tGOOS=%s\n' "$goos"
@@ -177,7 +177,7 @@ git init -q --bare "$remote"
 git init -q -b main "$source_repo"
 mkdir -p "$source_repo/scripts" "$source_repo/docs/releases"
 cp "$repo_root/scripts/release.sh" "$source_repo/scripts/release.sh"
-printf 'module github.com/RandomCodeSpace/kb\n\ngo 1.25.8\n' >"$source_repo/go.mod"
+printf 'module github.com/RandomCodeSpace/kb\n\ngo 1.26.6\n' >"$source_repo/go.mod"
 printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.3.md"
 printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.4.md"
 (
