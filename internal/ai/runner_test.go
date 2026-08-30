@@ -17,7 +17,6 @@ import (
 	"testing"
 
 	"github.com/RandomCodeSpace/plasmid/oneshot"
-	"github.com/RandomCodeSpace/rig"
 	adktool "google.golang.org/adk/v2/tool"
 
 	"github.com/RandomCodeSpace/kb/internal/board"

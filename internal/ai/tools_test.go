@@ -64,6 +64,16 @@ func mustRunNativeTool(t *testing.T, toolValue tool.Tool, args any) map[string]a
 	return result
 }
 
+func requireRawChatToolResult(t *testing.T, result map[string]any) {
+	t.Helper()
+	if len(result) != 1 {
+		t.Fatalf("raw Chat tool result = %#v, want one private marker", result)
+	}
+	if _, err := json.Marshal(result); err == nil {
+		t.Fatalf("raw Chat tool result serialized outside Chat conversion: %#v", result)
+	}
+}
+
 func addToolTask(t *testing.T, st *store.Store, task board.Task) board.Task {
 	t.Helper()
 	created, err := st.AddTask("default", task)
@@ -181,9 +191,7 @@ func TestNativeProductionToolAdapterParity(t *testing.T) {
 		runner, _ := newToolServer(t)
 		toolValue := runner.FetchLinkTool()
 		result := mustRunNativeTool(t, toolValue, map[string]any{"url": "  " + upstream.URL + "/doc  "})
-		if result["result"] != "native\ntext" || len(result) != 1 {
-			t.Fatalf("fetch_link result = %#v, want the ADK text wrapper", result)
-		}
+		requireRawChatToolResult(t, result)
 		if requests.Load() != 1 {
 			t.Fatalf("fetch_link requests = %d, want 1", requests.Load())
 		}

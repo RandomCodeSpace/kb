@@ -8,7 +8,7 @@ require (
 	charm.land/glamour/v2 v2.0.1
 	charm.land/huh/v2 v2.0.3
 	charm.land/lipgloss/v2 v2.0.6
-	github.com/RandomCodeSpace/plasmid v0.1.1
+	github.com/RandomCodeSpace/plasmid v0.1.2
 	github.com/RandomCodeSpace/rig v0.2.0
 	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/charmbracelet/x/ansi v0.11.8
@@ -22,6 +22,8 @@ require (
 	github.com/rivo/uniseg v0.4.7
 	github.com/sahilm/fuzzy v0.1.3
 	golang.org/x/text v0.41.0
+	google.golang.org/adk/v2 v2.2.0
+	google.golang.org/genai v1.66.0
 	modernc.org/sqlite v1.56.0
 )
 
@@ -29,7 +31,7 @@ require (
 	cloud.google.com/go v0.123.0 // indirect
 	cloud.google.com/go/auth v0.22.0 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
-	github.com/alecthomas/chroma/v2 v2.14.0 // indirect
+	github.com/alecthomas/chroma/v2 v2.24.1 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-udiff v0.4.1 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
@@ -44,7 +46,7 @@ require (
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/dlclark/regexp2 v1.11.0 // indirect
+	github.com/dlclark/regexp2 v1.12.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -88,9 +90,7 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	google.golang.org/adk/v2 v2.2.0 // indirect
 	google.golang.org/api v0.291.0 // indirect
-	google.golang.org/genai v1.66.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260724162435-b2f20204f0df // indirect
 	google.golang.org/grpc v1.83.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect

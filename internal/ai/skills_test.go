@@ -124,9 +124,10 @@ func TestLoadSkillToolKeepsTheCatalogContract(t *testing.T) {
 
 	ctx := &agent.StrictContextMock{Ctx: context.Background()}
 	result, err := tool.Run(ctx, map[string]any{"name": "alpha"})
-	if err != nil || result["result"] != "alpha body" {
+	if err != nil {
 		t.Fatalf("native load result = %#v, %v", result, err)
 	}
+	requireRawChatToolResult(t, result)
 }
 
 // TestLoadSkillsEmbedded pins the built-in catalogue: the embed directive has

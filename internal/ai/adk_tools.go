@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 
+	plasmidopenai "github.com/RandomCodeSpace/plasmid/openai"
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
@@ -24,8 +25,7 @@ const (
 
 // kbTool is a native ADK function tool. The declaration is the exact schema
 // kb advertises, while run keeps the domain validation and side effects in kb.
-// ADK requires function results to be objects, so text-only tools use the
-// conventional {"result": string} response.
+// Text-only tools mark their result for Chat's scalar response encoding.
 type kbTool struct {
 	name        string
 	description string
@@ -73,7 +73,7 @@ func (t *kbTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 		return modelToolError(err), nil
 	}
 	if t.resultKind == toolResultText {
-		return map[string]any{"result": output}, nil
+		return plasmidopenai.RawChatToolResult(output)
 	}
 	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
