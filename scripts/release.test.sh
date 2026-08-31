@@ -42,7 +42,33 @@ mkdir -p "$fake_bin"
 cat >"$fake_bin/go" <<'FAKE_GO'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >>"${FAKE_GO_LOG:-/dev/null}"
 case ${1:-} in
+  run)
+    base=''
+    head=''
+    output_format=''
+    shift
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --base) base=$2; shift 2 ;;
+        --head) head=$2; shift 2 ;;
+        --format) output_format=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [[ -n $base && -n $head && $output_format == plan ]]
+    base=$(git rev-parse "$base^{commit}")
+    head=$(git rev-parse "$head^{commit}")
+    printf 'schema_version\t1\n'
+    printf 'base\t%s\n' "$base"
+    printf 'head\t%s\n' "$head"
+    printf 'compile_all\tfalse\n'
+    for check_name in focused_quality contract_race migration_recovery \
+      tui_performance binary_release_contract ci_contract docs_contract sonar; do
+      printf 'check\t%s\tfalse\n' "$check_name"
+    done
+    ;;
   test)
     exit 0
     ;;
@@ -165,9 +191,21 @@ remote="$test_root/origin.git"
 source_repo="$test_root/source"
 git init -q --bare "$remote"
 git init -q -b main "$source_repo"
-mkdir -p "$source_repo/scripts" "$source_repo/docs/releases"
-cp "$repo_root/scripts/release.sh" "$source_repo/scripts/release.sh"
+mkdir -p "$source_repo/scripts/ci" "$source_repo/docs/releases"
 printf 'module github.com/RandomCodeSpace/kb\n\ngo 1.26.6\n' >"$source_repo/go.mod"
+printf 'release fixture baseline\n' >"$source_repo/baseline.txt"
+(
+  cd "$source_repo"
+  git config user.name 'Release Test'
+  git config user.email 'release-test@example.invalid'
+  git add .
+  git commit -q -m 'baseline fixture'
+  git tag -a v1.0.0 -m v1.0.0
+)
+cp "$repo_root/scripts/release.sh" "$source_repo/scripts/release.sh"
+cp "$repo_root/scripts/verify-release-artifacts.sh" \
+  "$source_repo/scripts/verify-release-artifacts.sh"
+cp "$repo_root/scripts/ci/impact.sh" "$source_repo/scripts/ci/impact.sh"
 printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.3.md"
 printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.4.md"
 (
@@ -175,15 +213,16 @@ printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.4.md"
   git config user.name 'Release Test'
   git config user.email 'release-test@example.invalid'
   git add .
-  git commit -q -m 'test fixture'
+  git commit -q -m 'candidate fixture'
   git remote add origin "$remote"
   git push -q -u origin HEAD:main
+  git push -q origin refs/tags/v1.0.0
 )
 
 release() {
   (
     cd "$source_repo"
-    PATH="$fake_bin:$PATH" FAKE_GH_LOG="$test_root/gh.log" \
+    PATH="$fake_bin:$PATH" FAKE_GH_LOG="$test_root/gh.log" FAKE_GO_LOG="$test_root/go.log" \
       bash scripts/release.sh "$@"
   )
 }
@@ -191,7 +230,7 @@ release() {
 bad_revision_release() {
   (
     cd "$source_repo"
-    PATH="$fake_bin:$PATH" FAKE_GH_LOG="$test_root/gh.log" \
+    PATH="$fake_bin:$PATH" FAKE_GH_LOG="$test_root/gh.log" FAKE_GO_LOG="$test_root/go.log" \
       FAKE_GO_BAD_REVISION=1 \
       bash scripts/release.sh v1.2.3 docs/releases/v1.2.3.md --dry-run
   )
@@ -200,7 +239,7 @@ bad_revision_release() {
 terminated_release() {
   (
     cd "$source_repo"
-    PATH="$fake_bin:$PATH" FAKE_GH_LOG="$test_root/gh.log" \
+    PATH="$fake_bin:$PATH" FAKE_GH_LOG="$test_root/gh.log" FAKE_GO_LOG="$test_root/go.log" \
       FAKE_GO_TERM_BUILD=1 \
       bash scripts/release.sh v1.2.3 docs/releases/v1.2.3.md --dry-run
   )
@@ -209,7 +248,7 @@ terminated_release() {
 linked_release() {
   (
     cd "$linked"
-    PATH="$fake_bin:$PATH" FAKE_GH_LOG="$test_root/gh.log" \
+    PATH="$fake_bin:$PATH" FAKE_GH_LOG="$test_root/gh.log" FAKE_GO_LOG="$test_root/go.log" \
       bash scripts/release.sh v1.2.3 docs/releases/v1.2.3.md --dry-run
   )
 }
@@ -268,6 +307,8 @@ release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/dry-run.out"
 git -C "$source_repo" remote set-url origin "$remote"
 assert_contains 'dry run complete: v1.2.3 verified locally; nothing published' \
   "$test_root/dry-run.out"
+assert_contains 'run -buildvcs=false ./scripts/ci/impactcmd' "$test_root/go.log"
+assert_contains '--format plan' "$test_root/go.log"
 [[ $(git -C "$source_repo" rev-parse HEAD) == "$head_before" ]] || fail 'dry run changed HEAD'
 [[ $(git -C "$source_repo" rev-parse 'HEAD^{tree}') == "$tree_before" ]] || fail 'dry run changed tree'
 [[ $(git -C "$source_repo" write-tree) == "$index_before" ]] || fail 'dry run changed index'

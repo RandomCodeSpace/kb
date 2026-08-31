@@ -40,7 +40,8 @@ commit_all() {
 run_impact() {
   base="$1"
   target="$2"
-  if (CDPATH='' cd -- "$fixture" && sh "$source_root/scripts/ci/impact.sh" --base "$base" --head "$target" >"$output"); then
+  shift 2
+  if (CDPATH='' cd -- "$fixture" && sh "$source_root/scripts/ci/impact.sh" --base "$base" --head "$target" "$@" >"$output"); then
     return 0
   else
     return $?
@@ -62,6 +63,7 @@ printf 'name: fixture\n' >"$fixture/.github/workflows/quality.yml"
 printf '#!/usr/bin/env sh\nexit 0\n' >"$fixture/scripts/check-go-coverage.sh"
 printf '#!/usr/bin/env sh\nexit 0\n' >"$fixture/scripts/check-docs.sh"
 printf '#!/usr/bin/env sh\nexit 0\n' >"$fixture/scripts/release.sh"
+printf '#!/usr/bin/env sh\nexit 0\n' >"$fixture/scripts/verify-release-artifacts.sh"
 printf '# release\n' >"$fixture/docs/releases/v1.0.0.md"
 initial="$(commit_all initial)"
 git -C "$fixture" tag -a v1.0.0 -m v1.0.0 "$initial"
@@ -80,6 +82,21 @@ assert_contains '"focused_quality": true' 'package classification'
 assert_contains 'example.test/impact/internal/leaf' 'changed owner'
 assert_contains 'example.test/impact/internal/importer' 'direct importer'
 assert_contains '"compile_all": false' 'ordinary package compile scope'
+
+run_impact "$docs" "$leaf" --format compact || fail 'compact impact failed'
+[ "$(wc -l <"$output")" -eq 1 ] || fail 'compact manifest was not one line'
+assert_contains '"focused_quality":true' 'compact check output'
+
+run_impact "$docs" "$leaf" --format github || fail 'GitHub output failed'
+assert_contains 'manifest={"schema_version":1' 'GitHub manifest output'
+assert_contains 'focused_quality=true' 'GitHub check output'
+assert_contains 'docs_contract=false' 'GitHub unaffected output'
+
+run_impact "$docs" "$leaf" --format plan || fail 'release plan output failed'
+assert_contains "$(printf 'schema_version\t1')" 'plan schema output'
+assert_contains "$(printf 'check\tfocused_quality\ttrue')" 'plan check output'
+assert_contains "$(printf 'owner\texample.test/impact/internal/leaf')" 'plan owner output'
+assert_contains "$(printf 'compile_package\texample.test/impact/internal/importer')" 'plan importer output'
 
 printf '\n// toolchain contract changed\n' >>"$fixture/go.mod"
 module="$(commit_all module)"
@@ -124,6 +141,7 @@ deleted="$(commit_all delete)"
 run_impact "$renamed" "$deleted" || fail 'deleted package impact failed'
 assert_contains 'example.test/impact/internal/leaf' 'deleted package identity'
 assert_contains '"compile_all": true' 'deleted package compile expansion'
+assert_contains '"sonar": false' 'deleted Go exclusion from Sonar'
 
 printf 'unknown\n' >"$fixture/mystery.bin"
 unknown="$(commit_all unknown)"

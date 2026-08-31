@@ -61,14 +61,16 @@ type packageInfo struct {
 
 func main() {
 	var base string
+	var outputFormat string
 	var head string
 	var repo string
 	flag.StringVar(&base, "base", "", "base commit")
 	flag.StringVar(&head, "head", "", "head commit")
+	flag.StringVar(&outputFormat, "format", "pretty", "output format: pretty, compact, github, or plan")
 	flag.StringVar(&repo, "repo", "", "repository working tree")
 	flag.Parse()
 	if base == "" || len(head) == 0 || flag.NArg() != 0 {
-		fatalf("usage: impact.sh --base COMMIT --head COMMIT")
+		fatalf("usage: impact.sh --base COMMIT --head COMMIT [--format pretty|compact|github|plan]")
 	}
 
 	if repo == "" {
@@ -113,14 +115,107 @@ func main() {
 	}
 
 	result := classify(repo, baseSHA, headSHA, modulePath, changes, packages)
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(result); err != nil {
+	if err := writeManifest(os.Stdout, result, outputFormat); err != nil {
 		fatalf("write manifest: %v", err)
 	}
 	if len(result.Unclassified) != 0 {
 		os.Exit(3)
+	}
+}
+
+func writeManifest(writer io.Writer, result manifest, outputFormat string) error {
+	switch outputFormat {
+	case "pretty":
+		encoder := json.NewEncoder(writer)
+		encoder.SetEscapeHTML(false)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(result)
+	case "compact":
+		content, err := json.Marshal(result)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(writer, "%s\n", content)
+		return err
+	case "github":
+		content, err := json.Marshal(result)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(writer, "base=%s\nhead=%s\nmanifest=%s\n",
+			result.Base, result.Head, content); err != nil {
+			return err
+		}
+		for _, item := range checkValues(result.Checks) {
+			if _, err := fmt.Fprintf(writer, "%s=%t\n", item.name, item.enabled); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "plan":
+		fields := []string{result.Base, result.Head}
+		fields = append(fields, result.Go.Owners...)
+		fields = append(fields, result.Go.CompilePackages...)
+		for _, paths := range result.Reasons {
+			fields = append(fields, paths...)
+		}
+		for _, field := range fields {
+			if strings.ContainsAny(field, "\t\r\n") {
+				return fmt.Errorf("plan field contains a tab or newline: %q", field)
+			}
+		}
+		if _, err := fmt.Fprintf(writer, "schema_version\t%d\nbase\t%s\nhead\t%s\ncompile_all\t%t\n",
+			result.SchemaVersion, result.Base, result.Head, result.Go.CompileAll); err != nil {
+			return err
+		}
+		for _, item := range checkValues(result.Checks) {
+			if _, err := fmt.Fprintf(writer, "check\t%s\t%t\n", item.name, item.enabled); err != nil {
+				return err
+			}
+		}
+		for _, owner := range result.Go.Owners {
+			if _, err := fmt.Fprintf(writer, "owner\t%s\n", owner); err != nil {
+				return err
+			}
+		}
+		for _, pkg := range result.Go.CompilePackages {
+			if _, err := fmt.Fprintf(writer, "compile_package\t%s\n", pkg); err != nil {
+				return err
+			}
+		}
+		reasonNames := make([]string, 0, len(result.Reasons))
+		for name := range result.Reasons {
+			reasonNames = append(reasonNames, name)
+		}
+		sort.Strings(reasonNames)
+		for _, name := range reasonNames {
+			for _, path := range result.Reasons[name] {
+				if _, err := fmt.Fprintf(writer, "reason\t%s\t%s\n", name, path); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown output format %q", outputFormat)
+	}
+}
+
+type checkValue struct {
+	name    string
+	enabled bool
+}
+
+func checkValues(values checks) []checkValue {
+	return []checkValue{
+		{name: "focused_quality", enabled: values.FocusedQuality},
+		{name: "contract_race", enabled: values.ContractRace},
+		{name: "migration_recovery", enabled: values.MigrationRecovery},
+		{name: "tui_performance", enabled: values.TUIPerformance},
+		{name: "binary_release_contract", enabled: values.BinaryReleaseContract},
+		{name: "ci_contract", enabled: values.CIContract},
+		{name: "docs_contract", enabled: values.DocsContract},
+		{name: "sonar", enabled: values.Sonar},
 	}
 }
 
@@ -201,6 +296,10 @@ func classify(repo, base, head, modulePath string, changes []change, packages []
 	result.Go.DeletedPackages = sortedKeys(deletedSet)
 	result.Go.ChangedFiles = sortedKeys(changedGoSet)
 	result.Unclassified = sortedKeys(unclassifiedSet)
+	if len(result.Go.ChangedFiles) == 0 {
+		result.Checks.Sonar = false
+		delete(result.Reasons, "sonar")
+	}
 
 	importerSet := make(map[string]bool)
 	for _, owner := range result.Go.Owners {
@@ -253,7 +352,8 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 		if path == ".github/workflows/release.yml" {
 			mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
 		}
-	case path == "scripts/release.sh" || path == "scripts/release.test.sh":
+	case path == "scripts/release.sh" || path == "scripts/release.test.sh" ||
+		path == "scripts/verify-release-artifacts.sh":
 		mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
 		mark("ci_contract", &result.Checks.CIContract)
 	case path == "scripts/ci_monitor.cjs" || path == "scripts/ci/test_ci_monitor.cjs":

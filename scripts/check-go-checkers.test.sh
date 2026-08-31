@@ -363,4 +363,33 @@ if find "$format_tmp" -type f -print | grep . >/dev/null; then
   fail "format failure left temporary files behind"
 fi
 
+quality_workflow="$repo_root/.github/workflows/quality.yml"
+release_script="$repo_root/scripts/release.sh"
+for job_name in focused-quality contract-race migration-recovery tui-performance \
+  binary-release-contract ci-contract docs-contract; do
+  assert_contains "  $job_name:" "$quality_workflow" "stable $job_name job"
+  assert_contains "    name: $job_name" "$quality_workflow" "stable $job_name name"
+done
+assert_contains 'base=$(git merge-base "$PR_BASE_SHA" "$head")' \
+  "$quality_workflow" "pull-request merge-base impact"
+assert_contains 'base=$(git rev-parse "$PUSH_BEFORE_SHA^{commit}")' \
+  "$quality_workflow" "main-push before impact"
+assert_contains '--format github' "$quality_workflow" "GitHub impact output"
+assert_contains 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' \
+  "$quality_workflow" "pinned performance evidence upload"
+assert_contains 'if-no-files-found: error' "$quality_workflow" \
+  "required performance evidence"
+assert_contains '--format plan' "$release_script" "release impact plan"
+assert_contains 'bash scripts/verify-release-artifacts.sh' "$release_script" \
+  "shared release artifact verification"
+
+if grep -E 'go (test|vet)([[:space:]][^[:space:]]+)*[[:space:]]+\./\.\.\.' \
+  "$quality_workflow" "$release_script" >/dev/null; then
+  fail 'quality or release gate contains a blanket Go package command'
+fi
+if grep -E 'scripts/check-go-(coverage|format)\.sh[[:space:]]*$' \
+  "$quality_workflow" "$release_script" >/dev/null; then
+  fail 'quality or release gate invokes a checker without an explicit scope'
+fi
+
 echo "check-go-checkers.test: pass"

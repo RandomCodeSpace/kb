@@ -15,22 +15,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality:
-    name: Regression (test-merge)
+  impact:
+    name: impact
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
+    outputs:
+      base: ${{ steps.classify.outputs.base }}
+      head: ${{ steps.classify.outputs.head }}
+      manifest: ${{ steps.classify.outputs.manifest }}
+      focused_quality: ${{ steps.classify.outputs.focused_quality }}
+      contract_race: ${{ steps.classify.outputs.contract_race }}
+      migration_recovery: ${{ steps.classify.outputs.migration_recovery }}
+      tui_performance: ${{ steps.classify.outputs.tui_performance }}
+      binary_release_contract: ${{ steps.classify.outputs.binary_release_contract }}
+      ci_contract: ${{ steps.classify.outputs.ci_contract }}
+      docs_contract: ${{ steps.classify.outputs.docs_contract }}
+      sonar: ${{ steps.classify.outputs.sonar }}
 
     steps:
-      - name: Check out repository
+      - name: Check out the exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Set up Node.js for the CI monitor test
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24.15.0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -38,30 +46,89 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      - name: Run Go coverage gate
+      - name: Calculate exact impact
+        id: classify
+        shell: bash
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse "$HEAD_SHA^{commit}")
+          case "$EVENT_NAME" in
+            pull_request)
+              base=$(git merge-base "$PR_BASE_SHA" "$head")
+              ;;
+            push)
+              [[ $PUSH_BEFORE_SHA != 0000000000000000000000000000000000000000 ]] || {
+                echo 'impact: a main push must have a concrete before commit' >&2
+                exit 2
+              }
+              base=$(git rev-parse "$PUSH_BEFORE_SHA^{commit}")
+              ;;
+            *)
+              echo "impact: unsupported event: $EVENT_NAME" >&2
+              exit 2
+              ;;
+          esac
+          output=$(sh scripts/ci/impact.sh --base "$base" --head "$head" --format github)
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" >>"$GITHUB_OUTPUT"
+
+  focused-quality:
+    name: focused-quality
+    needs: impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Report unaffected contract
+        if: needs.impact.outputs.focused_quality != 'true'
+        run: echo 'focused-quality not affected'
+
+      - name: Check out the exact candidate
+        if: needs.impact.outputs.focused_quality == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.impact.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        if: needs.impact.outputs.focused_quality == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Test owners and compile importers
+        if: needs.impact.outputs.focused_quality == 'true'
+        shell: bash
+        env:
+          IMPACT_MANIFEST: ${{ needs.impact.outputs.manifest }}
+          IMPACT_BASE: ${{ needs.impact.outputs.base }}
+          IMPACT_HEAD: ${{ needs.impact.outputs.head }}
           GO_PACKAGE_COVERAGE_THRESHOLD: '95.0'
-          GO_TOTAL_COVERAGE_THRESHOLD: '96.4'
           GO_COVERAGE_PROFILE: coverage/go.out
-        run: sh scripts/check-go-coverage.sh
-
-      - name: Vet Go packages
-        run: go vet ./...
-
-      - name: Run Go race tests
-        run: go test -race ./... -count=1
-
-      - name: Check Go formatting
-        run: sh scripts/check-go-format.sh
-
-      - name: Test release safeguards
-        run: bash scripts/release.test.sh
-
-      - name: Test CI monitor
-        run: node scripts/ci/test_ci_monitor.cjs
+        run: |
+          set -euo pipefail
+          mapfile -t owners < <(jq -r '.go.owners[]' <<<"$IMPACT_MANIFEST")
+          mapfile -t compile_packages < <(jq -r '.go.compile_packages[]' <<<"$IMPACT_MANIFEST")
+          sh scripts/check-go-format.sh --changed "$IMPACT_BASE" "$IMPACT_HEAD"
+          if ((${#owners[@]})); then
+            sh scripts/check-go-coverage.sh --packages "${owners[@]}"
+            go vet -buildvcs=false "${owners[@]}"
+          fi
+          if ((${#compile_packages[@]})); then
+            go test -buildvcs=false -run '^$' "${compile_packages[@]}"
+          fi
 
       - name: Run SonarQube Cloud scan
-        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        if: >-
+          needs.impact.outputs.sonar == 'true' &&
+          (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -69,3 +136,313 @@ jobs:
           args: >-
             -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
             -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+
+  contract-race:
+    name: contract-race
+    needs: impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Report unaffected contract
+        if: needs.impact.outputs.contract_race != 'true'
+        run: echo 'contract-race not affected'
+
+      - name: Check out the exact candidate
+        if: needs.impact.outputs.contract_race == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.impact.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        if: needs.impact.outputs.contract_race == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run mapped race contracts
+        if: needs.impact.outputs.contract_race == 'true'
+        shell: bash
+        env:
+          IMPACT_MANIFEST: ${{ needs.impact.outputs.manifest }}
+        run: |
+          set -euo pipefail
+          race_store=0
+          race_tui=0
+          race_forge=0
+          while IFS= read -r reason; do
+            case "$reason" in
+              internal/store/*) race_store=1 ;;
+              internal/tui/*) race_tui=1 ;;
+              internal/forge/*) race_forge=1 ;;
+            esac
+          done < <(jq -r '.reasons.contract_race[]?' <<<"$IMPACT_MANIFEST")
+          [[ $race_store == 1 || $race_tui == 1 || $race_forge == 1 ]] || {
+            echo 'contract-race selected without a mapped owning package' >&2
+            exit 1
+          }
+          if [[ $race_store == 1 ]]; then
+            go test -buildvcs=false -race ./internal/store \
+              -run '^(TestCreateSecretConcurrentPublication|TestConcurrentOpenSerializesMigration|TestDoneGuardCannotRaceConcurrentBlock|TestImportBaselineCreateAndCASAreAtomicAcrossCallers)$' \
+              -count=1
+          fi
+          if [[ $race_tui == 1 ]]; then
+            go test -buildvcs=false -race ./internal/tui \
+              -run '^(TestDataVersionWatcherDetectsAnotherConnection|TestRunCancelsInFlightWatcherBeforeClose|TestMoveSerializesWatcherRefreshBehindStoreWrite|TestAutoShipTransactionRefusesConcurrentCancellation|TestKeyboardAdmissionQueueIsConstantUnderBurst|TestRenderedPointerMailboxOverflowFailsClosed|TestModelCopiesShareRenderedPointerMailbox)$' \
+              -count=1
+          fi
+          if [[ $race_forge == 1 ]]; then
+            go test -buildvcs=false -race ./internal/forge \
+              -run '^(TestAcceptDriftConcurrentCASIsIdempotent|TestAcceptDriftRejectsConcurrentDifferentBaseline)$' \
+              -count=1
+          fi
+
+  migration-recovery:
+    name: migration-recovery
+    needs: impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Report unaffected contract
+        if: needs.impact.outputs.migration_recovery != 'true'
+        run: echo 'migration-recovery not affected'
+
+      - name: Check out the exact candidate
+        if: needs.impact.outputs.migration_recovery == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.impact.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        if: needs.impact.outputs.migration_recovery == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Verify mapped recovery contracts
+        if: needs.impact.outputs.migration_recovery == 'true'
+        shell: bash
+        env:
+          IMPACT_MANIFEST: ${{ needs.impact.outputs.manifest }}
+        run: |
+          set -euo pipefail
+          recovery_store=0
+          recovery_tui=0
+          while IFS= read -r reason; do
+            case "$reason" in
+              internal/store/*) recovery_store=1 ;;
+              internal/tui/*) recovery_tui=1 ;;
+            esac
+          done < <(jq -r '.reasons.migration_recovery[]?' <<<"$IMPACT_MANIFEST")
+          [[ $recovery_store == 1 || $recovery_tui == 1 ]] || {
+            echo 'migration-recovery selected without a mapped owning package' >&2
+            exit 1
+          }
+          if [[ $recovery_store == 1 ]]; then
+            go test -buildvcs=false ./internal/store \
+              -run '^(TestColdCopyRecoveryRoundTrip|TestLoadOrCreateSecret.*|TestOpenRejectsInvalidPathsAndSchemas|TestConnectionPragmas|TestConcurrentOpenSerializesMigration)$' \
+              -count=1
+          fi
+          if [[ $recovery_tui == 1 ]]; then
+            go test -buildvcs=false ./internal/tui \
+              -run '^(TestPreference.*|TestCancelledPreference.*)' -count=1
+          fi
+
+  tui-performance:
+    name: tui-performance
+    needs: impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Report unaffected contract
+        if: needs.impact.outputs.tui_performance != 'true'
+        run: echo 'tui-performance not affected'
+
+      - name: Check out the exact candidate
+        if: needs.impact.outputs.tui_performance == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.impact.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        if: needs.impact.outputs.tui_performance == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Verify deterministic and measured performance
+        if: needs.impact.outputs.tui_performance == 'true'
+        shell: bash
+        env:
+          GOMAXPROCS: '8'
+          KB_PERF_ACCEPT: '1'
+          KB_PERF_CORPORA: 17,120,500,1000
+          KB_PERF_REPORT: ${{ runner.temp }}/kb-tui-performance.json
+        run: |
+          set -uo pipefail
+          status=0
+          go test -buildvcs=false ./internal/tui \
+            -run '^(TestPerformance.*|TestPointerResolverCostIsBoundedByVisibleHitSnapshot|TestNavigationArtifactAcceptanceRejectsMissingOrUnboundedReuse)$' \
+            -count=1 || status=$?
+          if go test -buildvcs=false ./internal/tui \
+            -run '^TestLargeBoardPerformanceHarness$' -count=1 -timeout=15m; then
+            :
+          else
+            harness_status=$?
+            [[ $status -ne 0 ]] || status=$harness_status
+          fi
+          exit "$status"
+
+      - name: Upload TUI performance evidence
+        if: always() && needs.impact.outputs.tui_performance == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tui-performance-${{ needs.impact.outputs.head }}
+          path: ${{ runner.temp }}/kb-tui-performance.json
+          if-no-files-found: error
+          retention-days: 30
+
+  binary-release-contract:
+    name: binary-release-contract
+    needs: impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Report unaffected contract
+        if: needs.impact.outputs.binary_release_contract != 'true'
+        run: echo 'binary-release-contract not affected'
+
+      - name: Check out the exact candidate
+        if: needs.impact.outputs.binary_release_contract == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.impact.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        if: needs.impact.outputs.binary_release_contract == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Test changed release safeguards
+        if: needs.impact.outputs.binary_release_contract == 'true'
+        shell: bash
+        env:
+          IMPACT_MANIFEST: ${{ needs.impact.outputs.manifest }}
+        run: |
+          set -euo pipefail
+          if jq -e 'any(.reasons.binary_release_contract[]?;
+            . == "scripts/release.sh" or
+            . == "scripts/release.test.sh" or
+            . == "scripts/verify-release-artifacts.sh" or
+            . == ".github/workflows/release.yml")' <<<"$IMPACT_MANIFEST" >/dev/null; then
+            bash scripts/release.test.sh
+          else
+            echo 'release safeguards not affected'
+          fi
+
+      - name: Build and smoke the exact candidate
+        if: needs.impact.outputs.binary_release_contract == 'true'
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ needs.impact.outputs.head }}
+        run: |
+          set -euo pipefail
+          candidate_version="v0.0.${GITHUB_RUN_ID}"
+          artifact_dir=$(mktemp -d "$RUNNER_TEMP/kb-release-artifacts.XXXXXX")
+          cleanup() {
+            git tag -d "$candidate_version" >/dev/null 2>&1 || true
+            rm -rf -- "$artifact_dir"
+          }
+          trap cleanup EXIT
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$candidate_version" -m "$candidate_version" "$CANDIDATE_SHA"
+          bash scripts/verify-release-artifacts.sh \
+            "$candidate_version" "$CANDIDATE_SHA" "$artifact_dir"
+
+  ci-contract:
+    name: ci-contract
+    needs: impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Report unaffected contract
+        if: needs.impact.outputs.ci_contract != 'true'
+        run: echo 'ci-contract not affected'
+
+      - name: Check out the exact candidate
+        if: needs.impact.outputs.ci_contract == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.impact.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        if: needs.impact.outputs.ci_contract == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up Node.js
+        if: needs.impact.outputs.ci_contract == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.15.0
+
+      - name: Verify CI contracts
+        if: needs.impact.outputs.ci_contract == 'true'
+        shell: bash
+        env:
+          IMPACT_MANIFEST: ${{ needs.impact.outputs.manifest }}
+        run: |
+          set -euo pipefail
+          sh scripts/ci/test-impact.sh
+          sh scripts/check-go-checkers.test.sh
+          node scripts/ci/test_ci_monitor.cjs
+          node scripts/ci_monitor.cjs check-actions
+          if jq -e 'any(.reasons.ci_contract[]?; . == "scripts/check-docs.sh")' \
+            <<<"$IMPACT_MANIFEST" >/dev/null; then
+            sh scripts/check-docs.sh
+          fi
+
+  docs-contract:
+    name: docs-contract
+    needs: impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Report unaffected contract
+        if: needs.impact.outputs.docs_contract != 'true'
+        run: echo 'docs-contract not affected'
+
+      - name: Check out the exact candidate
+        if: needs.impact.outputs.docs_contract == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.impact.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify user documentation
+        if: needs.impact.outputs.docs_contract == 'true'
+        run: sh scripts/check-docs.sh
