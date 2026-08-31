@@ -5,21 +5,19 @@ description: Map GitHub/GitLab issue workflows onto the kb CLI. Opt-in only - us
 
 # kb as a local issue tracker (opt-in)
 
-kb is a local-first kanban board with a CLI. This skill applies only after
+kb is a local-only kanban board with a CLI. This skill applies only after
 the user has chosen kb for issue tracking — it is an alternative for when
 GitHub/GitLab is unavailable or unwanted, not a replacement policy. Once
 chosen, where a workflow reaches for `gh issue` or `glab issue`, use the
 `kb` verbs below instead. State lives in a local SQLite database (default
-`~/.local/share/kb`), or on a kb server when `KB_SERVER` is set.
+`~/.local/share/kb`).
 
 ## Environment
 
 - `KB_DATA` — data directory override. Local commands always operate on the
   single `default` board; there is no per-user selection.
-- `KB_SERVER` + `KB_SERVER_TOKEN` — operate against a running kb server
-  over HTTP instead of the local database.
-- MCP-capable agents can run `kb mcp` and use the board tools directly
-  instead of shelling out.
+- MCP-capable agents can run `kb mcp` and use the local board tools over
+  stdio instead of shelling out.
 
 ## Command mapping
 
@@ -49,10 +47,9 @@ blocked flag, status moves).
 ## Task ids
 
 Tasks carry stable per-board numbers `#1`, `#2`, ... assigned once and
-never reused, exactly like gh issue numbers — the same ids locally and
-against a `KB_SERVER`. Address tasks by bare number (`kb done 12`) or
-`#12`; UUIDs remain in `--json` (`id`) with the number as `seq`, and UUID
-prefixes still resolve.
+never reused, exactly like gh issue numbers. Address tasks by bare number
+(`kb done 12`) or `#12`; UUIDs remain in `--json` (`id`) with the number
+as `seq`, and UUID prefixes still resolve.
 
 ## Semantics that differ from GitHub/GitLab
 
@@ -65,8 +62,7 @@ prefixes still resolve.
 - Cross-references are typed blocks edges: `kb link <a> blocks <b>`
   (or `blocked-by`), `kb unlink <a> <b>`, shown in `kb view`. Finishing
   a task with open blockers is refused unless `--force`.
-- Every command works locally and against a `KB_SERVER` except
-  `kb users`, which reads the local database.
+- Every command uses the local database selected by `KB_DATA`.
 - There are no milestones.
 - `kb rm` is a hard delete with no undo; `kb cancel` is the reversible
   close and almost always the right choice.
