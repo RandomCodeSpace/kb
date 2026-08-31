@@ -20,7 +20,8 @@ const (
 
 // NewHTTPClient returns the guarded client used for model endpoints.
 func NewHTTPClient() *http.Client {
-	allowPrivate := os.Getenv("KB_AI_ALLOW_PRIVATE") == "1"
+	allowPrivateSetting := os.Getenv("KB_AI_ALLOW_PRIVATE")
+	allowPrivate := allowPrivateSetting == "" || allowPrivateSetting == "1"
 	return &http.Client{Timeout: aiTimeout, Transport: guardedTransport(nil, allowPrivate), CheckRedirect: sameHostRedirect}
 }
 

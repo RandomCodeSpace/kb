@@ -96,7 +96,7 @@ func TestProbeReportsMissingModel(t *testing.T) {
 // nothing downstream used to preserve. A local model server is the common
 // reason a connection test fails, so the test must say how to allow it.
 func TestProbeReportsPrivateEndpoint(t *testing.T) {
-	t.Setenv("KB_AI_ALLOW_PRIVATE", "")
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "0")
 	st := newTestStore(t)
 	base, model, key := "http://127.0.0.1:11434/v1", "llama", ""
 	if _, err := st.SetAISettings("default", &base, &model, &key); err != nil {
