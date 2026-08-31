@@ -124,7 +124,7 @@ func TestNewModelKeepsCallerHTTPPolicyAndTypedErrors(t *testing.T) {
 }
 
 func TestNewModelKeepsGuardedClientSSRFPolicy(t *testing.T) {
-	t.Setenv("KB_AI_ALLOW_PRIVATE", "")
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "0")
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		calls.Add(1)
@@ -147,6 +147,23 @@ func TestNewModelKeepsGuardedClientSSRFPolicy(t *testing.T) {
 	}
 	if got := calls.Load(); got != 0 {
 		t.Fatalf("private endpoint received %d requests, want none", got)
+	}
+}
+
+func TestNewHTTPClientAllowsPrivateEndpointByDefault(t *testing.T) {
+	t.Setenv("KB_AI_ALLOW_PRIVATE", "")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	response, err := NewHTTPClient().Get(upstream.URL)
+	if err != nil {
+		t.Fatalf("GET private endpoint with default setting: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("GET private endpoint status = %d, want %d", response.StatusCode, http.StatusNoContent)
 	}
 }
 

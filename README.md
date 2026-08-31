@@ -246,12 +246,13 @@ local modes. Source Markdown files are not deleted.
 | `KB_DATA` | Data directory |
 | `KB_SECRET` | Encryption secret override |
 | `KB_PROJECT` | Active project override |
-| `KB_AI_ALLOW_PRIVATE` | Bypass the AI client's resolved-address guard |
+| `KB_AI_ALLOW_PRIVATE` | Allow private AI endpoints; defaults to `1`, set `0` to block them |
 | `KB_FORGE_ALLOW_PRIVATE` | Bypass the forge guard for named hosts or all hosts |
 | `KB_LINK_ALLOW_PRIVATE` | Bypass the skill-link guard for named hosts or all hosts |
 
-The three `*_ALLOW_PRIVATE` settings weaken separate network boundaries. AI
-accepts exact `1`; forge and skill links accept a host list or `1`/`*` for all.
+The three `*_ALLOW_PRIVATE` settings control separate network boundaries. AI
+allows private endpoints when unset or set to `1`; set it to `0` to block them.
+Forge and skill links accept a host list or `1`/`*` for all.
 
 </details>
 
