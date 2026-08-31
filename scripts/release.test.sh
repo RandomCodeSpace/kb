@@ -79,7 +79,7 @@ case ${1:-} in
     case ${2:-} in
       GOOS) printf '%s\n' linux ;;
       GOARCH) printf '%s\n' amd64 ;;
-      GOVERSION) printf '%s\n' go1.26.6 ;;
+      GOVERSION) printf '%s\n' go1.26.5 ;;
       *) exit 64 ;;
     esac
     ;;
@@ -130,7 +130,7 @@ EOF
     revision=$(sed -n 's/^# fake-revision=//p' "$artifact")
     goos=$(sed -n 's/^# fake-goos=//p' "$artifact")
     goarch=$(sed -n 's/^# fake-goarch=//p' "$artifact")
-    printf '%s: go1.26.6\n' "$artifact"
+    printf '%s: go1.26.5\n' "$artifact"
     printf '\tpath\tgithub.com/RandomCodeSpace/kb\n'
     printf '\tmod\tgithub.com/RandomCodeSpace/kb\t%s\th1:fake\n' "$version"
     printf '\tbuild\tGOOS=%s\n' "$goos"
@@ -192,7 +192,7 @@ source_repo="$test_root/source"
 git init -q --bare "$remote"
 git init -q -b main "$source_repo"
 mkdir -p "$source_repo/scripts/ci" "$source_repo/docs/releases"
-printf 'module github.com/RandomCodeSpace/kb\n\ngo 1.26.6\n' >"$source_repo/go.mod"
+printf 'module github.com/RandomCodeSpace/kb\n\ngo 1.26.5\n' >"$source_repo/go.mod"
 printf 'release fixture baseline\n' >"$source_repo/baseline.txt"
 (
   cd "$source_repo"
