@@ -30,10 +30,8 @@ Rules:
 
 const RunnerSystemPrompt = runnerSystemPrompt
 
-// Budgets for one skill run. The loop is several upstream round trips, so it
-// outlives both AITimeout and the server-wide write timeout: the run context
-// bounds the whole loop and the response write deadline is extended past it
-// per request, leaving room to write the answer after the last round.
+// Budgets for one skill run. The loop spans several upstream round trips, so
+// the caller's context bounds the complete operation.
 const (
 	skillMaxIterations      = 12
 	maxToolCallsPerResponse = 32
@@ -45,7 +43,7 @@ const SkillMaxIterations = skillMaxIterations
 const (
 	unknownSkillMessage = "unknown skill"
 	// skillsUnavailableMessage covers a broken skill file. The parse error
-	// names the offending file, which is server-side detail.
+	// names the offending local file and stays out of the user-facing message.
 	skillsUnavailableMessage = "skills are unavailable"
 	// skillIterationLimitMessage is the model spending every round on tool
 	// calls without ever answering. Like truncation it is the caller's to act
@@ -62,21 +60,17 @@ const (
 // RunResult is one completed run: the cards the model proposed through
 // propose_card, and its closing prose. Partial marks a run that hit a budget
 // with cards already collected — the cards are real, the set is not complete.
-// It stays off the wire: /api/ai/run-skill states the same fact in the
-// commentary, and a caller that drops the commentary has to say so itself.
+// It stays out of JSON, so a caller that drops the commentary must preserve
+// the partial marker separately.
 type RunResult struct {
 	Cards      []Draft `json:"cards"`
 	Commentary string  `json:"commentary"`
 	Partial    bool    `json:"-"`
 }
 
-// Scope selects what one run is allowed to do. The input of a run is
-// prompt, and prompt is instruction: /api/ai/stories splits a document that
-// can be a forge issue body and its comments, authored by anyone who can
-// comment on that issue. Such a run gets the read-only set — it proposes
-// drafts the user still has to accept, and nothing in it writes to the board
-// or opens an outbound request the injected text could aim. The full set
-// belongs to /api/ai/run-skill, whose input the requesting user wrote.
+// Scope selects what one run may do. Imported or pasted documents use the
+// read-only set because they can contain untrusted instructions. Full scope is
+// reserved for input the local user explicitly authors for that authority.
 type Scope int
 
 const (
@@ -87,7 +81,7 @@ const (
 // runSkill executes one skill against the user's configured endpoint. The
 // cards come from the collector the propose_card tool writes into, never from
 // parsing the reply, so the model cannot smuggle a card past validateDraft and
-// the count is capped server-side. maxTokens is the per-flow output budget:
+// the count is capped by kb. maxTokens is the per-flow output budget:
 // one card needs far less room than a whole ADR split, and the caller knows
 // which flow it is.
 func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillName, input string, maxCards int, maxTokens int64) (RunResult, error) {

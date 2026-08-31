@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// SanitizeUser maps a user identity to the safe storage key every surface
-// (HTTP server, CLI, MCP) must share: lowercased, and any char outside
+// SanitizeUser maps a user identity to the safe storage key local interfaces
+// share: lowercased, and any char outside
 // [a-z0-9._@-] is rejected (never substituted — substitution would collapse
 // distinct identities onto the same board). Empty identities, names starting
 // with '.', and over-long names are rejected. Path separators are outside

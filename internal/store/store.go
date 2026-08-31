@@ -71,9 +71,10 @@ type BoardWriteReceipt struct {
 	Revision    int64
 }
 
-// BoardWriteCondition is the store-owned form of an HTTP If-Match predicate.
-// When Present is false the replacement is unconditional. Star requires an
-// existing board; otherwise any revision in Revisions satisfies the predicate.
+// BoardWriteCondition is the retained predicate for conditional whole-board
+// replacement. When Present is false the replacement is unconditional. Star
+// requires an existing board; otherwise any revision in Revisions satisfies
+// the predicate.
 type BoardWriteCondition struct {
 	Present   bool
 	Star      bool
@@ -88,7 +89,7 @@ var dueRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 // single line. Without this a title such as "x\n- [x] forged !1" would
 // serialize as an extra board line and re-parse as a different task. Phase 1
 // held the invariant implicitly because every write went through
-// board.Parse; store-level writers (MCP, CLI, HTTP) must enforce it here.
+// board.Parse; direct store writers must enforce it here.
 func validateTaskLines(t board.Task) error {
 	for _, f := range []struct{ name, v string }{
 		{"title", t.Title}, {"emoji", t.Emoji}, {"due", t.Due}, {"effort", t.Effort},
@@ -110,11 +111,10 @@ func validateTaskLines(t board.Task) error {
 	return nil
 }
 
-// ValidateTaskFields enforces, for the direct task writers (AddTask,
-// UpdateTask, and the remote-mode CLI and MCP paths that build the wire
-// themselves), the field formats a task must satisfy to survive the markdown
-// wire unchanged: a non-blank title, a real YYYY-MM-DD due date, S/M/L
-// effort, single-token tags without a leading '#', and a single-emoji Emoji.
+// ValidateTaskFields enforces, for direct task writers such as AddTask and
+// UpdateTask, the field formats a task must satisfy to survive the Markdown
+// codec unchanged: a non-blank title, a real YYYY-MM-DD due date, S/M/L effort,
+// single-token tags without a leading '#', and a single-emoji Emoji.
 // ReplaceBoard deliberately skips these checks: it ingests board.Parse
 // output, which is defined to be tolerant of odd-but-representable values.
 func ValidateTaskFields(t board.Task) error {
@@ -425,8 +425,8 @@ func (s *Store) ReplaceBoard(user string, b board.Board) error {
 	return err
 }
 
-// ReplaceBoardWithTaskIDs replaces the user's whole board (the SPA PUT path)
-// and returns each committed task ID in b.Tasks order. Incoming tasks are
+// ReplaceBoardWithTaskIDs replaces the user's whole board for legacy import
+// compatibility and returns each committed task ID in b.Tasks order. Incoming tasks are
 // matched against existing ones first by (Status, Title), then by Title alone;
 // matches keep their ID and CreatedAt, and a status change stamps MovedAt.
 // Unmatched incoming tasks get fresh UUIDs; existing tasks absent from b are
@@ -491,7 +491,8 @@ func (s *Store) ReplaceBoardIfExistsWithReceipt(user string, b board.Board, cano
 }
 
 // ReplaceBoardConditionalWithReceipt evaluates receipt replay, request-hash
-// identity, If-Match, replacement, and receipt insertion in one transaction.
+// identity, the supplied revision condition, replacement, and receipt insertion
+// in one transaction.
 // allowNewReceipt must only be true for a parsed creation-bearing JSON write.
 func (s *Store) ReplaceBoardConditionalWithReceipt(user string, b board.Board, canonicalIDs []*string, condition BoardWriteCondition, operationID, requestHash string, allowNewReceipt bool) ([]string, int64, bool, error) {
 	return s.replaceBoardConditionalReceipt(user, b, canonicalIDs, condition, operationID, requestHash, allowNewReceipt)

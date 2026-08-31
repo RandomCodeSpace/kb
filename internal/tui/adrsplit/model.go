@@ -38,8 +38,8 @@ const (
 
 var errADRTooLarge = errors.New("ADR is over 64 KiB")
 
-// Runner is the shared direct-store AI runner. The overlay deliberately has
-// no HTTP-shaped seam: it invokes the same package as the server adapters.
+// Runner is the shared direct-store AI runner. The narrow interface keeps the
+// overlay testable without another transport.
 type Runner interface {
 	RunSkill(context.Context, string, ai.Scope, string, string, int, int64) (ai.RunResult, error)
 }

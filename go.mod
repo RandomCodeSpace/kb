@@ -15,7 +15,6 @@ require (
 	github.com/charmbracelet/x/exp/teatest/v2 v2.0.0-20260816001655-68d539dca504
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/creack/pty v1.1.24
-	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/rivo/uniseg v0.4.7

@@ -2,21 +2,13 @@ package main
 
 import (
 	"errors"
-	"log"
-	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
 func restoreRootSeams(t *testing.T) {
 	t.Helper()
-	originalLoad := loadOrCreateSecret
-	originalOpen := openDataStore
-	originalImport := importMarkdownDir
 	originalRun := runMainRoot
 	originalFatal := fatalLog
 	originalExit := exitProcess
@@ -25,9 +17,6 @@ func restoreRootSeams(t *testing.T) {
 	originalCommands := subcommands
 	originalHome := userHomeDir
 	t.Cleanup(func() {
-		loadOrCreateSecret = originalLoad
-		openDataStore = originalOpen
-		importMarkdownDir = originalImport
 		runMainRoot = originalRun
 		fatalLog = originalFatal
 		exitProcess = originalExit
@@ -36,74 +25,6 @@ func restoreRootSeams(t *testing.T) {
 		subcommands = originalCommands
 		userHomeDir = originalHome
 	})
-}
-
-func TestRunWebServerInjectedStartupFailures(t *testing.T) {
-	restoreRootSeams(t)
-	resetServerEnv(t)
-	want := errors.New("injected failure")
-
-	t.Run("load secret", func(t *testing.T) {
-		loadOrCreateSecret = func(string) ([]byte, error) { return nil, want }
-		err := runWebServer([]string{"--data", t.TempDir()})
-		if !errors.Is(err, want) || !strings.Contains(err.Error(), "load secret") {
-			t.Fatalf("load-secret error = %v", err)
-		}
-	})
-
-	t.Run("open store", func(t *testing.T) {
-		loadOrCreateSecret = func(string) ([]byte, error) { return make([]byte, minSecretBytes), nil }
-		openDataStore = func(string, []byte) (*store.Store, error) { return nil, want }
-		err := runWebServer([]string{"--data", t.TempDir()})
-		if !errors.Is(err, want) || !strings.Contains(err.Error(), "open store") {
-			t.Fatalf("open-store error = %v", err)
-		}
-	})
-
-	t.Run("invalid secret", func(t *testing.T) {
-		loadOrCreateSecret = func(string) ([]byte, error) { return []byte("short"), nil }
-		err := runWebServer([]string{"--data", t.TempDir()})
-		if err == nil || !strings.Contains(err.Error(), "need at least") {
-			t.Fatalf("invalid-secret error = %v", err)
-		}
-	})
-}
-
-func TestRunWebServerInjectedPostOpenFailures(t *testing.T) {
-	restoreRootSeams(t)
-	resetServerEnv(t)
-	want := errors.New("injected failure")
-	data := t.TempDir()
-
-	importMarkdownDir = func(*store.Store, string) (int, error) { return 0, want }
-	err := runWebServer([]string{"--data", data})
-	if !errors.Is(err, want) || !strings.Contains(err.Error(), "import markdown") {
-		t.Fatalf("import error = %v", err)
-	}
-
-}
-
-func TestRunWebServerOpenExternalBindAndDefaultListener(t *testing.T) {
-	restoreRootSeams(t)
-	resetServerEnv(t)
-	t.Setenv("KB_BIND", "0.0.0.0")
-	wantStop := errors.New("stop")
-	originalListener := listenHTTPServer
-	t.Cleanup(func() { listenHTTPServer = originalListener })
-	listenHTTPServer = func(srv *http.Server) error {
-		if srv.Addr != "0.0.0.0:8124" {
-			t.Fatalf("addr = %q", srv.Addr)
-		}
-		return wantStop
-	}
-	if err := runWebServer([]string{"--data", t.TempDir(), "--port", "8124"}); !errors.Is(err, wantStop) {
-		t.Fatalf("external-bind error = %v", err)
-	}
-
-	listenHTTPServer = originalListener
-	if err := listenHTTPServer(&http.Server{Addr: "127.0.0.1:-1"}); err == nil {
-		t.Fatal("invalid listen address unexpectedly succeeded")
-	}
 }
 
 func TestDispatchAndMainProcessBoundaries(t *testing.T) {
@@ -152,7 +73,6 @@ func TestDispatchAndMainProcessBoundaries(t *testing.T) {
 	if exitCode != 2 {
 		t.Fatalf("invalid flag exit = %d, want 2", exitCode)
 	}
-
 }
 
 func TestRegisteredCLICommandUsesProcessBoundary(t *testing.T) {
@@ -185,27 +105,3 @@ func TestDefaultDataDirFatalBoundary(t *testing.T) {
 		t.Fatalf("fatal call = %q %v", format, args)
 	}
 }
-
-func TestConfiguredLogPathThroughRunWebServer(t *testing.T) {
-	restoreRootSeams(t)
-	resetServerEnv(t)
-	originalListener := listenHTTPServer
-	originalLogWriter := logWriterForTest()
-	t.Cleanup(func() {
-		listenHTTPServer = originalListener
-		setLogWriterForTest(originalLogWriter)
-	})
-	listenHTTPServer = func(*http.Server) error { return errors.New("stop") }
-	logPath := filepath.Join(t.TempDir(), "kb.log")
-	if err := runWebServer([]string{"--data", t.TempDir(), "--log", logPath}); err == nil {
-		t.Fatal("listener stop was not returned")
-	}
-	if _, err := os.Stat(logPath); err != nil {
-		t.Fatalf("log file: %v", err)
-	}
-}
-
-// Small wrappers keep the test's logger restoration explicit without exposing
-// another production seam.
-func logWriterForTest() interface{ Write([]byte) (int, error) }     { return log.Writer() }
-func setLogWriterForTest(w interface{ Write([]byte) (int, error) }) { log.SetOutput(w) }

@@ -33,7 +33,7 @@ type preferenceSavedMsg struct {
 // canonical configured database path together with the board owner isolates
 // alternate --data paths without putting user-controlled text in a filename.
 // The owner is the constant "default" for every local surface; it stays in the
-// hash because kb serve still keeps one board per identity.
+// hash because the store still keeps one board per identity.
 func tuiPreferencesPath(databasePath, user string) (string, error) {
 	databasePath, err := filepath.Abs(databasePath)
 	if err != nil {

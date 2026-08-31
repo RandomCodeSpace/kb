@@ -65,8 +65,8 @@ func issueProvenance(ref Ref, issue Issue) (string, string) {
 	return importIssueProvenance(privateRef(ref), issue)
 }
 
-// ResolveIssueDocument authorizes and fetches one configured issue for the
-// server's existing ADR split endpoint.
+// ResolveIssueDocument authorizes and fetches one configured issue for a local
+// ADR split flow.
 func (s *Service) ResolveIssueDocument(ctx context.Context, user, source, raw string) (Issue, string, string, error) {
 	ref, err := s.authorizeRef(user, source, raw)
 	if err != nil {

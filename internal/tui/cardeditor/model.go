@@ -44,13 +44,13 @@ const (
 )
 
 // SkillRunner is the shared direct-store AI runner used by the editor. The
-// narrow interface keeps model tests deterministic without an HTTP adapter.
+// narrow interface keeps model tests deterministic.
 type SkillRunner interface {
 	RunSkill(context.Context, string, ai.Scope, string, string, int, int64) (ai.RunResult, error)
 }
 
 // Store is the direct SQLite projection used by the editor. It deliberately
-// mirrors the store package instead of introducing an HTTP-shaped adapter.
+// mirrors the store package instead of introducing another adapter.
 type Store interface {
 	AddTask(string, board.Task) (board.Task, error)
 	UpdateTaskIfFieldsMatch(string, string, store.TaskPatch, store.TaskPatch) (board.Task, error)

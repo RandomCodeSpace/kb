@@ -99,23 +99,23 @@ func TestEveryCLIVerbIsDispatched(t *testing.T) {
 	}
 }
 
-func TestDispatchArgsClassifiesServeFlagErrors(t *testing.T) {
+func TestDispatchArgsClassifiesCommandFlagErrors(t *testing.T) {
 	original := subcommands
 	t.Cleanup(func() { subcommands = original })
 	subcommands = map[string]func([]string) error{
-		"serve": func([]string) error { return &webFlagError{err: errors.New("bad serve flag")} },
+		"mcp": func([]string) error { return &commandFlagError{err: errors.New("bad mcp flag")} },
 	}
 	var stderr bytes.Buffer
-	handled, code := dispatchArgs([]string{"serve", "--bad"}, &stderr)
-	if !handled || code != 2 || !strings.Contains(stderr.String(), "bad serve flag") {
-		t.Fatalf("serve flag error = handled %v code %d stderr %q", handled, code, stderr.String())
+	handled, code := dispatchArgs([]string{"mcp", "--bad"}, &stderr)
+	if !handled || code != 2 || !strings.Contains(stderr.String(), "bad mcp flag") {
+		t.Fatalf("mcp flag error = handled %v code %d stderr %q", handled, code, stderr.String())
 	}
 
-	subcommands["serve"] = func([]string) error { return &webFlagError{err: flag.ErrHelp} }
+	subcommands["mcp"] = func([]string) error { return &commandFlagError{err: flag.ErrHelp} }
 	stderr.Reset()
-	handled, code = dispatchArgs([]string{"serve", "--help"}, &stderr)
+	handled, code = dispatchArgs([]string{"mcp", "--help"}, &stderr)
 	if !handled || code != 0 || stderr.Len() != 0 {
-		t.Fatalf("serve help = handled %v code %d stderr %q", handled, code, stderr.String())
+		t.Fatalf("mcp help = handled %v code %d stderr %q", handled, code, stderr.String())
 	}
 }
 
@@ -139,7 +139,7 @@ func TestRunMCPPassesResolvedFlags(t *testing.T) {
 	// The board namespace is no longer selectable from the command line.
 	var flagOutput bytes.Buffer
 	err := runMCPWithFlagOutput([]string{"--user", "alice"}, &flagOutput)
-	var flagErr *webFlagError
+	var flagErr *commandFlagError
 	if !errors.As(err, &flagErr) || !strings.Contains(err.Error(), "flag provided but not defined: -user") {
 		t.Fatalf("--user should be rejected: %v", err)
 	}

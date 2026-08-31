@@ -85,16 +85,12 @@ case ${1:-} in
 set -euo pipefail
 case \${1:-} in
   version) printf 'kb %s (%s)\\n' '$version' '$revision_short' ;;
-  --help) printf 'usage: kb\\n  serve      run the optional HTTP API server\\n' ;;
+  --help) printf 'usage: kb\\n  mcp        expose the local board over MCP stdio\\n' ;;
   help) printf 'usage: kb <command>\\n  add "title"\\n' ;;
   project) printf 'active project: release-smoke\\n' ;;
   add) printf 'added Release smoke\\n' ;;
   list) printf '[{"title":"Release smoke","tags":["project::release-smoke"]}]\\n' ;;
   tui) exit 0 ;;
-  serve)
-    trap 'exit 0' TERM INT
-    while :; do sleep 1; done
-    ;;
   '') printf 'usage: kb\\n' ;;
   *) exit 64 ;;
 esac
@@ -137,12 +133,6 @@ case $artifact in
 esac
 FAKE_FILE
 chmod +x "$fake_bin/file"
-
-cat >"$fake_bin/curl" <<'FAKE_CURL'
-#!/usr/bin/env sh
-printf '%s\n' '{"ok":true}'
-FAKE_CURL
-chmod +x "$fake_bin/curl"
 
 cat >"$fake_bin/script" <<'FAKE_SCRIPT'
 #!/usr/bin/env bash

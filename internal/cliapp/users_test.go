@@ -85,14 +85,6 @@ func TestUsersJSONEmptyBoard(t *testing.T) {
 	}
 }
 
-func TestUsersRefusesRemoteMode(t *testing.T) {
-	t.Setenv("KB_SERVER", "http://127.0.0.1:1")
-	_, errS, code := runCmd(t, "users")
-	if code != 1 || !strings.Contains(errS, "KB_SERVER") {
-		t.Fatalf("remote users = code %d, stderr %q; want refusal naming KB_SERVER", code, errS)
-	}
-}
-
 func TestUsersUsageErrors(t *testing.T) {
 	dir := localEnv(t)
 	if _, errS, code := runCmd(t, "users", "extra", "--data", dir); code != 2 || !strings.Contains(errS, "takes no arguments") {

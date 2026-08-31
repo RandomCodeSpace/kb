@@ -9,23 +9,23 @@
   <a href="https://github.com/RandomCodeSpace/kb/actions/workflows/quality.yml"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/RandomCodeSpace/kb/quality.yml?branch=main&amp;style=for-the-badge&amp;logo=githubactions&amp;logoColor=white&amp;label=build"></a>
   <a href="https://github.com/RandomCodeSpace/kb/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/RandomCodeSpace/kb?sort=semver&amp;style=for-the-badge&amp;logo=github&amp;logoColor=white"></a>
   <a href="go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/RandomCodeSpace/kb?style=for-the-badge&amp;logo=go&amp;logoColor=white"></a>
-  <img alt="Local-first storage" src="https://img.shields.io/badge/storage-local--first-3fbf7f?style=for-the-badge&amp;logo=sqlite&amp;logoColor=white">
+  <img alt="Local-only storage" src="https://img.shields.io/badge/storage-local--only-3fbf7f?style=for-the-badge&amp;logo=sqlite&amp;logoColor=white">
 </p>
 
 <p align="center">
   <img src="docs/assets/kb-tui.svg" width="100%" alt="Illustrated preview of the kb terminal board with Todo, Doing, and Done columns">
 </p>
 
-`kb` is one Go binary with no web UI, JavaScript bundle, or hosted account.
-Your board lives in local SQLite. Open it full-screen, automate it from the
-command line, expose it to an MCP client, or opt into the HTTP API when you
-need remote access.
+`kb` is one Go binary with no web UI, JavaScript bundle, hosted account, or
+remote mode. Your board lives in local SQLite. Open it full-screen, automate it
+from the command line, or expose it to a local MCP client over stdio. `kb`
+never listens on a TCP port.
 
 ## Why kb
 
 - **Terminal-native:** keyboard and mouse controls, responsive columns, forms,
   filters, Markdown, comments, checklists, and blocker links.
-- **Local by default:** TUI, CLI, and MCP all use the same SQLite database.
+- **Local-only:** TUI, CLI, and MCP all use the same SQLite database.
 - **Scriptable:** stable task numbers, JSON output on supported commands, and a
   focused task CLI.
 - **Agent-ready:** 12 MCP tools plus optional AI-assisted drafting and imports.
@@ -133,11 +133,10 @@ add  list  view  update  move  done  cancel  restore  rm
 project  users  comment  link  unlink
 ```
 
-Run `kb help` for task-command syntax and flags; run `kb serve --help` for
-server flags. Moving to Done is refused while a task is blocked, has an
-incomplete checklist, or has an open linked blocker. Use `--force` only when
-you mean to bypass that guard. `cancel` is reversible; `rm ID --yes` is
-permanent.
+Run `kb help` for task-command syntax and flags. Moving to Done is refused
+while a task is blocked, has an incomplete checklist, or has an open linked
+blocker. Use `--force` only when you mean to bypass that guard. `cancel` is
+reversible; `rm ID --yes` is permanent.
 
 ### Work with projects
 
@@ -170,12 +169,11 @@ Built-in skills:
 - `import-transform` turns GitHub or GitLab issues into reviewable cards.
 
 Add or replace skills with direct-child Markdown files in `<data>/skills`.
-Provider and forge credentials are encrypted in SQLite and are never returned
-by the settings API.
+Provider and forge credentials are encrypted in the local SQLite database.
 
 ### Connect an MCP client
 
-`kb mcp` serves the local board over stdio. It does not need the HTTP server.
+`kb mcp` exposes the local board over stdio. It opens no network listener.
 
 ```toml
 [mcp_servers.kb]
@@ -183,7 +181,7 @@ command = "kb"
 args = ["mcp"]
 ```
 
-The server exposes task listing, creation, updates, moves, reversible
+The MCP process exposes task listing, creation, updates, moves, reversible
 cancellation, explicit permanent deletion, similarity and duplicate checks,
 task details, comments, and blocker links. It registers 12 tools and no MCP
 resources.
@@ -198,35 +196,6 @@ add_comment       list_comments     link_tasks        unlink_tasks
 ```
 
 </details>
-
-## Use the API and remote CLI
-
-The API is optional and has no HTML interface. For a local token-protected
-server:
-
-```sh
-KB_TOKEN=shared-secret \
-KB_BIND=127.0.0.1 \
-kb serve --port 8080 --data "$HOME/.local/share/kb-server"
-```
-
-Point the task CLI at it:
-
-```sh
-export KB_SERVER=http://127.0.0.1:8080
-export KB_SERVER_TOKEN=shared-secret
-kb list
-kb add "Remote task" -p ops
-```
-
-`KB_SERVER` changes only the task CLI. TUI and MCP modes remain local. The
-built-in remote CLI sends `X-KB-User: default`; open and token modes use that
-owner, while Entra uses the bearer token's immutable `oid`.
-
-Open mode binds to loopback by default. Token and Microsoft Entra modes can
-bind externally, but `kb serve` uses plain HTTP. Put external deployments
-behind TLS, configure `KB_ALLOWED_HOSTS`, and never expose open mode to an
-untrusted network. Run `kb serve --help` for server flags.
 
 ## Keep your data safe
 
@@ -245,9 +214,7 @@ For a complete backup, stop all kb writers and copy the entire data directory.
 This keeps the database and active sidecars together with `secret`, preferences,
 and custom skills. If `KB_SECRET` is configured externally, preserve that exact
 value with the backup. Losing the generated or external key makes stored
-credentials unreadable. Markdown returned by `/api/board` omits comments,
-links, settings, provenance, and credentials, so it is task interchange, not a
-backup.
+credentials unreadable.
 
 Legacy `<user>.md` boards in the data directory are considered for one-time
 import when that owner has no tasks. Use `default.md` for the board visible to
@@ -261,15 +228,6 @@ local modes. Source Markdown files are not deleted.
 | `KB_DATA` | Data directory |
 | `KB_SECRET` | Encryption secret override |
 | `KB_PROJECT` | Active project override |
-| `KB_SERVER` | Remote API base URL for the task CLI |
-| `KB_SERVER_TOKEN` | Remote bearer token |
-| `KB_PORT` | Server port, default `8080` |
-| `KB_BIND` | Server bind host or IP; port comes from `KB_PORT` or `--port` |
-| `KB_LOG_FILE` | Append-only server log |
-| `KB_TOKEN` | Shared server bearer token |
-| `KB_AZURE_TENANT_ID` | Microsoft Entra tenant ID |
-| `KB_AZURE_CLIENT_ID` | Microsoft Entra audience/client ID |
-| `KB_ALLOWED_HOSTS` | Additional accepted Host values |
 | `KB_AI_ALLOW_PRIVATE` | Bypass the AI client's resolved-address guard |
 | `KB_FORGE_ALLOW_PRIVATE` | Bypass the forge guard for named hosts or all hosts |
 | `KB_LINK_ALLOW_PRIVATE` | Bypass the skill-link guard for named hosts or all hosts |

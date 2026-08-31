@@ -244,10 +244,9 @@ var (
 	openSecretDir    = func(path string) (secretDirectory, error) { return os.Open(path) }
 )
 
-// EnvSecretMinBytes is the shortest KB_SECRET worth trusting. It is only a
-// warning threshold here: kb (serve) refuses to start below it, but the CLI
-// and the MCP server keep going, because a user already holding AI keys
-// encrypted under a short secret would otherwise be locked out of them.
+// EnvSecretMinBytes is the shortest KB_SECRET worth trusting. It is a warning
+// threshold because refusing the local CLI or MCP process would lock a user
+// out of AI keys already encrypted under a short secret.
 const EnvSecretMinBytes = 16
 
 // warnShortSecretOnce keeps the warning to one line per process no matter how
@@ -264,9 +263,8 @@ var warnShortSecretOnce sync.Once
 // can compute — and silently regenerating instead would orphan every AI key
 // already encrypted under the old secret, so the caller has to decide.
 //
-// A short KB_SECRET only warns, on stderr and once. Every entry point shares
-// this path, so the CLI and the MCP server report the same weak secret that
-// stops kb (serve) from booting instead of using it in silence.
+// A short KB_SECRET only warns, on stderr and once. Every local entry point
+// shares this path, so the CLI, TUI, and MCP process report the same warning.
 func LoadOrCreateSecret(dataDir string) ([]byte, error) {
 	if v, ok := os.LookupEnv("KB_SECRET"); ok && v != "" {
 		if len(v) < EnvSecretMinBytes {

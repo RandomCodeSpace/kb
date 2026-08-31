@@ -171,7 +171,7 @@ func (r *Runner) FindSimilarTool(user string) tool.Tool { return r.findSimilarTo
 // and an error naming the status or the transport reason would turn this tool
 // into a host reachability oracle for whoever writes the document it reads.
 //
-// Depends on the linkClient field on server, owned by the runner change.
+// The runner owns the guarded link client.
 func (r *Runner) fetchLinkTool() *kbTool {
 	return newKBTool(
 		"fetch_link",
@@ -449,9 +449,8 @@ type toolCheck struct {
 	Done bool   `json:"done,omitempty"`
 }
 
-// toolTask is the task shape the board tools return. It mirrors the MCP
-// server's taskJSON, which is unexported, so the fields are re-declared here
-// rather than shared.
+// toolTask is the task shape the board tools return. It mirrors the MCP task
+// result without coupling the two tool implementations.
 type toolTask struct {
 	ID      string      `json:"id"`
 	Seq     int         `json:"seq,omitempty"`
@@ -490,8 +489,8 @@ func toToolTask(t board.Task) toolTask {
 // --- helpers ---
 
 // marshalToolResult renders a tool result as the compact JSON the loop feeds
-// back to the model. The values are server-owned structs, so a failure is a
-// bug rather than something the model can correct; it gets an opaque message.
+// back to the model. Encoding failure is a kb bug rather than something the
+// model can correct, so the model receives an opaque message.
 func marshalToolResult(v any) (string, error) {
 	data, err := json.Marshal(v)
 	if err != nil {

@@ -9,10 +9,9 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
-// ForgeProber tests stored or draft forge integration values without going
-// through kb's HTTP API. It is shared by local UIs so they use the same guarded
-// client, credential-origin rule, endpoint derivation, and response handling
-// as the server handler.
+// ForgeProber tests stored or draft forge integration values. Local UI flows
+// share its guarded client, credential-origin rule, endpoint derivation, and
+// response handling.
 type ForgeProber struct {
 	store  *store.Store
 	client *http.Client

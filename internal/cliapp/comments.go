@@ -69,7 +69,7 @@ func (a *app) cmdCommentAdd(args []string) int {
 	if strings.TrimSpace(pos[1]) == "" {
 		return a.usageErr(errors.New("comment text must not be empty"))
 	}
-	return a.withBackend(*data, func(be backend) error {
+	return a.withLocal(*data, func(be *localBackend) error {
 		c, err := be.commentAdd(pos[0], pos[1])
 		if err != nil {
 			return err
@@ -92,7 +92,7 @@ func (a *app) cmdCommentList(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("comment list needs exactly one <id> argument"))
 	}
-	return a.withBackend(*data, func(be backend) error {
+	return a.withLocal(*data, func(be *localBackend) error {
 		comments, err := be.comments(pos[0])
 		if err != nil {
 			return err
@@ -133,7 +133,7 @@ func (a *app) cmdCommentRm(args []string) int {
 	if !*yes {
 		return a.fail(fmt.Errorf("refusing to delete comment c%d; re-run with --yes", id))
 	}
-	return a.withBackend(*data, func(be backend) error {
+	return a.withLocal(*data, func(be *localBackend) error {
 		c, err := be.commentRm(id)
 		if errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("no comment matches id c%d", id)

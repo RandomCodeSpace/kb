@@ -32,7 +32,7 @@ notes_file=${positional[1]}
 [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
   die 'version must match vX.Y.Z'
 
-for command_name in git go file sha256sum curl timeout script; do
+for command_name in git go file sha256sum timeout script; do
   command -v "$command_name" >/dev/null 2>&1 || \
     die "required command not found: $command_name"
 done
@@ -111,7 +111,6 @@ fi
 tag_created=0
 tag_pushed=0
 output_dir=''
-serve_pid=''
 
 source_is_unchanged() {
   [[ $(git rev-parse HEAD) == "$source_commit" ]] &&
@@ -124,10 +123,6 @@ cleanup() {
   local result=$?
   trap - EXIT HUP INT TERM
 
-  if [[ -n $serve_pid ]]; then
-    kill "$serve_pid" >/dev/null 2>&1 || true
-    wait "$serve_pid" >/dev/null 2>&1 || true
-  fi
   if [[ $tag_created == 1 && $tag_pushed == 0 ]]; then
     git tag -d "$version" >/dev/null 2>&1 || result=1
     tag_created=0
@@ -237,7 +232,7 @@ done
 run_native_smokes() {
   local native="$output_dir/kb-linux-amd64"
   local smoke="$output_dir/smoke"
-  local tui_command port health_url
+  local tui_command
   mkdir -p "$smoke"
 
   [[ $(go env GOOS) == linux && $(go env GOARCH) == amd64 ]] || \
@@ -252,8 +247,9 @@ run_native_smokes() {
     die 'bare non-TTY smoke opened the data directory'
   "$native" --help >"$smoke/root-help.txt"
   "$native" help >"$smoke/cli-help.txt"
-  grep -F 'serve      run the optional HTTP API server' "$smoke/root-help.txt" >/dev/null || \
-    die 'root help smoke omitted kb serve'
+  if grep -F 'kb serve' "$smoke/root-help.txt" >/dev/null; then
+    die 'root help smoke still advertises removed hosting'
+  fi
   grep -F '  add "title"' "$smoke/cli-help.txt" >/dev/null || \
     die 'CLI help smoke omitted kb add'
 
@@ -275,27 +271,6 @@ run_native_smokes() {
     >"$smoke/tui.txt" 2>&1; then
     die 'TUI launch/quit smoke failed'
   fi
-
-  port=$((30000 + (RANDOM % 20000)))
-  health_url="http://127.0.0.1:$port/api/health"
-  KB_BIND=127.0.0.1 "$native" serve --port "$port" \
-    --data "$smoke/serve-data" >"$smoke/serve.txt" 2>&1 &
-  serve_pid=$!
-  for _ in {1..100}; do
-    if curl --fail --silent --show-error --connect-timeout 0.2 --max-time 0.5 \
-      "$health_url" >"$smoke/health.json"; then
-      break
-    fi
-    if ! kill -0 "$serve_pid" 2>/dev/null; then
-      die 'serve smoke exited before becoming healthy'
-    fi
-    sleep 0.05
-  done
-  grep -F '"ok":true' "$smoke/health.json" >/dev/null || \
-    die 'serve smoke did not return a healthy API response'
-  kill "$serve_pid"
-  wait "$serve_pid" >/dev/null 2>&1 || true
-  serve_pid=''
 }
 
 run_native_smokes

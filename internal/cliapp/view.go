@@ -20,9 +20,7 @@ type viewJSON struct {
 	Comments  []commentJSON `json:"comments,omitempty"`
 }
 
-// cmdView shows one task in full, with its comments inline. Task fields work
-// in both local and remote mode; comments are local-only until the server
-// API grows comment endpoints.
+// cmdView shows one local task in full, with its comments inline.
 func (a *app) cmdView(args []string) int {
 	fs, data := a.newFlagSet("view")
 	jsonF := fs.Bool("json", false, "print the task and its comments as JSON")
@@ -35,7 +33,7 @@ func (a *app) cmdView(args []string) int {
 	}
 	ref := pos[0]
 
-	return a.withBackend(*data, func(be backend) error {
+	return a.withLocal(*data, func(be *localBackend) error {
 		it, comments, links, err := be.view(ref)
 		if err != nil {
 			return err

@@ -1,5 +1,5 @@
 // Package forge implements configured, guarded issue imports and upstream
-// drift checks without requiring the optional HTTP server.
+// drift checks for local UI workflows.
 package forge
 
 import (
@@ -44,8 +44,8 @@ const (
 	importPackTruncationNote      = "assistant input limit reached — some fetched issues produced no draft"
 )
 
-// Error is a caller-safe failure category shared by local UIs and HTTP
-// adapters. Cause is retained for errors.Is/As and logs, never display.
+// Error is a caller-safe failure category for local UI workflows. Cause is
+// retained for errors.Is/As and logs, never display.
 type Error struct {
 	Code    int
 	Message string
@@ -55,7 +55,7 @@ type Error struct {
 func (e *Error) Error() string { return e.Message }
 func (e *Error) Unwrap() error { return e.Cause }
 
-// Service owns the single guarded forge path used by the TUI and server.
+// Service owns the guarded forge path used by the TUI.
 type Service struct {
 	store            *store.Store
 	runner           *ai.Runner

@@ -67,11 +67,11 @@ func Run(dataDir, user string) error {
 	return err
 }
 
-// normalizeUser maps the caller's user onto the same storage key the HTTP
-// server and CLI use (trimmed, "default" when empty, then store.SanitizeUser:
-// lowercase + charset check), so agent edits land on the board the other
-// surfaces show instead of a phantom one. kb mcp always passes "default"; the
-// parameter stays because the store is shared with kb serve.
+// normalizeUser maps the caller's user onto the same storage key the CLI and
+// TUI use (trimmed, "default" when empty, then store.SanitizeUser: lowercase +
+// charset check), so agent edits land on the board the other local interfaces
+// show instead of a phantom one. kb mcp always passes "default"; the
+// parameter stays because the store retains its namespace key.
 func normalizeUser(user string) (string, error) {
 	user = strings.TrimSpace(user)
 	if user == "" {

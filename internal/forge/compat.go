@@ -61,11 +61,11 @@ func forgeIssueADR(issue forgeIssue) string {
 	return adr
 }
 
-// IssueADR renders one bounded forge issue for the existing ADR split API.
+// IssueADR renders one bounded forge issue for ADR splitting.
 func IssueADR(issue Issue) string { return forgeIssueADR(issue) }
 
-// StripLinkTags removes model-proposed forge identity tags before the server
-// appends its authorized provenance.
+// StripLinkTags removes model-proposed forge identity tags before the local
+// import path appends authorized provenance.
 func StripLinkTags(tags []string) []string { return stripModelLinkTags(tags) }
 
 func truncateImportText(text string, limit int) string {
