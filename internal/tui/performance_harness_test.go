@@ -451,25 +451,21 @@ func TestPerformanceMemoryGateUsesRetainedPlanEstimate(t *testing.T) {
 	validatePerformanceReport(t, report)
 }
 
-func TestPerformanceUsefulWheelApplicability(t *testing.T) {
+func TestPerformanceScenarioApplicability(t *testing.T) {
+	wantInapplicableAt17 := map[string]bool{
+		"useful_wheel":                       true,
+		"refresh_nonmatching_label_metadata": true,
+	}
 	for _, count := range []int{17, 120} {
-		var wheel *performanceScenario
-		for _, candidate := range performanceScenarios(count) {
-			if candidate.name == "useful_wheel" {
-				scenario := candidate
-				wheel = &scenario
-				break
+		for _, scenario := range performanceScenarios(count) {
+			reason := performanceScenarioNotApplicable(count, scenario)
+			wantReason := count == 17 && wantInapplicableAt17[scenario.name]
+			if wantReason && reason == "" {
+				t.Errorf("%s/%d was not marked inapplicable", scenario.name, count)
 			}
-		}
-		if wheel == nil {
-			t.Fatalf("useful_wheel/%d not found", count)
-		}
-		reason := performanceScenarioNotApplicable(count, *wheel)
-		if count == 17 && reason == "" {
-			t.Fatal("17-task useful_wheel was not marked inapplicable")
-		}
-		if count == 120 && reason != "" {
-			t.Fatalf("120-task useful_wheel marked inapplicable: %s", reason)
+			if !wantReason && reason != "" {
+				t.Errorf("%s/%d marked inapplicable: %s", scenario.name, count, reason)
+			}
 		}
 	}
 }
@@ -536,20 +532,24 @@ func TestPerformanceRetryAttemptsRoundTripInReport(t *testing.T) {
 }
 
 func TestPerformanceResizeScenarioUsesOnlySettledGeometryCacheHits(t *testing.T) {
-	var scenario performanceScenario
-	for _, candidate := range performanceScenarios(120) {
-		if candidate.name == "resize" {
-			scenario = candidate
-			break
-		}
-	}
-	if scenario.newModel == nil {
-		t.Fatal("resize scenario not found")
-	}
-	scenario.warmups, scenario.samples = 2, 3
-	result := runPerformanceScenario(t, 120, scenario)
-	if violation := resizeGeometryCacheAcceptanceViolation(result); violation != "" {
-		t.Fatal(violation)
+	for _, count := range []int{17, 120} {
+		t.Run(integerLabel(count), func(t *testing.T) {
+			var scenario performanceScenario
+			for _, candidate := range performanceScenarios(count) {
+				if candidate.name == "resize" {
+					scenario = candidate
+					break
+				}
+			}
+			if scenario.newModel == nil {
+				t.Fatal("resize scenario not found")
+			}
+			scenario.warmups, scenario.samples = 2, 3
+			result := runPerformanceScenario(t, count, scenario)
+			if violation := resizeGeometryCacheAcceptanceViolation(result); violation != "" {
+				t.Fatal(violation)
+			}
+		})
 	}
 }
 
@@ -1856,13 +1856,24 @@ func performanceScenarioAttemptFor(
 }
 
 func performanceScenarioNotApplicable(count int, scenario performanceScenario) string {
-	if count != 17 || scenario.name != "useful_wheel" {
+	if count != 17 {
 		return ""
 	}
-	model := scenario.newModel()
-	column := statusIndex(board.StatusTodo)
-	if model.current != nil && model.current.semantics.columns[column].maxScroll == 0 {
-		return "80x24 Todo column has no useful scroll target in the 17-task correctness corpus"
+	switch scenario.name {
+	case "useful_wheel":
+		model := scenario.newModel()
+		column := statusIndex(board.StatusTodo)
+		if model.current != nil && model.current.semantics.columns[column].maxScroll == 0 {
+			return "80x24 Todo column has no useful scroll target in the 17-task correctness corpus"
+		}
+	case "refresh_nonmatching_label_metadata":
+		model := scenario.newModel()
+		for _, task := range model.board.Tasks {
+			if !strings.Contains(task.Title, "keep17") {
+				return ""
+			}
+		}
+		return "17-task source has no task outside the active keep17 filter, so excluded-label metadata cannot change"
 	}
 	return ""
 }
@@ -2447,12 +2458,18 @@ func resizeGeometryCacheAcceptanceViolation(result performanceScenarioResult) st
 			result.AcceptedMessages, result.PublishedFrames, result.NormalBaseBuilds,
 			result.OverlayCompositions, result.NavigationArtifactPublications, want)
 	}
+	wantEntries := uint64(1)
+	if result.Tasks < 120 {
+		// The 17-card geometry is small enough to retain both exact alternating
+		// sizes. Larger corpora retain one under the same byte budget.
+		wantEntries = 2
+	}
 	if result.GeometryCacheHits != want || result.GeometryCacheMisses != 0 ||
 		result.GeometryCacheEvictions != 0 || result.GeometryCacheInvalidations != 0 ||
-		result.GeometryCacheEntries != 1 || result.GeometryCacheOwnedBytes == 0 {
-		return fmt.Sprintf("hits/misses/evictions/invalidations/entries/owned=%d/%d/%d/%d/%d/%d, want %d/0/0/0/1/>0",
+		result.GeometryCacheEntries != wantEntries || result.GeometryCacheOwnedBytes == 0 {
+		return fmt.Sprintf("hits/misses/evictions/invalidations/entries/owned=%d/%d/%d/%d/%d/%d, want %d/0/0/0/%d/>0",
 			result.GeometryCacheHits, result.GeometryCacheMisses, result.GeometryCacheEvictions,
-			result.GeometryCacheInvalidations, result.GeometryCacheEntries, result.GeometryCacheOwnedBytes, want)
+			result.GeometryCacheInvalidations, result.GeometryCacheEntries, result.GeometryCacheOwnedBytes, want, wantEntries)
 	}
 	if result.GeometryWorkerSlices != 0 || result.GeometrySnapshotInstalls != 0 ||
 		result.StaleWorkerResults != 0 || result.SynchronousLayoutRecords != 0 ||
