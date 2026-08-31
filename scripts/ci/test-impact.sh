@@ -75,24 +75,30 @@ assert_contains '"docs_contract": true' 'docs-only classification'
 assert_contains '"focused_quality": false' 'docs-only Go exclusion'
 assert_contains '"owners": []' 'docs-only owner set'
 
+printf 'MIT License\n' >"$fixture/LICENSE"
+license="$(commit_all license)"
+run_impact "$docs" "$license" || fail 'license impact failed'
+assert_contains '"docs_contract": true' 'license documentation classification'
+assert_contains '"focused_quality": false' 'license Go exclusion'
+
 printf 'package leaf\n\nfunc Value() int { return 2 }\n' >"$fixture/internal/leaf/leaf.go"
 leaf="$(commit_all leaf)"
-run_impact "$docs" "$leaf" || fail 'package impact failed'
+run_impact "$license" "$leaf" || fail 'package impact failed'
 assert_contains '"focused_quality": true' 'package classification'
 assert_contains 'example.test/impact/internal/leaf' 'changed owner'
 assert_contains 'example.test/impact/internal/importer' 'direct importer'
 assert_contains '"compile_all": false' 'ordinary package compile scope'
 
-run_impact "$docs" "$leaf" --format compact || fail 'compact impact failed'
+run_impact "$license" "$leaf" --format compact || fail 'compact impact failed'
 [ "$(wc -l <"$output")" -eq 1 ] || fail 'compact manifest was not one line'
 assert_contains '"focused_quality":true' 'compact check output'
 
-run_impact "$docs" "$leaf" --format github || fail 'GitHub output failed'
+run_impact "$license" "$leaf" --format github || fail 'GitHub output failed'
 assert_contains 'manifest={"schema_version":1' 'GitHub manifest output'
 assert_contains 'focused_quality=true' 'GitHub check output'
 assert_contains 'docs_contract=false' 'GitHub unaffected output'
 
-run_impact "$docs" "$leaf" --format plan || fail 'release plan output failed'
+run_impact "$license" "$leaf" --format plan || fail 'release plan output failed'
 assert_contains "$(printf 'schema_version\t1')" 'plan schema output'
 assert_contains "$(printf 'check\tfocused_quality\ttrue')" 'plan check output'
 assert_contains "$(printf 'owner\texample.test/impact/internal/leaf')" 'plan owner output'
