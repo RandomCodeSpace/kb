@@ -21,9 +21,6 @@ Turn one architecture decision record or design document into kanban cards.
    proposed card saying what it covers, plus one line for anything you dropped
    as a duplicate or left out because the document only records a decision.
 
-If the input is a URL instead of document text, call `fetch_link` on it first
-and work from what comes back.
-
 ## Card fields
 
 - `title`: imperative and specific. "Add rate limiting to the token endpoint",
@@ -33,8 +30,8 @@ and work from what comes back.
 - `checks`: the acceptance criteria, one per entry, each one verifiable by
   someone reviewing the change. Two to five per card.
 - `effort`: `S` for under a day, `M` for a few days, `L` for a week or more.
-- `prio`: 1 is highest, 4 is lowest. Use 3 unless the document says the item
-  blocks other work.
+- `prio`: 1 is high, 2 is medium, and 3 is low. Use 3 unless the document says
+  the item blocks other work.
 - `tags`: single words, no spaces. Name the area the work touches, for example
   `backend`, `api`, `docs`.
 - `emoji`: one emoji that suits the work, or leave it out.

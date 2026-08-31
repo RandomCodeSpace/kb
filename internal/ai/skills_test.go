@@ -162,6 +162,9 @@ func TestLoadSkillsEmbedded(t *testing.T) {
 			t.Errorf("adr-split body does not mention %q", want)
 		}
 	}
+	if strings.Contains(adr.Body, "fetch_link") {
+		t.Error("adr-split advertises fetch_link even though its caller is read-only")
+	}
 	story, ok := skillFixtureByName(skills, "story-draft")
 	if !ok {
 		t.Fatalf("embedded skills = %v, want story-draft", skills)
@@ -169,6 +172,18 @@ func TestLoadSkillsEmbedded(t *testing.T) {
 	for _, want := range []string{"find_similar", "Always call it"} {
 		if !strings.Contains(story.Body, want) {
 			t.Errorf("story-draft body does not mention %q", want)
+		}
+	}
+	importSkill, ok := skillFixtureByName(skills, "import-transform")
+	if !ok {
+		t.Fatalf("embedded skills = %v, want import-transform", skills)
+	}
+	if !strings.Contains(importSkill.Body, "import flow records") || strings.Contains(importSkill.Body, "server records") {
+		t.Errorf("import-transform provenance wording drifted")
+	}
+	for _, skill := range []Skill{adr, story, importSkill} {
+		if !strings.Contains(skill.Body, "1 is high, 2 is medium, and 3 is low") || strings.Contains(skill.Body, "4 is lowest") {
+			t.Errorf("skill %q does not describe the executable priority scale", skill.Name)
 		}
 	}
 }

@@ -23,7 +23,7 @@ func TestRunRemainingFilesystemFailures(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(dir, "secret"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := Run(dir, "tester"); err == nil || !strings.Contains(err.Error(), "read secret") {
+		if err := Run(dir, "tester", "test-version"); err == nil || !strings.Contains(err.Error(), "read secret") {
 			t.Fatalf("Run secret error = %v", err)
 		}
 	})
@@ -34,7 +34,7 @@ func TestRunRemainingFilesystemFailures(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(dir, "kb.db"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := Run(dir, "tester"); err == nil {
+		if err := Run(dir, "tester", "test-version"); err == nil {
 			t.Fatal("Run accepted a directory as kb.db")
 		}
 	})
@@ -45,7 +45,7 @@ func TestRunRemainingFilesystemFailures(t *testing.T) {
 		if err := os.Symlink("missing-target", filepath.Join(dir, "broken.md")); err != nil {
 			t.Fatal(err)
 		}
-		if err := Run(dir, "tester"); err == nil || !strings.Contains(err.Error(), "store: read") {
+		if err := Run(dir, "tester", "test-version"); err == nil || !strings.Contains(err.Error(), "store: read") {
 			t.Fatalf("Run import error = %v", err)
 		}
 	})

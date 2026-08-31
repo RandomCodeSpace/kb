@@ -148,11 +148,41 @@ func TestRunnerReadOnlyScopeOmitsMutatingTools(t *testing.T) {
 			t.Errorf("read-only request offered %q", tool.Function.Name)
 		}
 	}
+	for _, want := range []string{"read-only authority", "Do not fetch a URL", "mutate an existing board card"} {
+		if !strings.Contains(request, want) {
+			t.Errorf("read-only prompt missing %q", want)
+		}
+	}
 	if strings.Contains(request, `"max_tokens"`) {
 		t.Errorf("reasoning request used max_tokens: %s", request)
 	}
 	if !strings.Contains(request, `"max_completion_tokens":8192`) {
 		t.Errorf("request did not clamp and rename budget: %s", request)
+	}
+}
+
+func TestRunnerSystemMatchesToolScope(t *testing.T) {
+	skill := Skill{Name: "neutral", Description: "neutral task", Body: "Draft the requested work."}
+	readOnly := runnerSystem(ScopeReadOnly, skill, nil)
+	full := runnerSystem(ScopeFull, skill, nil)
+
+	for _, prompt := range []string{readOnly, full} {
+		for _, want := range []string{"propose_card", "find_similar", "list_tasks", "get_task", "Skill: neutral"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("prompt missing common guidance %q", want)
+			}
+		}
+		if strings.Contains(prompt, "Before proposing a card, call find_similar") {
+			t.Error("prompt retained the universal duplicate-check mandate")
+		}
+	}
+	for _, unavailable := range []string{"fetch_link", "update_task"} {
+		if strings.Contains(readOnly, unavailable) {
+			t.Errorf("read-only prompt names unavailable tool %q", unavailable)
+		}
+		if !strings.Contains(full, unavailable) {
+			t.Errorf("full prompt omits available tool %q", unavailable)
+		}
 	}
 }
 
@@ -448,11 +478,11 @@ func TestRunnerHelpers(t *testing.T) {
 		}
 	}
 	skill, others, found := splitSkills([]Skill{{Name: "a"}, {Name: "b"}}, " b ")
-	if !found || skill.Name != "b" || len(others) != 1 || !strings.Contains(runnerSystem(skill, others), "Skill: b") {
+	if !found || skill.Name != "b" || len(others) != 1 || !strings.Contains(runnerSystem(ScopeReadOnly, skill, others), "Skill: b") {
 		t.Fatalf("split/system = %+v %+v %t", skill, others, found)
 	}
 	only, others, found := splitSkills([]Skill{{Name: "only", Body: "instructions"}}, "only")
-	if !found || len(others) != 0 || strings.Contains(runnerSystem(only, others), "Available skills") {
+	if !found || len(others) != 0 || strings.Contains(runnerSystem(ScopeReadOnly, only, others), "Available skills") {
 		t.Fatalf("single skill split/system = %+v %+v %t", only, others, found)
 	}
 	if _, _, found := splitSkills([]Skill{{Name: "a"}}, "missing"); found {

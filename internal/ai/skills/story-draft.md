@@ -28,8 +28,8 @@ Turn the request into exactly one kanban card.
 - `emoji`: exactly one emoji character that suits the work, or an empty string
   when nothing fits.
 - `desc`: markdown. State what the work is and why it exists. A few sentences.
-- `prio`: an integer, 1 is highest and 4 is lowest. Use 3 unless the request
-  says otherwise.
+- `prio`: an integer: 1 is high, 2 is medium, and 3 is low. Use 3 unless the
+  request says otherwise.
 - `due`: a date as `YYYY-MM-DD`, or an empty string. Only when the request
   states a date.
 - `effort`: `S` for under a day, `M` for a few days, `L` for a week or more, or

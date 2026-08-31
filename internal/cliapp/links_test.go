@@ -1,6 +1,7 @@
 package cliapp
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -44,14 +45,21 @@ func TestLinkUnlinkCLI(t *testing.T) {
 
 	// After unlinking, blocked-by reverses the direction; unlink works in
 	// either argument order.
-	if _, _, code = runCmd(t, "unlink", "1", "2", "--data", dir); code != 0 {
-		t.Fatal("unlink 1 2 failed")
+	if out, _, code = runCmd(t, "unlink", "1", "2", "--data", dir); code != 0 || out != "unlinked 1 and 2\n" {
+		t.Fatalf("unlink 1 2: code=%d out=%q", code, out)
 	}
 	if out, _, code = runCmd(t, "link", "1", "blocked-by", "2", "--data", dir); code != 0 || out != "linked: #2 blocks #1\n" {
 		t.Fatalf("blocked-by link: code=%d out=%q", code, out)
 	}
-	if _, _, code = runCmd(t, "unlink", "2", "1", "--data", dir); code != 0 {
-		t.Fatal("unlink 2 1 failed")
+	if out, _, code = runCmd(t, "unlink", "2", "1", "--json", "--data", dir); code != 0 {
+		t.Fatalf("unlink 2 1 --json: code=%d out=%q", code, out)
+	}
+	var removed map[string]bool
+	if err := json.Unmarshal([]byte(out), &removed); err != nil {
+		t.Fatalf("unlink --json: %v\n%s", err, out)
+	}
+	if len(removed) != 1 || !removed["removed"] {
+		t.Fatalf("unlink --json = %#v", removed)
 	}
 	if _, errS, code = runCmd(t, "unlink", "1", "2", "--data", dir); code != 1 || !strings.Contains(errS, "no link") {
 		t.Fatalf("unlink absent: code=%d stderr=%q", code, errS)

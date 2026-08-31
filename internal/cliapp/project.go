@@ -393,6 +393,7 @@ func (a *app) cmdProject(args []string) int {
 
 func (a *app) cmdProjectUse(args []string) int {
 	fs, data := a.newFlagSet("project use")
+	jsonF := fs.Bool("json", false, "print the stored project as JSON")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -415,6 +416,12 @@ func (a *app) cmdProjectUse(args []string) int {
 	state.ActiveProject = name
 	if err := saveCLIState(dir, state); err != nil {
 		return a.fail(err)
+	}
+	if *jsonF {
+		if err := writeSingleJSON(a.stdout, projectCurrentJSON{Project: name, Source: string(sourceStored)}); err != nil {
+			return a.fail(err)
+		}
+		return 0
 	}
 	fmt.Fprintf(a.stdout, "active project: %s\n", name)
 	return 0

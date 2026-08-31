@@ -206,7 +206,9 @@ func runMCPWithFlagOutput(args []string, output io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return &commandFlagError{err: err}
 	}
-	return mcpRun(*dataDir, defaultBoardUser)
+	info, ok := readBuildInfo()
+	version, _, _ := versionParts(info, ok)
+	return mcpRun(*dataDir, defaultBoardUser, version)
 }
 
 // defaultDataDir resolves the board storage directory: KB_DATA if set, else

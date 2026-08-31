@@ -92,6 +92,22 @@ func TestProjectResolutionOrder(t *testing.T) {
 	assertOneProject(t, listJSON(t, "--data", dir), "stored", "fromenv", "fromflag")
 }
 
+func TestProjectUseJSON(t *testing.T) {
+	dir := noProjectEnv(t)
+	out, stderr, code := runCmd(t, "project", "use", "stored", "--json", "--data", dir)
+	if code != 0 || stderr != "" {
+		t.Fatalf("project use --json: code=%d stdout=%q stderr=%q", code, out, stderr)
+	}
+	var got map[string]string
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("project use --json: %v\n%s", err, out)
+	}
+	if len(got) != 2 || got["project"] != "stored" || got["source"] != "stored" {
+		t.Fatalf("project use --json = %#v", got)
+	}
+	assertCurrent(t, dir, "stored", "stored")
+}
+
 // assertCurrent checks what kb project current resolves to and where from.
 func assertCurrent(t *testing.T, dir, wantProject, wantSource string, extra ...string) {
 	t.Helper()

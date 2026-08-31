@@ -121,19 +121,26 @@ func TestDispatchArgsClassifiesCommandFlagErrors(t *testing.T) {
 
 func TestRunMCPPassesResolvedFlags(t *testing.T) {
 	original := mcpRun
-	t.Cleanup(func() { mcpRun = original })
+	originalBuildInfo := readBuildInfo
+	t.Cleanup(func() {
+		mcpRun = original
+		readBuildInfo = originalBuildInfo
+	})
 
-	var gotData, gotUser string
-	mcpRun = func(data, user string) error {
-		gotData, gotUser = data, user
+	readBuildInfo = func() (*debug.BuildInfo, bool) {
+		return &debug.BuildInfo{Main: debug.Module{Version: "v9.8.7"}}, true
+	}
+	var gotData, gotUser, gotVersion string
+	mcpRun = func(data, user, version string) error {
+		gotData, gotUser, gotVersion = data, user, version
 		return nil
 	}
 	wantData := filepath.Join(t.TempDir(), "boards")
 	if err := runMCP([]string{"--data", wantData}); err != nil {
 		t.Fatalf("runMCP: %v", err)
 	}
-	if gotData != wantData || gotUser != defaultBoardUser {
-		t.Fatalf("mcp args = %q, %q; want %q, %s", gotData, gotUser, wantData, defaultBoardUser)
+	if gotData != wantData || gotUser != defaultBoardUser || gotVersion != "v9.8.7" {
+		t.Fatalf("mcp args = %q, %q, %q; want %q, %s, v9.8.7", gotData, gotUser, gotVersion, wantData, defaultBoardUser)
 	}
 
 	// The board namespace is no longer selectable from the command line.
@@ -144,7 +151,7 @@ func TestRunMCPPassesResolvedFlags(t *testing.T) {
 		t.Fatalf("--user should be rejected: %v", err)
 	}
 
-	mcpRun = func(string, string) error { return errors.New("serve failed") }
+	mcpRun = func(string, string, string) error { return errors.New("serve failed") }
 	if err := runMCP([]string{"--data", wantData}); err == nil || err.Error() != "serve failed" {
 		t.Fatalf("runMCP error = %v, want serve failed", err)
 	}

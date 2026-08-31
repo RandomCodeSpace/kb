@@ -31,6 +31,13 @@ func TestRunEmptyAndHelpAliases(t *testing.T) {
 			t.Errorf("kb %s: code=%d stdout=%q stderr=%q", strings.Join(args, " "), code, stdout.String(), stderr.String())
 		}
 	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"--help"}, &stdout, &stderr); code != 0 ||
+		!strings.Contains(stdout.String(), "the JSON shape is documented by each") ||
+		strings.Contains(stdout.String(), "every\n                 other command prints the affected task") {
+		t.Fatalf("global JSON help: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
 }
 
 func TestUpdateValidationBranches(t *testing.T) {

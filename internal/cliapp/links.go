@@ -46,6 +46,7 @@ func (a *app) cmdLink(args []string) int {
 // cmdUnlink removes the edge between two tasks, whichever way it points.
 func (a *app) cmdUnlink(args []string) int {
 	fs, data := a.newFlagSet("unlink")
+	jsonF := fs.Bool("json", false, "print the removal result as JSON")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -59,6 +60,11 @@ func (a *app) cmdUnlink(args []string) int {
 				return fmt.Errorf("no link between %q and %q", pos[0], pos[1])
 			}
 			return friendlyIDErr(err, pos[0])
+		}
+		if *jsonF {
+			return writeSingleJSON(a.stdout, struct {
+				Removed bool `json:"removed"`
+			}{Removed: true})
 		}
 		fmt.Fprintf(a.stdout, "unlinked %s and %s\n", pos[0], pos[1])
 		return nil

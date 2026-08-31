@@ -22,11 +22,14 @@ const runnerSystemPrompt = `You are the assistant of kb, a kanban board. You rea
 
 Rules:
 - Propose a new card only by calling propose_card, once per card. Never write a card as JSON or markdown in your reply.
-- Before proposing a card, call find_similar to check the board does not already track that work.
-- Read the board with list_tasks and get_task; change an existing card with update_task.
-- Call fetch_link only for a URL the user supplied.
+- Read the board with list_tasks and get_task.
+- Use find_similar when the selected skill calls for a duplicate check.
 - Follow the skill instructions below. They describe the task you were given.
 - Finish with a short markdown commentary of what you proposed or changed and why. No JSON, no code fences, no card bodies.`
+
+const runnerReadOnlyPrompt = `This run has read-only authority. Do not fetch a URL or mutate an existing board card. A proposal collected by propose_card is only a draft for the user to review; it does not write to the board.`
+
+const runnerFullPrompt = `This run has full authority. Call fetch_link only for a URL the user supplied. Change an existing board card only with update_task.`
 
 const RunnerSystemPrompt = runnerSystemPrompt
 
@@ -108,7 +111,7 @@ func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillNa
 
 	result, err := oneshot.Run(ctx, oneshot.Request{
 		Model:                   model,
-		Instruction:             runnerSystem(skill, others),
+		Instruction:             runnerSystem(scope, skill, others),
 		Prompt:                  input,
 		Tools:                   tools,
 		MaxOutputTokens:         int32(skillBudget(maxTokens)),
@@ -248,9 +251,15 @@ func splitSkills(skills []Skill, name string) (Skill, []Skill, bool) {
 
 // runnerSystem assembles the system prompt: kb context, the catalogue of the
 // skills that stay loadable, then the invoked skill in full.
-func runnerSystem(skill Skill, others []Skill) string {
+func runnerSystem(scope Scope, skill Skill, others []Skill) string {
 	var b strings.Builder
 	b.WriteString(runnerSystemPrompt)
+	b.WriteString("\n\n")
+	if scope == ScopeFull {
+		b.WriteString(runnerFullPrompt)
+	} else {
+		b.WriteString(runnerReadOnlyPrompt)
+	}
 	if advertisement := advertiseSkills(others); advertisement != "" {
 		b.WriteString("\n\n")
 		b.WriteString(advertisement)

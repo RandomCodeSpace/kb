@@ -39,7 +39,7 @@ func TestRunLifecycleAndDisconnects(t *testing.T) {
 				return tt.serve
 			}
 			data := t.TempDir()
-			err := Run(data, " Alice.Work ")
+			err := Run(data, " Alice.Work ", "test-version")
 			if !called {
 				t.Fatal("serveMCP was not called")
 			}
@@ -61,14 +61,14 @@ func TestRunRejectsInvalidInputsBeforeServing(t *testing.T) {
 		return nil
 	}
 
-	if err := Run(t.TempDir(), "bad/user"); err == nil || !strings.Contains(err.Error(), "mcpserv") {
+	if err := Run(t.TempDir(), "bad/user", "test-version"); err == nil || !strings.Contains(err.Error(), "mcpserv") {
 		t.Fatalf("invalid user error = %v", err)
 	}
 	file := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Run(file, "tester"); err == nil || !strings.Contains(err.Error(), "create data dir") {
+	if err := Run(file, "tester", "test-version"); err == nil || !strings.Contains(err.Error(), "create data dir") {
 		t.Fatalf("invalid data dir error = %v", err)
 	}
 }

@@ -32,8 +32,9 @@ var backfillProjects = cliapp.BackfillProjects
 
 // Run opens (creating if needed) the store at <dataDir>/kb.db, imports any
 // legacy markdown boards in dataDir, and serves the MCP tools for user over
-// stdio until the client disconnects.
-func Run(dataDir, user string) error {
+// stdio until the client disconnects. version is the launching kb binary's
+// display version.
+func Run(dataDir, user, version string) error {
 	user, err := normalizeUser(user)
 	if err != nil {
 		return fmt.Errorf("mcpserv: %w", err)
@@ -60,7 +61,7 @@ func Run(dataDir, user string) error {
 	if _, err := backfillProjects(st, user); err != nil {
 		return err
 	}
-	err = serveMCP(newServer(st, user, dataDir))
+	err = serveMCP(newServer(st, user, dataDir, version))
 	if isClientDisconnect(err) {
 		return nil
 	}
@@ -105,8 +106,8 @@ type kb struct {
 }
 
 // newServer builds the MCP server with all twelve board tools registered.
-func newServer(st *store.Store, user, dataDir string) *mcp.Server {
-	srv := mcp.NewServer(&mcp.Implementation{Name: "kb", Title: "kb kanban board", Version: "1.0.0"}, nil)
+func newServer(st *store.Store, user, dataDir, version string) *mcp.Server {
+	srv := mcp.NewServer(&mcp.Implementation{Name: "kb", Title: "kb local kanban board", Version: version}, nil)
 	k := &kb{st: st, user: user, dataDir: dataDir}
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_tasks",

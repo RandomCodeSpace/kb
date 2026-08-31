@@ -66,8 +66,8 @@ other modes (not task commands):
 
 common flags (every command):
   --data dir     data directory (default $KB_DATA or ~/.local/share/kb)
-  --json         machine output: list prints an array of full tasks, every
-                 other command prints the affected task as one JSON object
+  --json         machine output; the JSON shape is documented by each
+                 command's --help
 
 projects:
   Every task carries exactly one project, stored as the scoped label
