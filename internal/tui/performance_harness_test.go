@@ -64,6 +64,10 @@ type performanceDistribution struct {
 type performanceScenarioResult struct {
 	Name                           string                        `json:"name"`
 	Tasks                          int                           `json:"tasks"`
+	Applicability                  string                        `json:"applicability"`
+	NotApplicableReason            string                        `json:"not_applicable_reason,omitempty"`
+	Attempts                       []performanceScenarioAttempt  `json:"attempts,omitempty"`
+	DeterministicViolations        []string                      `json:"deterministic_violations,omitempty"`
 	Warmups                        int                           `json:"warmups"`
 	Samples                        int                           `json:"samples"`
 	Latency                        performanceDistribution       `json:"latency"`
@@ -110,6 +114,20 @@ type performanceScenarioResult struct {
 	TemporalIndexNodesVisited      uint64                        `json:"temporal_index_nodes_visited"`
 	PublicationTrace               []performancePublicationStamp `json:"publication_trace"`
 	ExpectedZeroFrames             bool                          `json:"expected_zero_frames"`
+}
+
+type performanceScenarioAttempt struct {
+	Attempt            int                     `json:"attempt"`
+	GeneratedAt        time.Time               `json:"generated_at"`
+	Environment        performanceEnvironment  `json:"environment"`
+	Latency            performanceDistribution `json:"latency"`
+	WallClockViolation string                  `json:"wall_clock_violation,omitempty"`
+}
+
+type performanceScenarioRetryPayload struct {
+	GeneratedAt time.Time                 `json:"generated_at"`
+	Environment performanceEnvironment    `json:"environment"`
+	Result      performanceScenarioResult `json:"result"`
 }
 
 // performancePublicationStamp records the identity assigned at Update
@@ -179,7 +197,7 @@ func TestLargeBoardPerformanceHarness(t *testing.T) {
 	t.Cleanup(func() { runtime.GOMAXPROCS(previousProcs) })
 
 	report := performanceReport{
-		SchemaVersion: 4,
+		SchemaVersion: 5,
 		GeneratedAt:   time.Now().UTC(),
 		Environment:   currentPerformanceEnvironment(),
 		ExternalGates: performanceExternalGateState{
@@ -190,7 +208,13 @@ func TestLargeBoardPerformanceHarness(t *testing.T) {
 	for _, count := range selectedPerformanceCorpora(t) {
 		assertPerformanceOracle(t, count)
 		for _, scenario := range selectedPerformanceScenarios(t, count) {
-			report.Scenarios = append(report.Scenarios, runPerformanceScenario(t, count, scenario))
+			if reason := performanceScenarioNotApplicable(count, scenario); reason != "" {
+				report.Scenarios = append(report.Scenarios, performanceScenarioResult{
+					Name: scenario.name, Tasks: count, Applicability: "not_applicable", NotApplicableReason: reason,
+				})
+				continue
+			}
+			report.Scenarios = append(report.Scenarios, runPerformanceScenarioWithRetry(t, count, scenario))
 		}
 		if os.Getenv("KB_PERF_SKIP_STARTUP") != "1" {
 			report.Startup = append(report.Startup, measureFreshProcessStartup(t, count))
@@ -404,14 +428,19 @@ func TestPerformanceBurstFirstVisibleExcludesDeferredGeometry(t *testing.T) {
 
 func TestPerformanceMemoryGateUsesRetainedPlanEstimate(t *testing.T) {
 	goVersion := moduleGoVersion()
+	environment := performanceEnvironment{
+		GoVersion: "go" + goVersion, GoModVersion: goVersion, GOMAXPROCS: 8,
+	}
 	report := performanceReport{
-		Environment: performanceEnvironment{
-			GoVersion:    "go" + goVersion,
-			GoModVersion: goVersion,
-		},
+		SchemaVersion: 5,
+		Environment:   environment,
 		Scenarios: []performanceScenarioResult{{
-			Name:                           "separate-memory-contracts",
-			Tasks:                          1000,
+			Name:          "separate-memory-contracts",
+			Tasks:         1000,
+			Applicability: "measured",
+			Attempts: []performanceScenarioAttempt{{
+				Attempt: 1, GeneratedAt: time.Now().UTC(), Environment: environment,
+			}},
 			PublicationAllocatedBytesMax:   1 << 30,
 			RetainedPlanOwnedBytesEstimate: 63 << 20,
 		}},
@@ -420,6 +449,90 @@ func TestPerformanceMemoryGateUsesRetainedPlanEstimate(t *testing.T) {
 		}},
 	}
 	validatePerformanceReport(t, report)
+}
+
+func TestPerformanceUsefulWheelApplicability(t *testing.T) {
+	for _, count := range []int{17, 120} {
+		var wheel *performanceScenario
+		for _, candidate := range performanceScenarios(count) {
+			if candidate.name == "useful_wheel" {
+				scenario := candidate
+				wheel = &scenario
+				break
+			}
+		}
+		if wheel == nil {
+			t.Fatalf("useful_wheel/%d not found", count)
+		}
+		reason := performanceScenarioNotApplicable(count, *wheel)
+		if count == 17 && reason == "" {
+			t.Fatal("17-task useful_wheel was not marked inapplicable")
+		}
+		if count == 120 && reason != "" {
+			t.Fatalf("120-task useful_wheel marked inapplicable: %s", reason)
+		}
+	}
+}
+
+func TestPerformanceScenarioRetryPolicyIsWallClockOnly(t *testing.T) {
+	miss := performanceScenarioResult{
+		Name: "overlay_open", Tasks: 1000, Applicability: "measured",
+		Latency: performanceDistribution{
+			P95NS: (50 * time.Millisecond).Nanoseconds(),
+			P99NS: (90 * time.Millisecond).Nanoseconds(),
+		},
+	}
+	if !performanceScenarioRetryEligible(miss) {
+		t.Fatal("first p95 miss did not qualify for one retry")
+	}
+	secondMiss := performanceScenarioAttemptFor(2, time.Now().UTC(), performanceEnvironment{GOMAXPROCS: 8}, miss)
+	if secondMiss.WallClockViolation == "" {
+		t.Fatal("second wall-clock miss was recorded as a pass")
+	}
+
+	invariantFailure := miss
+	invariantFailure.RetainedPlanOwnedBytesEstimate = 65 << 20
+	if performanceScenarioRetryEligible(invariantFailure) {
+		t.Fatal("retained-memory invariant incorrectly qualified for a retry")
+	}
+	passing := miss
+	passing.Latency.P95NS = (49 * time.Millisecond).Nanoseconds()
+	if performanceScenarioRetryEligible(passing) {
+		t.Fatal("passing wall-clock result qualified for a retry")
+	}
+}
+
+func TestPerformanceRetryAttemptsRoundTripInReport(t *testing.T) {
+	environment := performanceEnvironment{GoVersion: "go1.26.6", GoModVersion: "1.26.6", GOMAXPROCS: 8}
+	first := performanceScenarioResult{
+		Name: "overlay_open", Tasks: 1000, Applicability: "measured",
+		Latency: performanceDistribution{P95NS: (51 * time.Millisecond).Nanoseconds()},
+	}
+	final := first
+	final.Latency = performanceDistribution{P95NS: (49 * time.Millisecond).Nanoseconds()}
+	final.Attempts = []performanceScenarioAttempt{
+		performanceScenarioAttemptFor(1, time.Now().UTC(), environment, first),
+		performanceScenarioAttemptFor(2, time.Now().UTC(), environment, final),
+	}
+	report := performanceReport{
+		SchemaVersion: 5,
+		GeneratedAt:   time.Now().UTC(),
+		Environment:   environment,
+		Scenarios:     []performanceScenarioResult{final},
+		Startup:       []performanceStartupResult{{Tasks: 120}},
+	}
+	content, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded performanceReport
+	if err := json.Unmarshal(content, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(decoded.Scenarios[0].Attempts); got != 2 {
+		t.Fatalf("retry attempts = %d, want 2", got)
+	}
+	validatePerformanceReport(t, decoded)
 }
 
 func TestPerformanceResizeScenarioUsesOnlySettledGeometryCacheHits(t *testing.T) {
@@ -1651,6 +1764,7 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 	return performanceScenarioResult{
 		Name:                           scenario.name,
 		Tasks:                          count,
+		Applicability:                  "measured",
 		Warmups:                        warmups,
 		Samples:                        samples,
 		Latency:                        performanceDurations(latencies),
@@ -1698,6 +1812,88 @@ func runPerformanceScenario(t *testing.T, count int, scenario performanceScenari
 		PublicationTrace:               trace,
 		ExpectedZeroFrames:             scenario.expectedZeroFrames,
 	}
+}
+
+func runPerformanceScenarioWithRetry(t *testing.T, count int, scenario performanceScenario) performanceScenarioResult {
+	t.Helper()
+	failedBefore := t.Failed()
+	generatedAt := time.Now().UTC()
+	environment := currentPerformanceEnvironment()
+	result := runPerformanceScenario(t, count, scenario)
+	result.DeterministicViolations = performanceScenarioDeterministicViolations(result)
+	result.Attempts = []performanceScenarioAttempt{
+		performanceScenarioAttemptFor(1, generatedAt, environment, result),
+	}
+	if failedBefore || t.Failed() || !performanceScenarioRetryEligible(result) {
+		return result
+	}
+
+	retried, retryGeneratedAt, retryEnvironment := measureFreshProcessScenario(t, count, scenario.name)
+	retried.DeterministicViolations = performanceScenarioDeterministicViolations(retried)
+	retried.Attempts = append(result.Attempts,
+		performanceScenarioAttemptFor(2, retryGeneratedAt, retryEnvironment, retried))
+	return retried
+}
+
+func performanceScenarioRetryEligible(result performanceScenarioResult) bool {
+	return len(performanceScenarioDeterministicViolations(result)) == 0 &&
+		performanceScenarioWallClockViolation(result) != ""
+}
+
+func performanceScenarioAttemptFor(
+	attempt int,
+	generatedAt time.Time,
+	environment performanceEnvironment,
+	result performanceScenarioResult,
+) performanceScenarioAttempt {
+	return performanceScenarioAttempt{
+		Attempt:            attempt,
+		GeneratedAt:        generatedAt,
+		Environment:        environment,
+		Latency:            result.Latency,
+		WallClockViolation: performanceScenarioWallClockViolation(result),
+	}
+}
+
+func performanceScenarioNotApplicable(count int, scenario performanceScenario) string {
+	if count != 17 || scenario.name != "useful_wheel" {
+		return ""
+	}
+	model := scenario.newModel()
+	column := statusIndex(board.StatusTodo)
+	if model.current != nil && model.current.semantics.columns[column].maxScroll == 0 {
+		return "80x24 Todo column has no useful scroll target in the 17-task correctness corpus"
+	}
+	return ""
+}
+
+func measureFreshProcessScenario(
+	t *testing.T,
+	count int,
+	scenarioName string,
+) (performanceScenarioResult, time.Time, performanceEnvironment) {
+	t.Helper()
+	outputPath := filepath.Join(t.TempDir(), "scenario-retry.json")
+	command := exec.Command(os.Args[0], "-test.run=^TestLargeBoardScenarioRetryChild$", "-test.count=1")
+	command.Env = append(os.Environ(),
+		"KB_PERF_RETRY_REPORT="+outputPath,
+		"KB_PERF_RETRY_CORPUS="+strconv.Itoa(count),
+		"KB_PERF_RETRY_SCENARIO="+scenarioName,
+		"GOMAXPROCS=8",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("fresh-process retry %s/%d: %v: %s", scenarioName, count, err, strings.TrimSpace(string(output)))
+	}
+	content, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read fresh-process retry %s/%d: %v", scenarioName, count, err)
+	}
+	var payload performanceScenarioRetryPayload
+	if err := json.Unmarshal(content, &payload); err != nil {
+		t.Fatalf("decode fresh-process retry %s/%d: %v", scenarioName, count, err)
+	}
+	return payload.Result, payload.GeneratedAt, payload.Environment
 }
 
 func admitPerformanceMessage(model *Model, message tea.Msg) []performancePublicationStamp {
@@ -2128,40 +2324,58 @@ func writePerformanceReport(t *testing.T, report performanceReport) string {
 
 func validatePerformanceReport(t *testing.T, report performanceReport) {
 	t.Helper()
+	if report.SchemaVersion != 5 {
+		t.Errorf("performance report schema = %d, want 5", report.SchemaVersion)
+	}
 	if report.Environment.GoModVersion == "" ||
 		strings.TrimPrefix(report.Environment.GoVersion, "go") != report.Environment.GoModVersion {
 		t.Errorf("performance run used %s, go.mod requires go%s",
 			report.Environment.GoVersion, report.Environment.GoModVersion)
 	}
 	for _, result := range report.Scenarios {
-		if result.Tasks < 120 {
+		if result.Applicability == "not_applicable" {
+			if result.NotApplicableReason == "" {
+				t.Errorf("%s/%d is not applicable without a reason", result.Name, result.Tasks)
+			}
 			continue
 		}
-		if result.Latency.P95NS >= (50*time.Millisecond).Nanoseconds() ||
-			result.Latency.P99NS >= (100*time.Millisecond).Nanoseconds() {
-			t.Errorf("%s/%d latency p95=%s p99=%s exceeds budget", result.Name, result.Tasks,
-				time.Duration(result.Latency.P95NS), time.Duration(result.Latency.P99NS))
+		if result.Applicability != "measured" {
+			t.Errorf("%s/%d applicability = %q, want measured or not_applicable",
+				result.Name, result.Tasks, result.Applicability)
 		}
-		if result.ExpectedZeroFrames && result.PublishedFrames != 0 {
-			t.Errorf("%s/%d published %d frames, want zero", result.Name, result.Tasks, result.PublishedFrames)
+		for _, violation := range performanceScenarioDeterministicViolations(result) {
+			t.Errorf("%s/%d deterministic acceptance: %s", result.Name, result.Tasks, violation)
 		}
-		if violation := resizeGeometryCacheAcceptanceViolation(result); violation != "" {
-			t.Errorf("resize/%d geometry cache acceptance: %s", result.Tasks, violation)
+		if violation := performanceScenarioWallClockViolation(result); violation != "" {
+			t.Errorf("%s/%d wall-clock acceptance after retry: %s", result.Name, result.Tasks, violation)
 		}
-		if result.Name == "held_navigation" &&
-			(result.AcceptedMessages != 202 || result.PublishedFrames != 202 || result.DiscardedEvents != 606) {
-			t.Errorf("held_navigation/%d accepted=%d published=%d discarded=%d, want 202/202/606",
-				result.Tasks, result.AcceptedMessages, result.PublishedFrames, result.DiscardedEvents)
+		if len(result.Attempts) < 1 || len(result.Attempts) > 2 {
+			t.Errorf("%s/%d recorded %d wall-clock attempts, want one or two",
+				result.Name, result.Tasks, len(result.Attempts))
+			continue
 		}
-		if violation := navigationArtifactAcceptanceViolation(result); violation != "" {
-			t.Errorf("%s/%d navigation artifact acceptance: %s", result.Name, result.Tasks, violation)
+		for index, attempt := range result.Attempts {
+			if attempt.Attempt != index+1 {
+				t.Errorf("%s/%d attempt number = %d, want %d", result.Name, result.Tasks, attempt.Attempt, index+1)
+			}
+			if attempt.GeneratedAt.IsZero() || attempt.Environment.GoVersion == "" || attempt.Environment.GOMAXPROCS != 8 {
+				t.Errorf("%s/%d attempt %d omitted its environment", result.Name, result.Tasks, index+1)
+			}
+			wantViolation := performanceWallClockViolation(result.Tasks, attempt.Latency)
+			if attempt.WallClockViolation != wantViolation {
+				t.Errorf("%s/%d attempt %d violation = %q, want %q",
+					result.Name, result.Tasks, index+1, attempt.WallClockViolation, wantViolation)
+			}
 		}
-		// The 64 MiB budget applies only to installed plan-owned data. Transient
-		// TotalAlloc remains diagnostic, and whole-process RSS belongs to the
-		// external gate; conflating the three produces very confident nonsense.
-		if result.Tasks == 1000 && result.RetainedPlanOwnedBytesEstimate > 64<<20 {
-			t.Errorf("%s retained plan estimate is %d bytes, want no more than 64 MiB",
-				result.Name, result.RetainedPlanOwnedBytesEstimate)
+		if len(result.Attempts) == 2 && result.Attempts[0].WallClockViolation == "" {
+			t.Errorf("%s/%d retried without a first wall-clock miss", result.Name, result.Tasks)
+		}
+		if len(result.Attempts) == 1 && result.Attempts[0].WallClockViolation != "" &&
+			len(result.DeterministicViolations) == 0 {
+			t.Errorf("%s/%d omitted the allowed fresh-process retry", result.Name, result.Tasks)
+		}
+		if last := result.Attempts[len(result.Attempts)-1].Latency; last != result.Latency {
+			t.Errorf("%s/%d selected latency does not match the final attempt", result.Name, result.Tasks)
 		}
 	}
 	if len(report.Startup) == 0 {
@@ -2172,6 +2386,53 @@ func validatePerformanceReport(t *testing.T, report performanceReport) {
 			t.Errorf("startup/%d p95=%s exceeds 700ms", result.Tasks, time.Duration(result.Latency.P95NS))
 		}
 	}
+}
+
+func performanceScenarioWallClockViolation(result performanceScenarioResult) string {
+	if result.Applicability == "not_applicable" {
+		return ""
+	}
+	return performanceWallClockViolation(result.Tasks, result.Latency)
+}
+
+func performanceWallClockViolation(tasks int, latency performanceDistribution) string {
+	if tasks < 120 {
+		return ""
+	}
+	if latency.P95NS >= (50*time.Millisecond).Nanoseconds() ||
+		latency.P99NS >= (100*time.Millisecond).Nanoseconds() {
+		return fmt.Sprintf("p95=%s p99=%s exceeds the 50ms/100ms budget",
+			time.Duration(latency.P95NS), time.Duration(latency.P99NS))
+	}
+	return ""
+}
+
+func performanceScenarioDeterministicViolations(result performanceScenarioResult) []string {
+	if result.Applicability == "not_applicable" {
+		return nil
+	}
+	var violations []string
+	if result.ExpectedZeroFrames && result.PublishedFrames != 0 {
+		violations = append(violations, fmt.Sprintf("published %d frames, want zero", result.PublishedFrames))
+	}
+	if violation := resizeGeometryCacheAcceptanceViolation(result); violation != "" {
+		violations = append(violations, "geometry cache: "+violation)
+	}
+	if result.Name == "held_navigation" &&
+		(result.AcceptedMessages != 202 || result.PublishedFrames != 202 || result.DiscardedEvents != 606) {
+		violations = append(violations, fmt.Sprintf("accepted/published/discarded=%d/%d/%d, want 202/202/606",
+			result.AcceptedMessages, result.PublishedFrames, result.DiscardedEvents))
+	}
+	if violation := navigationArtifactAcceptanceViolation(result); violation != "" {
+		violations = append(violations, "navigation artifacts: "+violation)
+	}
+	// The 64 MiB budget covers installed plan-owned data. Transient TotalAlloc
+	// remains diagnostic, and whole-process RSS belongs to the external gate.
+	if result.Tasks == 1000 && result.RetainedPlanOwnedBytesEstimate > 64<<20 {
+		violations = append(violations, fmt.Sprintf("retained plan estimate is %d bytes, want no more than 64 MiB",
+			result.RetainedPlanOwnedBytesEstimate))
+	}
+	return violations
 }
 
 func resizeGeometryCacheAcceptanceViolation(result performanceScenarioResult) string {
@@ -2252,6 +2513,49 @@ func navigationArtifactAcceptanceViolation(result performanceScenarioResult) str
 			result.NavigationArtifactMisses, result.PublishedFrames)
 	}
 	return ""
+}
+
+// TestLargeBoardScenarioRetryChild is invoked only after one wall-clock miss.
+func TestLargeBoardScenarioRetryChild(t *testing.T) {
+	outputPath := os.Getenv("KB_PERF_RETRY_REPORT")
+	if outputPath == "" {
+		t.Skip("performance scenario retry child")
+	}
+	count, err := strconv.Atoi(os.Getenv("KB_PERF_RETRY_CORPUS"))
+	if err != nil || count < 1 {
+		t.Fatalf("invalid retry corpus %q", os.Getenv("KB_PERF_RETRY_CORPUS"))
+	}
+	scenarioName := os.Getenv("KB_PERF_RETRY_SCENARIO")
+	var selected *performanceScenario
+	for _, candidate := range performanceScenarios(count) {
+		if candidate.name == scenarioName {
+			scenario := candidate
+			selected = &scenario
+			break
+		}
+	}
+	if selected == nil {
+		t.Fatalf("retry scenario %q not found", scenarioName)
+	}
+	if reason := performanceScenarioNotApplicable(count, *selected); reason != "" {
+		t.Fatalf("retry scenario %q is not applicable: %s", scenarioName, reason)
+	}
+	previousProcs := runtime.GOMAXPROCS(8)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previousProcs) })
+	assertPerformanceOracle(t, count)
+	payload := performanceScenarioRetryPayload{
+		GeneratedAt: time.Now().UTC(),
+		Environment: currentPerformanceEnvironment(),
+		Result:      runPerformanceScenario(t, count, *selected),
+	}
+	content, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = append(content, '\n')
+	if err := os.WriteFile(outputPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestLargeBoardStartupChild is invoked by the harness in a fresh test process.
