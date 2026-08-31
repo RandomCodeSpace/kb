@@ -181,7 +181,7 @@ func Open(path string, secret []byte) (*Store, error) {
 	// while acquiring their first connection, before migrate's BEGIN IMMEDIATE
 	// has a chance to serialize them. busy_timeout is connection-local and is
 	// installed first; WAL is enabled after the migration lock is released.
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=temp_store(2)")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=temp_store(2)&_pragma=synchronous(FULL)")
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}

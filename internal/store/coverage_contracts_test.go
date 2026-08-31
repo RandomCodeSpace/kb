@@ -314,6 +314,42 @@ func TestOpenRejectsInvalidPathsAndSchemas(t *testing.T) {
 	if _, err := Open(path, []byte("secret")); err == nil {
 		t.Fatal("Open accepted a nonnumeric schema version")
 	}
+
+	for _, rawVersion := range []string{"-1", "not-a-number", "01", strconv.Itoa(len(migrations) + 1)} {
+		t.Run("ledger_"+rawVersion, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "kb.db")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO meta(k, v) VALUES ('schema_version', ?)`, rawVersion); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(path, []byte("secret")); err == nil ||
+				!strings.Contains(err.Error(), "newer kb binary or restore a compatible backup") {
+				t.Fatalf("Open schema version %q error = %v", rawVersion, err)
+			}
+			db, err = sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var got string
+			if err := db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&got); err != nil || got != rawVersion {
+				t.Fatalf("rejected ledger changed from %q to %q: %v", rawVersion, got, err)
+			}
+			var taskTable int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'`).Scan(&taskTable); err != nil || taskTable != 0 {
+				t.Fatalf("rejected ledger ran migrations: tasks=%d err=%v", taskTable, err)
+			}
+		})
+	}
 }
 
 func TestSameAIOriginRejectsMalformedURLs(t *testing.T) {

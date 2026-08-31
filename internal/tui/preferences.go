@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -29,12 +30,20 @@ type preferenceSavedMsg struct {
 	err         error
 }
 
-// tuiPreferencesPath keeps display state beside its SQLite board. Hashing the
-// canonical configured database path together with the board owner isolates
-// alternate --data paths without putting user-controlled text in a filename.
-// The owner is the constant "default" for every local surface; it stays in the
-// hash because the store still keeps one board per identity.
-func tuiPreferencesPath(databasePath, user string) (string, error) {
+// tuiPreferencesPath keeps the single local board's display state beside its
+// SQLite database without binding it to an absolute path. A cold-copy restore
+// can therefore move the whole data directory and retain the same view.
+func tuiPreferencesPath(databasePath, _ string) (string, error) {
+	databasePath, err := filepath.Abs(databasePath)
+	if err != nil {
+		return "", fmt.Errorf("tui preferences: database path: %w", err)
+	}
+	databasePath = filepath.Clean(databasePath)
+	return filepath.Join(filepath.Dir(databasePath), ".kb-tui", "preferences.json"), nil
+}
+
+// legacyTUIPreferencesPath reproduces the exact pre-portability filename.
+func legacyTUIPreferencesPath(databasePath, user string) (string, error) {
 	databasePath, err := filepath.Abs(databasePath)
 	if err != nil {
 		return "", fmt.Errorf("tui preferences: database path: %w", err)
@@ -45,20 +54,80 @@ func tuiPreferencesPath(databasePath, user string) (string, error) {
 	return filepath.Join(filepath.Dir(databasePath), ".kb-tui", name), nil
 }
 
-func loadTUIPreferences(path string) (tuiPreferences, error) {
-	data, err := os.ReadFile(path)
+func resolveTUIPreferences(databasePath, user string) (string, tuiPreferences, error) {
+	stablePath, err := tuiPreferencesPath(databasePath, user)
+	if err != nil {
+		return "", tuiPreferences{}, err
+	}
+	if preferences, found, err := readTUIPreferences(stablePath); err != nil || found {
+		return stablePath, preferences, err
+	}
+
+	exactLegacyPath, err := legacyTUIPreferencesPath(databasePath, user)
+	if err != nil {
+		return stablePath, tuiPreferences{}, err
+	}
+	if preferences, found, err := readTUIPreferences(exactLegacyPath); err != nil {
+		return stablePath, tuiPreferences{}, err
+	} else if found {
+		return stablePath, preferences, saveTUIPreferences(stablePath, preferences)
+	}
+
+	entries, err := os.ReadDir(filepath.Dir(stablePath))
 	if errors.Is(err, os.ErrNotExist) {
-		return tuiPreferences{}, nil
+		return stablePath, tuiPreferences{}, nil
 	}
 	if err != nil {
-		return tuiPreferences{}, fmt.Errorf("tui preferences: read: %w", err)
+		return stablePath, tuiPreferences{}, fmt.Errorf("tui preferences: list legacy files: %w", err)
+	}
+	var candidates []string
+	for _, entry := range entries {
+		if !entry.IsDir() && isLegacyPreferenceName(entry.Name()) {
+			candidates = append(candidates, filepath.Join(filepath.Dir(stablePath), entry.Name()))
+		}
+	}
+	if len(candidates) == 0 {
+		return stablePath, tuiPreferences{}, nil
+	}
+	if len(candidates) > 1 {
+		return stablePath, tuiPreferences{}, fmt.Errorf(
+			"tui preferences: found %d legacy preference files; using defaults instead of guessing", len(candidates))
+	}
+	preferences, found, err := readTUIPreferences(candidates[0])
+	if err != nil || !found {
+		return stablePath, tuiPreferences{}, err
+	}
+	return stablePath, preferences, saveTUIPreferences(stablePath, preferences)
+}
+
+func isLegacyPreferenceName(name string) bool {
+	if len(name) != 37 || filepath.Ext(name) != ".json" {
+		return false
+	}
+	encoded := strings.TrimSuffix(name, ".json")
+	decoded, err := hex.DecodeString(encoded)
+	return err == nil && len(decoded) == 16
+}
+
+func loadTUIPreferences(path string) (tuiPreferences, error) {
+	preferences, _, err := readTUIPreferences(path)
+	return preferences, err
+}
+
+func readTUIPreferences(path string) (tuiPreferences, bool, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return tuiPreferences{}, false, nil
+	}
+	if err != nil {
+		return tuiPreferences{}, false, fmt.Errorf("tui preferences: read: %w", err)
 	}
 	var preferences tuiPreferences
 	if err := json.Unmarshal(data, &preferences); err != nil {
-		return tuiPreferences{}, fmt.Errorf("tui preferences: decode: %w", err)
+		return tuiPreferences{}, false, fmt.Errorf("tui preferences: decode: %w", err)
 	}
 	preferences.Filter.Tags = normalizedFilterTags(preferences.Filter.Tags)
-	return preferences, nil
+	return preferences, true, nil
 }
 
 func (m *Model) restorePreferences(path string) {

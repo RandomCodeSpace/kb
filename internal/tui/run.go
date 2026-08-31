@@ -90,11 +90,10 @@ func runProgram(
 	model.SetVersion(version)
 	model.configureAI(aiRunner, ctx)
 	model.SetActiveProject(activeProject)
-	preferencePath, preferencePathErr := tuiPreferencesPath(databasePath, user)
+	preferencePath, preferences, preferencePathErr := resolveTUIPreferences(databasePath, user)
+	model.preferenceErr = preferencePathErr
 	if preferencePathErr == nil {
-		model.restorePreferences(preferencePath)
-	} else {
-		model.preferenceErr = preferencePathErr
+		model.adoptPreferences(preferences)
 	}
 	model.savePreferences = func(preferences tuiPreferences) error {
 		if preferencePathErr != nil {

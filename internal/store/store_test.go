@@ -1098,6 +1098,7 @@ func TestConnectionPragmas(t *testing.T) {
 		{"journal_mode", "wal"},
 		{"foreign_keys", "1"},
 		{"temp_store", "2"},
+		{"synchronous", "2"},
 	} {
 		var got string
 		if err := s.db.QueryRow("PRAGMA " + tc.pragma).Scan(&got); err != nil {

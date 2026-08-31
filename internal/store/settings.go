@@ -287,6 +287,13 @@ func LoadOrCreateSecret(dataDir string) ([]byte, error) {
 	if !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("store: read secret: %w", err)
 	}
+	databasePath := filepath.Join(dataDir, "kb.db")
+	if _, err := os.Stat(databasePath); err == nil {
+		return nil, fmt.Errorf("store: database %s exists but %s is missing: restore the original secret file or supply the original KB_SECRET",
+			databasePath, path)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("store: inspect existing database: %w", err)
+	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("store: create data dir: %w", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 )
 
 // migrations holds one DDL script per schema version. migrate applies the
@@ -310,10 +311,20 @@ func migrate(db *sql.DB) error {
 	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)`); err != nil {
 		return fmt.Errorf("store: create meta: %w", err)
 	}
-	var version int
-	err = conn.QueryRowContext(ctx, `SELECT CAST(v AS INTEGER) FROM meta WHERE k = 'schema_version'`).Scan(&version)
+	var rawVersion string
+	err = conn.QueryRowContext(ctx, `SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&rawVersion)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("store: read schema version: %w", err)
+	}
+	version := 0
+	if err == nil {
+		version, err = strconv.Atoi(rawVersion)
+		if err != nil || version < 0 || rawVersion != strconv.Itoa(version) {
+			return fmt.Errorf("store: incompatible schema version %q: use a newer kb binary or restore a compatible backup", rawVersion)
+		}
+		if version > len(migrations) {
+			return fmt.Errorf("store: schema version %d is newer than this binary supports: use a newer kb binary or restore a compatible backup", version)
+		}
 	}
 	for v := version; v < len(migrations); v++ {
 		if _, err := conn.ExecContext(ctx, migrations[v]); err != nil {
