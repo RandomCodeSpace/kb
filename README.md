@@ -283,7 +283,7 @@ dependency.
 Use conventional commit subjects and target pull requests at `main`.
 
 Current release notes are in
-[`docs/releases/v1.6.0.md`](docs/releases/v1.6.0.md).
+[`docs/releases/v2.0.0.md`](docs/releases/v2.0.0.md).
 
 ## License
 
