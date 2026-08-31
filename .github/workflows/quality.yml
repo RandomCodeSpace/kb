@@ -379,6 +379,93 @@ jobs:
           bash scripts/verify-release-artifacts.sh \
             "$candidate_version" "$CANDIDATE_SHA" "$artifact_dir"
 
+  platform-smoke:
+    name: platform-smoke (${{ matrix.platform }})
+    needs: impact
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-latest
+            goos: linux
+          - platform: macos
+            os: macos-latest
+            goos: darwin
+          - platform: windows
+            os: windows-latest
+            goos: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    steps:
+      - name: Report unaffected contract
+        if: >-
+          needs.impact.outputs.focused_quality != 'true' &&
+          needs.impact.outputs.binary_release_contract != 'true' &&
+          needs.impact.outputs.ci_contract != 'true'
+        shell: bash
+        run: echo 'platform-smoke not affected'
+
+      - name: Check out the exact candidate
+        if: >-
+          needs.impact.outputs.focused_quality == 'true' ||
+          needs.impact.outputs.binary_release_contract == 'true' ||
+          needs.impact.outputs.ci_contract == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.impact.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        if: >-
+          needs.impact.outputs.focused_quality == 'true' ||
+          needs.impact.outputs.binary_release_contract == 'true' ||
+          needs.impact.outputs.ci_contract == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build and run the local task flow
+        if: >-
+          needs.impact.outputs.focused_quality == 'true' ||
+          needs.impact.outputs.binary_release_contract == 'true' ||
+          needs.impact.outputs.ci_contract == 'true'
+        shell: bash
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          expected_goos='${{ matrix.goos }}'
+          actual_goos=$(go env GOOS)
+          [[ $actual_goos == "$expected_goos" ]] || {
+            echo "platform-smoke: runner GOOS is $actual_goos, want $expected_goos" >&2
+            exit 1
+          }
+          smoke=$(mktemp -d)
+          cleanup() {
+            rm -rf -- "$smoke"
+          }
+          trap cleanup EXIT
+          binary="$smoke/kb$(go env GOEXE)"
+          go build -buildvcs=false -trimpath -o "$binary" .
+          "$binary" version >"$smoke/version.txt"
+          grep -E '^kb ' "$smoke/version.txt" >/dev/null
+          "$binary" --help >"$smoke/root-help.txt"
+          grep -F 'usage: kb' "$smoke/root-help.txt" >/dev/null
+          if grep -F 'kb serve' "$smoke/root-help.txt" >/dev/null; then
+            echo 'platform-smoke: root help advertises removed hosting' >&2
+            exit 1
+          fi
+          "$binary" project use platform-smoke --data "$smoke/data" >/dev/null
+          "$binary" add 'Platform smoke' --data "$smoke/data" >/dev/null
+          "$binary" list --data "$smoke/data" --json >"$smoke/list.json"
+          grep -F 'Platform smoke' "$smoke/list.json" >/dev/null
+          grep -F 'project::platform-smoke' "$smoke/list.json" >/dev/null
+          printf 'platform-smoke: %s/%s pass\n' "$actual_goos" "$(go env GOARCH)"
+
   ci-contract:
     name: ci-contract
     needs: impact

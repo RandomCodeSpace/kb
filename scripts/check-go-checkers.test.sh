@@ -366,7 +366,7 @@ fi
 quality_workflow="$repo_root/.github/workflows/quality.yml"
 release_script="$repo_root/scripts/release.sh"
 for job_name in focused-quality contract-race migration-recovery tui-performance \
-  binary-release-contract ci-contract docs-contract; do
+  binary-release-contract platform-smoke ci-contract docs-contract; do
   assert_contains "  $job_name:" "$quality_workflow" "stable $job_name job"
   assert_contains "    name: $job_name" "$quality_workflow" "stable $job_name name"
 done
@@ -379,6 +379,12 @@ assert_contains 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa0
   "$quality_workflow" "pinned performance evidence upload"
 assert_contains 'if-no-files-found: error' "$quality_workflow" \
   "required performance evidence"
+assert_contains 'runs-on: ${{ matrix.os }}' "$quality_workflow" \
+  "native platform runner matrix"
+assert_contains 'go build -buildvcs=false -trimpath' "$quality_workflow" \
+  "native platform build"
+assert_contains 'project use platform-smoke' "$quality_workflow" \
+  "native platform local task flow"
 assert_contains '--format plan' "$release_script" "release impact plan"
 assert_contains 'bash scripts/verify-release-artifacts.sh' "$release_script" \
   "shared release artifact verification"

@@ -9,6 +9,7 @@
   <a href="https://github.com/RandomCodeSpace/kb/actions/workflows/quality.yml"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/RandomCodeSpace/kb/quality.yml?branch=main&amp;style=for-the-badge&amp;logo=githubactions&amp;logoColor=white&amp;label=build"></a>
   <a href="https://github.com/RandomCodeSpace/kb/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/RandomCodeSpace/kb?sort=semver&amp;style=for-the-badge&amp;logo=github&amp;logoColor=white"></a>
   <a href="go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/RandomCodeSpace/kb?style=for-the-badge&amp;logo=go&amp;logoColor=white"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-7f5af0?style=for-the-badge&amp;logo=opensourceinitiative&amp;logoColor=white"></a>
   <img alt="Local-only storage" src="https://img.shields.io/badge/storage-local--only-3fbf7f?style=for-the-badge&amp;logo=sqlite&amp;logoColor=white">
 </p>
 
@@ -274,12 +275,15 @@ base=$(git merge-base origin/main HEAD)
 sh scripts/ci/impact.sh --base "$base" --head HEAD
 ```
 
-Every pull request still reports the same seven Quality jobs. Unaffected jobs
+Every pull request still reports the same eight Quality jobs. Unaffected jobs
 say `not affected`; affected jobs run only the owning packages and mapped
 contracts. Changes to shared migrations, terminal performance, CI, docs, or
 release behavior select their focused gate automatically. Node is used only by
 the repository's CI monitor and is not an application build or runtime
 dependency.
+
+When Go, release, or CI behavior changes, a native smoke matrix builds and
+exercises the local task flow on Linux, macOS, and Windows.
 
 Use conventional commit subjects and target pull requests at `main`.
 
@@ -288,6 +292,4 @@ Current release notes are in
 
 ## License
 
-This repository does not currently contain a project license file. Do not
-assume permission to use, modify, or redistribute the code beyond rights
-granted by applicable law or a separate agreement.
+kb is available under the [MIT License](LICENSE).
