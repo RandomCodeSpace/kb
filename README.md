@@ -16,10 +16,10 @@
   <img src="docs/assets/kb-tui.svg" width="100%" alt="Illustrated preview of the kb terminal board with Todo, Doing, and Done columns">
 </p>
 
-`kb` is one Go binary with no web UI, JavaScript bundle, hosted account, or
-remote mode. Your board lives in local SQLite. Open it full-screen, automate it
-from the command line, or expose it to a local MCP client over stdio. `kb`
-never listens on a TCP port.
+`kb` is one executable with no web UI, JavaScript bundle, hosted account, or
+remote mode. Your board lives in local SQLite—no signup and no service to keep
+running. Open it full-screen, automate it from the command line, or connect a
+local MCP client over stdio. `kb` never listens on a TCP port.
 
 ## Why kb
 
@@ -210,11 +210,29 @@ Important files in the data directory:
 | `.kb-tui/` | TUI preferences |
 | `skills/` | Optional custom AI skills |
 
-For a complete backup, stop all kb writers and copy the entire data directory.
-This keeps the database and active sidecars together with `secret`, preferences,
-and custom skills. If `KB_SECRET` is configured externally, preserve that exact
-value with the backup. Losing the generated or external key makes stored
-credentials unreadable.
+### Back up
+
+1. Quit the TUI and stop any CLI scripts or MCP clients that may be writing.
+2. Copy the entire data directory as one unit—not just `kb.db`. This keeps the
+   database, any SQLite sidecars, the generated `secret`, preferences, and
+   custom skills together.
+3. If you set `KB_SECRET` outside the data directory, preserve that exact value
+   with the backup. It is part of the backup even though it is stored elsewhere.
+
+### Restore
+
+1. Stop every kb process that uses the destination data directory.
+2. Restore the complete directory. Do not place an old `kb.db` beside a newly
+   generated `secret`.
+3. If the backup used an external `KB_SECRET`, restore that same value before
+   starting kb.
+4. Start kb normally. It validates the database schema before migration and
+   refuses an existing database when its generated secret is missing, instead
+   of silently creating a key that cannot decrypt the stored credentials.
+
+Losing the generated or external key makes stored credentials unreadable. Task
+content remains in SQLite, but the complete directory plus the matching secret
+is the supported recovery unit.
 
 Legacy `<user>.md` boards in the data directory are considered for one-time
 import when that owner has no tasks. Use `default.md` for the board visible to
@@ -239,28 +257,29 @@ accepts exact `1`; forge and skill links accept a host list or `1`/`*` for all.
 
 ## Build and contribute
 
-Build and run the ordinary test suite:
+Build the local binary:
 
 ```sh
-go test ./...
 CGO_ENABLED=0 go build -o kb .
 ```
 
-Use conventional commit subjects and target pull requests at `main`. The full
-local preflight is:
+Run the test for the package or contract you changed. After committing, the
+repository-owned impact calculator shows the same scope GitHub Quality will
+use:
 
 ```sh
-sh scripts/check-go-checkers.test.sh
-sh scripts/check-go-coverage.sh
-go vet ./...
-go test -race ./... -count=1
-sh scripts/check-go-format.sh
-bash scripts/release.test.sh
-node scripts/ci/test_ci_monitor.cjs
+base=$(git merge-base origin/main HEAD)
+sh scripts/ci/impact.sh --base "$base" --head HEAD
 ```
 
-The final Node command tests repository CI tooling. Node is not an application
-build or runtime dependency.
+Every pull request still reports the same seven Quality jobs. Unaffected jobs
+say `not affected`; affected jobs run only the owning packages and mapped
+contracts. Changes to shared migrations, terminal performance, CI, docs, or
+release behavior select their focused gate automatically. Node is used only by
+the repository's CI monitor and is not an application build or runtime
+dependency.
+
+Use conventional commit subjects and target pull requests at `main`.
 
 Current release notes are in
 [`docs/releases/v1.6.0.md`](docs/releases/v1.6.0.md).
