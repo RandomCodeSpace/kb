@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -406,9 +407,14 @@ func syncSecretDirectory(dataDir string) error {
 	if err != nil {
 		return fmt.Errorf("store: open data dir for sync: %w", err)
 	}
-	if err := dir.Sync(); err != nil {
-		dir.Close()
-		return fmt.Errorf("store: sync data dir: %w", err)
+	// Windows implements File.Sync with FlushFileBuffers, which rejects
+	// directory handles. The secret file itself was synced before publication;
+	// os.File exposes no supported directory flush on Windows.
+	if runtime.GOOS != "windows" {
+		if err := dir.Sync(); err != nil {
+			dir.Close()
+			return fmt.Errorf("store: sync data dir: %w", err)
+		}
 	}
 	if err := dir.Close(); err != nil {
 		return fmt.Errorf("store: close data dir: %w", err)

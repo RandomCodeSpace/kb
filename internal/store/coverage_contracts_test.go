@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -477,8 +478,13 @@ func TestCreateSecretReportsInjectedDurabilityFailures(t *testing.T) {
 			installCoverageSecretOps(t)
 			createSecretTemp = func(string, string) (secretTempFile, error) { return tt.file, nil }
 			removeSecretFile = func(string) error { return nil }
-			if _, err := createSecret("dir", "path", random(), nil); err == nil {
+			_, err := createSecret("dir", "path", random(), nil)
+			wantError := tt.name != "sync data directory" || runtime.GOOS != "windows"
+			if wantError && err == nil {
 				t.Fatal("createSecret returned nil error")
+			}
+			if !wantError && err != nil {
+				t.Fatalf("createSecret returned error: %v", err)
 			}
 		})
 	}
