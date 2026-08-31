@@ -53,7 +53,7 @@ mkdir -p -- "$fixture/internal/leaf" "$fixture/internal/importer" "$fixture/inte
 git -C "$fixture" init -q -b main
 git -C "$fixture" config user.name 'kb impact test'
 git -C "$fixture" config user.email 'impact@example.invalid'
-printf 'module example.test/impact\n\ngo 1.26.6\n' >"$fixture/go.mod"
+printf 'module example.test/impact\n\ngo 1.26.5\n' >"$fixture/go.mod"
 printf 'package leaf\n\nfunc Value() int { return 1 }\n' >"$fixture/internal/leaf/leaf.go"
 printf 'package importer\n\nimport "example.test/impact/internal/leaf"\n\nfunc Value() int { return leaf.Value() }\n' >"$fixture/internal/importer/importer.go"
 printf 'package main\n\nimport "example.test/impact/internal/importer"\n\nfunc main() { _ = importer.Value() }\n' >"$fixture/main.go"

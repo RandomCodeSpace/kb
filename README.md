@@ -36,10 +36,11 @@ local MCP client over stdio. `kb` never listens on a TCP port.
 
 ### Install with Go
 
-Go 1.26.6 or newer is required:
+Go 1.26.5 or newer is required. Use the local toolchain so Go does not download
+another version during installation:
 
 ```sh
-go install github.com/RandomCodeSpace/kb@latest
+GOTOOLCHAIN=local go install github.com/RandomCodeSpace/kb@latest
 kb version
 ```
 
@@ -283,7 +284,7 @@ dependency.
 Use conventional commit subjects and target pull requests at `main`.
 
 Current release notes are in
-[`docs/releases/v1.7.0.md`](docs/releases/v1.7.0.md).
+[`docs/releases/v1.7.1.md`](docs/releases/v1.7.1.md).
 
 ## License
 

@@ -24,6 +24,9 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+env:
+  GOTOOLCHAIN: local
+
 jobs:
   dry-run:
     if: ${{ inputs.dry_run }}
