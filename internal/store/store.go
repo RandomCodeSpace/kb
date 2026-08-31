@@ -584,11 +584,17 @@ func (s *Store) AddTask(user string, t board.Task) (board.Task, error) {
 	return t, nil
 }
 
-// AddTaskWithImportLink inserts one task and its provenance in the same
-// transaction. A crash or failed provenance write therefore cannot leave an
-// imported card that the next preview mistakes for safe work to recreate.
-func (s *Store) AddTaskWithImportLink(user string, t board.Task, link ImportLink) (board.Task, error) {
+// AddTaskWithImportLink inserts one task, its provenance, and the previewed
+// upstream baseline in the same transaction. An established baseline wins
+// over a later import of the same provenance key.
+func (s *Store) AddTaskWithImportLink(user string, t board.Task, link ImportLink, baseline ImportBaseline) (board.Task, error) {
 	if err := validateImportLink(link); err != nil {
+		return board.Task{}, err
+	}
+	if baseline == (ImportBaseline{}) {
+		return board.Task{}, errors.New("store: import baseline required")
+	}
+	if err := validateImportBaseline(baseline); err != nil {
 		return board.Task{}, err
 	}
 	var err error
@@ -600,7 +606,18 @@ func (s *Store) AddTaskWithImportLink(user string, t board.Task, link ImportLink
 		if err := s.addTaskTx(tx, user, &t); err != nil {
 			return err
 		}
-		return recordImportLinksTx(tx, user, []ImportLink{link}, time.Now().UTC().Format(time.RFC3339Nano))
+		if err := recordImportLinksTx(tx, user, []ImportLink{link}, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+UPDATE import_links
+SET baseline_title = ?, baseline_hash = ?, baseline_excerpt = ?, baseline_at = ?
+WHERE scope = ? AND external_key = ?
+  AND baseline_title = '' AND baseline_hash = '' AND baseline_excerpt = '' AND baseline_at = ''`,
+			baseline.Title, baseline.Hash, baseline.Excerpt, baseline.At, user, link.ExternalKey); err != nil {
+			return fmt.Errorf("store: initialize import baseline: %w", err)
+		}
+		return nil
 	})
 	if err != nil {
 		return board.Task{}, err

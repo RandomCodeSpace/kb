@@ -602,8 +602,8 @@ func (m *Model) nextWrite() tea.Cmd {
 		task.Checks = append(task.Checks, board.Check{Text: check.Text, Done: check.Done})
 	}
 	session, generation := m.session, m.generation
-	source := m.sources[m.source].Name
-	item := forge.LinkInput{ExternalKey: draft.ExternalKey, Link: draft.Link, URL: draft.URL, Title: draft.Title}
+	source := draft.SourceName
+	item := forge.LinkInput{ExternalKey: draft.ExternalKey, Link: draft.Link, URL: draft.URL, Title: draft.Title, Baseline: draft.Baseline}
 	dataDir := m.dataDir
 	return func() tea.Msg {
 		// An imported card is a card: it carries the one project every task

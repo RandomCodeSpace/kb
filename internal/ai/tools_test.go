@@ -81,6 +81,37 @@ func TestNativeToolRejectsNonObjectArguments(t *testing.T) {
 	}
 }
 
+func TestImportCollectorRequiresUniqueBoundedSources(t *testing.T) {
+	collector := &cardCollector{max: 2, sourceCount: 2, claimedSources: make(map[int]bool)}
+	proposal := proposeCardTool(collector)
+	for _, input := range []string{
+		`{"title":"missing"}`,
+		`{"title":"fractional","source":1.5}`,
+		`{"title":"past end","source":3}`,
+	} {
+		if _, err := runTool(t, proposal, input); err == nil || !strings.Contains(err.Error(), "source must be a unique integer from 1 to 2") {
+			t.Fatalf("propose_card(%s) error = %v", input, err)
+		}
+	}
+	if _, err := runTool(t, proposal, `{"title":"first","source":1}`); err != nil {
+		t.Fatalf("first source: %v", err)
+	}
+	if _, err := runTool(t, proposal, `{"title":"duplicate","source":1}`); err == nil || !strings.Contains(err.Error(), "already proposed") {
+		t.Fatalf("duplicate source error = %v", err)
+	}
+	if _, err := runTool(t, proposal, `{"title":"second","source":2}`); err != nil {
+		t.Fatalf("second source: %v", err)
+	}
+	if got := collector.Cards(); len(got) != 2 || got[0].Source != 1 || got[1].Source != 2 {
+		t.Fatalf("collected cards = %+v", got)
+	}
+
+	ordinary := &cardCollector{max: 1}
+	if _, err := runTool(t, proposeCardTool(ordinary), `{"title":"ordinary"}`); err != nil || ordinary.cards[0].Source != 0 {
+		t.Fatalf("ordinary skill source contract changed: cards=%+v err=%v", ordinary.cards, err)
+	}
+}
+
 func addToolTask(t *testing.T, st *store.Store, task board.Task) board.Task {
 	t.Helper()
 	created, err := st.AddTask("default", task)

@@ -43,6 +43,8 @@ const (
 
 const SkillMaxIterations = skillMaxIterations
 
+const importTransformSkill = "import-transform"
+
 const (
 	unknownSkillMessage = "unknown skill"
 	// skillsUnavailableMessage covers a broken skill file. The parse error
@@ -107,6 +109,10 @@ func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillNa
 	}
 
 	collector := &cardCollector{max: normalizeStoryCount(maxCards)}
+	if skill.Name == importTransformSkill {
+		collector.sourceCount = collector.max
+		collector.claimedSources = make(map[int]bool, collector.sourceCount)
+	}
 	tools := r.skillTools(user, scope, others, collector)
 
 	result, err := oneshot.Run(ctx, oneshot.Request{

@@ -73,7 +73,7 @@ func TestColdCopyRecoveryRoundTrip(t *testing.T) {
 			}, ImportLink{
 				Source: "origin", Kind: "github", ExternalKey: "github:example/repo#42",
 				Link: "example/repo#42", URL: "https://github.com/example/repo/issues/42", Title: "Upstream issue",
-			})
+			}, NewImportBaseline("Upstream issue", "Recovered upstream body", "2026-08-31T00:00:00Z"))
 			if err != nil {
 				t.Fatal(err)
 			}

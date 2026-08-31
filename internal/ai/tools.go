@@ -57,8 +57,10 @@ const CardLimitReachedMessage = cardLimitReachedMessage
 // one-shot loop executes tool calls sequentially for kb, so the slice needs no
 // lock; one collector must not be shared across runs.
 type cardCollector struct {
-	max   int
-	cards []Draft
+	max            int
+	sourceCount    int
+	claimedSources map[int]bool
+	cards          []Draft
 }
 
 // CardCollector owns the structured card output for one tool loop.
@@ -108,8 +110,19 @@ func proposeCardTool(c *cardCollector) *kbTool {
 				return "", errors.New("invalid input: expected a JSON object matching the tool schema")
 			}
 			draft := coerceDraftMap(m)
+			if c.sourceCount > 0 {
+				if draft.Source < 1 || draft.Source > c.sourceCount {
+					return "", fmt.Errorf("card rejected: source must be a unique integer from 1 to %d", c.sourceCount)
+				}
+				if c.claimedSources[draft.Source] {
+					return "", fmt.Errorf("card rejected: source %d was already proposed", draft.Source)
+				}
+			}
 			if err := validateDraft(draft); err != nil {
 				return "", fmt.Errorf("card rejected: %w", err)
+			}
+			if c.sourceCount > 0 {
+				c.claimedSources[draft.Source] = true
 			}
 			c.cards = append(c.cards, draft)
 			return marshalToolResult(struct {

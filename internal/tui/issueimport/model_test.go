@@ -42,6 +42,8 @@ type fakeBackend struct {
 	recordCalls  int
 	previewCalls int
 	lastRequest  forge.PreviewRequest
+	lastSource   string
+	lastItem     forge.LinkInput
 	store        *fakeStore
 }
 
@@ -51,8 +53,9 @@ func (b *fakeBackend) Preview(_ context.Context, _ string, request forge.Preview
 	b.lastRequest = request
 	return b.preview, b.previewErr
 }
-func (b *fakeBackend) CreateTask(user, _ string, task board.Task, _ forge.LinkInput) (board.Task, error) {
+func (b *fakeBackend) CreateTask(user, source string, task board.Task, item forge.LinkInput) (board.Task, error) {
 	b.recordCalls++
+	b.lastSource, b.lastItem = source, item
 	if b.recordErr != nil {
 		return board.Task{}, b.recordErr
 	}
@@ -136,11 +139,13 @@ func TestPreviewDefaultsExactDuplicatesOffAndFuzzyOn(t *testing.T) {
 }
 
 func TestAtomicCardProvenanceRetryDoesNotDuplicateCard(t *testing.T) {
+	baseline := store.NewImportBaseline("upstream", "body", "2026-08-31T00:00:00Z")
 	backend := &fakeBackend{
-		sources: []store.ForgeSource{{Name: "primary", Kind: "github"}},
+		sources: []store.ForgeSource{{Name: "primary", Kind: "github"}, {Name: "secondary", Kind: "github"}},
 		preview: forge.Preview{Drafts: []forge.Draft{{
 			Draft: ai.Draft{Title: "import me", Prio: 2, Checks: []ai.DraftCheck{{Text: "verify"}}},
 			Link:  "github#93", ExternalKey: "github:github.com/acme/kb#93", URL: "https://github.com/acme/kb/issues/93",
+			SourceName: "primary", Baseline: baseline,
 		}}},
 		recordErr: errors.New("disk unavailable"),
 	}
@@ -148,6 +153,9 @@ func TestAtomicCardProvenanceRetryDoesNotDuplicateCard(t *testing.T) {
 	m := openModel(t, backend, st)
 	m.ref.SetValue("acme/kb")
 	m.Update(runCmd(m.startPreview()))
+	// The input selector is mutable state. A previewed draft owns the source
+	// it was authorized against and must not follow a later selector value.
+	m.source = 1
 	command := m.startCreate()
 	m.Update(command())
 	if len(st.added) != 0 || m.rows[0].created || m.ConsumeChanged() {
@@ -158,6 +166,9 @@ func TestAtomicCardProvenanceRetryDoesNotDuplicateCard(t *testing.T) {
 	m.Update(command())
 	if len(st.added) != 1 || !m.rows[0].created || backend.recordCalls != 2 || !m.ConsumeChanged() {
 		t.Fatalf("retry duplicated or failed: added=%d created=%t records=%d", len(st.added), m.rows[0].created, backend.recordCalls)
+	}
+	if backend.lastSource != "primary" || backend.lastItem.Baseline != baseline {
+		t.Fatalf("create used source %q baseline %+v", backend.lastSource, backend.lastItem.Baseline)
 	}
 }
 
