@@ -63,7 +63,7 @@ fi
 : "${CGO_ENABLED:=0}"
 export CGO_ENABLED
 
-if package_list="$(go list "$@")"; then
+if package_list="$(go list -buildvcs=false "$@")"; then
   :
 else
   exit $?
@@ -74,7 +74,7 @@ if [ "$mode" = full ] || printf '%s\n' "$package_list" | grep -Fx 'github.com/Ra
   run_helper=1
 fi
 if [ "$run_helper" -eq 1 ]; then
-  if helper_test_output="$(go test \
+  if helper_test_output="$(go test -buildvcs=false \
     ./internal/tui/testdata/generate_web_lower_fixture.go \
     ./internal/tui/testdata/generate_web_lower_fixture_test.go \
     -count=1)"; then
@@ -87,7 +87,7 @@ if [ "$run_helper" -eq 1 ]; then
   printf '%s\n' "$helper_test_output"
 fi
 
-if test_output="$(go test "$@" -count=1 -covermode=atomic -coverprofile="$profile")"; then
+if test_output="$(go test -buildvcs=false "$@" -count=1 -covermode=atomic -coverprofile="$profile")"; then
   :
 else
   status=$?

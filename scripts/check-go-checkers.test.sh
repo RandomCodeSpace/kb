@@ -54,10 +54,10 @@ cat >"$fake_go_dir/go" <<'EOF'
 set -eu
 case "$1" in
   test)
-    if [ "$#" -eq 4 ] && \
-      [ "$2" = "./internal/tui/testdata/generate_web_lower_fixture.go" ] && \
-      [ "$3" = "./internal/tui/testdata/generate_web_lower_fixture_test.go" ] && \
-      [ "$4" = "-count=1" ]; then
+    if [ "$#" -eq 5 ] && [ "$2" = "-buildvcs=false" ] && \
+      [ "$3" = "./internal/tui/testdata/generate_web_lower_fixture.go" ] && \
+      [ "$4" = "./internal/tui/testdata/generate_web_lower_fixture_test.go" ] && \
+      [ "$5" = "-count=1" ]; then
       printf '%s\n' "${FAKE_HELPER_TEST_OUTPUT:-ok  command-line-arguments  0.001s  generator helper fixture test ran}"
       exit "${FAKE_HELPER_TEST_STATUS:-0}"
     fi
