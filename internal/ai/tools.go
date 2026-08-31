@@ -57,8 +57,10 @@ const CardLimitReachedMessage = cardLimitReachedMessage
 // one-shot loop executes tool calls sequentially for kb, so the slice needs no
 // lock; one collector must not be shared across runs.
 type cardCollector struct {
-	max   int
-	cards []Draft
+	max            int
+	sourceCount    int
+	claimedSources map[int]bool
+	cards          []Draft
 }
 
 // CardCollector owns the structured card output for one tool loop.
@@ -108,8 +110,19 @@ func proposeCardTool(c *cardCollector) *kbTool {
 				return "", errors.New("invalid input: expected a JSON object matching the tool schema")
 			}
 			draft := coerceDraftMap(m)
+			if c.sourceCount > 0 {
+				if draft.Source < 1 || draft.Source > c.sourceCount {
+					return "", fmt.Errorf("card rejected: source must be a unique integer from 1 to %d", c.sourceCount)
+				}
+				if c.claimedSources[draft.Source] {
+					return "", fmt.Errorf("card rejected: source %d was already proposed", draft.Source)
+				}
+			}
 			if err := validateDraft(draft); err != nil {
 				return "", fmt.Errorf("card rejected: %w", err)
+			}
+			if c.sourceCount > 0 {
+				c.claimedSources[draft.Source] = true
 			}
 			c.cards = append(c.cards, draft)
 			return marshalToolResult(struct {
@@ -171,7 +184,7 @@ func (r *Runner) FindSimilarTool(user string) tool.Tool { return r.findSimilarTo
 // and an error naming the status or the transport reason would turn this tool
 // into a host reachability oracle for whoever writes the document it reads.
 //
-// Depends on the linkClient field on server, owned by the runner change.
+// The runner owns the guarded link client.
 func (r *Runner) fetchLinkTool() *kbTool {
 	return newKBTool(
 		"fetch_link",
@@ -449,9 +462,8 @@ type toolCheck struct {
 	Done bool   `json:"done,omitempty"`
 }
 
-// toolTask is the task shape the board tools return. It mirrors the MCP
-// server's taskJSON, which is unexported, so the fields are re-declared here
-// rather than shared.
+// toolTask is the task shape the board tools return. It mirrors the MCP task
+// result without coupling the two tool implementations.
 type toolTask struct {
 	ID      string      `json:"id"`
 	Seq     int         `json:"seq,omitempty"`
@@ -490,8 +502,8 @@ func toToolTask(t board.Task) toolTask {
 // --- helpers ---
 
 // marshalToolResult renders a tool result as the compact JSON the loop feeds
-// back to the model. The values are server-owned structs, so a failure is a
-// bug rather than something the model can correct; it gets an opaque message.
+// back to the model. Encoding failure is a kb bug rather than something the
+// model can correct, so the model receives an opaque message.
 func marshalToolResult(v any) (string, error) {
 	data, err := json.Marshal(v)
 	if err != nil {

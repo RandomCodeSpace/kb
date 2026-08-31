@@ -65,8 +65,8 @@ func issueProvenance(ref Ref, issue Issue) (string, string) {
 	return importIssueProvenance(privateRef(ref), issue)
 }
 
-// ResolveIssueDocument authorizes and fetches one configured issue for the
-// server's existing ADR split endpoint.
+// ResolveIssueDocument authorizes and fetches one configured issue for a local
+// ADR split flow.
 func (s *Service) ResolveIssueDocument(ctx context.Context, user, source, raw string) (Issue, string, string, error) {
 	ref, err := s.authorizeRef(user, source, raw)
 	if err != nil {
@@ -88,6 +88,8 @@ type Draft struct {
 	Link        string
 	ExternalKey string
 	URL         string
+	SourceName  string
+	Baseline    store.ImportBaseline
 	Duplicate   *Duplicate
 }
 
@@ -172,6 +174,7 @@ func (s *Service) Preview(ctx context.Context, user string, request PreviewReque
 	if err != nil {
 		return Preview{}, err
 	}
+	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	duplicates, err := s.duplicates(user, ref, issues)
 	if err != nil {
 		return Preview{}, storageFailure(err)
@@ -190,14 +193,22 @@ func (s *Service) Preview(ctx context.Context, user string, request PreviewReque
 	runCtx, cancel := context.WithTimeout(ctx, skillRunDeadline)
 	defer cancel()
 	run, err := s.runner.RunSkill(runCtx, user, ai.ScopeReadOnly, importTransformSkillName,
-		"Transform these numbered forge issues into kanban-card proposals:\n\n"+packed, maxImportIssues, aiImportMaxTokens)
+		"Transform these numbered forge issues into kanban-card proposals:\n\n"+packed, sourceCount, aiImportMaxTokens)
 	if err != nil {
 		return Preview{}, err
 	}
 	if run.Partial {
 		result.Note = appendImportNote(result.Note, importPartialTransformNote)
 	}
-	result.Drafts = attachDrafts(ref, run.Cards, issues, duplicates)
+	var dropped int
+	result.Drafts, dropped = attachDrafts(ref, run.Cards, issues, duplicates, observedAt)
+	if dropped > 0 {
+		noun := "drafts"
+		if dropped == 1 {
+			noun = "draft"
+		}
+		result.Note = appendImportNote(result.Note, fmt.Sprintf("the assistant returned %d %s without a valid unique source number — omitted", dropped, noun))
+	}
 	return result, nil
 }
 
@@ -247,23 +258,32 @@ func (s *Service) duplicates(user string, ref Ref, issues []Issue) ([]*Duplicate
 	return result, nil
 }
 
-func attachDrafts(ref Ref, drafts []ai.Draft, issues []Issue, duplicates []*Duplicate) []Draft {
+func attachDrafts(ref Ref, drafts []ai.Draft, issues []Issue, duplicates []*Duplicate, observedAt string) ([]Draft, int) {
 	result := make([]Draft, 0, len(drafts))
 	claimed := make(map[int]bool, len(drafts))
+	dropped := 0
 	for _, proposal := range drafts {
-		proposal.Tags = stripModelLinkTags(proposal.Tags)
-		item := Draft{Draft: proposal}
-		if proposal.Source > 0 && proposal.Source <= len(issues) && !claimed[proposal.Source] {
-			claimed[proposal.Source] = true
-			issue := issues[proposal.Source-1]
-			item.Link, item.ExternalKey = issueProvenance(ref, issue)
-			item.URL = issue.URL
-			item.Duplicate = duplicates[proposal.Source-1]
-			item.Tags = append(item.Tags, linkTagPrefix+item.Link, importTagPrefix+item.ExternalKey)
+		if proposal.Source < 1 || proposal.Source > len(issues) || claimed[proposal.Source] {
+			dropped++
+			continue
 		}
+		claimed[proposal.Source] = true
+		issue := issues[proposal.Source-1]
+		proposal.Tags = stripModelLinkTags(proposal.Tags)
+		item := Draft{
+			Draft:      proposal,
+			URL:        issue.URL,
+			SourceName: ref.Source.Name,
+			Baseline:   store.NewImportBaseline(issue.Title, issue.Body, observedAt),
+		}
+		item.Link, item.ExternalKey = issueProvenance(ref, issue)
+		if proposal.Source-1 < len(duplicates) {
+			item.Duplicate = duplicates[proposal.Source-1]
+		}
+		item.Tags = append(item.Tags, linkTagPrefix+item.Link, importTagPrefix+item.ExternalKey)
 		result = append(result, item)
 	}
-	return result
+	return result, dropped
 }
 
 func refKind(ref Ref) string {
@@ -277,10 +297,11 @@ func refKind(ref Ref) string {
 }
 
 type LinkInput struct {
-	ExternalKey string `json:"external_key"`
-	Link        string `json:"link"`
-	URL         string `json:"url"`
-	Title       string `json:"title"`
+	ExternalKey string               `json:"external_key"`
+	Link        string               `json:"link"`
+	URL         string               `json:"url"`
+	Title       string               `json:"title"`
+	Baseline    store.ImportBaseline `json:"baseline"`
 }
 
 // RecordLinks journals provenance for compatibility clients that already
@@ -317,8 +338,8 @@ func (s *Service) RecordLinks(user, sourceName string, items []LinkInput) error 
 	return nil
 }
 
-// CreateTask atomically creates one selected card and its provenance. The
-// transaction removes the crash window between those two durable writes.
+// CreateTask atomically creates one selected card, its provenance, and the
+// upstream baseline captured by the preview.
 func (s *Service) CreateTask(user, sourceName string, task board.Task, item LinkInput) (board.Task, error) {
 	sources, err := s.store.ForgeSources(user)
 	if err != nil {
@@ -328,12 +349,23 @@ func (s *Service) CreateTask(user, sourceName string, task board.Task, item Link
 	if !found {
 		return board.Task{}, badRequest(configuredSourceUnavailableMessage, nil)
 	}
+	ref, err := parseRef(sources, source.Name, item.URL)
+	if err != nil || !strings.EqualFold(ref.Source.Name, source.Name) || ref.Kind != source.Kind || ref.Issue <= 0 {
+		return board.Task{}, badRequest("import preview no longer matches the configured source; preview again", err)
+	}
+	canonicalLink, canonicalKey := issueProvenance(ref, Issue{Ref: fmt.Sprintf("%s#%d", ref.Kind, ref.Issue)})
+	if item.Link != canonicalLink || item.ExternalKey != canonicalKey {
+		return board.Task{}, badRequest("import preview provenance does not match the configured source; preview again", nil)
+	}
 	link, err := importLink(source, item)
 	if err != nil {
 		return board.Task{}, err
 	}
-	created, err := s.store.AddTaskWithImportLink(user, task, link)
+	created, err := s.store.AddTaskWithImportLink(user, task, link, item.Baseline)
 	if err != nil {
+		if strings.HasPrefix(err.Error(), "store: import baseline") {
+			return board.Task{}, badRequest("invalid import baseline", err)
+		}
 		if strings.HasPrefix(err.Error(), "store: import ") {
 			return board.Task{}, badRequest("invalid import link", err)
 		}

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -71,6 +72,32 @@ func TestLoadOrCreateSecretEnvironmentBypassesFilesystem(t *testing.T) {
 	}
 	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
 		t.Fatalf("environment secret touched data directory: %v", err)
+	}
+}
+
+func TestLoadOrCreateSecretRefusesExistingDatabaseWithoutKey(t *testing.T) {
+	t.Setenv("KB_SECRET", "")
+	dataDir := t.TempDir()
+	databasePath := filepath.Join(dataDir, "kb.db")
+	wantDatabase := []byte("existing database placeholder")
+	if err := os.WriteFile(databasePath, wantDatabase, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOrCreateSecret(dataDir); err == nil ||
+		!strings.Contains(err.Error(), "restore the original secret file") ||
+		!strings.Contains(err.Error(), "KB_SECRET") {
+		t.Fatalf("missing key beside existing database error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "secret")); !os.IsNotExist(err) {
+		t.Fatalf("missing key refusal published a secret: %v", err)
+	}
+	if got, err := os.ReadFile(databasePath); err != nil || !bytes.Equal(got, wantDatabase) {
+		t.Fatalf("database changed during key refusal: %q, %v", got, err)
+	}
+
+	t.Setenv("KB_SECRET", "restored-external-secret")
+	if got, err := LoadOrCreateSecret(dataDir); err != nil || string(got) != "restored-external-secret" {
+		t.Fatalf("external restore key = %q, %v", got, err)
 	}
 }
 

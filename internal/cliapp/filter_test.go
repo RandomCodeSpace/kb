@@ -51,17 +51,3 @@ func TestListSearchAndTagFiltersLocal(t *testing.T) {
 		t.Fatalf("blank tag: code=%d stderr=%q", code, errS)
 	}
 }
-
-func TestListSearchAndTagFiltersRemote(t *testing.T) {
-	remoteEnv(t)
-	seedSearchBoard(t)
-
-	assertListTitles(t, []string{"Fix login timeout", "Rotate auth keys"}, "--search", "auth")
-	assertListTitles(t, []string{"Fix login timeout"}, "--tag", "auth", "--tag", "bug")
-	assertListTitles(t, []string{"Rotate auth keys"}, "--tag", "env::prod")
-	assertListTitles(t, []string{"Rotate auth keys"}, "--search", "auth", "--tag", "auth", "--status", "doing")
-
-	if _, errS, code := runCmd(t, "list", "--tag", " "); code != 1 || !strings.Contains(errS, "400") {
-		t.Fatalf("remote blank tag: code=%d stderr=%q", code, errS)
-	}
-}

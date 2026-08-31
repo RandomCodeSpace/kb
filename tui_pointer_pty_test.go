@@ -188,7 +188,12 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	if err := os.MkdirAll(data, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(filepath.Join(data, "kb.db"), nil)
+	t.Setenv("KB_SECRET", "")
+	secret, err := store.LoadOrCreateSecret(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(data, "kb.db"), secret)
 	if err != nil {
 		t.Fatal(err)
 	}

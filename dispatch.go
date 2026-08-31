@@ -22,7 +22,6 @@ import (
 // handled separately because it depends on whether stdin and stdout are TTYs.
 var subcommands = map[string]func(args []string) error{
 	"mcp":     runMCP,
-	"serve":   runWebServer,
 	"tui":     runTUI,
 	"version": runVersion,
 }
@@ -42,6 +41,11 @@ type rootUsageError struct{ message string }
 
 func (e *rootUsageError) Error() string { return e.message }
 
+type commandFlagError struct{ err error }
+
+func (e *commandFlagError) Error() string { return e.err.Error() }
+func (e *commandFlagError) Unwrap() error { return e.err }
+
 // runRoot handles only the commandless surface. It never opens the data store
 // when either standard stream is non-interactive.
 func runRoot(args []string) error {
@@ -50,7 +54,7 @@ func runRoot(args []string) error {
 			fmt.Fprint(rootStdout, rootUsageText)
 			return nil
 		}
-		return &rootUsageError{message: "root flags are no longer accepted; use `kb serve --port ... --data ... --log ...` for the optional API server"}
+		return &rootUsageError{message: "root flags are not accepted; use `kb tui --data ...` or pass `--data` to a task command"}
 	}
 	if !stdinIsTerminal() || !stdoutIsTerminal() {
 		fmt.Fprint(rootStdout, rootUsageText)
@@ -61,7 +65,7 @@ func runRoot(args []string) error {
 
 // dispatch runs os.Args[1] as a subcommand when one is named, reporting
 // whether it handled the invocation. Unknown subcommands exit with an error
-// so typos never silently start the web server.
+// so typos never silently start another mode.
 func dispatch() bool {
 	handled, code := dispatchArgs(os.Args[1:], os.Stderr)
 	if code != 0 {
@@ -86,7 +90,7 @@ func dispatchArgs(args []string, stderr io.Writer) (handled bool, exitCode int) 
 		return true, 2
 	}
 	if err := fn(args[1:]); err != nil {
-		var flagErr *webFlagError
+		var flagErr *commandFlagError
 		if errors.As(err, &flagErr) {
 			if errors.Is(flagErr, flag.ErrHelp) {
 				return true, 0
@@ -185,7 +189,7 @@ func versionString(info *debug.BuildInfo, ok bool) string {
 
 // defaultBoardUser is the single board namespace every local surface (CLI,
 // TUI, MCP) operates on. The --user/KB_USER selection was removed; the store
-// and the HTTP wire API keep their user parameter for kb serve.
+// keeps its user parameter for internal namespace compatibility.
 const defaultBoardUser = "default"
 
 // runMCP serves the board over MCP stdio: kb mcp [--data DIR].
@@ -193,16 +197,18 @@ func runMCP(args []string) error {
 	return runMCPWithFlagOutput(args, os.Stderr)
 }
 
-// runMCPWithFlagOutput keeps flag failures returnable (kb serve does the same)
-// so an unknown flag is a testable usage error instead of a process exit.
+// runMCPWithFlagOutput keeps flag failures returnable so an unknown flag is a
+// testable usage error instead of a process exit.
 func runMCPWithFlagOutput(args []string, output io.Writer) error {
 	fs := flag.NewFlagSet("kb mcp", flag.ContinueOnError)
 	fs.SetOutput(output)
 	dataDir := fs.String("data", defaultDataDir(), "board storage directory (env KB_DATA)")
 	if err := fs.Parse(args); err != nil {
-		return &webFlagError{err: err}
+		return &commandFlagError{err: err}
 	}
-	return mcpRun(*dataDir, defaultBoardUser)
+	info, ok := readBuildInfo()
+	version, _, _ := versionParts(info, ok)
+	return mcpRun(*dataDir, defaultBoardUser, version)
 }
 
 // defaultDataDir resolves the board storage directory: KB_DATA if set, else

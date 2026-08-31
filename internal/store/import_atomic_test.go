@@ -10,7 +10,8 @@ import (
 func TestAddTaskWithImportLinkIsAtomicAndDeletionKeepsProvenance(t *testing.T) {
 	s := newStore(t)
 	link := ImportLink{Source: "primary", Kind: "github", ExternalKey: "github:primary@example.test/acme/kb#93", Link: "github#93", URL: "https://example.test/acme/kb/issues/93", Title: "Imported"}
-	created, err := s.AddTaskWithImportLink("alice", board.Task{Title: "Imported", Tags: []string{"link::github#93", "import::" + link.ExternalKey}}, link)
+	baseline := NewImportBaseline("Imported upstream", "original body", "2026-08-31T00:00:00Z")
+	created, err := s.AddTaskWithImportLink("alice", board.Task{Title: "Imported", Tags: []string{"link::github#93", "import::" + link.ExternalKey}}, link, baseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,12 +28,42 @@ func TestAddTaskWithImportLinkIsAtomicAndDeletionKeepsProvenance(t *testing.T) {
 
 	bad := link
 	bad.URL = "bad\nurl"
-	if _, err := s.AddTaskWithImportLink("alice", board.Task{Title: "Must roll back"}, bad); err == nil {
+	if _, err := s.AddTaskWithImportLink("alice", board.Task{Title: "Must roll back"}, bad, baseline); err == nil {
 		t.Fatal("invalid provenance created a task")
 	}
 	tasks, err := s.ListTasks("alice", "")
 	if err != nil || len(tasks) != 0 {
 		t.Fatalf("rolled-back tasks = %+v, %v", tasks, err)
+	}
+	stored, present, err := s.ImportBaseline("alice", link.ExternalKey)
+	if err != nil || !present || stored != baseline {
+		t.Fatalf("atomic baseline = %+v, %t, %v", stored, present, err)
+	}
+	later := NewImportBaseline("Later upstream", "changed body", "2026-09-01T00:00:00Z")
+	if _, err := s.AddTaskWithImportLink("alice", board.Task{Title: "Reimported"}, link, later); err != nil {
+		t.Fatal(err)
+	}
+	stored, present, err = s.ImportBaseline("alice", link.ExternalKey)
+	if err != nil || !present || stored != baseline {
+		t.Fatalf("reimport replaced established baseline = %+v, %t, %v", stored, present, err)
+	}
+}
+
+func TestAddTaskWithImportLinkRollsBackWhenBaselineWriteFails(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.db.Exec(`CREATE TRIGGER fail_import_baseline BEFORE UPDATE OF baseline_title ON import_links BEGIN SELECT RAISE(ABORT, 'baseline failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	link := ImportLink{Source: "primary", Kind: "github", ExternalKey: "github:primary@example.test/acme/kb#94", Link: "github#94", URL: "https://example.test/acme/kb/issues/94", Title: "Imported"}
+	baseline := NewImportBaseline("Imported", "body", "2026-08-31T00:00:00Z")
+	if _, err := s.AddTaskWithImportLink("alice", board.Task{Title: "Must roll back"}, link, baseline); err == nil {
+		t.Fatal("baseline failure accepted the import")
+	}
+	if tasks, err := s.ListTasks("alice", ""); err != nil || len(tasks) != 0 {
+		t.Fatalf("baseline failure left tasks = %+v, %v", tasks, err)
+	}
+	if found, err := s.ImportedAs("alice", []string{link.ExternalKey}); err != nil || len(found) != 0 {
+		t.Fatalf("baseline failure left provenance = %+v, %v", found, err)
 	}
 }
 
@@ -116,13 +147,16 @@ func TestImportAtomicOperationsRejectMissingAndInvalidState(t *testing.T) {
 	}
 
 	link := ImportLink{Source: "primary", Kind: "github", ExternalKey: "qualified", Link: "github#1", URL: "https://example.test/owner/repo/issues/1", Title: "issue"}
-	if _, err := s.AddTaskWithImportLink("alice", board.Task{Title: "issue", Status: board.Status("invalid")}, link); err == nil {
+	if _, err := s.AddTaskWithImportLink("alice", board.Task{Title: "issue", Status: board.Status("invalid")}, link, valid); err == nil {
 		t.Fatal("invalid task status accepted")
+	}
+	if _, err := s.AddTaskWithImportLink("alice", board.Task{Title: "issue"}, link, ImportBaseline{}); err == nil {
+		t.Fatal("missing import baseline accepted")
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AddTaskWithImportLink("alice", board.Task{Title: "issue"}, link); err == nil {
+	if _, err := s.AddTaskWithImportLink("alice", board.Task{Title: "issue"}, link, valid); err == nil {
 		t.Fatal("closed store accepted atomic import")
 	}
 	if _, _, err := s.CreateImportBaseline("alice", "qualified", valid); err == nil {

@@ -1,6 +1,5 @@
-// Package ai implements kb's model probe, skill runner, and board tools.
-// It depends on the store directly so local UIs do not need an HTTP
-// server to use AI features.
+// Package ai implements kb's model probe, skill runner, and board tools over
+// the local store.
 package ai
 
 import (
@@ -26,9 +25,8 @@ const (
 	ToolCallRequiredMessage = "model must support tool calling"
 )
 
-// Error carries the caller-facing status category without depending on the
-// server package. HTTP adapters may use Code directly; local callers can use
-// Error.As and Error.Unwrap without standing up a server.
+// Error carries a caller-facing category. Code retains status-shaped values
+// for compatibility; local callers use Error.As and Error.Unwrap.
 type Error struct {
 	Code    int
 	Message string

@@ -313,6 +313,32 @@ func TestBaseImpactInvalidatesLazyDimmedBase(t *testing.T) {
 	assertPerformanceColdOracleParity(t, model)
 }
 
+func TestBaseImpactReusesDimmedCardArtifacts(t *testing.T) {
+	model := performanceModel(17, "", 120, 36)
+	model, _ = model.updateWithCommands(tea.KeyPressMsg{Code: '?', Text: "?"})
+	model, _ = model.updateWithCommands(tea.KeyPressMsg{Code: '?', Text: "?"})
+
+	model.rebuildRenderPlan(renderImpactAll)
+	beforeOpen := model.RenderPlanStats()
+	model, _ = model.updateWithCommands(tea.KeyPressMsg{Code: '?', Text: "?"})
+	afterOpen := model.RenderPlanStats()
+
+	if hits := afterOpen.NavigationArtifactHits - beforeOpen.NavigationArtifactHits; hits == 0 {
+		t.Fatal("post-invalidation dimmed base reused no card artifacts")
+	}
+	if misses := afterOpen.NavigationArtifactMisses - beforeOpen.NavigationArtifactMisses; misses != 0 {
+		t.Fatalf("post-invalidation dimmed base artifact misses = %d, want zero", misses)
+	}
+	if rendered := afterOpen.RenderedCardRecords - beforeOpen.RenderedCardRecords; rendered != 0 {
+		t.Fatalf("post-invalidation dimmed base rendered cards = %d, want zero", rendered)
+	}
+	if afterOpen.DimmedBaseBuilds != beforeOpen.DimmedBaseBuilds+1 {
+		t.Fatalf("post-invalidation dim base builds = %d, want %d",
+			afterOpen.DimmedBaseBuilds, beforeOpen.DimmedBaseBuilds+1)
+	}
+	assertPerformanceColdOracleParity(t, model)
+}
+
 func TestCachedOverlayPublicationRejectsPreviousSnapshotRoute(t *testing.T) {
 	model := performanceModel(17, "", 120, 36)
 	model, _ = model.updateWithCommands(tea.KeyPressMsg{Code: '?', Text: "?"})

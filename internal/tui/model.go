@@ -1462,13 +1462,11 @@ func (b boardRenderBase) ownedBytesEstimate() uint64 {
 func (m Model) renderBoardBase(dimmed bool) boardRenderBase {
 	backdrop := m
 	if dimmed {
-		// Retain the normal board artifacts only. Dimmed bases already have their
-		// own bounded retained frame and are rendered lazily on overlay open.
-		backdrop.cardArtifacts = nil
 		if styles := m.themeStyles().Dimmed; styles != nil {
 			backdrop.styles = styles
 		}
-	} else if backdrop.cardArtifacts != nil {
+	}
+	if backdrop.cardArtifacts != nil {
 		backdrop.cardArtifacts.beginPass()
 	}
 	base := boardRenderBase{pointer: m.pointerState}

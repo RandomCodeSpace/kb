@@ -5,6 +5,30 @@ package_threshold="${GO_PACKAGE_COVERAGE_THRESHOLD:-95.0}"
 total_threshold="${GO_TOTAL_COVERAGE_THRESHOLD:-96.4}"
 cleanup_profile=0
 
+case "${1:-}" in
+  --full)
+    mode=full
+    shift
+    [ "$#" -eq 0 ] || {
+      echo 'coverage: --full does not accept package arguments' >&2
+      exit 2
+    }
+    set -- ./...
+    ;;
+  --packages)
+    mode=selected
+    shift
+    [ "$#" -gt 0 ] || {
+      echo 'coverage: --packages requires at least one package' >&2
+      exit 2
+    }
+    ;;
+  *)
+    echo 'coverage: usage: check-go-coverage.sh --full | --packages PACKAGE...' >&2
+    exit 2
+    ;;
+esac
+
 if [ -n "${GO_COVERAGE_PROFILE:-}" ]; then
   profile="$GO_COVERAGE_PROFILE"
   mkdir -p -- "$(dirname "$profile")"
@@ -32,24 +56,38 @@ validate_threshold() {
 }
 
 validate_threshold GO_PACKAGE_COVERAGE_THRESHOLD "$package_threshold"
-validate_threshold GO_TOTAL_COVERAGE_THRESHOLD "$total_threshold"
+if [ "$mode" = full ]; then
+  validate_threshold GO_TOTAL_COVERAGE_THRESHOLD "$total_threshold"
+fi
 
 : "${CGO_ENABLED:=0}"
 export CGO_ENABLED
 
-if helper_test_output="$(go test \
-  ./internal/tui/testdata/generate_web_lower_fixture.go \
-  ./internal/tui/testdata/generate_web_lower_fixture_test.go \
-  -count=1)"; then
+if package_list="$(go list -buildvcs=false "$@")"; then
   :
 else
-  status=$?
-  printf '%s\n' "$helper_test_output"
-  exit "$status"
+  exit $?
 fi
-printf '%s\n' "$helper_test_output"
 
-if test_output="$(go test ./... -count=1 -covermode=atomic -coverprofile="$profile")"; then
+run_helper=0
+if [ "$mode" = full ] || printf '%s\n' "$package_list" | grep -Fx 'github.com/RandomCodeSpace/kb/internal/tui' >/dev/null; then
+  run_helper=1
+fi
+if [ "$run_helper" -eq 1 ]; then
+  if helper_test_output="$(go test -buildvcs=false \
+    ./internal/tui/testdata/generate_web_lower_fixture.go \
+    ./internal/tui/testdata/generate_web_lower_fixture_test.go \
+    -count=1)"; then
+    :
+  else
+    status=$?
+    printf '%s\n' "$helper_test_output"
+    exit "$status"
+  fi
+  printf '%s\n' "$helper_test_output"
+fi
+
+if test_output="$(go test -buildvcs=false "$@" -count=1 -covermode=atomic -coverprofile="$profile")"; then
   :
 else
   status=$?
@@ -58,11 +96,6 @@ else
 fi
 printf '%s\n' "$test_output"
 
-if package_list="$(go list ./...)"; then
-  :
-else
-  exit $?
-fi
 if ! printf '%s\n' "$test_output" | awk -v required="$package_threshold" -v expected_packages="$package_list" '
   BEGIN {
     expected_count = split(expected_packages, expected, "\n")
@@ -120,6 +153,12 @@ if ! printf '%s\n' "$test_output" | awk -v required="$package_threshold" -v expe
   }
 '; then
   exit 1
+fi
+
+if [ "$mode" = selected ]; then
+  package_count="$(printf '%s\n' "$package_list" | awk 'NF { count++ } END { print count + 0 }')"
+  printf 'Selected Go package coverage passed: %s package(s)\n' "$package_count"
+  exit 0
 fi
 
 if cover_output="$(go tool cover -func="$profile")"; then

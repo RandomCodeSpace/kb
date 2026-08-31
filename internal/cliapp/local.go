@@ -15,8 +15,7 @@ import (
 // dbFile is the SQLite database filename inside the data directory.
 const dbFile = "kb.db"
 
-// defaultDataDir mirrors the server default: $KB_DATA, else
-// ~/.local/share/kb.
+// defaultDataDir resolves $KB_DATA, else ~/.local/share/kb.
 func defaultDataDir() (string, error) {
 	if v := os.Getenv("KB_DATA"); v != "" {
 		return v, nil
@@ -38,7 +37,7 @@ type localBackend struct {
 // openLocal opens (creating if needed) <dataDir>/kb.db with the shared
 // secret and seeds it from any legacy per-user markdown boards in dataDir
 // (idempotent; the store never reimports a user).
-func openLocal(user, dataDir string, stderr io.Writer) (backend, error) {
+func openLocal(user, dataDir string, stderr io.Writer) (*localBackend, error) {
 	st, err := openLocalStore(dataDir, stderr)
 	if err != nil {
 		return nil, err
@@ -89,7 +88,7 @@ func OpenLocalStore(dataDir string, stderr io.Writer) (*store.Store, error) {
 // warnOrphanedNamespaces prints one stderr line when the database still holds
 // tasks under a namespace other than defaultUser. The --user/KB_USER surface
 // is gone, so the local commands can no longer reach those rows; nothing is
-// deleted and kb serve still serves them.
+// deleted.
 func warnOrphanedNamespaces(st *store.Store, stderr io.Writer) {
 	users, err := st.Users()
 	if err != nil {

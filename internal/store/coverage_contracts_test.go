@@ -105,7 +105,7 @@ func TestSanitizeUserAcceptsCanonicalIdentityAndRejectsUnsafeValues(t *testing.T
 	}
 }
 
-func TestBoardExistenceConditionsAndReceiptWrappers(t *testing.T) {
+func TestHasBoardTracksLocalBoardState(t *testing.T) {
 	s := newStore(t)
 	const user = "coverage-user"
 
@@ -113,18 +113,6 @@ func TestBoardExistenceConditionsAndReceiptWrappers(t *testing.T) {
 	if err != nil || exists {
 		t.Fatalf("HasBoard(empty) = %v, %v, want false, nil", exists, err)
 	}
-	if revision, err := s.CheckBoardWriteCondition(user, BoardWriteCondition{}); err != nil || revision != 0 {
-		t.Fatalf("unconditional condition = revision %d, %v", revision, err)
-	}
-	if _, err := s.CheckBoardWriteCondition(user, BoardWriteCondition{Present: true, Star: true}); err == nil {
-		t.Fatal("wildcard condition accepted an absent board")
-	} else {
-		var conflict *RevisionConflictError
-		if !errors.As(err, &conflict) || conflict.CurrentRevision != 0 {
-			t.Fatalf("wildcard absent error = %v, want revision conflict at 0", err)
-		}
-	}
-
 	b := board.Board{Title: "Coverage", Tasks: []board.Task{{Title: "one", Status: board.StatusTodo}}}
 	if err := s.ReplaceBoard(user, b); err != nil {
 		t.Fatalf("ReplaceBoard: %v", err)
@@ -132,37 +120,6 @@ func TestBoardExistenceConditionsAndReceiptWrappers(t *testing.T) {
 	exists, err = s.HasBoard(user)
 	if err != nil || !exists {
 		t.Fatalf("HasBoard(saved) = %v, %v, want true, nil", exists, err)
-	}
-	revision, err := s.CheckBoardWriteCondition(user, BoardWriteCondition{Present: true, Star: true})
-	if err != nil || revision <= 0 {
-		t.Fatalf("wildcard condition = revision %d, %v, want positive revision, nil", revision, err)
-	}
-	if _, err := s.CheckBoardWriteCondition(user, BoardWriteCondition{Present: true, Revisions: []int64{0, revision}}); err != nil {
-		t.Fatalf("revision list rejected current revision: %v", err)
-	}
-	if _, err := s.CheckBoardWriteCondition(user, BoardWriteCondition{Present: true, Revisions: []int64{9}}); err == nil {
-		t.Fatal("revision condition accepted a stale revision")
-	}
-
-	b.Tasks[0].Title = "two"
-	ids, committed, replayed, err := s.ReplaceBoardIfExistsWithReceipt(user, b, nil, "operation-1", "hash-1")
-	if err != nil || replayed || committed <= revision || len(ids) != 1 {
-		t.Fatalf("ReplaceBoardIfExistsWithReceipt = ids %v revision %d replayed %v err %v", ids, committed, replayed, err)
-	}
-	ids2, committed2, replayed, err := s.ReplaceBoardIfExistsWithReceipt(user, b, nil, "operation-1", "hash-1")
-	if err != nil || !replayed || committed2 != committed || strings.Join(ids2, ",") != strings.Join(ids, ",") {
-		t.Fatalf("receipt replay = ids %v revision %d replayed %v err %v", ids2, committed2, replayed, err)
-	}
-}
-
-func TestBoardWriteReceiptRejectsCorruptStoredTaskIDs(t *testing.T) {
-	s := newStore(t)
-	if _, err := s.db.Exec(`INSERT INTO board_write_receipts(user, operation_id, request_hash, task_ids, revision) VALUES (?, ?, ?, ?, ?)`,
-		"u", "op", "hash", "not-json", 4); err != nil {
-		t.Fatalf("seed corrupt receipt: %v", err)
-	}
-	if _, found, err := s.BoardWriteReceipt("u", "op"); err == nil || found {
-		t.Fatalf("BoardWriteReceipt(corrupt) = found %v err %v, want false and decode error", found, err)
 	}
 }
 
@@ -204,24 +161,10 @@ func TestStoreMethodsReturnErrorsAfterDatabaseClose(t *testing.T) {
 		{name: "ForgePAT", call: func() error { _, _, _, err := s.ForgePAT("u", "primary"); return err }},
 		{name: "DeleteTombstone", call: func() error { return s.DeleteTombstone("u", "id") }},
 		{name: "HasBoard", call: func() error { _, err := s.HasBoard("u"); return err }},
-		{name: "CheckBoardWriteCondition", call: func() error { _, err := s.CheckBoardWriteCondition("u", BoardWriteCondition{}); return err }},
 		{name: "Board", call: func() error { _, err := s.Board("u"); return err }},
 		{name: "ReadBoardSnapshot", call: func() error { _, err := s.ReadBoardSnapshot("u"); return err }},
-		{name: "DeleteBoard", call: func() error { return s.DeleteBoard("u") }},
 		{name: "ReplaceBoard", call: func() error { return s.ReplaceBoard("u", board.Board{}) }},
 		{name: "ReplaceBoardWithTaskIDs", call: func() error { _, err := s.ReplaceBoardWithTaskIDs("u", board.Board{}); return err }},
-		{name: "ReplaceBoardWithTaskIDsAndRevision", call: func() error { _, _, err := s.ReplaceBoardWithTaskIDsAndRevision("u", board.Board{}); return err }},
-		{name: "ReplaceBoardIfRevision", call: func() error { _, _, err := s.ReplaceBoardIfRevision("u", board.Board{}, nil, 0); return err }},
-		{name: "ReplaceBoardIfExists", call: func() error { _, _, err := s.ReplaceBoardIfExists("u", board.Board{}, nil); return err }},
-		{name: "ReplaceBoardIfRevisionWithReceipt", call: func() error {
-			_, _, _, err := s.ReplaceBoardIfRevisionWithReceipt("u", board.Board{}, nil, 0, "op", "hash")
-			return err
-		}},
-		{name: "ReplaceBoardIfExistsWithReceipt", call: func() error {
-			_, _, _, err := s.ReplaceBoardIfExistsWithReceipt("u", board.Board{}, nil, "op", "hash")
-			return err
-		}},
-		{name: "BoardWriteReceipt", call: func() error { _, _, err := s.BoardWriteReceipt("u", "op"); return err }},
 		{name: "AddTask", call: func() error { _, err := s.AddTask("u", board.Task{Title: "task"}); return err }},
 		{name: "UpdateTask", call: func() error { _, err := s.UpdateTask("u", "id", TaskPatch{}); return err }},
 		{name: "UpdateAndMoveTask", call: func() error { _, err := s.UpdateAndMoveTask("u", "id", TaskPatch{}, nil, nil, nil); return err }},
@@ -370,6 +313,42 @@ func TestOpenRejectsInvalidPathsAndSchemas(t *testing.T) {
 	}
 	if _, err := Open(path, []byte("secret")); err == nil {
 		t.Fatal("Open accepted a nonnumeric schema version")
+	}
+
+	for _, rawVersion := range []string{"-1", "not-a-number", "01", strconv.Itoa(len(migrations) + 1)} {
+		t.Run("ledger_"+rawVersion, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "kb.db")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO meta(k, v) VALUES ('schema_version', ?)`, rawVersion); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(path, []byte("secret")); err == nil ||
+				!strings.Contains(err.Error(), "newer kb binary or restore a compatible backup") {
+				t.Fatalf("Open schema version %q error = %v", rawVersion, err)
+			}
+			db, err = sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var got string
+			if err := db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&got); err != nil || got != rawVersion {
+				t.Fatalf("rejected ledger changed from %q to %q: %v", rawVersion, got, err)
+			}
+			var taskTable int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'`).Scan(&taskTable); err != nil || taskTable != 0 {
+				t.Fatalf("rejected ledger ran migrations: tasks=%d err=%v", taskTable, err)
+			}
+		})
 	}
 }
 
@@ -588,13 +567,7 @@ func TestQueryMethodsReportDriverIteratorFailures(t *testing.T) {
 		{name: "list tasks", call: func(s *Store) error { _, err := s.ListTasks("u", ""); return err }},
 		{name: "resolve ID", call: func(s *Store) error { _, err := resolveID(s.db, "u", "prefix"); return err }},
 		{name: "legacy identity loader", call: func(s *Store) error {
-			_, _, err := s.replaceBoardConditional("u", board.Board{}, nil, BoardWriteCondition{})
-			return err
-		}},
-		{name: "canonical identity loader", call: func(s *Store) error {
-			ids := []*string{}
-			_, _, err := s.replaceBoardConditional("u", board.Board{}, ids, BoardWriteCondition{})
-			return err
+			return s.ReplaceBoard("u", board.Board{})
 		}},
 	}
 	for _, tt := range tests {
@@ -615,9 +588,6 @@ func TestCorruptTablesExerciseTransactionalErrorBoundaries(t *testing.T) {
 		{name: "snapshot tasks", table: "tasks", call: func(s *Store) error { _, err := s.ReadBoardSnapshot("u"); return err }},
 		{name: "snapshot meta", table: "meta", call: func(s *Store) error { _, err := s.ReadBoardSnapshot("u"); return err }},
 		{name: "snapshot revisions", table: "board_revisions", call: func(s *Store) error { _, err := s.ReadBoardSnapshot("u"); return err }},
-		{name: "delete tasks", table: "tasks", call: func(s *Store) error { return s.DeleteBoard("u") }},
-		{name: "delete title", table: "meta", call: func(s *Store) error { return s.DeleteBoard("u") }},
-		{name: "condition revisions", table: "board_revisions", call: func(s *Store) error { _, err := s.CheckBoardWriteCondition("u", BoardWriteCondition{}); return err }},
 		{name: "replace tasks", table: "tasks", call: func(s *Store) error { return s.ReplaceBoard("u", board.Board{Title: "x"}) }},
 		{name: "replace meta", table: "meta", call: func(s *Store) error { return s.ReplaceBoard("u", board.Board{Title: "x"}) }},
 		{name: "add tasks", table: "tasks", call: func(s *Store) error { _, err := s.AddTask("u", board.Task{Title: "x"}); return err }},
@@ -668,45 +638,12 @@ func TestForgeSourcesRejectCorruptCreationTimestamp(t *testing.T) {
 	}
 }
 
-func TestReplaceBoardRejectsCanonicalIdentityMismatches(t *testing.T) {
-	s := newStore(t)
-	initial := board.Board{Title: "identity", Tasks: []board.Task{{Title: "one", Status: board.StatusTodo}}}
-	ids, revision, err := s.ReplaceBoardWithTaskIDsAndRevision("u", initial)
-	if err != nil {
-		t.Fatalf("seed board: %v", err)
-	}
-	id := ids[0]
-	unknown := "00000000-0000-4000-8000-000000000001"
-	bad := "not-a-uuid"
-
-	tests := []struct {
-		name string
-		b    board.Board
-		ids  []*string
-	}{
-		{name: "length mismatch", b: initial, ids: []*string{}},
-		{name: "malformed UUID", b: initial, ids: []*string{&bad}},
-		{name: "unknown UUID", b: initial, ids: []*string{&unknown}},
-		{name: "duplicate UUID", b: board.Board{Tasks: []board.Task{{Title: "one", Status: board.StatusTodo}, {Title: "two", Status: board.StatusTodo}}}, ids: []*string{&id, &id}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, _, err := s.ReplaceBoardIfRevision("u", tt.b, tt.ids, revision); !errors.Is(err, ErrInvalidTaskIDs) {
-				t.Fatalf("ReplaceBoardIfRevision error = %v, want ErrInvalidTaskIDs", err)
-			}
-		})
-	}
-}
-
 func TestReplaceBoardReportsCorruptExistingIdentityTimes(t *testing.T) {
 	for _, tt := range []struct {
 		name, column string
-		canonical    bool
 	}{
 		{name: "legacy created time", column: "created_at"},
 		{name: "legacy moved time", column: "moved_at"},
-		{name: "canonical created time", column: "created_at", canonical: true},
-		{name: "canonical moved time", column: "moved_at", canonical: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newStore(t)
@@ -717,11 +654,7 @@ func TestReplaceBoardReportsCorruptExistingIdentityTimes(t *testing.T) {
 			if _, err := s.db.Exec("UPDATE tasks SET "+tt.column+" = 'bad' WHERE id = ?", seed.ID); err != nil {
 				t.Fatal(err)
 			}
-			var ids []*string
-			if tt.canonical {
-				ids = []*string{&seed.ID}
-			}
-			if _, _, err := s.ReplaceBoardIfRevision("u", board.Board{Tasks: []board.Task{{Title: "one", Status: board.StatusTodo}}}, ids, 0); err == nil {
+			if err := s.ReplaceBoard("u", board.Board{Tasks: []board.Task{{Title: "one", Status: board.StatusTodo}}}); err == nil {
 				t.Fatal("replacement accepted a corrupt identity timestamp")
 			}
 		})
@@ -796,41 +729,6 @@ func TestReplaceBoardReportsTransactionalWriteFailures(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestConditionalReplacementReportsRevisionAndReceiptFailures(t *testing.T) {
-	for _, tt := range []struct {
-		name, trigger string
-		receipt       bool
-	}{
-		{name: "claim revision", trigger: `CREATE TRIGGER coverage_fail_revision BEFORE UPDATE ON board_revisions BEGIN SELECT RAISE(ABORT, 'revision failed'); END`},
-		{name: "insert receipt", trigger: `CREATE TRIGGER coverage_fail_receipt BEFORE INSERT ON board_write_receipts BEGIN SELECT RAISE(ABORT, 'receipt failed'); END`, receipt: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			s := newStore(t)
-			if err := s.ReplaceBoard("u", board.Board{Title: "old"}); err != nil {
-				t.Fatal(err)
-			}
-			mustExecCoverage(t, s, tt.trigger)
-			var err error
-			if tt.receipt {
-				_, _, _, err = s.ReplaceBoardIfRevisionWithReceipt("u", board.Board{Title: "new"}, nil, 0, "op", "hash")
-			} else {
-				_, _, err = s.ReplaceBoardIfRevision("u", board.Board{Title: "new"}, nil, 0)
-			}
-			if err == nil {
-				t.Fatal("conditional replacement returned nil error")
-			}
-		})
-	}
-
-	t.Run("read receipt", func(t *testing.T) {
-		s := newStore(t)
-		mustExecCoverage(t, s, `DROP TABLE board_write_receipts`)
-		if _, _, _, err := s.ReplaceBoardIfRevisionWithReceipt("u", board.Board{}, nil, 0, "op", "hash"); err == nil {
-			t.Fatal("replacement returned nil error")
-		}
-	})
 }
 
 func TestSearchAndImportWritesReportSQLiteFailures(t *testing.T) {
@@ -1049,57 +947,6 @@ func TestStoreQueriesRejectUnscannableRows(t *testing.T) {
 	}
 }
 
-func TestConditionalReceiptRejectsInvalidCallShapesAndBrokenState(t *testing.T) {
-	s := newStore(t)
-	if _, _, _, err := s.replaceBoardConditionalReceipt("u", board.Board{}, nil, BoardWriteCondition{}, "op", "hash", false); !errors.Is(err, ErrInvalidTaskIDs) {
-		t.Fatalf("operation without receipt permission = %v", err)
-	}
-	if _, _, _, err := s.replaceBoardConditionalReceipt("u", board.Board{}, nil, BoardWriteCondition{}, "", "", true); !errors.Is(err, ErrInvalidTaskIDs) {
-		t.Fatalf("receipt permission without operation = %v", err)
-	}
-	mustExecCoverage(t, s, `INSERT INTO board_write_receipts(user, operation_id, request_hash, task_ids, revision) VALUES ('u', 'mismatch', 'stored', '[]', 1)`)
-	if _, _, _, err := s.ReplaceBoardIfRevisionWithReceipt("u", board.Board{}, nil, 0, "mismatch", "request"); !errors.Is(err, ErrInvalidTaskIDs) {
-		t.Fatalf("mismatched receipt = %v", err)
-	}
-	if receipt, found, err := s.BoardWriteReceipt("u", "mismatch"); err != nil || !found || receipt.RequestHash != "stored" {
-		t.Fatalf("BoardWriteReceipt = %+v, %v, %v", receipt, found, err)
-	}
-}
-
-func TestConditionalReplacementReportsAdditionalDatabaseFailures(t *testing.T) {
-	t.Run("initialize revision", func(t *testing.T) {
-		s := newStore(t)
-		mustExecCoverage(t, s, `DROP TABLE board_revisions`)
-		if _, _, err := s.ReplaceBoardIfRevision("u", board.Board{}, nil, 0); err == nil {
-			t.Fatal("replacement returned nil error")
-		}
-	})
-
-	t.Run("inspect board existence", func(t *testing.T) {
-		s := newStore(t)
-		mustExecCoverage(t, s, `DROP TABLE tasks`)
-		if _, _, err := s.ReplaceBoardIfExists("u", board.Board{}, nil); err == nil {
-			t.Fatal("replacement returned nil error")
-		}
-	})
-
-	t.Run("read committed revision", func(t *testing.T) {
-		s := newStore(t)
-		if err := s.ReplaceBoard("u", board.Board{Title: "old"}); err != nil {
-			t.Fatal(err)
-		}
-		snapshot, err := s.ReadBoardSnapshot("u")
-		if err != nil {
-			t.Fatal(err)
-		}
-		mustExecCoverage(t, s, `DROP TRIGGER board_revision_title_au`)
-		mustExecCoverage(t, s, `CREATE TRIGGER coverage_remove_revision AFTER UPDATE ON meta BEGIN DELETE FROM board_revisions WHERE user = 'u'; END`)
-		if _, _, err := s.ReplaceBoardIfRevision("u", board.Board{Title: "new"}, nil, snapshot.Revision); err == nil {
-			t.Fatal("replacement returned nil error")
-		}
-	})
-}
-
 func TestSettingsAndForgeWritesReportDatabaseAndEntropyFailures(t *testing.T) {
 	t.Run("AI settings read", func(t *testing.T) {
 		s := newStore(t)
@@ -1238,57 +1085,7 @@ func TestPatchTaskMapsMissingTask(t *testing.T) {
 	}
 }
 
-func TestAdditionalBoardDatabaseFailuresAreReported(t *testing.T) {
-	t.Run("unconditional committed revision", func(t *testing.T) {
-		s := newStore(t)
-		if err := s.ReplaceBoard("u", board.Board{Title: "old"}); err != nil {
-			t.Fatal(err)
-		}
-		mustExecCoverage(t, s, `DROP TRIGGER board_revision_title_au`)
-		mustExecCoverage(t, s, `CREATE TRIGGER coverage_remove_unconditional_revision AFTER UPDATE ON meta BEGIN DELETE FROM board_revisions WHERE user = 'u'; END`)
-		if _, _, err := s.ReplaceBoardWithTaskIDsAndRevision("u", board.Board{Title: "new"}); err == nil {
-			t.Fatal("replacement returned nil error")
-		}
-	})
-
-	t.Run("condition revision scan", func(t *testing.T) {
-		s := newStore(t)
-		mustExecCoverage(t, s, `DROP TABLE board_revisions`)
-		mustExecCoverage(t, s, `CREATE TABLE board_revisions (user TEXT PRIMARY KEY, revision INTEGER)`)
-		mustExecCoverage(t, s, `INSERT INTO board_revisions(user, revision) VALUES ('u', NULL)`)
-		if _, err := s.CheckBoardWriteCondition("u", BoardWriteCondition{}); err == nil {
-			t.Fatal("condition accepted an unscannable revision")
-		}
-	})
-
-	t.Run("condition existence query", func(t *testing.T) {
-		s := newStore(t)
-		mustExecCoverage(t, s, `DROP TABLE tasks`)
-		if _, err := s.CheckBoardWriteCondition("u", BoardWriteCondition{Star: true}); err == nil {
-			t.Fatal("condition returned nil error")
-		}
-	})
-
-	t.Run("star conflict revision scan", func(t *testing.T) {
-		s := newStore(t)
-		mustExecCoverage(t, s, `DROP TABLE board_revisions`)
-		mustExecCoverage(t, s, `CREATE TABLE board_revisions (user TEXT PRIMARY KEY, revision INTEGER)`)
-		mustExecCoverage(t, s, `INSERT INTO board_revisions(user, revision) VALUES ('u', NULL)`)
-		if _, _, err := s.ReplaceBoardIfExists("u", board.Board{}, nil); err == nil {
-			t.Fatal("replacement returned nil error")
-		}
-	})
-
-	t.Run("revision condition scan", func(t *testing.T) {
-		s := newStore(t)
-		mustExecCoverage(t, s, `DROP TABLE board_revisions`)
-		mustExecCoverage(t, s, `CREATE TABLE board_revisions (user TEXT PRIMARY KEY, revision INTEGER)`)
-		mustExecCoverage(t, s, `INSERT INTO board_revisions(user, revision) VALUES ('u', NULL)`)
-		if _, _, err := s.ReplaceBoardIfRevision("u", board.Board{}, nil, 0); err == nil {
-			t.Fatal("replacement returned nil error")
-		}
-	})
-
+func TestReplaceBoardRejectsInvalidStatus(t *testing.T) {
 	t.Run("replacement status", func(t *testing.T) {
 		s := newStore(t)
 		err := s.ReplaceBoard("u", board.Board{Tasks: []board.Task{{Title: "bad", Status: board.Status("invalid")}}})
@@ -1299,35 +1096,20 @@ func TestAdditionalBoardDatabaseFailuresAreReported(t *testing.T) {
 }
 
 func TestExistingTaskLoadersRejectUnscannableRows(t *testing.T) {
-	for _, tt := range []struct {
-		name      string
-		canonical bool
-	}{
-		{name: "legacy"},
-		{name: "canonical", canonical: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			s := newStore(t)
-			task, err := s.AddTask("u", board.Task{Title: "task"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			mustExecCoverage(t, s, `PRAGMA ignore_check_constraints = ON`)
-			if _, err := s.db.Exec(`UPDATE tasks SET created_at = NULL WHERE id = ?`, task.ID); err != nil {
-				// NOT NULL remains enforced even when CHECK constraints are ignored.
-				mustExecCoverage(t, s, `DROP TABLE tasks`)
-				mustExecCoverage(t, s, `CREATE TABLE tasks (id TEXT, user TEXT, title TEXT, status TEXT, created_at TEXT, moved_at TEXT)`)
-				mustExecCoverage(t, s, `INSERT INTO tasks(id, user, title, status, created_at, moved_at) VALUES ('00000000-0000-4000-8000-000000000001', 'u', 'task', 'todo', NULL, '2026-01-01T00:00:00Z')`)
-				task.ID = "00000000-0000-4000-8000-000000000001"
-			}
-			var ids []*string
-			if tt.canonical {
-				ids = []*string{&task.ID}
-			}
-			if _, _, err := s.replaceBoardConditional("u", board.Board{Tasks: []board.Task{{Title: "task", Status: board.StatusTodo}}}, ids, BoardWriteCondition{}); err == nil {
-				t.Fatal("replacement accepted an unscannable identity row")
-			}
-		})
+	s := newStore(t)
+	task, err := s.AddTask("u", board.Task{Title: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExecCoverage(t, s, `PRAGMA ignore_check_constraints = ON`)
+	if _, err := s.db.Exec(`UPDATE tasks SET created_at = NULL WHERE id = ?`, task.ID); err != nil {
+		// NOT NULL remains enforced even when CHECK constraints are ignored.
+		mustExecCoverage(t, s, `DROP TABLE tasks`)
+		mustExecCoverage(t, s, `CREATE TABLE tasks (id TEXT, user TEXT, title TEXT, status TEXT, created_at TEXT, moved_at TEXT)`)
+		mustExecCoverage(t, s, `INSERT INTO tasks(id, user, title, status, created_at, moved_at) VALUES ('00000000-0000-4000-8000-000000000001', 'u', 'task', 'todo', NULL, '2026-01-01T00:00:00Z')`)
+	}
+	if err := s.ReplaceBoard("u", board.Board{Tasks: []board.Task{{Title: "task", Status: board.StatusTodo}}}); err == nil {
+		t.Fatal("replacement accepted an unscannable identity row")
 	}
 }
 

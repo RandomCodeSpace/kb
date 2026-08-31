@@ -567,13 +567,8 @@ func TestRestoreAndFullBoardReplacementRemoveTombstones(t *testing.T) {
 				t.Fatalf("RecordTombstone(%s): %v", task.ID, err)
 			}
 		}
-		ids := []*string{&restored.ID}
-		snapshot, err := s.ReadBoardSnapshot("alice")
-		if err != nil {
-			t.Fatalf("ReadBoardSnapshot: %v", err)
-		}
-		if _, _, err := s.ReplaceBoardIfRevision("alice", board.Board{Title: "Board", Tasks: []board.Task{{Title: restored.Title, Status: board.StatusTodo}}}, ids, snapshot.Revision); err != nil {
-			t.Fatalf("ReplaceBoardIfRevision: %v", err)
+		if err := s.ReplaceBoard("alice", board.Board{Title: "Board", Tasks: []board.Task{{Title: restored.Title, Status: board.StatusTodo}}}); err != nil {
+			t.Fatalf("ReplaceBoard: %v", err)
 		}
 		for _, id := range []string{restored.ID, purged.ID} {
 			if got, found, err := s.Tombstone("alice", id); err != nil || found {

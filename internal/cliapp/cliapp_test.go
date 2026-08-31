@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -69,11 +67,9 @@ func runCmd(t *testing.T, args ...string) (stdout, stderr string, code int) {
 	return out.String(), errb.String(), code
 }
 
-// localEnv forces local mode into a fresh temp data dir.
+// localEnv selects a fresh temp data directory.
 func localEnv(t *testing.T) string {
 	t.Helper()
-	t.Setenv("KB_SERVER", "")
-	t.Setenv("KB_SERVER_TOKEN", "")
 	t.Setenv("KB_USER", "")
 	t.Setenv("KB_SECRET", "test-secret")
 	// Projects are mandatory: give the seeded tasks one so tests that are
@@ -594,38 +590,5 @@ func TestCancelRestore(t *testing.T) {
 	}
 	if n := len(listJSON(t, "--data", dir, "--all")); n != 1 {
 		t.Errorf("after rm --yes: %d tasks, want 1", n)
-	}
-}
-
-func TestRemoteRefusesCrossHostRedirect(t *testing.T) {
-	var sinkHits int
-	var mu sync.Mutex
-	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		sinkHits++
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer sink.Close()
-
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, sink.URL+r.URL.Path, http.StatusTemporaryRedirect)
-	}))
-	defer redirector.Close()
-
-	t.Setenv("KB_SERVER", redirector.URL)
-	t.Setenv("KB_SERVER_TOKEN", "sekrit")
-
-	_, errS, code := runCmd(t, "list")
-	if code == 0 {
-		t.Fatalf("list followed a cross-host redirect (code %d)", code)
-	}
-	if !strings.Contains(errS, "refusing cross-host redirect") {
-		t.Errorf("stderr = %q, want it to name the refused redirect", errS)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if sinkHits != 0 {
-		t.Errorf("the other host was contacted %d times, want 0", sinkHits)
 	}
 }

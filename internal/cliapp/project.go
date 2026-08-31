@@ -20,8 +20,8 @@ import (
 
 // Every task carries exactly one project, spelled as the scoped label
 // "project::<name>". Projects slice one board rather than splitting it into
-// several: the label is ordinary task data, so nothing about the schema, the
-// wire format, or the server changes.
+// several: the label is ordinary task data, so nothing about the schema
+// changes.
 //
 // The vocabulary itself lives in internal/project because the TUI writes tasks
 // too; these names are the CLI's local spelling of it.
@@ -39,10 +39,8 @@ const projectFlagUsage = "project for this task (overrides KB_PROJECT and the ac
 // — inside the data directory, beside kb.db and the TUI's preference files.
 //
 // The active project lives here rather than in the database because it is
-// client state, not board data: it has to resolve identically in remote mode
-// (KB_SERVER), where no local store is ever opened, and it must not travel to
-// whoever the board is served to. A file also keeps the map's "no schema
-// change" promise literal — the settings table gains no column.
+// client state, not board data. A file also keeps the map's "no schema change"
+// promise literal: the settings table gains no column.
 const cliStateFile = "state.json"
 
 // cliState is the on-disk shape of state.json.
@@ -284,7 +282,7 @@ func registerProjectFlag(fs *flag.FlagSet) *string {
 // reads the task only when the update actually rewrites labels — --tag
 // replaced them, or -p moved the task — and rewrites the patch so what lands
 // carries exactly one project:: label, never zero and never two.
-func applyProjectPatch(be backend, ref string, p *store.TaskPatch, flagValue, dataDir string, hasProject bool) error {
+func applyProjectPatch(be *localBackend, ref string, p *store.TaskPatch, flagValue, dataDir string, hasProject bool) error {
 	if p.Tags == nil && !hasProject {
 		return nil
 	}
@@ -395,6 +393,7 @@ func (a *app) cmdProject(args []string) int {
 
 func (a *app) cmdProjectUse(args []string) int {
 	fs, data := a.newFlagSet("project use")
+	jsonF := fs.Bool("json", false, "print the stored project as JSON")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -417,6 +416,12 @@ func (a *app) cmdProjectUse(args []string) int {
 	state.ActiveProject = name
 	if err := saveCLIState(dir, state); err != nil {
 		return a.fail(err)
+	}
+	if *jsonF {
+		if err := writeSingleJSON(a.stdout, projectCurrentJSON{Project: name, Source: string(sourceStored)}); err != nil {
+			return a.fail(err)
+		}
+		return 0
 	}
 	fmt.Fprintf(a.stdout, "active project: %s\n", name)
 	return 0
@@ -477,7 +482,7 @@ func (a *app) cmdProjectList(args []string) int {
 	if err != nil {
 		return a.fail(err)
 	}
-	return a.withBackend(*data, func(be backend) error {
+	return a.withLocal(*data, func(be *localBackend) error {
 		items, err := be.list(store.TaskFilter{})
 		if err != nil {
 			return err

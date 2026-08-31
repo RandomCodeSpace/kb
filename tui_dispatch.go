@@ -24,8 +24,7 @@ var (
 )
 
 // runTUI opens the same local store as the task CLI: kb tui [--data DIR]. The
-// board namespace is always defaultBoardUser; remote KB_SERVER mode is
-// deliberately not part of this direct-SQLite wayfinder slice.
+// board namespace is always defaultBoardUser.
 func runTUI(args []string) error {
 	fs := flag.NewFlagSet("kb tui", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

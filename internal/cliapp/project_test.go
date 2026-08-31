@@ -3,8 +3,6 @@ package cliapp
 import (
 	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -92,6 +90,22 @@ func TestProjectResolutionOrder(t *testing.T) {
 		t.Fatalf("add: code=%d stderr=%q", code, stderr)
 	}
 	assertOneProject(t, listJSON(t, "--data", dir), "stored", "fromenv", "fromflag")
+}
+
+func TestProjectUseJSON(t *testing.T) {
+	dir := noProjectEnv(t)
+	out, stderr, code := runCmd(t, "project", "use", "stored", "--json", "--data", dir)
+	if code != 0 || stderr != "" {
+		t.Fatalf("project use --json: code=%d stdout=%q stderr=%q", code, out, stderr)
+	}
+	var got map[string]string
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("project use --json: %v\n%s", err, out)
+	}
+	if len(got) != 2 || got["project"] != "stored" || got["source"] != "stored" {
+		t.Fatalf("project use --json = %#v", got)
+	}
+	assertCurrent(t, dir, "stored", "stored")
 }
 
 // assertCurrent checks what kb project current resolves to and where from.
@@ -480,22 +494,6 @@ func TestProjectStateFollowsDataDir(t *testing.T) {
 	}
 }
 
-func TestProjectRemoteModeUsesTheSameResolution(t *testing.T) {
-	remoteEnv(t) // KB_PROJECT=inbox
-	if _, stderr, code := runCmd(t, "add", "Remote", "-p", "web"); code != 0 {
-		t.Fatalf("remote add: code=%d stderr=%q", code, stderr)
-	}
-	assertOneProject(t, listJSON(t), "web")
-	if _, stderr, code := runCmd(t, "update", "1", "-p", "api"); code != 0 {
-		t.Fatalf("remote update: code=%d stderr=%q", code, stderr)
-	}
-	assertOneProject(t, listJSON(t), "api")
-	out, _, code := runCmd(t, "project", "list")
-	if code != 0 || !strings.Contains(out, "api      1") {
-		t.Errorf("remote project list = %q (code %d)", out, code)
-	}
-}
-
 func TestCurrentProjectOfWantsExactlyOne(t *testing.T) {
 	for _, tc := range []struct {
 		tags []string
@@ -709,19 +707,6 @@ func TestProjectCurrentPropagatesWriterFailure(t *testing.T) {
 	code := Run([]string{"project", "current", "--json", "--data", dir}, coverageFailWriter{err: want}, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), want.Error()) {
 		t.Fatalf("project current writer failure: code=%d stderr=%q", code, stderr.String())
-	}
-}
-
-func TestProjectListPropagatesBackendFailure(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	t.Setenv("KB_SERVER", srv.URL)
-	t.Setenv("KB_SERVER_TOKEN", "")
-	t.Setenv("KB_PROJECT", inboxProject)
-	if _, stderr, code := runCmd(t, "project", "list"); code != 1 || stderr == "" {
-		t.Fatalf("project list against a failing server: code=%d stderr=%q", code, stderr)
 	}
 }
 

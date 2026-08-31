@@ -313,6 +313,10 @@ func TestServicePreviewProvenanceAndDuplicateDefaults(t *testing.T) {
 	if err != nil || len(preview.Drafts) != 1 || preview.Drafts[0].ExternalKey == "" || preview.Drafts[0].Link != "github#93" || model.calls != 2 {
 		t.Fatalf("preview = %+v calls=%d err=%v cause=%v", preview, model.calls, err, errors.Unwrap(err))
 	}
+	previewDraft := preview.Drafts[0]
+	if previewDraft.SourceName != "primary" || previewDraft.Baseline.Title != "Upstream issue" || previewDraft.Baseline.Excerpt != "body" || previewDraft.Baseline.At == "" {
+		t.Fatalf("preview source/baseline = %q %+v", previewDraft.SourceName, previewDraft.Baseline)
+	}
 	model.calls, model.partial = 0, true
 	partial, err := service.Preview(context.Background(), "alice", PreviewRequest{Source: "primary", Ref: "owner/repo", Max: 1})
 	if err != nil || len(partial.Drafts) != 1 || !strings.Contains(partial.Note, "stopped early") {
@@ -322,6 +326,9 @@ func TestServicePreviewProvenanceAndDuplicateDefaults(t *testing.T) {
 	draft := preview.Drafts[0]
 	if err := service.RecordLinks("alice", "primary", []LinkInput{{ExternalKey: draft.ExternalKey, Link: draft.Link, URL: draft.URL, Title: draft.Title}}); err != nil {
 		t.Fatal(err)
+	}
+	if baseline, present, err := st.ImportBaseline("alice", draft.ExternalKey); err != nil || present || baseline != (store.ImportBaseline{}) {
+		t.Fatalf("legacy RecordLinks baseline = %+v, %t, %v", baseline, present, err)
 	}
 	links, err := service.Provenance("alice", draft.Link)
 	if err != nil || len(links) != 1 || links[0].ExternalKey != draft.ExternalKey {
@@ -461,6 +468,27 @@ func TestQualifiedIdentityPreventsCrossForgeExactDuplicates(t *testing.T) {
 	}
 }
 
+func TestAttachDraftsDropsUnboundAndDuplicateSources(t *testing.T) {
+	ref := Ref{Source: store.ForgeSource{Name: "primary", Kind: "github", BaseURL: "https://github.example"}, Kind: "github", Project: "owner/repo"}
+	issues := []Issue{
+		{Ref: "github#1", Title: "First", Body: "first body", URL: "https://github.example/owner/repo/issues/1"},
+		{Ref: "github#2", Title: "Second", Body: "second body", URL: "https://github.example/owner/repo/issues/2"},
+	}
+	drafts, dropped := attachDrafts(ref, []ai.Draft{
+		{Title: "missing"},
+		{Title: "first", Source: 1},
+		{Title: "duplicate", Source: 1},
+		{Title: "past end", Source: 3},
+		{Title: "second", Source: 2},
+	}, issues, []*Duplicate{nil, {Via: "similar"}}, "2026-08-31T00:00:00Z")
+	if dropped != 3 || len(drafts) != 2 {
+		t.Fatalf("attached=%+v dropped=%d", drafts, dropped)
+	}
+	if drafts[0].SourceName != "primary" || drafts[0].Baseline != store.NewImportBaseline("First", "first body", "2026-08-31T00:00:00Z") || drafts[1].Duplicate == nil {
+		t.Fatalf("attached metadata = %+v", drafts)
+	}
+}
+
 func TestLegacyShortLinkAndStaleProvenanceNeverBecomeExact(t *testing.T) {
 	issue := Issue{Ref: "github#93", Title: "Fix login", URL: "https://forge.test/b/owner/repo/issues/93"}
 	ref := Ref{Source: store.ForgeSource{Name: "primary", Kind: "github", BaseURL: "https://forge.test/b"}, Kind: "github", Project: "owner/repo"}
@@ -510,9 +538,15 @@ func TestServiceSourceValidationAndAtomicCreate(t *testing.T) {
 	if _, err := service.CreateTask("alice", "missing", board.Task{Title: "card"}, LinkInput{}); err == nil {
 		t.Fatal("missing source created task")
 	}
-	item := LinkInput{ExternalKey: "gitlab:primary@gitlab.example/acme/kb#1", Link: "gitlab#1", URL: "https://gitlab.example/acme/kb/-/issues/1", Title: "card"}
+	baseline := store.NewImportBaseline("Upstream card", "body", "2026-08-31T00:00:00Z")
+	item := LinkInput{ExternalKey: "gitlab:primary@https://gitlab.example/acme/kb#1", Link: "gitlab#1", URL: "https://gitlab.example/acme/kb/-/issues/1", Title: "card", Baseline: baseline}
 	if _, err := service.CreateTask("alice", "primary", board.Task{Title: "card"}, LinkInput{}); err == nil {
 		t.Fatal("missing provenance created task")
+	}
+	withoutBaseline := item
+	withoutBaseline.Baseline = store.ImportBaseline{}
+	if _, err := service.CreateTask("alice", "primary", board.Task{Title: "card"}, withoutBaseline); err == nil || !strings.Contains(err.Error(), "invalid import baseline") {
+		t.Fatalf("missing baseline error = %v", err)
 	}
 	created, err := service.CreateTask("alice", "primary", board.Task{Title: "card", Tags: []string{"import::" + item.ExternalKey}}, item)
 	if err != nil || created.ID == "" {
@@ -520,6 +554,22 @@ func TestServiceSourceValidationAndAtomicCreate(t *testing.T) {
 	}
 	if found, err := st.ImportedAs("alice", []string{item.ExternalKey}); err != nil || found[item.ExternalKey].Title != item.Title {
 		t.Fatalf("atomic provenance = %+v, %v", found, err)
+	}
+	if stored, present, err := st.ImportBaseline("alice", item.ExternalKey); err != nil || !present || stored != baseline {
+		t.Fatalf("atomic baseline = %+v, %t, %v", stored, present, err)
+	}
+	for name, mutate := range map[string]func(*LinkInput){
+		"key":  func(value *LinkInput) { value.ExternalKey += "-stale" },
+		"link": func(value *LinkInput) { value.Link = "gitlab#2" },
+		"url":  func(value *LinkInput) { value.URL = "https://other.example/acme/kb/-/issues/1" },
+	} {
+		t.Run("reject mismatched "+name, func(t *testing.T) {
+			mismatched := item
+			mutate(&mismatched)
+			if _, err := service.CreateTask("alice", "primary", board.Task{Title: "must not exist"}, mismatched); err == nil {
+				t.Fatal("mismatched preview created a task")
+			}
+		})
 	}
 	oversized := item
 	oversized.URL = strings.Repeat("x", 2049)
@@ -531,6 +581,16 @@ func TestServiceSourceValidationAndAtomicCreate(t *testing.T) {
 	}
 	if _, err := service.CreateTask("alice", "primary", board.Task{Title: "card", Status: board.Status("invalid")}, item); err == nil {
 		t.Fatal("invalid task created")
+	}
+	newBase := "https://replacement.example"
+	if _, err := service.SaveSource("alice", "primary", "gitlab", &newBase, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateTask("alice", "primary", board.Task{Title: "stale source"}, item); err == nil {
+		t.Fatal("preview from the prior source configuration created a task")
+	}
+	if tasks, err := st.ListTasks("alice", ""); err != nil || len(tasks) != 1 {
+		t.Fatalf("refused previews changed tasks: %+v, %v", tasks, err)
 	}
 	if err := service.DeleteSource("alice", "primary"); err != nil {
 		t.Fatal(err)

@@ -37,12 +37,9 @@ func (r *Runner) probeModel(ctx context.Context, cfg Config) (model.LLM, *modelO
 // probeError turns a probe failure into something the operator can act on.
 // seen may be nil, which selects the message set that needs no round trip.
 //
-// Every outcome that describes the network or the upstream keeps code 502.
-// That is not a detail: the HTTP probe handler redacts exactly the 502s, so
-// the added detail reaches the local settings overlay through Message while
-// the remote surface still answers with one opaque sentence. Only a failure
-// that describes the caller's own settings - a model field left blank, a
-// model that cannot call tools - carries a code that passes through.
+// Every outcome that describes the network or upstream keeps code 502 for
+// compatibility. Failures in the caller's settings, such as a blank model or
+// missing tool support, retain their more specific category.
 func probeError(err error, observation *modelObservation) error {
 	switch {
 	case err == nil:

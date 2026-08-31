@@ -27,14 +27,14 @@ comments.
 - `emoji`: exactly one emoji character that suits the work, or an empty string.
 - `desc`: markdown. State the problem and why it matters, in your own words.
   Do not paste the issue body or its comments into it.
-- `prio`: an integer, 1 is highest and 4 is lowest. Use 3 unless the issue is
-  explicitly urgent or blocking.
+- `prio`: an integer: 1 is high, 2 is medium, and 3 is low. Use 3 unless the
+  issue is explicitly urgent or blocking.
 - `due`: a date as `YYYY-MM-DD`, or an empty string. Only when the issue states
   a date.
 - `effort`: `S` for under a day, `M` for a few days, `L` for a week or more.
 - `tags`: single words, no spaces, no leading `#`, taken from the issue labels
   or the area it touches. Never add a `link::` tag or any other tag that
-  encodes a URL or a ref; the server records where a card came from.
+  encodes a URL or a ref; the import flow records where a card came from.
 - `checks`: acceptance criteria, one per entry, two to five of them.
 
 If `propose_card` returns an error, read it, fix that field, and call the tool

@@ -22,18 +22,19 @@ const runnerSystemPrompt = `You are the assistant of kb, a kanban board. You rea
 
 Rules:
 - Propose a new card only by calling propose_card, once per card. Never write a card as JSON or markdown in your reply.
-- Before proposing a card, call find_similar to check the board does not already track that work.
-- Read the board with list_tasks and get_task; change an existing card with update_task.
-- Call fetch_link only for a URL the user supplied.
+- Read the board with list_tasks and get_task.
+- Use find_similar when the selected skill calls for a duplicate check.
 - Follow the skill instructions below. They describe the task you were given.
 - Finish with a short markdown commentary of what you proposed or changed and why. No JSON, no code fences, no card bodies.`
 
+const runnerReadOnlyPrompt = `This run has read-only authority. Do not fetch a URL or mutate an existing board card. A proposal collected by propose_card is only a draft for the user to review; it does not write to the board.`
+
+const runnerFullPrompt = `This run has full authority. Call fetch_link only for a URL the user supplied. Change an existing board card only with update_task.`
+
 const RunnerSystemPrompt = runnerSystemPrompt
 
-// Budgets for one skill run. The loop is several upstream round trips, so it
-// outlives both AITimeout and the server-wide write timeout: the run context
-// bounds the whole loop and the response write deadline is extended past it
-// per request, leaving room to write the answer after the last round.
+// Budgets for one skill run. The loop spans several upstream round trips, so
+// the caller's context bounds the complete operation.
 const (
 	skillMaxIterations      = 12
 	maxToolCallsPerResponse = 32
@@ -42,10 +43,12 @@ const (
 
 const SkillMaxIterations = skillMaxIterations
 
+const importTransformSkill = "import-transform"
+
 const (
 	unknownSkillMessage = "unknown skill"
 	// skillsUnavailableMessage covers a broken skill file. The parse error
-	// names the offending file, which is server-side detail.
+	// names the offending local file and stays out of the user-facing message.
 	skillsUnavailableMessage = "skills are unavailable"
 	// skillIterationLimitMessage is the model spending every round on tool
 	// calls without ever answering. Like truncation it is the caller's to act
@@ -62,21 +65,17 @@ const (
 // RunResult is one completed run: the cards the model proposed through
 // propose_card, and its closing prose. Partial marks a run that hit a budget
 // with cards already collected — the cards are real, the set is not complete.
-// It stays off the wire: /api/ai/run-skill states the same fact in the
-// commentary, and a caller that drops the commentary has to say so itself.
+// It stays out of JSON, so a caller that drops the commentary must preserve
+// the partial marker separately.
 type RunResult struct {
 	Cards      []Draft `json:"cards"`
 	Commentary string  `json:"commentary"`
 	Partial    bool    `json:"-"`
 }
 
-// Scope selects what one run is allowed to do. The input of a run is
-// prompt, and prompt is instruction: /api/ai/stories splits a document that
-// can be a forge issue body and its comments, authored by anyone who can
-// comment on that issue. Such a run gets the read-only set — it proposes
-// drafts the user still has to accept, and nothing in it writes to the board
-// or opens an outbound request the injected text could aim. The full set
-// belongs to /api/ai/run-skill, whose input the requesting user wrote.
+// Scope selects what one run may do. Imported or pasted documents use the
+// read-only set because they can contain untrusted instructions. Full scope is
+// reserved for input the local user explicitly authors for that authority.
 type Scope int
 
 const (
@@ -87,7 +86,7 @@ const (
 // runSkill executes one skill against the user's configured endpoint. The
 // cards come from the collector the propose_card tool writes into, never from
 // parsing the reply, so the model cannot smuggle a card past validateDraft and
-// the count is capped server-side. maxTokens is the per-flow output budget:
+// the count is capped by kb. maxTokens is the per-flow output budget:
 // one card needs far less room than a whole ADR split, and the caller knows
 // which flow it is.
 func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillName, input string, maxCards int, maxTokens int64) (RunResult, error) {
@@ -110,11 +109,15 @@ func (r *Runner) RunSkill(ctx context.Context, user string, scope Scope, skillNa
 	}
 
 	collector := &cardCollector{max: normalizeStoryCount(maxCards)}
+	if skill.Name == importTransformSkill {
+		collector.sourceCount = collector.max
+		collector.claimedSources = make(map[int]bool, collector.sourceCount)
+	}
 	tools := r.skillTools(user, scope, others, collector)
 
 	result, err := oneshot.Run(ctx, oneshot.Request{
 		Model:                   model,
-		Instruction:             runnerSystem(skill, others),
+		Instruction:             runnerSystem(scope, skill, others),
 		Prompt:                  input,
 		Tools:                   tools,
 		MaxOutputTokens:         int32(skillBudget(maxTokens)),
@@ -254,9 +257,15 @@ func splitSkills(skills []Skill, name string) (Skill, []Skill, bool) {
 
 // runnerSystem assembles the system prompt: kb context, the catalogue of the
 // skills that stay loadable, then the invoked skill in full.
-func runnerSystem(skill Skill, others []Skill) string {
+func runnerSystem(scope Scope, skill Skill, others []Skill) string {
 	var b strings.Builder
 	b.WriteString(runnerSystemPrompt)
+	b.WriteString("\n\n")
+	if scope == ScopeFull {
+		b.WriteString(runnerFullPrompt)
+	} else {
+		b.WriteString(runnerReadOnlyPrompt)
+	}
 	if advertisement := advertiseSkills(others); advertisement != "" {
 		b.WriteString("\n\n")
 		b.WriteString(advertisement)

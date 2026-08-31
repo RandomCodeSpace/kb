@@ -3,8 +3,6 @@ package cliapp
 import (
 	"bytes"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,51 +33,9 @@ func TestRemainingCommandValidationAndUpdateFields(t *testing.T) {
 	}
 }
 
-func TestRemainingRemoveCommandErrors(t *testing.T) {
-	t.Run("preview list", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "list failed", http.StatusServiceUnavailable)
-		}))
-		defer srv.Close()
-		t.Setenv("KB_SERVER", srv.URL)
-		if _, stderr, code := runCmd(t, "rm", "1"); code != 1 || !strings.Contains(stderr, "list failed") {
-			t.Fatalf("rm preview list failure: code=%d stderr=%q", code, stderr)
-		}
-	})
-
-	t.Run("preview lookup", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, "[]")
-		}))
-		defer srv.Close()
-		t.Setenv("KB_SERVER", srv.URL)
-		if _, stderr, code := runCmd(t, "rm", "1"); code != 1 || !strings.Contains(stderr, "no task") {
-			t.Fatalf("rm preview lookup failure: code=%d stderr=%q", code, stderr)
-		}
-	})
-
-	t.Run("confirmed remove", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodDelete {
-				http.Error(w, "remove failed", http.StatusConflict)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `[{"id":"a","seq":1,"title":"doomed","status":"todo","prio":3}]`)
-		}))
-		defer srv.Close()
-		t.Setenv("KB_SERVER", srv.URL)
-		if _, stderr, code := runCmd(t, "rm", "1", "--yes"); code != 1 || !strings.Contains(stderr, "remove failed") {
-			t.Fatalf("rm confirmed failure: code=%d stderr=%q", code, stderr)
-		}
-	})
-}
-
 func TestOpenLocalRemainingFilesystemPaths(t *testing.T) {
 	t.Run("default data succeeds", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("KB_SERVER", "")
 		t.Setenv("KB_DATA", dir)
 		t.Setenv("KB_SECRET", "test-secret")
 		be, err := openLocal("default", "", io.Discard)

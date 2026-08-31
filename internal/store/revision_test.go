@@ -117,43 +117,14 @@ func TestConcurrentOpenSerializesMigration(t *testing.T) {
 	}
 }
 
-func TestBoardRevisionCASAcrossHandles(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "kb.db")
-	a := openStoreAt(t, path)
-	b := openStoreAt(t, path)
-	seed := board.Board{Title: "Board", Tasks: []board.Task{{Title: "Seed", Status: board.StatusTodo, Prio: 3}}}
-	if err := a.ReplaceBoard("u", seed); err != nil {
-		t.Fatal(err)
-	}
-	before, err := a.ReadBoardSnapshot("u")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.AddTask("u", board.Task{Title: "Intervening"}); err != nil {
-		t.Fatal(err)
-	}
-	_, _, err = a.ReplaceBoardIfRevision("u", board.Board{Title: "Stale", Tasks: seed.Tasks}, nil, before.Revision)
-	var conflict *RevisionConflictError
-	if !errors.As(err, &conflict) || conflict.CurrentRevision <= before.Revision {
-		t.Fatalf("CAS err=%v conflict=%+v before=%d", err, conflict, before.Revision)
-	}
-	after, err := a.ReadBoardSnapshot("u")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(after.Board.Tasks) != 2 || after.Board.Title != "Board" {
-		t.Fatalf("stale replacement changed board: %+v", after.Board)
-	}
-}
-
 func TestEqualTitleReorderLegacyKeepsPositionalIdentity(t *testing.T) {
 	s := newStore(t)
-	seed, ids, _ := seedEqualTitleTasks(t, s)
+	seed, ids := seedEqualTitleTasks(t, s)
 	mustRecordTombstone(t, s, ids[0], "first reason")
 	before := mustBoard(t, s)
 
 	reordered := board.Board{Title: "B", Tasks: []board.Task{seed.Tasks[1], seed.Tasks[0]}}
-	committed, _, err := s.ReplaceBoardWithTaskIDsAndRevision("u", reordered)
+	committed, err := s.ReplaceBoardWithTaskIDs("u", reordered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,53 +136,21 @@ func TestEqualTitleReorderLegacyKeepsPositionalIdentity(t *testing.T) {
 	assertTombstoneReason(t, s, ids[0], "first reason")
 }
 
-func TestEqualTitleReorderCanonicalIdentityFollowsTasks(t *testing.T) {
-	s := newStore(t)
-	seed, ids, _ := seedEqualTitleTasks(t, s)
-	firstCreated := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
-	firstMoved := time.Date(2024, time.February, 3, 4, 5, 6, 0, time.UTC)
-	secondCreated := time.Date(2025, time.March, 4, 5, 6, 7, 0, time.UTC)
-	secondMoved := time.Date(2025, time.April, 5, 6, 7, 8, 0, time.UTC)
-	setTaskIdentityTimes(t, s, ids[0], firstCreated, firstMoved)
-	setTaskIdentityTimes(t, s, ids[1], secondCreated, secondMoved)
-	revision := mustBoardSnapshot(t, s).Revision
-	mustRecordTombstone(t, s, ids[0], "first reason")
-	expected := map[string]taskIdentity{
-		"first":  {ID: ids[0], CreatedAt: firstCreated, MovedAt: firstMoved},
-		"second": {ID: ids[1], CreatedAt: secondCreated, MovedAt: secondMoved},
-	}
-
-	reordered := board.Board{Title: "B", Tasks: []board.Task{seed.Tasks[1], seed.Tasks[0]}}
-	canonical := []*string{&ids[1], &ids[0]}
-	committed, _, err := s.ReplaceBoardIfRevision("u", reordered, canonical, revision)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := []string{ids[1], ids[0]}; !reflect.DeepEqual(committed, want) {
-		t.Fatalf("canonical reordered IDs = %v, want %v", committed, want)
-	}
-	after := mustBoard(t, s)
-	assertCanonicalIdentityByDescription(t, after.Tasks, expected)
-	assertDistinctTaskTimestamps(t, after.Tasks)
-	assertTombstoneReason(t, s, ids[0], "first reason")
-}
-
 type taskIdentity struct {
-	ID                 string
 	CreatedAt, MovedAt time.Time
 }
 
-func seedEqualTitleTasks(t *testing.T, s *Store) (board.Board, []string, int64) {
+func seedEqualTitleTasks(t *testing.T, s *Store) (board.Board, []string) {
 	t.Helper()
 	seed := board.Board{Title: "B", Tasks: []board.Task{
 		{Title: "Duplicate", Desc: "first", Status: board.StatusCancelled, Prio: 3},
 		{Title: "Duplicate", Desc: "second", Status: board.StatusCancelled, Prio: 3},
 	}}
-	ids, revision, err := s.ReplaceBoardWithTaskIDsAndRevision("u", seed)
+	ids, err := s.ReplaceBoardWithTaskIDs("u", seed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return seed, ids, revision
+	return seed, ids
 }
 
 func mustRecordTombstone(t *testing.T, s *Store, taskID, reason string) {
@@ -230,14 +169,6 @@ func mustBoard(t *testing.T, s *Store) board.Board {
 	return b
 }
 
-func setTaskIdentityTimes(t *testing.T, s *Store, taskID string, createdAt, movedAt time.Time) {
-	t.Helper()
-	_, err := s.db.Exec(`UPDATE tasks SET created_at = ?, moved_at = ? WHERE user = ? AND id = ?`, createdAt.Format(time.RFC3339Nano), movedAt.Format(time.RFC3339Nano), "u", taskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
 func assertTaskTimestampsByPosition(t *testing.T, before, after []board.Task) {
 	t.Helper()
 	for i := range after {
@@ -246,26 +177,6 @@ func assertTaskTimestampsByPosition(t *testing.T, before, after []board.Task) {
 		if afterIdentity != beforeIdentity {
 			t.Errorf("legacy task %d timestamps changed: before=%+v after=%+v", i, before[i], after[i])
 		}
-	}
-}
-
-func assertCanonicalIdentityByDescription(t *testing.T, tasks []board.Task, expected map[string]taskIdentity) {
-	t.Helper()
-	for _, task := range tasks {
-		got := taskIdentity{ID: task.ID, CreatedAt: task.CreatedAt, MovedAt: task.MovedAt}
-		if got != expected[task.Desc] {
-			t.Errorf("canonical identity for %q = %+v, want %+v", task.Desc, got, expected[task.Desc])
-		}
-	}
-}
-
-func assertDistinctTaskTimestamps(t *testing.T, tasks []board.Task) {
-	t.Helper()
-	if tasks[0].CreatedAt.Equal(tasks[1].CreatedAt) {
-		t.Errorf("canonical created timestamps are not distinct: %v", tasks[0].CreatedAt)
-	}
-	if tasks[0].MovedAt.Equal(tasks[1].MovedAt) {
-		t.Errorf("canonical moved timestamps are not distinct: %v", tasks[0].MovedAt)
 	}
 }
 
@@ -345,155 +256,6 @@ func mustTombstone(t *testing.T, s *Store, taskID string) Tombstone {
 		t.Fatalf("missing tombstone for %q", taskID)
 	}
 	return tombstone
-}
-
-func TestConditionalCanonicalReplacement(t *testing.T) {
-	s := newStore(t)
-	if err := s.ReplaceBoard("u", board.Board{Title: "B", Tasks: []board.Task{{Title: "Old", Status: board.StatusTodo, Prio: 3}}}); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := s.ReadBoardSnapshot("u")
-	if err != nil {
-		t.Fatal(err)
-	}
-	id := snapshot.TaskIDs[0]
-	ids, revision, err := s.ReplaceBoardIfRevision("u", board.Board{Title: "B2", Tasks: []board.Task{
-		{Title: "Renamed", Status: board.StatusDoing, Prio: 2},
-		{Title: "New", Status: board.StatusTodo, Prio: 3},
-	}}, []*string{&id, nil}, snapshot.Revision)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ids) != 2 || ids[0] != id || ids[1] == "" || ids[1] == id || revision <= snapshot.Revision {
-		t.Fatalf("ids=%v revision=%d snapshot=%+v", ids, revision, snapshot)
-	}
-	current, err := s.ReadBoardSnapshot("u")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bad := "not-a-uuid"
-	if _, err := s.AddTask("u", board.Task{Title: "Intervening"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.ReplaceBoardIfRevision("u", current.Board, []*string{&bad, nil}, current.Revision); !errors.As(err, new(*RevisionConflictError)) {
-		t.Fatalf("stale invalid IDs err=%v, want revision conflict first", err)
-	}
-	current, err = s.ReadBoardSnapshot("u")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.ReplaceBoardIfRevision("u", current.Board, []*string{&bad, nil}, current.Revision); !errors.Is(err, ErrInvalidTaskIDs) {
-		t.Fatalf("invalid ID err=%v", err)
-	}
-	unchanged, _ := s.ReadBoardSnapshot("u")
-	if unchanged.Revision != current.Revision {
-		t.Fatalf("invalid IDs changed revision: %d -> %d", current.Revision, unchanged.Revision)
-	}
-}
-
-func TestReplaceBoardIfExistsUsesTransactionalExistence(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "kb.db")
-	a := openStoreAt(t, path)
-	b := openStoreAt(t, path)
-	if err := a.ReplaceBoard("u", board.Board{Title: "B", Tasks: []board.Task{{Title: "Seed", Status: board.StatusTodo, Prio: 3}}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.AddTask("u", board.Task{Title: "Concurrent"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := a.ReplaceBoardIfExists("u", board.Board{Title: "Star", Tasks: []board.Task{{Title: "Replacement", Status: board.StatusTodo, Prio: 3}}}, nil); err != nil {
-		t.Fatalf("existing board after concurrent mutation: %v", err)
-	}
-	current, err := a.ReadBoardSnapshot("u")
-	if err != nil || current.Board.Title != "Star" {
-		t.Fatalf("replacement = %+v err=%v", current, err)
-	}
-	beforeDelete, err := a.ReadBoardSnapshot("u")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.DeleteBoard("u"); err != nil {
-		t.Fatal(err)
-	}
-	afterDelete, err := a.ReadBoardSnapshot("u")
-	if err != nil || afterDelete.Exists || afterDelete.Revision <= beforeDelete.Revision {
-		t.Fatalf("deleted board = %+v err=%v, before revision=%d", afterDelete, err, beforeDelete.Revision)
-	}
-	if _, _, err := a.ReplaceBoardIfExists("u", board.Board{Title: "No", Tasks: nil}, nil); !errors.As(err, new(*RevisionConflictError)) {
-		t.Fatalf("missing wildcard replacement err=%v, want conflict", err)
-	}
-}
-
-func TestBoardWriteReceiptIsAtomicScopedAndReplaySafe(t *testing.T) {
-	s := newStore(t)
-	seed := board.Board{Title: "B", Tasks: []board.Task{{Title: "Seed", Status: board.StatusTodo, Prio: 3}}}
-	if err := s.ReplaceBoard("alice", seed); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := s.ReadBoardSnapshot("alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	id := snapshot.TaskIDs[0]
-	next := board.Board{Title: "B", Tasks: []board.Task{
-		{Title: "Seed", Status: board.StatusTodo, Prio: 3},
-		{Title: "New", Status: board.StatusTodo, Prio: 3},
-	}}
-	ids, revision, replayed, err := s.ReplaceBoardIfRevisionWithReceipt("alice", next, []*string{&id, nil}, snapshot.Revision, "op", "hash-a")
-	if err != nil || replayed || len(ids) != 2 {
-		t.Fatalf("commit ids=%v rev=%d replay=%v err=%v", ids, revision, replayed, err)
-	}
-	replayedIDs, replayedRevision, replayed, err := s.ReplaceBoardIfRevisionWithReceipt("alice", next, []*string{&id, nil}, snapshot.Revision, "op", "hash-a")
-	if err != nil || !replayed || replayedRevision != revision || !reflect.DeepEqual(replayedIDs, ids) {
-		t.Fatalf("replay ids=%v rev=%d replay=%v err=%v", replayedIDs, replayedRevision, replayed, err)
-	}
-	if _, _, _, err := s.ReplaceBoardIfRevisionWithReceipt("alice", next, []*string{&id, nil}, revision, "op", "hash-b"); !errors.Is(err, ErrInvalidTaskIDs) {
-		t.Fatalf("mismatched replay err=%v", err)
-	}
-	if _, found, err := s.BoardWriteReceipt("bob", "op"); err != nil || found {
-		t.Fatalf("cross-user receipt found=%v err=%v", found, err)
-	}
-}
-
-func TestConcurrentBoardWriteReceiptClosesDuplicateCreateRace(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "kb.db")
-	a := openStoreAt(t, path)
-	b := openStoreAt(t, path)
-	if err := a.ReplaceBoard("u", board.Board{Title: "B"}); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := a.ReadBoardSnapshot("u")
-	if err != nil {
-		t.Fatal(err)
-	}
-	next := board.Board{Title: "B", Tasks: []board.Task{{Title: "New", Status: board.StatusTodo, Prio: 3}}}
-	type result struct {
-		ids      []string
-		revision int64
-		replayed bool
-		err      error
-	}
-	start := make(chan struct{})
-	results := make(chan result, 2)
-	for _, handle := range []*Store{a, b} {
-		go func(s *Store) {
-			<-start
-			ids, revision, replayed, err := s.ReplaceBoardIfRevisionWithReceipt("u", next, []*string{nil}, snapshot.Revision, "same-op", "same-hash")
-			results <- result{ids, revision, replayed, err}
-		}(handle)
-	}
-	close(start)
-	first, second := <-results, <-results
-	if first.err != nil || second.err != nil {
-		t.Fatalf("concurrent receipts err=%v/%v", first.err, second.err)
-	}
-	if first.replayed == second.replayed || first.revision != second.revision || !reflect.DeepEqual(first.ids, second.ids) {
-		t.Fatalf("concurrent receipts = %+v / %+v", first, second)
-	}
-	current, err := a.ReadBoardSnapshot("u")
-	if err != nil || len(current.TaskIDs) != 1 || current.TaskIDs[0] != first.ids[0] {
-		t.Fatalf("current = %+v err=%v", current, err)
-	}
 }
 
 func TestSnapshotIsUntornAcrossWriter(t *testing.T) {
@@ -723,12 +485,5 @@ func TestDoneGuardCannotRaceConcurrentBlock(t *testing.T) {
 	}
 	if len(stored) != 1 || stored[0].Status != board.StatusTodo || !stored[0].Blocked {
 		t.Fatalf("final task=%+v", stored)
-	}
-}
-
-func TestRevisionConflictErrorCarriesCurrentRevision(t *testing.T) {
-	err := &RevisionConflictError{CurrentRevision: 7}
-	if err.Error() == "" || err.CurrentRevision != 7 {
-		t.Fatal(err)
 	}
 }

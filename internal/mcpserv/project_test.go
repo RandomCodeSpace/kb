@@ -295,7 +295,7 @@ func TestRunBackfillsProjects(t *testing.T) {
 	original := serveMCP
 	t.Cleanup(func() { serveMCP = original })
 	serveMCP = func(*mcp.Server) error { return nil }
-	if err := Run(dir, "default"); err != nil {
+	if err := Run(dir, "default", "test-version"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -325,7 +325,7 @@ func TestRunReportsABackfillFailure(t *testing.T) {
 	backfillProjects = func(cliapp.ProjectBackfiller, string) (int, error) {
 		return 0, errors.New("backfill refused")
 	}
-	if err := Run(t.TempDir(), "default"); err == nil || !strings.Contains(err.Error(), "backfill refused") {
+	if err := Run(t.TempDir(), "default", "test-version"); err == nil || !strings.Contains(err.Error(), "backfill refused") {
 		t.Fatalf("Run error = %v, want the backfill failure", err)
 	}
 }

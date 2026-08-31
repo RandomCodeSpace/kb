@@ -110,18 +110,19 @@ type RenderPlanStats struct {
 // and the harness reads counters. Projection records and compact card plans
 // join this root in later slices without widening that interface.
 type renderPlan struct {
-	view          tea.View
-	resolver      func(tea.MouseMsg) tea.Cmd
-	semantics     renderSnapshotSemantics
-	bases         retainedBoardBases
-	pointer       pointer.State
-	projection    renderProjection
-	geometry      renderGeometry
-	geometryCache renderGeometryLRU
-	geometryEpoch uint64
-	worker        geometryWorkerState
-	artifacts     retainedCardArtifacts
-	stats         RenderPlanStats
+	view            tea.View
+	resolver        func(tea.MouseMsg) tea.Cmd
+	semantics       renderSnapshotSemantics
+	bases           retainedBoardBases
+	pointer         pointer.State
+	projection      renderProjection
+	geometry        renderGeometry
+	geometryCache   renderGeometryLRU
+	geometryEpoch   uint64
+	worker          geometryWorkerState
+	artifacts       retainedCardArtifacts
+	dimmedArtifacts retainedCardArtifacts
+	stats           RenderPlanStats
 }
 
 type retainedBoardBases struct {
@@ -278,7 +279,7 @@ func (p renderPlan) rebuild(model Model, impact renderImpact, checkSource bool) 
 	base := p.bases.normal
 	if model.overlayOpen() {
 		if !p.bases.haveDimmed {
-			p.bases.dimmed = model.renderBoardBase(true)
+			p.bases.dimmed = p.renderDimmedBoardBase(model)
 			p.bases.haveDimmed = true
 			p.stats.DimmedBaseBuilds++
 		}
@@ -302,8 +303,27 @@ func (p renderPlan) rebuild(model Model, impact renderImpact, checkSource bool) 
 	p.refreshGeometryStats()
 	p.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
 		p.projection.ownedBytesEstimate() + p.geometry.ownedBytesEstimate() + p.bases.ownedBytesEstimate() +
-		p.artifacts.ownedBytesEstimate() + p.geometryCache.ownedBytesEstimate()
+		p.artifacts.ownedBytesEstimate() + p.dimmedArtifacts.ownedBytesEstimate() +
+		p.geometryCache.ownedBytesEstimate()
 	return p
+}
+
+func (p *renderPlan) renderDimmedBoardBase(model Model) boardRenderBase {
+	dimmedModel := model
+	if styles := model.themeStyles().Dimmed; styles != nil {
+		dimmedModel.styles = styles
+	}
+	publication := newCardArtifactPublication(
+		p.dimmedArtifacts, dimmedModel.cardArtifactDomain(&p.projection),
+	)
+	model.cardArtifacts = publication
+	base := model.renderBoardBase(true)
+	p.dimmedArtifacts = publication.finish()
+	p.stats.NavigationArtifactHits += publication.hits
+	p.stats.NavigationArtifactMisses += publication.misses
+	p.stats.NavigationArtifactPublications++
+	p.stats.NavigationArtifactFallbacks += publication.fallbacks
+	return base
 }
 
 func (b retainedBoardBases) ownedBytesEstimate() uint64 {
@@ -665,7 +685,7 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 		next.stats.NavigationArtifactPublications++
 		next.stats.NavigationArtifactFallbacks += artifactPublication.fallbacks
 		if model.overlayOpen() {
-			next.bases.dimmed = model.renderBoardBase(true)
+			next.bases.dimmed = next.renderDimmedBoardBase(model)
 			next.bases.haveDimmed = true
 			next.stats.DimmedBaseBuilds++
 			base = next.bases.dimmed
@@ -677,7 +697,7 @@ func (m Model) installGeometryBatch(message geometryBatchMsg) Model {
 		next.stats.RetainedPlanOwnedBytesEstimate = retainedPlanOwnedBytesEstimate(model, snapshot) +
 			next.projection.ownedBytesEstimate() + next.geometry.ownedBytesEstimate() +
 			next.bases.ownedBytesEstimate() + next.artifacts.ownedBytesEstimate() +
-			next.geometryCache.ownedBytesEstimate()
+			next.dimmedArtifacts.ownedBytesEstimate() + next.geometryCache.ownedBytesEstimate()
 		if !next.semanticallyMatches(snapshot) {
 			next.view = snapshot.view
 			next.semantics = snapshot.semantics

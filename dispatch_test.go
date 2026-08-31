@@ -99,52 +99,59 @@ func TestEveryCLIVerbIsDispatched(t *testing.T) {
 	}
 }
 
-func TestDispatchArgsClassifiesServeFlagErrors(t *testing.T) {
+func TestDispatchArgsClassifiesCommandFlagErrors(t *testing.T) {
 	original := subcommands
 	t.Cleanup(func() { subcommands = original })
 	subcommands = map[string]func([]string) error{
-		"serve": func([]string) error { return &webFlagError{err: errors.New("bad serve flag")} },
+		"mcp": func([]string) error { return &commandFlagError{err: errors.New("bad mcp flag")} },
 	}
 	var stderr bytes.Buffer
-	handled, code := dispatchArgs([]string{"serve", "--bad"}, &stderr)
-	if !handled || code != 2 || !strings.Contains(stderr.String(), "bad serve flag") {
-		t.Fatalf("serve flag error = handled %v code %d stderr %q", handled, code, stderr.String())
+	handled, code := dispatchArgs([]string{"mcp", "--bad"}, &stderr)
+	if !handled || code != 2 || !strings.Contains(stderr.String(), "bad mcp flag") {
+		t.Fatalf("mcp flag error = handled %v code %d stderr %q", handled, code, stderr.String())
 	}
 
-	subcommands["serve"] = func([]string) error { return &webFlagError{err: flag.ErrHelp} }
+	subcommands["mcp"] = func([]string) error { return &commandFlagError{err: flag.ErrHelp} }
 	stderr.Reset()
-	handled, code = dispatchArgs([]string{"serve", "--help"}, &stderr)
+	handled, code = dispatchArgs([]string{"mcp", "--help"}, &stderr)
 	if !handled || code != 0 || stderr.Len() != 0 {
-		t.Fatalf("serve help = handled %v code %d stderr %q", handled, code, stderr.String())
+		t.Fatalf("mcp help = handled %v code %d stderr %q", handled, code, stderr.String())
 	}
 }
 
 func TestRunMCPPassesResolvedFlags(t *testing.T) {
 	original := mcpRun
-	t.Cleanup(func() { mcpRun = original })
+	originalBuildInfo := readBuildInfo
+	t.Cleanup(func() {
+		mcpRun = original
+		readBuildInfo = originalBuildInfo
+	})
 
-	var gotData, gotUser string
-	mcpRun = func(data, user string) error {
-		gotData, gotUser = data, user
+	readBuildInfo = func() (*debug.BuildInfo, bool) {
+		return &debug.BuildInfo{Main: debug.Module{Version: "v9.8.7"}}, true
+	}
+	var gotData, gotUser, gotVersion string
+	mcpRun = func(data, user, version string) error {
+		gotData, gotUser, gotVersion = data, user, version
 		return nil
 	}
 	wantData := filepath.Join(t.TempDir(), "boards")
 	if err := runMCP([]string{"--data", wantData}); err != nil {
 		t.Fatalf("runMCP: %v", err)
 	}
-	if gotData != wantData || gotUser != defaultBoardUser {
-		t.Fatalf("mcp args = %q, %q; want %q, %s", gotData, gotUser, wantData, defaultBoardUser)
+	if gotData != wantData || gotUser != defaultBoardUser || gotVersion != "v9.8.7" {
+		t.Fatalf("mcp args = %q, %q, %q; want %q, %s, v9.8.7", gotData, gotUser, gotVersion, wantData, defaultBoardUser)
 	}
 
 	// The board namespace is no longer selectable from the command line.
 	var flagOutput bytes.Buffer
 	err := runMCPWithFlagOutput([]string{"--user", "alice"}, &flagOutput)
-	var flagErr *webFlagError
+	var flagErr *commandFlagError
 	if !errors.As(err, &flagErr) || !strings.Contains(err.Error(), "flag provided but not defined: -user") {
 		t.Fatalf("--user should be rejected: %v", err)
 	}
 
-	mcpRun = func(string, string) error { return errors.New("serve failed") }
+	mcpRun = func(string, string, string) error { return errors.New("serve failed") }
 	if err := runMCP([]string{"--data", wantData}); err == nil || err.Error() != "serve failed" {
 		t.Fatalf("runMCP error = %v, want serve failed", err)
 	}

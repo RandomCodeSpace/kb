@@ -1,10 +1,6 @@
-// Package cliapp implements the kb command-line interface: add, list,
-// update, move, done, cancel, restore, and rm against either the local
-// SQLite store or, when KB_SERVER is set, a remote kb server over the
-// markdown wire API (GET/PUT /api/board). In remote mode task ids are
-// ephemeral listing indexes ("i1", "i2", ...); in local mode they are stable
-// per-board sequence numbers ("#12", bare "12" works too) with UUIDs still
-// addressable by unique prefix.
+// Package cliapp implements the kb command-line interface against the local
+// SQLite store. Task ids are stable per-board sequence numbers ("#12", bare
+// "12" works too) with UUIDs still addressable by unique prefix.
 package cliapp
 
 import (
@@ -13,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -25,8 +20,7 @@ import (
 )
 
 // defaultUser is the only board namespace the local surfaces ever open. The
-// per-user surface (--user / KB_USER) was removed; the store API keeps its
-// user parameter because kb serve still serves one board per identity.
+// per-user surface (--user / KB_USER) was removed.
 const defaultUser = "default"
 
 const noBlockedFlagName = "no-blocked"
@@ -68,13 +62,12 @@ commands:
 other modes (not task commands):
   kb                     open the local board in a full-screen terminal UI
   kb tui                 open the local board in a full-screen terminal UI
-  kb serve               run the optional HTTP API server
-  kb mcp                 serve the board to AI agents over MCP stdio
+  kb mcp                 expose the local board to AI agents over MCP stdio
 
 common flags (every command):
   --data dir     data directory (default $KB_DATA or ~/.local/share/kb)
-  --json         machine output: list prints an array of full tasks, every
-                 other command prints the affected task as one JSON object
+  --json         machine output; the JSON shape is documented by each
+                 command's --help
 
 projects:
   Every task carries exactly one project, stored as the scoped label
@@ -133,14 +126,7 @@ task ids:
   never reused. Commands take the number with or without the # (kb done 12
   and kb done '#12' are the same task). UUID prefixes still work, but a
   digits-only id always means the number. --json exposes both ("seq" and
-  "id"). The same ids work locally and against a server.
-
-remote mode:
-  KB_SERVER=http://host:port operates over the HTTP API instead of the
-  local database; KB_SERVER_TOKEN adds a bearer token. Every command works
-  remotely except users, which reads the local database (the server API
-  serves one board per identity). The old ephemeral i-N indexes are gone;
-  use the stable #n numbers.
+  "id").
 `
 
 // Run executes one kb CLI invocation. args starts with the subcommand,
@@ -218,10 +204,10 @@ func (a *app) parseResult(err error) (code int, done bool) {
 	return a.usageErr(err), true
 }
 
-// withBackend opens the backend for data, runs fn, and maps its error to the
+// withLocal opens the local store for data, runs fn, and maps its error to the
 // exit code.
-func (a *app) withBackend(data string, fn func(backend) error) int {
-	be, err := openBackend(data, a.stderr)
+func (a *app) withLocal(data string, fn func(*localBackend) error) int {
+	be, err := openLocal(defaultUser, data, a.stderr)
 	if err != nil {
 		return a.fail(err)
 	}
@@ -232,43 +218,10 @@ func (a *app) withBackend(data string, fn func(backend) error) int {
 	return 0
 }
 
-// backend is the storage abstraction shared by local (SQLite) and remote
-// (HTTP wire markdown) modes.
-type backend interface {
-	list(filter store.TaskFilter) ([]item, error)
-	add(t board.Task) (item, error)
-	// update applies the field patch and the optional status move as one
-	// atomic step. Moving to done is guarded exactly as move and done are:
-	// refused unless force, judged on the post-patch task, and rolled back
-	// whole so a refusal persists neither the move nor the patch.
-	update(ref string, p store.TaskPatch, moveTo *board.Status, force bool) (item, error)
-	move(ref string, to board.Status, force bool) (item, error)
-	remove(ref string) (item, error)
-	// view fetches one task with its comments and links.
-	view(ref string) (item, []store.Comment, store.TaskLinks, error)
-	commentAdd(ref, body string) (store.Comment, error)
-	comments(ref string) ([]store.Comment, error)
-	commentRm(id int) (store.Comment, error)
-	link(blockerRef, blockedRef string) (blocker, blocked board.Task, err error)
-	unlink(aRef, bRef string) error
-	close() error
-}
-
-// item pairs a task with the id the CLI prints and accepts for it: the full
-// UUID in local mode, an ephemeral listing index ("i1", ...) in remote mode.
+// item pairs a task with the id the CLI prints and accepts for it.
 type item struct {
 	ref  string
 	task board.Task
-}
-
-// openBackend picks remote mode when KB_SERVER is set, local otherwise. Both
-// operate on the defaultUser namespace: the local per-user surface is gone,
-// while the store and the wire API keep their user parameter for kb serve.
-func openBackend(dataDir string, stderr io.Writer) (backend, error) {
-	if base := strings.TrimSpace(os.Getenv("KB_SERVER")); base != "" {
-		return newRemote(strings.TrimRight(base, "/"), os.Getenv("KB_SERVER_TOKEN"), defaultUser), nil
-	}
-	return openLocal(defaultUser, dataDir, stderr)
 }
 
 // --- flag plumbing ---
@@ -508,7 +461,7 @@ func (a *app) cmdAdd(args []string) int {
 	if t.Tags, err = ProjectTags(t.Tags, *projectF, *data, ""); err != nil {
 		return a.usageErr(err)
 	}
-	return a.withBackend(*data, func(be backend) error {
+	return a.withLocal(*data, func(be *localBackend) error {
 		it, err := be.add(t)
 		if err != nil {
 			return err
@@ -521,7 +474,7 @@ func (a *app) cmdAdd(args []string) int {
 	})
 }
 
-func outputList(be backend, filter store.TaskFilter, all, asJSON bool, stdout io.Writer) error {
+func outputList(be *localBackend, filter store.TaskFilter, all, asJSON bool, stdout io.Writer) error {
 	items, err := be.list(filter)
 	if err != nil {
 		return err
@@ -545,9 +498,7 @@ func outputList(be backend, filter store.TaskFilter, all, asJSON bool, stdout io
 }
 
 // cmdUsers lists every board owner in the local database with their task
-// count. It deliberately has no --user flag: the listing is global. Remote
-// mode is refused because the wire API serves exactly one board per
-// authenticated identity.
+// count. It deliberately has no --user flag: the listing is global.
 func (a *app) cmdUsers(args []string) int {
 	fs := flag.NewFlagSet("kb users", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -559,9 +510,6 @@ func (a *app) cmdUsers(args []string) int {
 	}
 	if len(pos) != 0 {
 		return a.usageErr(fmt.Errorf("users takes no arguments, got %q", pos[0]))
-	}
-	if strings.TrimSpace(os.Getenv("KB_SERVER")) != "" {
-		return a.fail(errors.New("users reads the local database only; unset KB_SERVER (the server API serves one board per identity)"))
 	}
 	st, err := openLocalStore(*data, a.stderr)
 	if err != nil {
@@ -615,7 +563,7 @@ func (a *app) cmdList(args []string) int {
 		}
 		filter.Status = s
 	}
-	return a.withBackend(*data, func(be backend) error {
+	return a.withLocal(*data, func(be *localBackend) error {
 		return outputList(be, filter, *allF, *jsonF, a.stdout)
 	})
 }
@@ -728,7 +676,7 @@ func (a *app) cmdUpdate(args []string) int {
 	if err != nil {
 		return a.usageErr(err)
 	}
-	return a.withBackend(*data, func(be backend) error {
+	return a.withLocal(*data, func(be *localBackend) error {
 		if err := applyProjectPatch(be, pos[0], &p, *projectF, *data, hasProject); err != nil {
 			return err
 		}
@@ -810,7 +758,7 @@ func (a *app) cmdRestore(args []string) int {
 // is set: the CLI has no interactive confirmation, so it errors out rather
 // than shipping something the user may not have meant to.
 func (a *app) moveTo(data, ref string, to board.Status, force, asJSON bool) int {
-	return a.withBackend(data, func(be backend) error {
+	return a.withLocal(data, func(be *localBackend) error {
 		it, err := be.move(ref, to, force)
 		if err != nil {
 			return err
@@ -835,7 +783,7 @@ func (a *app) cmdRm(args []string) int {
 		return a.usageErr(errors.New("rm needs exactly one <id-prefix> argument"))
 	}
 	ref := pos[0]
-	return a.withBackend(*data, func(be backend) error {
+	return a.withLocal(*data, func(be *localBackend) error {
 		if !*yes {
 			items, err := be.list(store.TaskFilter{})
 			if err != nil {
@@ -860,16 +808,11 @@ func (a *app) cmdRm(args []string) int {
 }
 
 // findItem locates ref among items without mutating anything (rm preview):
-// exact ref match first (remote "i2", full UUIDs), then a bare remote index,
-// then a stable sequence number, then a unique local prefix.
+// exact UUID match first, then a stable sequence number, then a unique UUID
+// prefix.
 func findItem(items []item, ref string) (item, error) {
 	for _, it := range items {
 		if it.ref == ref {
-			return it, nil
-		}
-	}
-	for _, it := range items {
-		if it.ref == "i"+ref {
 			return it, nil
 		}
 	}
@@ -922,8 +865,7 @@ func seqRef(ref string) (int, bool) {
 }
 
 // displayID renders the id agents type back: the stable #n when the task
-// carries one, else the shortened ref (an i-N index in remote mode, where
-// tasks have no sequence number).
+// carries one, else the shortened ref.
 func displayID(it item) string {
 	if it.task.Seq > 0 {
 		return "#" + strconv.Itoa(it.task.Seq)
@@ -931,7 +873,7 @@ func displayID(it item) string {
 	return displayRef(it.ref)
 }
 
-// displayRef shortens local UUIDs to 8 characters; remote refs pass through.
+// displayRef shortens UUIDs to 8 characters.
 func displayRef(ref string) string {
 	if len(ref) > 8 {
 		return ref[:8]

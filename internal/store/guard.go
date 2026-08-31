@@ -9,8 +9,8 @@ import (
 
 // CompletionBlockedError is the typed refusal for finishing a task that
 // still has open work: open checklist items, a blocked flag, or open
-// blockers. Callers that force the move never see it; the HTTP API maps it
-// to 409 and the CLI prints it verbatim.
+// blockers. Callers that force the move never see it; local interfaces print
+// it verbatim.
 type CompletionBlockedError struct{ msg string }
 
 func (e *CompletionBlockedError) Error() string { return e.msg }
@@ -22,8 +22,8 @@ func NewCompletionBlockedError(reason, ref, title string) *CompletionBlockedErro
 
 // CompletionWarning explains why finishing t deserves a second look — open
 // checklist items, a blocked flag, or both — and returns "" when the task
-// is clear to ship. Shared by the CLI, MCP, and HTTP surfaces so the
-// refusal reads identically everywhere.
+// is clear to ship. Shared by the CLI and TUI so the refusal reads identically
+// everywhere.
 func CompletionWarning(t board.Task) string {
 	open := 0
 	for _, c := range t.Checks {

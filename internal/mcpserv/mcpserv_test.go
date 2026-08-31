@@ -92,7 +92,7 @@ func connectWithStore(t *testing.T) (*mcp.ClientSession, *store.Store) {
 
 	serverT, clientT := mcp.NewInMemoryTransports()
 	ctx := context.Background()
-	ss, err := newServer(st, "tester", dataDir).Connect(ctx, serverT, nil)
+	ss, err := newServer(st, "tester", dataDir, "test-version").Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -137,6 +137,10 @@ func callOK(t *testing.T, cs *mcp.ClientSession, name string, args map[string]an
 // preserves the rationale that tells an agent when to prefer their cheap stubs.
 func TestListToolsExposesExactlyTwelve(t *testing.T) {
 	cs := connect(t)
+	info := cs.InitializeResult().ServerInfo
+	if info.Name != "kb" || info.Title != "kb local kanban board" || info.Version != "test-version" {
+		t.Fatalf("server info = %+v", info)
+	}
 	res, err := cs.ListTools(context.Background(), &mcp.ListToolsParams{})
 	if err != nil {
 		t.Fatalf("list tools: %v", err)

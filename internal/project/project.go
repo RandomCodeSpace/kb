@@ -2,8 +2,8 @@
 //
 // Every task carries exactly one project, spelled as the scoped label
 // "project::<name>". Projects slice one board rather than splitting it into
-// several: the label is ordinary task data, so nothing about the schema, the
-// wire format, or the server changes.
+// several: the label is ordinary task data, so nothing about the schema or
+// Markdown codec changes.
 //
 // The rules live here rather than in one surface because more than one surface
 // writes tasks: the CLI resolves an active project and stamps it, and the TUI

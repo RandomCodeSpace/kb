@@ -822,35 +822,20 @@ func TestCancelledPreferencePathAndIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	paths := []string{pathA}
-	for _, identity := range []struct {
-		database string
-		user     string
-	}{
-		{databaseA, "bob"},
-		{databaseB, "alice"},
-		{databaseAlternate, "alice"},
-	} {
-		path, pathErr := tuiPreferencesPath(identity.database, identity.user)
-		if pathErr != nil {
-			t.Fatal(pathErr)
-		}
-		paths = append(paths, path)
+	pathForOtherUser, err := tuiPreferencesPath(databaseA, "bob")
+	if err != nil || pathForOtherUser != pathA {
+		t.Fatalf("single-board preference path = %q,%v, want %q", pathForOtherUser, err, pathA)
 	}
-	for i, left := range paths {
-		for j, right := range paths {
-			if i != j && left == right {
-				t.Fatalf("preference identities %d and %d share %q", i, j, left)
-			}
-		}
+	pathForAlternateDB, err := tuiPreferencesPath(databaseAlternate, "alice")
+	if err != nil || pathForAlternateDB != pathA {
+		t.Fatalf("same-directory preference path = %q,%v, want %q", pathForAlternateDB, err, pathA)
 	}
-	stable, err := tuiPreferencesPath(databaseA, "alice")
-	if err != nil || stable != pathA {
-		t.Fatalf("stable preference path = %q,%v, want %q", stable, err, pathA)
+	pathB, err := tuiPreferencesPath(databaseB, "alice")
+	if err != nil || pathB == pathA {
+		t.Fatalf("separate data directory preference path = %q,%v, must differ from %q", pathB, err, pathA)
 	}
-	wantRoot := filepath.Join(filepath.Dir(databaseA), ".kb-tui") + string(os.PathSeparator)
-	if !strings.HasPrefix(pathA, wantRoot) {
-		t.Fatalf("preference path %q is not under board data %q", pathA, wantRoot)
+	if want := filepath.Join(filepath.Dir(databaseA), ".kb-tui", "preferences.json"); pathA != want {
+		t.Fatalf("preference path = %q, want %q", pathA, want)
 	}
 
 	if got, err := loadTUIPreferences(pathA); err != nil || got.ShowCancelled || got.Filter.Text != "" || len(got.Filter.Tags) != 0 {
@@ -863,10 +848,8 @@ func TestCancelledPreferencePathAndIsolation(t *testing.T) {
 	if got, err := loadTUIPreferences(pathA); err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("saved preference = %v,%v", got, err)
 	}
-	for _, isolated := range paths[1:] {
-		if got, readErr := loadTUIPreferences(isolated); readErr != nil || got.ShowCancelled || got.Filter.Text != "" || len(got.Filter.Tags) != 0 {
-			t.Fatalf("isolated preference %q = %v,%v", isolated, got, readErr)
-		}
+	if got, readErr := loadTUIPreferences(pathB); readErr != nil || got.ShowCancelled || got.Filter.Text != "" || len(got.Filter.Tags) != 0 {
+		t.Fatalf("isolated data-directory preference %q = %v,%v", pathB, got, readErr)
 	}
 	if info, err := os.Stat(pathA); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("preference mode = %v,%v", info, err)
@@ -882,6 +865,98 @@ func TestCancelledPreferencePathAndIsolation(t *testing.T) {
 	}
 	if _, err := loadTUIPreferences(pathA); err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("malformed preference error = %v", err)
+	}
+}
+
+func TestPreferenceLegacyMigrationPublishesStableFile(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "kb.db")
+	legacyPath, err := legacyTUIPreferencesPath(databasePath, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := tuiPreferences{
+		ShowCancelled: true,
+		Filter:        boardFilter{Text: "restored", Tags: []string{"project::work"}},
+		Project:       "work",
+		Shipped:       shippedRecord{Date: "2026-08-31", IDs: []string{"one"}},
+	}
+	if err := saveTUIPreferences(legacyPath, want); err != nil {
+		t.Fatal(err)
+	}
+	stablePath, got, err := resolveTUIPreferences(databasePath, "default")
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolved exact legacy preference = %+v, %v", got, err)
+	}
+	if stablePath == legacyPath {
+		t.Fatalf("stable path reused legacy name %q", legacyPath)
+	}
+	if stable, err := loadTUIPreferences(stablePath); err != nil || !reflect.DeepEqual(stable, want) {
+		t.Fatalf("published stable preference = %+v, %v", stable, err)
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("legacy preference was removed: %v", err)
+	}
+}
+
+func TestPreferenceMovedDirectoryAdoptsSingleLegacyFile(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	movedDir := filepath.Join(root, "restored")
+	sourceDatabase := filepath.Join(sourceDir, "kb.db")
+	legacyPath, err := legacyTUIPreferencesPath(sourceDatabase, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := tuiPreferences{
+		ShowCancelled: true,
+		Filter:        boardFilter{Text: "portable", Tags: []string{"project::moved"}},
+		Project:       "moved",
+		Shipped:       shippedRecord{Date: "2026-08-31", IDs: []string{"shipped"}},
+	}
+	if err := saveTUIPreferences(legacyPath, want); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(sourceDir, movedDir); err != nil {
+		t.Fatal(err)
+	}
+	stablePath, got, err := resolveTUIPreferences(filepath.Join(movedDir, "kb.db"), "default")
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("moved preference = %+v, %v", got, err)
+	}
+	if stable, err := loadTUIPreferences(stablePath); err != nil || !reflect.DeepEqual(stable, want) {
+		t.Fatalf("moved stable preference = %+v, %v", stable, err)
+	}
+}
+
+func TestPreferenceMultipleLegacyFilesUsesDefaultsWithoutGuessing(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "kb.db")
+	preferenceDir := filepath.Join(root, ".kb-tui")
+	for index, identity := range []string{"first", "second"} {
+		otherPath, err := legacyTUIPreferencesPath(filepath.Join(t.TempDir(), "kb.db"), identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidate := filepath.Join(preferenceDir, filepath.Base(otherPath))
+		if err := saveTUIPreferences(candidate, tuiPreferences{Project: identity}); err != nil {
+			t.Fatal(err)
+		}
+		if index == 1 && candidate == otherPath {
+			t.Fatal("legacy fixture unexpectedly used its source directory")
+		}
+	}
+	stablePath, got, err := resolveTUIPreferences(databasePath, "default")
+	if err == nil || !strings.Contains(err.Error(), "using defaults instead of guessing") {
+		t.Fatalf("multiple legacy files error = %v", err)
+	}
+	if !reflect.DeepEqual(got, tuiPreferences{}) {
+		t.Fatalf("multiple legacy files restored %+v, want defaults", got)
+	}
+	if _, statErr := os.Stat(stablePath); !os.IsNotExist(statErr) {
+		t.Fatalf("multiple legacy files published a stable guess: %v", statErr)
+	}
+	if err := saveTUIPreferences(stablePath, tuiPreferences{Project: "chosen"}); err != nil {
+		t.Fatalf("future save could not publish stable preference: %v", err)
 	}
 }
 

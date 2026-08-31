@@ -32,7 +32,7 @@ notes_file=${positional[1]}
 [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
   die 'version must match vX.Y.Z'
 
-for command_name in git go file sha256sum curl timeout script; do
+for command_name in git go file sha256sum timeout script; do
   command -v "$command_name" >/dev/null 2>&1 || \
     die "required command not found: $command_name"
 done
@@ -111,7 +111,7 @@ fi
 tag_created=0
 tag_pushed=0
 output_dir=''
-serve_pid=''
+artifact_dir=''
 
 source_is_unchanged() {
   [[ $(git rev-parse HEAD) == "$source_commit" ]] &&
@@ -124,10 +124,6 @@ cleanup() {
   local result=$?
   trap - EXIT HUP INT TERM
 
-  if [[ -n $serve_pid ]]; then
-    kill "$serve_pid" >/dev/null 2>&1 || true
-    wait "$serve_pid" >/dev/null 2>&1 || true
-  fi
   if [[ $tag_created == 1 && $tag_pushed == 0 ]]; then
     git tag -d "$version" >/dev/null 2>&1 || result=1
     tag_created=0
@@ -149,7 +145,202 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-go test ./...
+output_dir=$(mktemp -d "${TMPDIR:-/tmp}/kb-release.XXXXXX")
+artifact_dir="$output_dir/artifacts"
+mkdir "$artifact_dir"
+
+existing_version_tags=$(git tag --points-at "$source_commit" --list 'v[0-9]*.[0-9]*.[0-9]*')
+[[ -z $existing_version_tags ]] || \
+  die "release source already has a version tag: ${existing_version_tags//$'\n'/, }"
+previous_tag=$(git describe --tags --abbrev=0 \
+  --match 'v[0-9]*.[0-9]*.[0-9]*' "$source_commit" 2>/dev/null) || \
+  die 'release source has no reachable previous version tag'
+previous_commit=$(git rev-parse "$previous_tag^{commit}") || \
+  die "previous version tag does not resolve to a commit: $previous_tag"
+
+impact_plan="$output_dir/impact.plan"
+sh scripts/ci/impact.sh --base "$previous_tag" --head "$source_commit" \
+  --format plan >"$impact_plan"
+
+impact_schema=''
+impact_base=''
+impact_head=''
+impact_compile_all=''
+focused_quality=''
+contract_race=''
+migration_recovery=''
+tui_performance=''
+binary_release_contract=''
+ci_contract=''
+docs_contract=''
+sonar=''
+impact_owners=()
+impact_compile_packages=()
+contract_race_reasons=()
+binary_release_reasons=()
+ci_contract_reasons=()
+
+while IFS=$'\t' read -r record first second extra; do
+  [[ -z ${extra:-} ]] || die "malformed impact plan record: $record"
+  case "$record" in
+    schema_version) impact_schema=$first ;;
+    base) impact_base=$first ;;
+    head) impact_head=$first ;;
+    compile_all) impact_compile_all=$first ;;
+    check)
+      case "$first" in
+        focused_quality|contract_race|migration_recovery|tui_performance|binary_release_contract|ci_contract|docs_contract|sonar)
+          printf -v "$first" '%s' "$second"
+          ;;
+        *) die "unknown impact check: $first" ;;
+      esac
+      ;;
+    owner) impact_owners+=("$first") ;;
+    compile_package) impact_compile_packages+=("$first") ;;
+    reason)
+      case "$first" in
+        contract_race) contract_race_reasons+=("$second") ;;
+        binary_release_contract) binary_release_reasons+=("$second") ;;
+        ci_contract) ci_contract_reasons+=("$second") ;;
+      esac
+      ;;
+    '') ;;
+    *) die "unknown impact plan record: $record" ;;
+  esac
+done <"$impact_plan"
+
+[[ $impact_schema == 1 ]] || die "unsupported impact plan schema: ${impact_schema:-missing}"
+[[ $impact_base == "$previous_commit" ]] || die 'impact plan resolved the wrong previous release'
+[[ $impact_head == "$source_commit" ]] || die 'impact plan resolved the wrong candidate'
+[[ $impact_compile_all == true || $impact_compile_all == false ]] || \
+  die 'impact plan omitted compile_all'
+for check_name in focused_quality contract_race migration_recovery tui_performance \
+  binary_release_contract ci_contract docs_contract sonar; do
+  check_value=${!check_name}
+  [[ $check_value == true || $check_value == false ]] || \
+    die "impact plan omitted check: $check_name"
+done
+printf 'release: impact %s (%s) -> %s\n' "$previous_tag" "$previous_commit" "$source_commit"
+
+array_contains() {
+  local wanted=$1
+  shift
+  local value
+  for value in "$@"; do
+    [[ $value == "$wanted" ]] && return 0
+  done
+  return 1
+}
+
+if [[ $focused_quality == true ]]; then
+  sh scripts/check-go-format.sh --changed "$previous_commit" "$source_commit"
+  if [[ ${#impact_owners[@]} -gt 0 ]]; then
+    GO_COVERAGE_PROFILE="$output_dir/go-coverage.out" \
+      sh scripts/check-go-coverage.sh --packages "${impact_owners[@]}"
+    go vet -buildvcs=false "${impact_owners[@]}"
+  fi
+  if [[ ${#impact_compile_packages[@]} -gt 0 ]]; then
+    go test -buildvcs=false -run '^$' "${impact_compile_packages[@]}"
+  fi
+else
+  printf 'release: focused-quality not affected\n'
+fi
+
+if [[ $contract_race == true ]]; then
+  race_store=0
+  race_tui=0
+  race_forge=0
+  for reason in "${contract_race_reasons[@]}"; do
+    case "$reason" in
+      internal/store/*) race_store=1 ;;
+      internal/tui/*) race_tui=1 ;;
+      internal/forge/*) race_forge=1 ;;
+    esac
+  done
+  [[ $race_store == 1 || $race_tui == 1 || $race_forge == 1 ]] || \
+    die 'contract-race was selected without a mapped owning package'
+  if [[ $race_store == 1 ]]; then
+    go test -buildvcs=false -race ./internal/store \
+      -run '^(TestCreateSecretConcurrentPublication|TestConcurrentOpenSerializesMigration|TestDoneGuardCannotRaceConcurrentBlock|TestImportBaselineCreateAndCASAreAtomicAcrossCallers)$' \
+      -count=1
+  fi
+  if [[ $race_tui == 1 ]]; then
+    go test -buildvcs=false -race ./internal/tui \
+      -run '^(TestDataVersionWatcherDetectsAnotherConnection|TestRunCancelsInFlightWatcherBeforeClose|TestMoveSerializesWatcherRefreshBehindStoreWrite|TestAutoShipTransactionRefusesConcurrentCancellation|TestKeyboardAdmissionQueueIsConstantUnderBurst|TestRenderedPointerMailboxOverflowFailsClosed|TestModelCopiesShareRenderedPointerMailbox)$' \
+      -count=1
+  fi
+  if [[ $race_forge == 1 ]]; then
+    go test -buildvcs=false -race ./internal/forge \
+      -run '^(TestAcceptDriftConcurrentCASIsIdempotent|TestAcceptDriftRejectsConcurrentDifferentBaseline)$' \
+      -count=1
+  fi
+else
+  printf 'release: contract-race not affected\n'
+fi
+
+if [[ $migration_recovery == true ]]; then
+  if array_contains 'github.com/RandomCodeSpace/kb/internal/store' "${impact_owners[@]}"; then
+    printf 'release: store migration/recovery covered by focused owner tests\n'
+  else
+    go test -buildvcs=false ./internal/store \
+      -run '^(TestColdCopyRecoveryRoundTrip|TestLoadOrCreateSecret.*|TestOpenRejectsInvalidPathsAndSchemas|TestConnectionPragmas|TestConcurrentOpenSerializesMigration)$' \
+      -count=1
+  fi
+  if array_contains 'github.com/RandomCodeSpace/kb/internal/tui' "${impact_owners[@]}"; then
+    printf 'release: TUI preferences covered by focused owner tests\n'
+  else
+    go test -buildvcs=false ./internal/tui \
+      -run '^(TestPreference.*|TestCancelledPreference.*)' -count=1
+  fi
+else
+  printf 'release: migration-recovery not affected\n'
+fi
+
+if [[ $tui_performance == true ]]; then
+  if ! array_contains 'github.com/RandomCodeSpace/kb/internal/tui' "${impact_owners[@]}"; then
+    go test -buildvcs=false ./internal/tui \
+      -run '^(TestPerformance.*|TestPointerResolverCostIsBoundedByVisibleHitSnapshot|TestNavigationArtifactAcceptanceRejectsMissingOrUnboundedReuse)$' \
+      -count=1
+  fi
+  KB_PERF_ACCEPT=1 KB_PERF_CORPORA=17,120,500,1000 \
+    KB_PERF_REPORT="$output_dir/tui-performance.json" GOMAXPROCS=8 \
+    go test -buildvcs=false ./internal/tui \
+      -run '^TestLargeBoardPerformanceHarness$' -count=1 -timeout=15m
+else
+  printf 'release: tui-performance not affected\n'
+fi
+
+if [[ $ci_contract == true ]]; then
+  sh scripts/ci/test-impact.sh
+  sh scripts/check-go-checkers.test.sh
+  command -v node >/dev/null 2>&1 || die 'required command not found: node'
+  node scripts/ci/test_ci_monitor.cjs
+  node scripts/ci_monitor.cjs check-actions
+  if array_contains 'scripts/check-docs.sh' "${ci_contract_reasons[@]}" && \
+    [[ $docs_contract == false ]]; then
+    sh scripts/check-docs.sh
+  fi
+else
+  printf 'release: ci-contract not affected\n'
+fi
+
+if [[ $docs_contract == true ]]; then
+  sh scripts/check-docs.sh
+else
+  printf 'release: docs-contract not affected\n'
+fi
+
+release_safeguards=0
+for reason in "${binary_release_reasons[@]}"; do
+  case "$reason" in
+    scripts/release.sh|scripts/release.test.sh|scripts/verify-release-artifacts.sh|.github/workflows/release.yml)
+      release_safeguards=1
+      ;;
+  esac
+done
+if [[ $release_safeguards == 1 ]]; then
+  bash scripts/release.test.sh
+fi
 
 # The tag points directly at the reviewed source commit. No generated commit,
 # detached checkout, reset, or tracked build output is involved.
@@ -160,145 +351,7 @@ tag_created=1
 [[ $(git rev-parse "$version^{}") == "$source_commit" ]] || \
   die "$version does not dereference to the source commit"
 
-output_dir=$(mktemp -d "${TMPDIR:-/tmp}/kb-release.XXXXXX")
-targets=(
-  linux/amd64
-  linux/arm64
-  darwin/amd64
-  darwin/arm64
-  windows/amd64
-)
-
-metadata_value() {
-  local artifact=$1
-  local key=$2
-  go version -m "$artifact" | awk -F '\t' -v wanted="$key" '
-    $2 == "build" && index($3, wanted "=") == 1 {
-      print substr($3, length(wanted) + 2)
-      exit
-    }
-  '
-}
-
-verify_artifact() {
-  local artifact=$1
-  local goos=$2
-  local goarch=$3
-  local description metadata recorded_module recorded_version recorded_go
-
-  description=$(file -b "$artifact")
-  case "$goos/$goarch" in
-    linux/amd64)  [[ $description == *'ELF 64-bit LSB'*x86-64* ]] ;;
-    linux/arm64)  [[ $description == *'ELF 64-bit LSB'*ARM\ aarch64* ]] ;;
-    darwin/amd64) [[ $description == *'Mach-O 64-bit x86_64'* ]] ;;
-    darwin/arm64) [[ $description == *'Mach-O 64-bit arm64'* ]] ;;
-    windows/amd64) [[ $description == *'PE32+'*x86-64* ]] ;;
-    *) return 1 ;;
-  esac || die "unexpected file format for $(basename "$artifact"): $description"
-
-  metadata=$(go version -m "$artifact") || \
-    die "cannot read Go metadata from $(basename "$artifact")"
-  recorded_go=$(printf '%s\n' "$metadata" | awk 'NR == 1 { print $NF }')
-  recorded_module=$(printf '%s\n' "$metadata" | awk -F '\t' '$2 == "mod" { print $3; exit }')
-  recorded_version=$(printf '%s\n' "$metadata" | awk -F '\t' '$2 == "mod" { print $4; exit }')
-
-  [[ $recorded_go == "$expected_go_version" ]] || \
-    die "$(basename "$artifact") uses $recorded_go, want $expected_go_version"
-  [[ $recorded_module == "$module_path" ]] || \
-    die "$(basename "$artifact") module is $recorded_module, want $module_path"
-  [[ $recorded_version == "$version" ]] || \
-    die "$(basename "$artifact") version is $recorded_version, want $version"
-  [[ $(metadata_value "$artifact" vcs.revision) == "$source_commit" ]] || \
-    die "$(basename "$artifact") has the wrong source revision"
-  [[ $(metadata_value "$artifact" GOOS) == "$goos" ]] || \
-    die "$(basename "$artifact") has the wrong GOOS"
-  [[ $(metadata_value "$artifact" GOARCH) == "$goarch" ]] || \
-    die "$(basename "$artifact") has the wrong GOARCH"
-  [[ $(metadata_value "$artifact" vcs.modified) == false ]] || \
-    die "$(basename "$artifact") is stamped as modified"
-}
-
-for target in "${targets[@]}"; do
-  goos=${target%/*}
-  goarch=${target#*/}
-  artifact="$output_dir/kb-$goos-$goarch"
-  [[ $goos == windows ]] && artifact+='.exe'
-  CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
-    go build -trimpath -ldflags='-s -w' -o "$artifact" .
-  verify_artifact "$artifact" "$goos" "$goarch"
-done
-
-(
-  cd "$output_dir"
-  sha256sum kb-* >SHA256SUMS
-  sha256sum -c SHA256SUMS
-)
-
-run_native_smokes() {
-  local native="$output_dir/kb-linux-amd64"
-  local smoke="$output_dir/smoke"
-  local tui_command port health_url
-  mkdir -p "$smoke"
-
-  [[ $(go env GOOS) == linux && $(go env GOARCH) == amd64 ]] || \
-    die 'native release smokes require linux/amd64'
-  [[ $($native version) == "kb $version (${source_commit:0:12})" ]] || \
-    die 'native version smoke returned the wrong version'
-
-  KB_DATA="$smoke/default-data" "$native" </dev/null >"$smoke/default.txt"
-  grep -F 'usage: kb' "$smoke/default.txt" >/dev/null || \
-    die 'bare non-TTY smoke did not print root help'
-  [[ ! -e $smoke/default-data ]] || \
-    die 'bare non-TTY smoke opened the data directory'
-  "$native" --help >"$smoke/root-help.txt"
-  "$native" help >"$smoke/cli-help.txt"
-  grep -F 'serve      run the optional HTTP API server' "$smoke/root-help.txt" >/dev/null || \
-    die 'root help smoke omitted kb serve'
-  grep -F '  add "title"' "$smoke/cli-help.txt" >/dev/null || \
-    die 'CLI help smoke omitted kb add'
-
-  "$native" project use release-smoke --data "$smoke/cli-data" \
-    >"$smoke/project-use.txt"
-  "$native" add 'Release smoke' --data "$smoke/cli-data" \
-    >"$smoke/add.txt"
-  "$native" list --data "$smoke/cli-data" --json \
-    >"$smoke/list.json"
-  grep -F 'Release smoke' "$smoke/list.json" >/dev/null || \
-    die 'local CLI smoke did not round-trip its task'
-  grep -F 'project::release-smoke' "$smoke/list.json" >/dev/null || \
-    die 'local CLI smoke did not stamp the active project'
-
-  printf -v tui_command '%q tui --data %q' \
-    "$native" "$smoke/tui-data"
-  if ! printf 'q' | TERM=xterm-256color timeout 10s \
-    script --quiet --return --command "$tui_command" "$smoke/tui.typescript" \
-    >"$smoke/tui.txt" 2>&1; then
-    die 'TUI launch/quit smoke failed'
-  fi
-
-  port=$((30000 + (RANDOM % 20000)))
-  health_url="http://127.0.0.1:$port/api/health"
-  KB_BIND=127.0.0.1 "$native" serve --port "$port" \
-    --data "$smoke/serve-data" >"$smoke/serve.txt" 2>&1 &
-  serve_pid=$!
-  for _ in {1..100}; do
-    if curl --fail --silent --show-error --connect-timeout 0.2 --max-time 0.5 \
-      "$health_url" >"$smoke/health.json"; then
-      break
-    fi
-    if ! kill -0 "$serve_pid" 2>/dev/null; then
-      die 'serve smoke exited before becoming healthy'
-    fi
-    sleep 0.05
-  done
-  grep -F '"ok":true' "$smoke/health.json" >/dev/null || \
-    die 'serve smoke did not return a healthy API response'
-  kill "$serve_pid"
-  wait "$serve_pid" >/dev/null 2>&1 || true
-  serve_pid=''
-}
-
-run_native_smokes
+bash scripts/verify-release-artifacts.sh "$version" "$source_commit" "$artifact_dir"
 
 if [[ $dry_run == 1 ]]; then
   git tag -d "$version" >/dev/null
@@ -317,12 +370,12 @@ gh release create "$version" \
   --verify-tag \
   --title "$version" \
   --notes-file "$notes_file" \
-  "$output_dir"/kb-linux-amd64 \
-  "$output_dir"/kb-linux-arm64 \
-  "$output_dir"/kb-darwin-amd64 \
-  "$output_dir"/kb-darwin-arm64 \
-  "$output_dir"/kb-windows-amd64.exe \
-  "$output_dir"/SHA256SUMS
+  "$artifact_dir"/kb-linux-amd64 \
+  "$artifact_dir"/kb-linux-arm64 \
+  "$artifact_dir"/kb-darwin-amd64 \
+  "$artifact_dir"/kb-darwin-arm64 \
+  "$artifact_dir"/kb-windows-amd64.exe \
+  "$artifact_dir"/SHA256SUMS
 
 printf 'release: %s published from %s\n' "$version" "$source_commit"
 printf 'verify: gh release verify %s --repo %s\n' "$version" "$module_path"

@@ -92,8 +92,8 @@ type Check struct {
 // scoped ("type::bug"). Position is the 0-based ordinal within the task's
 // column and, like ID, Seq, CreatedAt, and MovedAt, is metadata not carried
 // by the wire format. Seq is the task's stable per-board sequence number
-// (#n): assigned once on creation, never reused, 0 when unknown (tasks
-// parsed from the wire or served by a remote board).
+// (#n): assigned once on creation, never reused, 0 when unknown, such as a
+// task parsed from legacy Markdown.
 type Task struct {
 	ID        string
 	Seq       int

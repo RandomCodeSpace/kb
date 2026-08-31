@@ -513,6 +513,7 @@ func validateImportBaseline(baseline ImportBaseline) error {
 	for name, value := range map[string]string{
 		"title": baseline.Title,
 		"hash":  baseline.Hash,
+		"at":    baseline.At,
 	} {
 		if strings.ContainsAny(value, "\r\n") {
 			return fmt.Errorf("store: import baseline %s contains a line break", name)
