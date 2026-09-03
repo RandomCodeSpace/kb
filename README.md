@@ -299,7 +299,7 @@ exercises the local task flow on Linux, macOS, and Windows.
 Use conventional commit subjects and target pull requests at `main`.
 
 Current release notes are in
-[`docs/releases/v1.7.1.md`](docs/releases/v1.7.1.md).
+[`docs/releases/v1.7.2.md`](docs/releases/v1.7.2.md).
 
 ## License
 
