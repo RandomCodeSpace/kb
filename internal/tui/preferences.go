@@ -54,6 +54,12 @@ func legacyTUIPreferencesPath(databasePath, user string) (string, error) {
 	return filepath.Join(filepath.Dir(databasePath), ".kb-tui", name), nil
 }
 
+// errAmbiguousLegacyPreferences marks the one resolution outcome that is a
+// notice rather than a broken path: several legacy hash files sit beside the
+// database and none can be attributed, so defaults are used. The stable file
+// is still writable, so saves must keep publishing it (spec issue #284 step 4).
+var errAmbiguousLegacyPreferences = errors.New("using defaults instead of guessing")
+
 func resolveTUIPreferences(databasePath, user string) (string, tuiPreferences, error) {
 	stablePath, err := tuiPreferencesPath(databasePath, user)
 	if err != nil {
@@ -91,7 +97,7 @@ func resolveTUIPreferences(databasePath, user string) (string, tuiPreferences, e
 	}
 	if len(candidates) > 1 {
 		return stablePath, tuiPreferences{}, fmt.Errorf(
-			"tui preferences: found %d legacy preference files; using defaults instead of guessing", len(candidates))
+			"tui preferences: found %d legacy preference files; %w", len(candidates), errAmbiguousLegacyPreferences)
 	}
 	preferences, found, err := readTUIPreferences(candidates[0])
 	if err != nil || !found {
