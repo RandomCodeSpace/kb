@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"io"
@@ -1099,6 +1100,7 @@ func TestConnectionPragmas(t *testing.T) {
 		{"foreign_keys", "1"},
 		{"temp_store", "2"},
 		{"synchronous", "2"},
+		{"busy_timeout", "5000"},
 	} {
 		var got string
 		if err := s.db.QueryRow("PRAGMA " + tc.pragma).Scan(&got); err != nil {
@@ -1107,5 +1109,73 @@ func TestConnectionPragmas(t *testing.T) {
 		if !strings.EqualFold(got, tc.want) {
 			t.Errorf("PRAGMA %s = %q, want %q", tc.pragma, got, tc.want)
 		}
+	}
+}
+
+// TestWriteWaitsForConcurrentImmediateTransaction proves the busy_timeout
+// pinned above is load-bearing: a second kb process writing while another
+// holds the write lock waits for the lock instead of failing the user's edit.
+func TestWriteWaitsForConcurrentImmediateTransaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kb.db")
+	holder, err := Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatalf("Open holder: %v", err)
+	}
+	defer holder.Close()
+	writer, err := Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatalf("Open writer: %v", err)
+	}
+	defer writer.Close()
+
+	conn, err := holder.db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("holder conn: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE: %v", err)
+	}
+
+	type result struct {
+		elapsed time.Duration
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		start := time.Now()
+		_, err := writer.AddTask("u", board.Task{Title: "blocked write"})
+		done <- result{time.Since(start), err}
+	}()
+
+	const hold = 200 * time.Millisecond
+	time.Sleep(hold)
+	select {
+	case got := <-done:
+		t.Fatalf("AddTask finished in %v while the write lock was held (err %v)", got.elapsed, got.err)
+	default:
+	}
+	if _, err := conn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		t.Fatalf("ROLLBACK: %v", err)
+	}
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("AddTask after the lock was released: %v", got.err)
+		}
+		if got.elapsed >= busyTimeout {
+			t.Errorf("AddTask waited %v, want less than the %v busy timeout", got.elapsed, busyTimeout)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("AddTask did not return within 1s of the lock being released")
+	}
+
+	b, err := writer.Board("u")
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	if len(b.Tasks) != 1 || b.Tasks[0].Title != "blocked write" {
+		t.Fatalf("board after the blocked write = %+v", b.Tasks)
 	}
 }
