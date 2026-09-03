@@ -139,6 +139,7 @@ jobs:
           args: >-
             -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
             -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+            ${{ hashFiles('coverage/go.out') != '' && '-Dsonar.go.coverage.reportPaths=coverage/go.out' || '' }}
 
   contract-race:
     name: contract-race
