@@ -42,6 +42,7 @@ func importReady(t *testing.T) (Model, *fakeStore) {
 			Link:        "github#1",
 			ExternalKey: "github:primary@github.example/acme/kb#1",
 			URL:         "https://github.example/acme/kb/issues/1",
+			Baseline:    store.NewImportBaseline("imported", "body", "2026-08-31T00:00:00Z"),
 		}}},
 	}
 	m := openModel(t, backend, st)

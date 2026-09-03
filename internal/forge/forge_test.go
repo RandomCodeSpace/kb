@@ -681,6 +681,54 @@ func TestDriftLifecycleAndRevisionConflict(t *testing.T) {
 
 func upstreamURL(r *http.Request) string { return "http://" + r.Host }
 
+// TestImportedCardDriftsOnFirstCheck composes the import write with the drift
+// check: a card created through the service stores the previewed baseline, so
+// the very first check after upstream moves reports drift instead of quietly
+// recording a fresh baseline the way a legacy import does.
+func TestImportedCardDriftsOnFirstCheck(t *testing.T) {
+	var title atomic.Value
+	title.Store("Imported")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/issues/7"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "title": title.Load().(string), "body": "body", "html_url": upstreamURL(r) + "/owner/repo/issues/7"})
+		case strings.HasSuffix(r.URL.Path, "/issues/7/comments"):
+			_, _ = io.WriteString(w, `[]`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	st := testStore(t)
+	base := upstream.URL
+	if _, err := st.SetForgeSource("alice", "primary", "github", &base, nil); err != nil {
+		t.Fatal(err)
+	}
+	service := New(st, nil, upstream.Client())
+	sources, err := service.Sources("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueURL := upstream.URL + "/owner/repo/issues/7"
+	ref, err := parseRef(sources, "primary", issueURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, key := issueProvenance(ref, Issue{Ref: "github#7"})
+	item := LinkInput{
+		ExternalKey: key, Link: link, URL: issueURL, Title: "Imported",
+		Baseline: store.NewImportBaseline("Imported", "body", "2026-09-01T00:00:00Z"),
+	}
+	if _, err := service.CreateTask("alice", "primary", board.Task{Title: "Imported"}, item); err != nil {
+		t.Fatalf("create = %v", err)
+	}
+	title.Store("Renamed upstream")
+	drift, err := service.CheckDrift(context.Background(), "alice", "primary", key)
+	if err != nil || drift.State != "drifted" || drift.BaselineTitle != "Imported" || drift.UpstreamTitle != "Renamed upstream" {
+		t.Fatalf("first check after import = %+v, %v", drift, err)
+	}
+}
+
 func TestProbeAndSourceLifecycle(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v3/user" || r.URL.Path == "/api/v3/repos/owner/repo" {
