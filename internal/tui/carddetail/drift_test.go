@@ -177,6 +177,37 @@ func TestDriftAcceptSuccessAndStaleSessionGuards(t *testing.T) {
 	}
 }
 
+// Issue #282: a legacy import with no recorded snapshot has nothing to compare
+// against, so the first check records one. The pane says that in English and
+// never claims the card is unchanged since import.
+func TestDriftBaselineRecordedExplainsFirstCheck(t *testing.T) {
+	backend := &fakeDriftBackend{
+		provenance: map[string][]store.ImportLink{"github#93": {{Source: "github", ExternalKey: "key", Title: "Issue"}}},
+		result: forge.Drift{
+			State: "baseline_recorded", UpstreamTitle: "Current title",
+			BaselineTitle: "Current title", BaselineAt: "2026-09-03T00:00:00Z",
+		},
+	}
+	m := New(nil, "alice", testStyles())
+	m.SetDriftBackend(backend, context.Background())
+	task := driftTask("task-legacy")
+	task.Tags = []string{"link::github#93"}
+	m.Open(task)
+	m.Update(m.beginDrift()())
+	m.Update(m.startDriftCheck()())
+	view := ansi.Strip(m.View(120, 18))
+	for _, want := range []string{"state  baseline recorded", driftBaselineRecordedCopy} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view omitted %q:\n%s", want, view)
+		}
+	}
+	for _, unwanted := range []string{"baseline_recorded", "unchanged"} {
+		if strings.Contains(view, unwanted) {
+			t.Fatalf("view leaked %q:\n%s", unwanted, view)
+		}
+	}
+}
+
 func TestDriftErrorsMissingLinksAndBusyInput(t *testing.T) {
 	m := New(nil, "alice", testStyles())
 	m.SetDriftBackend(&fakeDriftBackend{}, context.Background())

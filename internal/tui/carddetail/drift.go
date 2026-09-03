@@ -15,6 +15,24 @@ import (
 
 const upstreamConflictCopy = "Upstream changed again. Check upstream before updating the card."
 
+// driftBaselineRecorded is the state the service reports when a legacy import
+// carried no snapshot and this check recorded the current one. Spec section
+// 10.8 and issue #282 bar the pane from reading that as "unchanged since
+// import": there was nothing to compare against, so the pane names the gap.
+const (
+	driftBaselineRecorded     = "baseline_recorded"
+	driftBaselineRecordedCopy = "no original import snapshot existed; comparison starts with this check"
+)
+
+// driftStateCopy renders a service state token as the pane's own copy. Only
+// the recorded-baseline state needs one; the rest already read as English.
+func driftStateCopy(state string) string {
+	if state == driftBaselineRecorded {
+		return "baseline recorded"
+	}
+	return state
+}
+
 type DriftBackend interface {
 	Provenance(string, string) ([]store.ImportLink, error)
 	CheckDrift(context.Context, string, string, string) (forge.Drift, error)
@@ -264,9 +282,12 @@ func (m Model) driftBody(width int) string {
 		return strings.Join(lines, "\n")
 	}
 	result := m.driftResult
-	lines = append(lines, "", "state  "+safeText(result.State, false), "upstream  "+safeText(result.UpstreamTitle, false))
+	lines = append(lines, "", "state  "+safeText(driftStateCopy(result.State), false), "upstream  "+safeText(result.UpstreamTitle, false))
 	if result.BaselineTitle != "" {
 		lines = append(lines, "baseline  "+safeText(result.BaselineTitle, false))
+	}
+	if result.State == driftBaselineRecorded {
+		lines = append(lines, driftBaselineRecordedCopy)
 	}
 	if result.Summary != "" {
 		lines = append(lines, "", "summary  "+safeText(result.Summary, true))
