@@ -280,6 +280,32 @@ func TestRunVersion(t *testing.T) {
 	}
 }
 
+func TestVersionAndTUIFlagErrors(t *testing.T) {
+	// version and tui flag errors should be wrapped in commandFlagError
+	// so dispatch classifies them as usage errors (exit code 2)
+	err := runVersion([]string{"--bogus"})
+	var flagErr *commandFlagError
+	if !errors.As(err, &flagErr) {
+		t.Errorf("version --bogus should return commandFlagError, got %v", err)
+	}
+
+	err = runTUI([]string{"--bogus"})
+	if !errors.As(err, &flagErr) {
+		t.Errorf("tui --bogus should return commandFlagError, got %v", err)
+	}
+
+	// -h should return flag.ErrHelp wrapped in commandFlagError
+	err = runVersion([]string{"-h"})
+	if !errors.As(err, &flagErr) || !errors.Is(flagErr, flag.ErrHelp) {
+		t.Errorf("version -h should return commandFlagError wrapping flag.ErrHelp, got %v", err)
+	}
+
+	err = runTUI([]string{"-h"})
+	if !errors.As(err, &flagErr) || !errors.Is(flagErr, flag.ErrHelp) {
+		t.Errorf("tui -h should return commandFlagError wrapping flag.ErrHelp, got %v", err)
+	}
+}
+
 func TestResolveDefaultDataDir(t *testing.T) {
 	t.Setenv("KB_DATA", "/custom/data")
 	if got, err := resolveDefaultDataDir(); err != nil || got != "/custom/data" {

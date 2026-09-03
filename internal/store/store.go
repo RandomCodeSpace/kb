@@ -258,9 +258,20 @@ func repairAIBaseURLSuffixes(db *sql.DB) error {
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }
 
+// busyTimeout mirrors the DSN's busy_timeout(5000): how long a write waits for
+// another process holding the write lock before it gives up.
+const busyTimeout = 5 * time.Second
+
 // withTx runs fn inside a transaction, committing on nil and rolling back on
 // error.
+//
+// database/sql begins deferred transactions, so a write that upgrades an
+// already-open read snapshot is handed SQLITE_BUSY at once and the
+// connection's busy_timeout never sees it. Retrying for the same budget here
+// is what makes a second kb process wait for the lock instead of failing the
+// user's edit.
 func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
+	deadline := time.Now().Add(busyTimeout)
 	for attempt := 0; ; attempt++ {
 		tx, err := s.db.Begin()
 		if err != nil {
@@ -268,22 +279,27 @@ func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
 		}
 		if err := fn(tx); err != nil {
 			_ = tx.Rollback()
-			if isSQLiteBusy(err) && attempt < 9 {
-				time.Sleep(time.Duration(attempt+1) * time.Millisecond)
+			if isSQLiteBusy(err) && time.Now().Before(deadline) {
+				time.Sleep(busyBackoff(attempt))
 				continue
 			}
 			return err
 		}
 		if err := tx.Commit(); err != nil {
 			_ = tx.Rollback()
-			if isSQLiteBusy(err) && attempt < 9 {
-				time.Sleep(time.Duration(attempt+1) * time.Millisecond)
+			if isSQLiteBusy(err) && time.Now().Before(deadline) {
+				time.Sleep(busyBackoff(attempt))
 				continue
 			}
 			return fmt.Errorf("store: commit: %w", err)
 		}
 		return nil
 	}
+}
+
+// busyBackoff ramps a retry sleep to 10ms and holds it there.
+func busyBackoff(attempt int) time.Duration {
+	return min(time.Duration(attempt+1)*time.Millisecond, 10*time.Millisecond)
 }
 
 func isSQLiteBusy(err error) bool {

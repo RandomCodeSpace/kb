@@ -261,7 +261,11 @@ func classify(repo, base, head, modulePath string, changes []change, packages []
 				result.Go.CompileAll = true
 				addReason(result.Reasons, "focused_quality", path)
 			}
-			if strings.HasSuffix(path, ".go") && !strings.HasPrefix(path, "scripts/") {
+			if hasTestdataSegment(path) {
+				if pkg, ok := enclosingPackage(dirToPackage, path); ok {
+					ownerSet[pkg] = true
+				}
+			} else if strings.HasSuffix(path, ".go") && !strings.HasPrefix(path, "scripts/") {
 				dir := filepath.ToSlash(filepath.Dir(path))
 				if dir == "." {
 					dir = ""
@@ -332,6 +336,8 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 	}
 
 	switch {
+	case hasTestdataSegment(path):
+		mark("focused_quality", &result.Checks.FocusedQuality)
 	case path == "go.mod" || path == "go.sum":
 		mark("focused_quality", &result.Checks.FocusedQuality)
 		mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
@@ -358,12 +364,15 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 		mark("ci_contract", &result.Checks.CIContract)
 	case path == "scripts/ci_monitor.cjs" || path == "scripts/ci/test_ci_monitor.cjs":
 		mark("ci_contract", &result.Checks.CIContract)
+	case path == "sonar-project.properties":
+		mark("ci_contract", &result.Checks.CIContract)
 	case path == "README.md" || path == "LICENSE" || strings.HasPrefix(path, "docs/") || strings.HasPrefix(path, ".claude/"):
 		mark("docs_contract", &result.Checks.DocsContract)
 		if strings.HasPrefix(path, "docs/releases/") {
 			mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
 		}
-	case path == ".gitattributes" || path == ".gitignore" || path == ".github/CODEOWNERS":
+	case path == ".gitattributes" || path == ".gitignore" || path == ".github/CODEOWNERS" ||
+		path == ".github/dependabot.yml":
 		mark("ci_contract", &result.Checks.CIContract)
 	}
 
@@ -394,6 +403,29 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 	}
 	if performancePath {
 		mark("tui_performance", &result.Checks.TUIPerformance)
+	}
+}
+
+func hasTestdataSegment(path string) bool {
+	return strings.HasPrefix(path, "testdata/") || strings.Contains(path, "/testdata/")
+}
+
+func enclosingPackage(dirToPackage map[string]string, path string) (string, bool) {
+	dir := filepath.ToSlash(filepath.Dir(path))
+	if dir == "." {
+		dir = ""
+	}
+	for {
+		if pkg, ok := dirToPackage[dir]; ok {
+			return pkg, true
+		}
+		if dir == "" {
+			return "", false
+		}
+		dir = filepath.ToSlash(filepath.Dir(dir))
+		if dir == "." {
+			dir = ""
+		}
 	}
 }
 

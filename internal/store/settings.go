@@ -295,6 +295,15 @@ func LoadOrCreateSecret(dataDir string) ([]byte, error) {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("store: inspect existing database: %w", err)
 	}
+	// A WAL or SHM sidecar without kb.db is a half-copied data directory. The
+	// missing database (and its secret) still exist somewhere; minting a new
+	// secret here would only make the eventual restore unreadable.
+	for _, sidecar := range []string{databasePath + "-wal", databasePath + "-shm"} {
+		if _, err := os.Stat(sidecar); err == nil {
+			return nil, fmt.Errorf("store: %s exists but %s does not: %s looks like a partial copy — restore the whole data directory including %s instead of generating a new secret",
+				sidecar, databasePath, dataDir, databasePath)
+		}
+	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("store: create data dir: %w", err)
 	}

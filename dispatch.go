@@ -114,10 +114,10 @@ var versionOut io.Writer = os.Stdout
 // from.
 func runVersion(args []string) error {
 	fs := flag.NewFlagSet("kb version", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(os.Stderr)
 	jsonOut := fs.Bool("json", false, "print the version as JSON")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return &commandFlagError{err: err}
 	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("version takes no arguments")

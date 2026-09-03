@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 	"testing"
@@ -58,6 +59,17 @@ func (b *fakeBackend) CreateTask(user, source string, task board.Task, item forg
 	b.lastSource, b.lastItem = source, item
 	if b.recordErr != nil {
 		return board.Task{}, b.recordErr
+	}
+	// The real service refuses a draft whose upstream binding was never
+	// validated: provenance that does not match the previewed source and a
+	// missing baseline are both rejected before any card is written
+	// (internal/forge.Service.CreateTask). The fake has to refuse them too,
+	// or the overlay's tests pass on cards the service would never create.
+	if strings.TrimSpace(item.ExternalKey) == "" {
+		return board.Task{}, &forge.Error{Code: http.StatusBadRequest, Message: "import preview provenance does not match the configured source; preview again"}
+	}
+	if item.Baseline == (store.ImportBaseline{}) {
+		return board.Task{}, &forge.Error{Code: http.StatusBadRequest, Message: "invalid import baseline"}
 	}
 	return b.store.AddTask(user, task)
 }
@@ -312,11 +324,13 @@ func TestEdgeMessagesAndRows(t *testing.T) {
 	m := openModel(t, backend, st)
 	m.ref.SetValue("acme/kb")
 	m.Update(runCmd(m.startPreview()))
+	// A draft with no external key was never bound to an upstream issue. The
+	// service refuses it, so the row fails and no card is written.
 	m.rows[0].draft.ExternalKey = ""
 	command := m.startCreate()
 	m.Update(command())
-	if len(st.added) != 1 || m.operation != "" || !m.rows[0].created {
-		t.Fatalf("plain created row = %+v operation=%q", m.rows[0], m.operation)
+	if len(st.added) != 0 || m.rows[0].created || m.rows[0].err == "" || m.operation != "" {
+		t.Fatalf("unbound draft row = %+v added=%d operation=%q", m.rows[0], len(st.added), m.operation)
 	}
 	m.rows[0].include = false
 	m.rows[0].created = false

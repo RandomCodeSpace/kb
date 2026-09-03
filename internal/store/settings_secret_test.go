@@ -101,6 +101,29 @@ func TestLoadOrCreateSecretRefusesExistingDatabaseWithoutKey(t *testing.T) {
 	}
 }
 
+// TestLoadOrCreateSecretRefusesOrphanedSidecars covers the half-copied data
+// directory: kb.db was left behind but its WAL or SHM sidecar came along, so
+// minting a fresh secret would make the eventual restore unreadable.
+func TestLoadOrCreateSecretRefusesOrphanedSidecars(t *testing.T) {
+	for _, sidecar := range []string{"kb.db-wal", "kb.db-shm"} {
+		t.Run(sidecar, func(t *testing.T) {
+			t.Setenv("KB_SECRET", "")
+			dataDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dataDir, sidecar), []byte("orphan"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadOrCreateSecret(dataDir); err == nil ||
+				!strings.Contains(err.Error(), "partial copy") ||
+				!strings.Contains(err.Error(), "kb.db") {
+				t.Fatalf("orphaned %s error = %v", sidecar, err)
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, "secret")); !os.IsNotExist(err) {
+				t.Fatalf("orphaned %s refusal published a secret: %v", sidecar, err)
+			}
+		})
+	}
+}
+
 func TestCreateSecretConcurrentPublication(t *testing.T) {
 	t.Setenv("KB_SECRET", "")
 	dataDir := t.TempDir()

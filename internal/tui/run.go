@@ -90,17 +90,7 @@ func runProgram(
 	model.SetVersion(version)
 	model.configureAI(aiRunner, ctx)
 	model.SetActiveProject(activeProject)
-	preferencePath, preferences, preferencePathErr := resolveTUIPreferences(databasePath, user)
-	model.preferenceErr = preferencePathErr
-	if preferencePathErr == nil {
-		model.adoptPreferences(preferences)
-	}
-	model.savePreferences = func(preferences tuiPreferences) error {
-		if preferencePathErr != nil {
-			return preferencePathErr
-		}
-		return saveTUIPreferences(preferencePath, preferences)
-	}
+	model.installPreferences(databasePath, user)
 	if settingsNew != nil {
 		model.settingsNew = func() *settingsModel { return settingsNew(ctx) }
 	}
@@ -117,4 +107,26 @@ func runProgram(
 		return fmt.Errorf("tui: run: %w", err)
 	}
 	return nil
+}
+
+// installPreferences wires the restored snapshot, the sticky notice a failed
+// resolution raises, and the saver. Ambiguous legacy files are a notice, not a
+// broken path: defaults are used, the legacy files are left alone, and saves
+// still publish the stable file so the board can settle on one.
+func (m *Model) installPreferences(databasePath, user string) {
+	preferencePath, preferences, preferencePathErr := resolveTUIPreferences(databasePath, user)
+	m.preferenceErr = preferencePathErr
+	if preferencePathErr == nil {
+		m.adoptPreferences(preferences)
+	}
+	saveErr := preferencePathErr
+	if errors.Is(saveErr, errAmbiguousLegacyPreferences) {
+		saveErr = nil
+	}
+	m.savePreferences = func(preferences tuiPreferences) error {
+		if saveErr != nil {
+			return saveErr
+		}
+		return saveTUIPreferences(preferencePath, preferences)
+	}
 }
