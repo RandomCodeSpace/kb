@@ -371,7 +371,8 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 		if strings.HasPrefix(path, "docs/releases/") {
 			mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
 		}
-	case path == ".gitattributes" || path == ".gitignore" || path == ".github/CODEOWNERS":
+	case path == ".gitattributes" || path == ".gitignore" || path == ".github/CODEOWNERS" ||
+		path == ".github/dependabot.yml":
 		mark("ci_contract", &result.Checks.CIContract)
 	}
 
