@@ -217,17 +217,16 @@ Important files in the data directory:
 1. Quit the TUI and stop any CLI scripts or MCP clients that may be writing.
 2. Copy the entire data directory as one unit—not just `kb.db`. This keeps the
    database, any SQLite sidecars, the generated `secret`, preferences, and
-   custom skills together.
+   custom skills together. Copy to a fresh destination, not over an existing one.
 3. If you set `KB_SECRET` outside the data directory, preserve that exact value
    with the backup. It is part of the backup even though it is stored elsewhere.
 
 ### Restore
 
 1. Stop every kb process that uses the destination data directory.
-2. Restore the complete directory. Do not place an old `kb.db` beside a newly
-   generated `secret`.
-3. If the backup used an external `KB_SECRET`, restore that same value before
-   starting kb.
+2. Restore the complete directory to an empty directory. Use the original
+   generated `secret` file or the exact external `KB_SECRET` value.
+3. Open the restored directory first with the same kb version or a newer one.
 4. Start kb normally. It validates the database schema before migration and
    refuses an existing database when its generated secret is missing, instead
    of silently creating a key that cannot decrypt the stored credentials.
@@ -235,6 +234,18 @@ Important files in the data directory:
 Losing the generated or external key makes stored credentials unreadable. Task
 content remains in SQLite, but the complete directory plus the matching secret
 is the supported recovery unit.
+
+### Unsupported
+
+Do not:
+
+- Back up live copies of the directory while kb is running anywhere.
+- Copy only `kb.db` without the rest of the directory.
+- Overlay a restored backup onto an existing directory.
+- Store the data directory on network filesystems or synced folders (Dropbox,
+  iCloud, OneDrive, and similar).
+- Use the same data directory from multiple hosts.
+- Downgrade to an older kb version with an existing database.
 
 Legacy `<user>.md` boards in the data directory are considered for one-time
 import when that owner has no tasks. Use `default.md` for the board visible to
@@ -275,7 +286,7 @@ base=$(git merge-base origin/main HEAD)
 sh scripts/ci/impact.sh --base "$base" --head HEAD
 ```
 
-Every pull request still reports the same eight Quality jobs. Unaffected jobs
+Every pull request still reports the same nine Quality jobs. Unaffected jobs
 say `not affected`; affected jobs run only the owning packages and mapped
 contracts. Changes to shared migrations, terminal performance, CI, docs, or
 release behavior select their focused gate automatically. Node is used only by
