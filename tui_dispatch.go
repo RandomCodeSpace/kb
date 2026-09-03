@@ -27,10 +27,10 @@ var (
 // board namespace is always defaultBoardUser.
 func runTUI(args []string) error {
 	fs := flag.NewFlagSet("kb tui", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(tuiStderr)
 	dataDir := fs.String("data", "", "board storage directory (default $KB_DATA or ~/.local/share/kb)")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return &commandFlagError{err: err}
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("tui takes no positional arguments")

@@ -66,8 +66,9 @@ other modes (not task commands):
 
 common flags (every command):
   --data dir     data directory (default $KB_DATA or ~/.local/share/kb)
-  --json         machine output; the JSON shape is documented by each
-                 command's --help
+  --json         machine output: --json is available on every data-producing
+                 and mutating command and on version. Shapes are
+                 command-specific; see README.
 
 projects:
   Every task carries exactly one project, stored as the scoped label

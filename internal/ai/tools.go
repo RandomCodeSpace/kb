@@ -141,7 +141,7 @@ func (r *Runner) findSimilarTool(user string) *kbTool {
 	return newKBTool(
 		"find_similar",
 		"Search existing cards and import history for work that already covers a "+
-			"proposal. Call this before proposing a card. Returns cheap stubs.",
+			"proposal. Returns cheap stubs.",
 		schemaObject(map[string]any{
 			"query": schemaString("free text matched against card titles, descriptions, tags, and import history"),
 		}, "query"),

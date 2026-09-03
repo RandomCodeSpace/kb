@@ -78,3 +78,33 @@ func TestLinkUnlinkCLI(t *testing.T) {
 		}
 	}
 }
+
+func TestLinkJSONOutput(t *testing.T) {
+	dir := localEnv(t)
+	// Create two tasks to link
+	if _, errS, code := runCmd(t, "add", "Task A", "--data", dir); code != 0 {
+		t.Fatalf("add A failed: %s", errS)
+	}
+	if _, errS, code := runCmd(t, "add", "Task B", "--data", dir); code != 0 {
+		t.Fatalf("add B failed: %s", errS)
+	}
+
+	// link --json should produce valid JSON array with two task objects
+	out, _, code := runCmd(t, "link", "1", "blocks", "2", "--json", "--data", dir)
+	if code != 0 {
+		t.Fatalf("link --json failed")
+	}
+	var linked []map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &linked); err != nil {
+		t.Fatalf("link --json output not JSON: %v\n%s", err, out)
+	}
+	if len(linked) != 2 {
+		t.Fatalf("link --json should return 2 tasks, got %d", len(linked))
+	}
+	// Check that both tasks have id field
+	for i, task := range linked {
+		if id, ok := task["id"]; !ok || id == "" {
+			t.Fatalf("link --json task %d missing id: %v", i, task)
+		}
+	}
+}

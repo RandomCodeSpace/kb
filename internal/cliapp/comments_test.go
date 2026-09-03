@@ -43,12 +43,41 @@ func TestCommentLifecycleCLI(t *testing.T) {
 		t.Fatalf("comment list table:\n%s", out)
 	}
 
+	// comment list --json should produce valid JSON array
+	listOut, _, code := runCmd(t, "comment", "list", "1", "--json", "--data", dir)
+	if code != 0 {
+		t.Fatalf("comment list --json failed")
+	}
+	var comments []map[string]interface{}
+	if err := json.Unmarshal([]byte(listOut), &comments); err != nil {
+		t.Fatalf("comment list --json output not JSON: %v\n%s", err, listOut)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("comment list --json should return 2 comments, got %d", len(comments))
+	}
+	if id, ok := comments[0]["id"]; !ok || id == nil {
+		t.Fatalf("comment list --json missing id: %v", comments[0])
+	}
+
 	// rm demands --yes, accepts the c-form, and reports the deletion.
 	if _, errS, code = runCmd(t, "comment", "rm", "c1", "--data", dir); code != 1 || !strings.Contains(errS, "--yes") {
 		t.Fatalf("comment rm without --yes: code=%d stderr=%q", code, errS)
 	}
 	if out, _, code = runCmd(t, "comment", "rm", "c1", "--yes", "--data", dir); code != 0 || out != "deleted c1\n" {
 		t.Fatalf("comment rm: code=%d out=%q", code, out)
+	}
+
+	// comment rm --json should produce valid JSON
+	rmOut, _, code := runCmd(t, "comment", "rm", "c2", "--yes", "--json", "--data", dir)
+	if code != 0 {
+		t.Fatalf("comment rm --json failed")
+	}
+	var deleted map[string]interface{}
+	if err := json.Unmarshal([]byte(rmOut), &deleted); err != nil {
+		t.Fatalf("comment rm --json output not JSON: %v\n%s", err, rmOut)
+	}
+	if id, ok := deleted["id"]; !ok || id == nil {
+		t.Fatalf("comment rm --json missing id: %v", deleted)
 	}
 	if _, errS, code = runCmd(t, "comment", "rm", "1", "--yes", "--data", dir); code != 1 || !strings.Contains(errS, "no comment matches") {
 		t.Fatalf("comment rm gone: code=%d stderr=%q", code, errS)

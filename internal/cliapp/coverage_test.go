@@ -34,7 +34,7 @@ func TestRunEmptyAndHelpAliases(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	if code := Run([]string{"--help"}, &stdout, &stderr); code != 0 ||
-		!strings.Contains(stdout.String(), "the JSON shape is documented by each") ||
+		!strings.Contains(stdout.String(), "--json is available on every data-producing") ||
 		strings.Contains(stdout.String(), "every\n                 other command prints the affected task") {
 		t.Fatalf("global JSON help: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
