@@ -48,8 +48,9 @@ run_impact() {
   fi
 }
 
-mkdir -p -- "$fixture/internal/leaf" "$fixture/internal/importer" "$fixture/internal/tui" \
-  "$fixture/.github/workflows" "$fixture/scripts" "$fixture/docs/releases"
+mkdir -p -- "$fixture/internal/leaf" "$fixture/internal/importer" "$fixture/internal/tui/testdata" \
+  "$fixture/internal/board/testdata" "$fixture/internal/store" \
+  "$fixture/.github/workflows" "$fixture/scripts/ci" "$fixture/docs/releases"
 git -C "$fixture" init -q -b main
 git -C "$fixture" config user.name 'kb impact test'
 git -C "$fixture" config user.email 'impact@example.invalid'
@@ -58,6 +59,15 @@ printf 'package leaf\n\nfunc Value() int { return 1 }\n' >"$fixture/internal/lea
 printf 'package importer\n\nimport "example.test/impact/internal/leaf"\n\nfunc Value() int { return leaf.Value() }\n' >"$fixture/internal/importer/importer.go"
 printf 'package main\n\nimport "example.test/impact/internal/importer"\n\nfunc main() { _ = importer.Value() }\n' >"$fixture/main.go"
 printf 'package tui\n\nfunc fixture() int { return 1 }\n' >"$fixture/internal/tui/performance_harness_test.go"
+printf 'golden\n' >"$fixture/internal/tui/testdata/TestBoardGolden.golden"
+printf '//go:build ignore\n\npackage main\n\nfunc main() {}\n' >"$fixture/internal/tui/testdata/generate_fixture.go"
+printf 'package board\n\nfunc Value() int { return 1 }\n' >"$fixture/internal/board/board.go"
+printf '{"cards": 1}\n' >"$fixture/internal/board/testdata/golden.json"
+printf 'package store\n\nfunc Schema() int { return 1 }\n' >"$fixture/internal/store/schema.go"
+printf 'package store\n\nfunc Migrate() int { return 1 }\n' >"$fixture/internal/store/migrate.go"
+printf '\n' >"$fixture/go.sum"
+printf 'sonar.sources=.\n' >"$fixture/sonar-project.properties"
+printf '// ci monitor fixture\n' >"$fixture/scripts/ci_monitor.cjs"
 printf '# local fixture\n' >"$fixture/README.md"
 printf 'name: fixture\n' >"$fixture/.github/workflows/quality.yml"
 printf '#!/usr/bin/env sh\nexit 0\n' >"$fixture/scripts/check-go-coverage.sh"
@@ -149,11 +159,75 @@ assert_contains 'example.test/impact/internal/leaf' 'deleted package identity'
 assert_contains '"compile_all": true' 'deleted package compile expansion'
 assert_contains '"sonar": false' 'deleted Go exclusion from Sonar'
 
+printf 'golden changed\n' >"$fixture/internal/tui/testdata/TestBoardGolden.golden"
+golden="$(commit_all golden)"
+run_impact "$deleted" "$golden" || fail 'golden testdata impact failed'
+assert_contains 'example.test/impact/internal/tui' 'golden testdata owner'
+assert_contains '"focused_quality": true' 'golden testdata classification'
+assert_contains '"sonar": false' 'golden testdata Sonar exclusion'
+
+printf '{"cards": 2}\n' >"$fixture/internal/board/testdata/golden.json"
+board="$(commit_all board-testdata)"
+run_impact "$golden" "$board" || fail 'board testdata impact failed'
+assert_contains 'example.test/impact/internal/board' 'board testdata owner'
+assert_not_contains 'example.test/impact/internal/tui"' 'board testdata owner isolation'
+
+printf '//go:build ignore\n\npackage main\n\nfunc main() { println(1) }\n' >"$fixture/internal/tui/testdata/generate_fixture.go"
+generator="$(commit_all generator)"
+run_impact "$board" "$generator" || fail 'generator impact failed'
+assert_contains 'example.test/impact/internal/tui' 'generator owner'
+assert_contains '"compile_all": false' 'generator compile scope'
+
+printf 'sonar.sources=.\nsonar.sourceEncoding=UTF-8\n' >"$fixture/sonar-project.properties"
+sonar="$(commit_all sonar)"
+run_impact "$generator" "$sonar" || fail 'sonar properties impact failed'
+assert_contains '"ci_contract": true' 'sonar properties classification'
+assert_contains '"focused_quality": false' 'sonar properties Go exclusion'
+
+printf 'example.test/dep v1.0.0/go.mod h1:fixture=\n' >"$fixture/go.sum"
+checksums="$(commit_all checksums)"
+run_impact "$sonar" "$checksums" || fail 'go.sum impact failed'
+assert_contains '"compile_all": true' 'go.sum compile expansion'
+assert_contains '"binary_release_contract": true' 'go.sum release classification'
+assert_contains '"focused_quality": true' 'go.sum quality classification'
+
+printf 'package store\n\nfunc Schema() int { return 2 }\n' >"$fixture/internal/store/schema.go"
+schema="$(commit_all schema)"
+run_impact "$checksums" "$schema" || fail 'schema impact failed'
+assert_contains '"migration_recovery": true' 'schema migration classification'
+assert_contains '"contract_race": false' 'schema race exclusion'
+
+printf 'package store\n\nfunc Migrate() int { return 2 }\n' >"$fixture/internal/store/migrate.go"
+migrate="$(commit_all migrate)"
+run_impact "$schema" "$migrate" || fail 'migrate impact failed'
+assert_contains '"contract_race": true' 'migrate race classification'
+assert_contains '"migration_recovery": true' 'migrate recovery classification'
+
+printf '// ci monitor fixture\nprocess.exit(0);\n' >"$fixture/scripts/ci_monitor.cjs"
+monitor="$(commit_all monitor)"
+run_impact "$migrate" "$monitor" || fail 'ci monitor impact failed'
+assert_contains '"ci_contract": true' 'ci monitor classification'
+assert_contains '"focused_quality": false' 'ci monitor Go exclusion'
+
 printf 'unknown\n' >"$fixture/mystery.bin"
 unknown="$(commit_all unknown)"
 status=0
-run_impact "$deleted" "$unknown" 2>/dev/null || status=$?
+run_impact "$monitor" "$unknown" 2>/dev/null || status=$?
 [ "$status" -ne 0 ] || fail 'unclassified path unexpectedly passed'
 assert_contains 'mystery.bin' 'unclassified path manifest'
+
+mirror="$test_root/mirror"
+mkdir -p -- "$mirror"
+git -C "$mirror" init -q -b main
+git -C "$mirror" config user.name 'kb impact test'
+git -C "$mirror" config user.email 'impact@example.invalid'
+git -C "$mirror" commit -q --allow-empty -m empty
+mirror_base="$(git -C "$mirror" rev-parse HEAD)"
+git -C "$source_root" archive HEAD | tar -x -C "$mirror"
+git -C "$mirror" add -A
+git -C "$mirror" commit -q -m tracked
+(CDPATH='' cd -- "$mirror" && sh "$source_root/scripts/ci/impact.sh" --base "$mirror_base" --head HEAD >"$output") ||
+  fail "tracked paths remain unclassified: $(grep -A 100 '"unclassified"' "$output" | tr -d ' \n')"
+assert_contains '"unclassified": []' 'tracked path classification'
 
 echo 'test-impact: pass'
