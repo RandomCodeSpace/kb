@@ -189,3 +189,47 @@ func TestSelectionAffordancesStayAccurateAtNarrowWidths(t *testing.T) {
 		}
 	}
 }
+
+func TestNearestSelectionPointClampsAcrossBlankRowsAndClearIsIdempotent(t *testing.T) {
+	m := openRefModel(t, "selection source")
+	m.selectable = []selectableRow{
+		{row: 2, width: 0},
+		{row: 4, text: "alpha", width: 5, block: 1},
+		{row: 8, text: "omega", width: 5, block: 2},
+	}
+	inset := m.styles.Metrics.OverlayInsetX
+	point, ok := m.nearestSelectablePoint(6, inset-20)
+	if !ok || point != (textPoint{row: 4, cell: 0}) {
+		t.Fatalf("nearest point above blank gap = %+v, %t", point, ok)
+	}
+	point, ok = m.nearestSelectablePoint(99, inset+99)
+	if !ok || point != (textPoint{row: 8, cell: 4}) {
+		t.Fatalf("nearest point below content = %+v, %t", point, ok)
+	}
+	first, last := orderedPoints(textPoint{row: 8, cell: 3}, textPoint{row: 4, cell: 1})
+	if first != (textPoint{row: 4, cell: 1}) || last != (textPoint{row: 8, cell: 3}) {
+		t.Fatalf("reversed selection ordered as %+v to %+v", first, last)
+	}
+
+	m.selectable = []selectableRow{{row: 2, width: 0}}
+	if point, ok := m.nearestSelectablePoint(2, inset); ok || point != (textPoint{}) {
+		t.Fatalf("blank-only point = %+v, %t", point, ok)
+	}
+	if m.ClearSelection() {
+		t.Fatal("clearing an inactive selection reported a change")
+	}
+	m.textSelection = textSelection{active: true, moved: true}
+	if !m.ClearSelection() || m.textSelection.active || m.ClearSelection() {
+		t.Fatalf("selection clear was not one-shot: %+v", m.textSelection)
+	}
+}
+
+func TestTerminalSelectionReportsEmptyReadableDetail(t *testing.T) {
+	m := openRefModel(t, "")
+	m.comments = nil
+	m.rebuildBody()
+	m.Update(tea.KeyPressMsg{Code: 'V', Text: "V", Mod: tea.ModShift})
+	if m.TerminalSelectionActive() || m.statusMessage != "No description or comment text" {
+		t.Fatalf("empty terminal selection = active:%t status:%q", m.TerminalSelectionActive(), m.statusMessage)
+	}
+}

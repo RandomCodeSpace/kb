@@ -119,6 +119,33 @@ func TestOnAppliesBothSlots(t *testing.T) {
 	}
 }
 
+func TestTableItalicAndNeutralChipHelpersKeepTheirRoles(t *testing.T) {
+	styles := New(true)
+	if got, want := styles.Table.Column(0, 2).Render("cell"), styles.Table.Cell.Render("cell"); got != want {
+		t.Fatalf("non-final table column = %q, want cell style %q", got, want)
+	}
+	if got, want := styles.Table.Column(1, 2).Render("cell"), styles.Table.Last.Render("cell"); got != want {
+		t.Fatalf("final table column = %q, want last style %q", got, want)
+	}
+	plain := styles.On(FgBase, Card).Render("emphasis")
+	italic := styles.OnItalic(FgBase, Card).Render("emphasis")
+	if italic == plain || ansi.Strip(italic) != "emphasis" {
+		t.Fatalf("italic role = %q, plain = %q", italic, plain)
+	}
+
+	neutral := styles.NeutralChipRuns(Card)
+	if neutral.Body.Render("label") != neutral.Pad.Render("label") ||
+		neutral.ScopedKey.Render("scope") != neutral.ScopedPad.Render("scope") {
+		t.Fatal("neutral chip padding does not carry the adjacent run ground")
+	}
+	if neutral.BodyHover.Render("label") == neutral.Body.Render("label") ||
+		neutral.BodyFocus.Render("label") == neutral.Body.Render("label") ||
+		neutral.BodyFocusHover.Render("label") == neutral.BodyFocus.Render("label") ||
+		neutral.FlatHover.Render("label") == neutral.Flat.Render("label") {
+		t.Fatal("neutral chip hover/focus cues are not distinct")
+	}
+}
+
 func TestSurfacePicksTheCardTier(t *testing.T) {
 	styles := New(true)
 	cases := []struct {

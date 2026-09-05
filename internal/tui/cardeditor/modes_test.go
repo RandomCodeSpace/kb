@@ -190,3 +190,54 @@ func TestTerminalSelectionRejectsEmptyAndSanitizesSnapshot(t *testing.T) {
 		t.Fatal("escape did not exit terminal selection")
 	}
 }
+
+func TestPreviewAndTerminalControlsRouteThroughPointerAndKeyboard(t *testing.T) {
+	m := newTestEditor(newTestStore(t), "alice")
+	if surface := m.PointerSurface(80, 20); surface.Pointer != nil {
+		t.Fatal("closed editor exposed a pointer surface")
+	}
+	m.OpenEdit(board.Task{ID: "task", Title: "Controls", Desc: "preview me", Status: board.StatusTodo, Prio: 3})
+
+	m.Update(pointerClickMsg{session: m.pointerSession, target: "source-preview"})
+	if !m.preview {
+		t.Fatal("preview pointer control did not enter preview")
+	}
+	targets := map[string]bool{}
+	for _, hit := range m.pointerHits(80, 20) {
+		targets[hit.target] = true
+	}
+	if !targets["source-preview"] || !targets["terminal-select"] {
+		t.Fatalf("preview footer pointer targets = %v", targets)
+	}
+	m.Update(pointerClickMsg{session: m.pointerSession, target: "source-preview"})
+	if m.preview {
+		t.Fatal("preview pointer control did not return to source")
+	}
+
+	m.focus = "source-preview"
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.preview {
+		t.Fatal("preview keyboard control did not enter preview")
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m.focus = "terminal-select"
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.TerminalSelectionActive() {
+		t.Fatal("terminal keyboard control did not enter terminal selection")
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	m.Update(pointerClickMsg{session: m.pointerSession, target: "terminal-select"})
+	if !m.TerminalSelectionActive() {
+		t.Fatal("terminal pointer control did not enter terminal selection")
+	}
+}
+
+func TestPreviewRowsNameAnEmptyDescription(t *testing.T) {
+	m := newTestEditor(newTestStore(t), "alice")
+	m.OpenEdit(board.Task{ID: "task", Title: "Empty", Status: board.StatusTodo, Prio: 3})
+	rows := m.previewRows(40)
+	if len(rows) != 1 || rows[0].text != "Description is empty" || rows[0].kind != rowHint {
+		t.Fatalf("empty preview rows = %+v", rows)
+	}
+}
