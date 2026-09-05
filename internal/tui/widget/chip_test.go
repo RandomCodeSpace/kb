@@ -104,7 +104,7 @@ func TestLabelForms(t *testing.T) {
 	}{
 		{"plain", "bug", false, " #bug "},
 		{"plain compact", "bug", true, "#bug"},
-		{"scoped", "type::feature", false, " type:feature "},
+		{"scoped", "type::feature", false, " type feature "},
 		{"scoped compact", "type::feature", true, "feature"},
 		{"empty key falls back to plain", "::feature", false, " #::feature "},
 		{"empty value falls back to plain", "type::", false, " #type:: "},
@@ -125,48 +125,22 @@ func TestLabelForms(t *testing.T) {
 	}
 }
 
-// TestScopedLabelColonRidesTheKeyRun pins the half of issue #229 that turned out
-// not to be a defect, so a future reader does not have to re-derive it: the
-// source "key::value" spends exactly one colon, it is the last cell of the dark
-// key run, and no colon reaches the hue half or the padding at either end. It
-// holds in all three forms the report named - the filled board pill, the
-// withdrawn filter pill, and the pill on the detail overlay's surface.
-func TestScopedLabelColonRidesTheKeyRun(t *testing.T) {
+// TestScopedLabelDoesNotInjectAColon keeps raw key::value identity separate
+// from presentation. The scope and value remain readable, with a quiet space
+// boundary instead of a synthetic colon or split color block.
+func TestScopedLabelDoesNotInjectAColon(t *testing.T) {
 	styles := theme.New(true)
 	const tag = "type::feature"
-	fill := theme.LabelSlot(LabelWheel(tag))
-	cases := []struct {
-		name     string
-		rendered string
-		key      string
-	}{
-		{
-			name:     "filled",
-			rendered: Label(styles, tag, theme.Card, false, false),
-			key:      styles.ChipRuns(fill, theme.Card).ScopedKey.Render("type:"),
-		},
-		{
-			name:     "inactive",
-			rendered: FilterLabel(styles, tag, theme.Canvas, false, false, false),
-			key:      styles.ChipRunsTint(fill, theme.Canvas).ScopedKey.Render(styles.Glyph.MarkFilterOff + "type:"),
-		},
-		{
-			name:     "detail overlay",
-			rendered: Label(styles, tag, theme.OverlaySurf, false, false),
-			key:      styles.ChipRuns(fill, theme.OverlaySurf).ScopedKey.Render("type:"),
-		},
+	cases := []string{
+		Label(styles, tag, theme.Card, false, false),
+		FilterLabel(styles, tag, theme.Canvas, false, false, false),
+		Label(styles, tag, theme.OverlaySurf, false, false),
 	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			if got := strings.Count(ansi.Strip(testCase.rendered), ":"); got != 1 {
-				t.Errorf("pill %q spends %d colons, spec section 3.5 spends one",
-					ansi.Strip(testCase.rendered), got)
-			}
-			if !strings.Contains(testCase.rendered, testCase.key) {
-				t.Errorf("pill %q does not carry the colon on its key run %q",
-					testCase.rendered, testCase.key)
-			}
-		})
+	for _, rendered := range cases {
+		plain := ansi.Strip(rendered)
+		if strings.Contains(plain, ":") || !strings.Contains(plain, "type feature") {
+			t.Errorf("scoped label presentation = %q", plain)
+		}
 	}
 }
 
@@ -176,14 +150,18 @@ func TestLabelIsEmptyWithoutATag(t *testing.T) {
 	}
 }
 
-func TestLabelHuesFollowTheWheel(t *testing.T) {
+func TestLabelsUseTheirMutedWheelFill(t *testing.T) {
 	styles := theme.New(true)
-	seen := map[string]bool{}
 	for _, tag := range []string{"a", "b", "c", "d", "e"} {
-		seen[Label(styles, tag, theme.Card, true, false)] = true
-	}
-	if len(seen) < 2 {
-		t.Error("the wheel must produce more than one hue across tags")
+		rendered := Label(styles, tag, theme.Card, false, false)
+		fill := theme.LabelSlot(LabelWheel(tag))
+		runs := styles.ChipRuns(fill, theme.Card)
+		if !strings.HasPrefix(rendered, runs.Pad.Render(" ")) {
+			t.Errorf("label %q did not use wheel fill %d", tag, fill)
+		}
+		if runs.ScopedKey.Render("scope") == runs.Body.Render("scope") {
+			t.Errorf("label %q does not give the scope a quieter foreground", tag)
+		}
 	}
 }
 
@@ -198,10 +176,10 @@ func TestFilterLabelForms(t *testing.T) {
 	}{
 		{"unselected plain", "bug", false, false, " + #bug "},
 		{"selected plain", "bug", true, false, " x #bug "},
-		{"unselected scoped", "type::feature", false, false, " + type:feature "},
-		{"selected scoped", "type::feature", true, false, " x type:feature "},
+		{"unselected scoped", "type::feature", false, false, " + type feature "},
+		{"selected scoped", "type::feature", true, false, " x type feature "},
 		{"focus draws no glyph", "bug", false, true, " + #bug "},
-		{"focused and selected", "type::feature", true, true, " x type:feature "},
+		{"focused and selected", "type::feature", true, true, " x type feature "},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -221,28 +199,20 @@ func TestFilterLabelIsEmptyWithoutATag(t *testing.T) {
 	}
 }
 
-// TestFilterLabelWithdrawsTheFillAndKeepsTheHue is the toggle affordance the
-// filter bar spends the hue on, after issue #208: a selected pill wears its
-// wheel fill, an unselected one withdraws that fill to Surface but keeps the
-// same wheel hue on its body text, so the offer can still be matched by eye to
-// the label pill on the card it filters for. The two forms are not the same
-// bytes, and neither is a different width.
-func TestFilterLabelWithdrawsTheFillAndKeepsTheHue(t *testing.T) {
+func TestFilterLabelKeepsItsWheelFillAcrossSelection(t *testing.T) {
 	styles := theme.New(true)
 	for _, tag := range []string{"bug", "type::feature"} {
 		off := FilterLabel(styles, tag, theme.Canvas, false, false, false)
 		on := FilterLabel(styles, tag, theme.Canvas, true, false, false)
+		fill := theme.LabelSlot(LabelWheel(tag))
+		runs := styles.ChipRuns(fill, theme.Canvas)
 		if off == on {
 			t.Errorf("%q renders identically selected and unselected", tag)
 		}
-		if strings.Contains(off, fillRun(styles, tag)) {
-			t.Errorf("the unselected %q pill kept its wheel fill: %q", tag, off)
-		}
-		if !strings.Contains(on, fillRun(styles, tag)) {
-			t.Errorf("the selected %q pill lost its wheel fill: %q", tag, on)
-		}
-		if !strings.Contains(off, tintRun(styles, tag)) {
-			t.Errorf("the unselected %q pill lost its wheel hue: %q", tag, off)
+		for state, rendered := range map[string]string{"unselected": off, "selected": on} {
+			if !strings.HasSuffix(rendered, runs.Pad.Render(" ")) {
+				t.Errorf("the %s %q pill lost wheel fill %d: %q", state, tag, fill, rendered)
+			}
 		}
 		if ansi.StringWidth(off) != ansi.StringWidth(on) {
 			t.Errorf("%q changed width across the toggle: %d then %d",
@@ -262,9 +232,6 @@ func TestFilterLabelPadsAreTheSpanItself(t *testing.T) {
 		fill := theme.LabelSlot(LabelWheel(tag))
 		for _, selected := range []bool{false, true} {
 			runs := styles.ChipRuns(fill, theme.Canvas)
-			if !selected {
-				runs = styles.ChipRunsTint(fill, theme.Canvas)
-			}
 			rendered := FilterLabel(styles, tag, theme.Canvas, selected, false, false)
 			if !strings.HasSuffix(rendered, runs.Pad.Render(" ")) {
 				t.Errorf("%q selected=%v: the trailing pad is not the body ground: %q", tag, selected, rendered)

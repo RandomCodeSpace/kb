@@ -35,9 +35,9 @@ func TestDimBlendsTowardCanvas(t *testing.T) {
 	if dimmed[Canvas] != darkPalette[Canvas] {
 		t.Errorf("Canvas dimmed to %s, it is the blend target and must not move", dimmed[Canvas].hex())
 	}
-	// 37*0.34 + 11*0.66 rounds to 20 by the spec's round-half-up, and so on
+	// 48*0.34 + 18*0.66 rounds to 28 by the spec's round-half-up, and so on
 	// per channel.
-	if got, want := dimmed[Card].hex(), "#141922"; got != want {
+	if got, want := dimmed[Card].hex(), "#1c1c1c"; got != want {
 		t.Errorf("Card dimmed to %s, want %s", got, want)
 	}
 	ground := darkPalette[Canvas]

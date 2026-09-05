@@ -30,8 +30,8 @@ type BandOpts struct {
 }
 
 // Band renders one column header band. Unfocused it sits on the Raised tier
-// with the column hue as foreground; focused it fills solid with the column hue
-// and the rail becomes a focus caret so the band reads as filled edge to edge.
+// with secondary text; focused it uses the shared accent on the same neutral
+// surface and the rail becomes a focus caret.
 //
 // The status dot survives the focus change. Spec section 10.4.4, ratified as
 // contestable call 11: dropping it moved the label from column 5 to column 4,
@@ -42,11 +42,11 @@ func Band(styles *theme.Styles, opts BandOpts) string {
 	if opts.Width <= 0 {
 		return ""
 	}
-	text := styles.OnBold(opts.Hue, theme.BandRest)
+	text := styles.OnBold(theme.FgSubtle, theme.BandRest)
 	head := styles.Glyph.Rail
 	switch {
 	case opts.Focused:
-		text = styles.OnBold(theme.FgOnAccent, opts.Hue)
+		text = styles.OnBold(theme.Brand, theme.BandRest)
 		head = styles.Glyph.Focus
 	case opts.Hovered:
 		head = styles.Glyph.RailFull

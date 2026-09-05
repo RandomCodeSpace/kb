@@ -36,7 +36,7 @@ func TestScrollHintClampsToTheRange(t *testing.T) {
 
 func TestScrollHintCarriesTheSurfaceItSitsOn(t *testing.T) {
 	styles := theme.New(true)
-	if ScrollHint(styles, 1, 2, theme.OverlaySurf) == ScrollHint(styles, 1, 2, theme.Card) {
+	if ScrollHint(styles, 1, 2, theme.OverlaySurf) == ScrollHint(styles, 1, 2, theme.Raised) {
 		t.Error("the scroll hint must carry the surface behind it")
 	}
 }

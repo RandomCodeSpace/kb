@@ -125,12 +125,15 @@ func TestViewHelpersCoverCursorPlaceholdersAndLabels(t *testing.T) {
 	}
 
 	area := textarea.New()
+	area.Prompt = ""
+	area.ShowLineNumbers = false
 	area.Placeholder = "line one\nline two"
-	if got := areaDisplay(area, false, 20, 3); len(got) != 3 || !strings.Contains(got[0], "line one") {
+	if got := areaDisplay(&area, false, 20, 3); len(got) != 3 || !strings.Contains(got[0], "line one") {
 		t.Fatalf("placeholder area = %#v", got)
 	}
 	area.SetValue("one\ntwo\nthree")
-	if got := areaDisplay(area, true, 8, 2); len(got) != 2 || !strings.Contains(strings.Join(got, ""), "|") {
+	area.Focus()
+	if got := areaDisplay(&area, true, 8, 2); len(got) != 2 || !strings.Contains(strings.Join(got, ""), "|") {
 		t.Fatalf("focused area = %#v", got)
 	}
 

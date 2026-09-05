@@ -11,6 +11,7 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
+	"github.com/RandomCodeSpace/kb/internal/tui/formview"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 	"github.com/RandomCodeSpace/kb/internal/tui/widget"
@@ -86,7 +87,7 @@ func newLinkInput() textinput.Model {
 // and in-flight writes. Destructive or focus-changing root shortcuts must not
 // run while it returns true.
 func (m Model) OwnsInput() bool {
-	return m.action != actionNone || m.saving || m.driftMode != driftNone
+	return m.action != actionNone || m.saving || m.driftMode != driftNone || m.terminalSelection
 }
 
 // IsDestructivePrompt reports whether the overlay is showing a prompt whose
@@ -502,7 +503,7 @@ func (m Model) actionBody(width int) string {
 	case actionAddComment:
 		lines = []string{"ADD COMMENT / " + ref, "", "Comment:"}
 		marked, markFrom = m.mark.Active(commentMarkField), len(lines)
-		lines = append(lines, textareaLines(m.commentInput, width, 8)...)
+		lines = append(lines, textareaLines(&m.commentInput, width, 8)...)
 		markTo = len(lines)
 	case actionDeleteComment:
 		lines = []string{"DELETE COMMENT / " + ref, ""}
@@ -636,7 +637,19 @@ func (m Model) footerLadder(width int) widget.Ladder {
 			Tail:   []string{"esc back"},
 		}
 	}
-	return widget.Ladder{Head: []string{"up/down scroll"}, Tail: []string{"esc close"}}
+	middle := []string{"drag description/comments", "V terminal select"}
+	if m.selectedText() != "" {
+		middle = append(middle, "y copy")
+	}
+	head := "up/down scroll"
+	if m.statusMessage != "" && !m.statusIsError {
+		head = m.statusMessage
+	}
+	tail := "esc close"
+	if m.selectedText() != "" {
+		tail = "esc clear"
+	}
+	return widget.Ladder{Head: []string{head}, Middle: middle, Tail: []string{tail}}
 }
 
 // busyTail is the hint that survives beside a busy head. A cancellable
@@ -714,6 +727,14 @@ func (m Model) pointerFooterControls(width int) []detailPointerControl {
 			detailPointerControl{label: "Cancel", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
 		)
 	}
+	if m.selectedText() != "" {
+		return controls(
+			detailPointerControl{label: "Copy", message: key('y'), variant: theme.ButtonPrimary},
+			detailPointerControl{label: "Terminal", message: key('V')},
+			detailPointerControl{label: "Clear", message: tea.KeyPressMsg{Code: tea.KeyEscape}},
+			detailPointerControl{label: "Close", message: mouseDismissMsg{}},
+		)
+	}
 	taskControls := controls(
 		detailPointerControl{label: "Check", message: key('t'), variant: theme.ButtonSuccess},
 		detailPointerControl{label: "Kill", message: key('x'), variant: theme.ButtonDanger},
@@ -736,17 +757,29 @@ func (m Model) pointerFooterControls(width int) []detailPointerControl {
 		detailPointerControl{label: "Unlink", message: key('u'), variant: theme.ButtonDanger},
 		detailPointerControl{label: "Close", message: mouseDismissMsg{}},
 	)...)
-	if detailControlsWidth(m.styles, full) <= width {
-		return full
+	withSelection := append([]detailPointerControl(nil), full...)
+	withSelection = append(withSelection, detailPointerControl{label: "Terminal", message: key('V')})
+	if detailControlsWidth(m.styles, withSelection) <= width {
+		return withSelection
 	}
-	primary := append([]detailPointerControl(nil), taskControls...)
-	primary = append(primary, controls(
-		detailPointerControl{label: "Comment", message: key('c')},
-		detailPointerControl{label: "Link", message: key('b')},
+	primary := controls(
+		detailPointerControl{label: "Terminal", message: key('V')},
 		detailPointerControl{label: "Close", message: mouseDismissMsg{}},
-	)...)
-	for len(primary) > 1 && detailControlsWidth(m.styles, primary) > width {
-		primary = append(primary[:len(primary)-2], primary[len(primary)-1])
+	)
+	optional := append([]detailPointerControl(nil), taskControls...)
+	optional = append(optional, detailPointerControl{label: "Comment", message: key('c')})
+	if len(m.comments) > 0 {
+		optional = append(optional, detailPointerControl{label: "Del", message: key('d'), variant: theme.ButtonDanger})
+	}
+	if len(m.links.Blocks)+len(m.links.BlockedBy) > 0 {
+		optional = append(optional, detailPointerControl{label: "Unlink", message: key('u'), variant: theme.ButtonDanger})
+	}
+	optional = append(optional, detailPointerControl{label: "Link", message: key('b')})
+	for _, control := range optional {
+		candidate := append(append([]detailPointerControl(nil), primary[:len(primary)-1]...), control, primary[len(primary)-1])
+		if detailControlsWidth(m.styles, candidate) <= width {
+			primary = candidate
+		}
 	}
 	return primary
 }
@@ -820,29 +853,21 @@ func textInputLine(input textinput.Model, width int) string {
 	return ansi.Truncate(visible, max(width, 0), "")
 }
 
-func textareaLines(input textarea.Model, width, rows int) []string {
-	value := input.Value()
-	placeholder := false
-	if value == "" {
-		value = input.Placeholder
-		placeholder = true
+func textareaLines(input *textarea.Model, width, rows int) []string {
+	// Lightweight action-body tests can construct a zero-value Model. Bubbles'
+	// textarea requires New before resizing its internal viewport; an entirely
+	// empty zero value renders as the same blank rows without touching it.
+	if input != nil && input.Width() == 0 && input.Height() == 0 && input.Value() == "" && input.Placeholder == "" {
+		return make([]string, max(rows, 0))
 	}
-	logical := strings.Split(safeText(value, true), "\n")
-	line := min(max(input.Line(), 0), len(logical)-1)
-	start := max(line-rows+1, 0)
-	end := min(start+rows, len(logical))
-	out := make([]string, 0, rows)
-	for i := start; i < end; i++ {
-		content := logical[i]
-		if i == line && !placeholder {
-			content = insertCursor(content, min(input.Column(), len([]rune(content))))
-		}
-		out = append(out, "  "+ansi.Truncate(content, max(width-2, 0), ""))
+	lines := formview.Area(input, true, width+2, rows,
+		func(value string) string { return safeText(value, true) },
+		func(value string, position, _ int) string { return insertCursor(value, position) },
+	)
+	for index := range lines {
+		lines[index] = ansi.Cut(lines[index], 2, width+2)
 	}
-	for len(out) < rows {
-		out = append(out, "  ")
-	}
-	return out
+	return lines
 }
 
 func insertCursor(value string, position int) string {

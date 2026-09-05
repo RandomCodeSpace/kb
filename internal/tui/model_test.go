@@ -518,7 +518,7 @@ func TestModelLoadsRoutesAndRenders(t *testing.T) {
 	if !wide.AltScreen || wide.MouseMode != tea.MouseModeAllMotion {
 		t.Fatalf("view terminal modes = alt:%v mouse:%v", wide.AltScreen, wide.MouseMode)
 	}
-	for _, want := range []string{"kb / Work / alice", "▸● 1 TO DO", "one", "DOING", "DONE", "ready"} {
+	for _, want := range []string{"kb / Work", "▸● 1 TO DO", "one", "DOING", "DONE", "ready"} {
 		if !strings.Contains(ansi.Strip(wide.Content), want) {
 			t.Errorf("wide view missing %q:\n%s", want, wide.Content)
 		}
@@ -560,6 +560,146 @@ func TestModelLoadsRoutesAndRenders(t *testing.T) {
 		if width := ansi.StringWidth(line); width > 1 {
 			t.Fatalf("one-column line width = %d: %q", width, line)
 		}
+	}
+}
+
+func TestDetailTerminalSelectionDisablesMouseUntilEscape(t *testing.T) {
+	task := board.Task{ID: "one", Title: "One", Desc: "copy this description", Status: board.StatusTodo}
+	m := newTestRootModel(stubBoardReader{board: board.Board{Title: "Work", Tasks: []board.Task{task}}}, nil, "alice")
+	m.board, m.loading = board.Board{Title: "Work", Tasks: []board.Task{task}}, false
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 48, Height: 12})
+	_ = m.detail.Open(task)
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'V', Text: "V", Mod: tea.ModShift})
+	view := m.View()
+	if !view.AltScreen || view.MouseMode != tea.MouseModeNone || view.OnMouse != nil {
+		t.Fatalf("terminal selection modes = alt:%v mouse:%v handler:%v", view.AltScreen, view.MouseMode, view.OnMouse != nil)
+	}
+	if plain := ansi.Strip(view.Content); !strings.Contains(plain, "copy this description") || !strings.Contains(plain, "esc return") {
+		t.Fatalf("terminal selection view:\n%s", plain)
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	view = m.View()
+	if !m.detail.IsOpen() || m.detail.TerminalSelectionActive() || view.MouseMode != tea.MouseModeAllMotion || view.OnMouse == nil {
+		t.Fatalf("restored detail = open:%v terminal:%v mouse:%v handler:%v",
+			m.detail.IsOpen(), m.detail.TerminalSelectionActive(), view.MouseMode, view.OnMouse != nil)
+	}
+}
+
+func TestEditorTerminalSelectionDisablesMouseAndReturnsToUnsavedSource(t *testing.T) {
+	st := newSettingsTestStore(t)
+	task, err := st.AddTask("alice", board.Task{Title: "One", Desc: "stored " + strings.Repeat("long-text ", 20) + "TAIL", Status: board.StatusTodo, Prio: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newTestRootModel(st, nil, "alice")
+	completeBoardLoad(t, &m, m.Init())
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 42, Height: 9})
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'e'})
+	if !m.editor.IsOpen() || m.editor.TaskID() != task.ID {
+		t.Fatalf("editor did not open for %q", task.ID)
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyTab})
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyTab})
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'X', Text: "X"})
+	if !m.editor.Dirty() {
+		t.Fatal("editor fixture is not unsaved")
+	}
+	sourceRoute := m.pointerRoute()
+
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyF3})
+	view := m.View()
+	if !m.editor.TerminalSelectionActive() || view.MouseMode != tea.MouseModeNone || view.OnMouse != nil {
+		t.Fatalf("editor terminal modes = active:%t mouse:%v handler:%v", m.editor.TerminalSelectionActive(), view.MouseMode, view.OnMouse != nil)
+	}
+	terminalRoute := m.pointerRoute()
+	if sourceRoute.ownerSession == terminalRoute.ownerSession {
+		t.Fatalf("terminal entry retained pointer owner session %d", sourceRoute.ownerSession)
+	}
+	if plain := ansi.Strip(view.Content); !strings.Contains(plain, "stored") || !strings.Contains(plain, "esc return") {
+		t.Fatalf("editor terminal selection view:\n%s", plain)
+	}
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 12, Height: 4})
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnd})
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "TAILX") {
+		t.Fatalf("resized terminal selection did not reach final text:\n%s", plain)
+	}
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 5, Height: 1})
+	tiny := strings.Split(ansi.Strip(m.View().Content), "\n")
+	if len(tiny) != 1 || ansi.StringWidth(tiny[0]) > 5 || !strings.HasPrefix(tiny[0], "esc") {
+		t.Fatalf("tiny terminal selection = %#v", tiny)
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 42, Height: 9})
+	view = m.View()
+	if !m.editor.IsOpen() || m.editor.TerminalSelectionActive() || view.MouseMode != tea.MouseModeAllMotion || view.OnMouse == nil ||
+		!m.editor.Dirty() || !strings.Contains(ansi.Strip(view.Content), "TAILX") {
+		t.Fatalf("editor source return = open:%t terminal:%t mouse:%v handler:%v dirty:%t\n%s",
+			m.editor.IsOpen(), m.editor.TerminalSelectionActive(), view.MouseMode, view.OnMouse != nil, m.editor.Dirty(), ansi.Strip(view.Content))
+	}
+	if restoredRoute := m.pointerRoute(); restoredRoute.ownerSession == terminalRoute.ownerSession {
+		t.Fatalf("terminal exit retained pointer owner session %d", terminalRoute.ownerSession)
+	}
+}
+
+func TestRootRoutesDetailTextDragAndClipboardRequest(t *testing.T) {
+	task := board.Task{ID: "one", Title: "One", Desc: "copy this description", Status: board.StatusTodo}
+	m := newTestRootModel(stubDetailBoardReader{stubBoardReader{board: board.Board{Title: "Work", Tasks: []board.Task{task}}}}, nil, "alice")
+	m.board, m.loading = board.Board{Title: "Work", Tasks: []board.Task{task}}, false
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 80, Height: 18})
+	_ = m.detail.Open(task)
+	rebuildTestView(&m)
+	view := m.View()
+	x, y := -1, -1
+	for row, line := range strings.Split(ansi.Strip(view.Content), "\n") {
+		if column := strings.Index(line, "copy this"); column >= 0 {
+			x, y = ansi.StringWidth(line[:column]), row
+			break
+		}
+	}
+	if x < 0 {
+		t.Fatalf("description text is not visible:\n%s", ansi.Strip(view.Content))
+	}
+	updateRootPointerTest(t, &m, tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	updateRootPointerTest(t, &m, tea.MouseMotionMsg{X: x + 3, Y: y, Button: tea.MouseLeft})
+	updateRootPointerTest(t, &m, tea.MouseReleaseMsg{X: x + 3, Y: y, Button: tea.MouseLeft})
+	if content := ansi.Strip(m.View().Content); !strings.Contains(content, " Copy ") || !containsReverseVideo(m.View().Content) {
+		t.Fatalf("root drag did not publish selected detail text and copy control:\n%s", content)
+	}
+	command := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'y', Text: "y"})
+	if command == nil || fmt.Sprint(command()) != "copy" {
+		t.Fatalf("root clipboard request payload = %v", command)
+	}
+	if !strings.Contains(ansi.Strip(m.View().Content), "Copy requested") {
+		t.Fatal("root detail did not show honest copy feedback")
+	}
+}
+
+func TestRootPlainDetailTextClickDoesNotLeaveInvisibleSelection(t *testing.T) {
+	task := board.Task{ID: "one", Title: "One", Desc: "plain selectable text", Status: board.StatusTodo}
+	m := newTestRootModel(stubDetailBoardReader{stubBoardReader{board: board.Board{Title: "Work", Tasks: []board.Task{task}}}}, nil, "alice")
+	m.board, m.loading = board.Board{Title: "Work", Tasks: []board.Task{task}}, false
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 80, Height: 18})
+	_ = m.detail.Open(task)
+	rebuildTestView(&m)
+	view := m.View()
+	x, y := -1, -1
+	for row, line := range strings.Split(ansi.Strip(view.Content), "\n") {
+		if column := strings.Index(line, "plain selectable"); column >= 0 {
+			x, y = ansi.StringWidth(line[:column]), row
+			break
+		}
+	}
+	if x < 0 {
+		t.Fatalf("plain detail text is not visible:\n%s", ansi.Strip(view.Content))
+	}
+	updateRootPointerTest(t, &m, tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	updateRootPointerTest(t, &m, tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if m.detail.ClearSelection() {
+		t.Fatal("plain press/release left an invisible detail selection")
+	}
+	updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.detail.IsOpen() {
+		t.Fatal("one escape did not close detail after plain text click")
 	}
 }
 
@@ -1458,6 +1598,7 @@ func TestBoardReloadReconcilesOpenDetailAndCoalescesEnrichment(t *testing.T) {
 	}}}}
 	m := newTestRootModel(reader, nil, "u")
 	completeBoardLoad(t, &m, m.Init())
+	updateTestModel(t, &m, tea.WindowSizeMsg{Width: 80, Height: 40})
 	firstDetailLoad := updateTestModel(t, &m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	updated := board.Task{

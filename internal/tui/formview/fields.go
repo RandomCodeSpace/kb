@@ -33,30 +33,59 @@ func Input(
 
 // Area renders a fixed-height textarea viewport.
 func Area(
-	area textarea.Model,
+	area *textarea.Model,
 	focused bool,
 	width, rows int,
 	clean func(string) string,
 	cursor func(string, int, int) string,
 ) []string {
-	value := area.Value()
-	if value == "" {
-		value = area.Placeholder
-	}
-	logical := strings.Split(value, "\n")
-	line := min(max(area.Line(), 0), len(logical)-1)
-	start := max(line-rows+1, 0)
-	end := min(start+rows, len(logical))
+	rows = max(rows, 0)
 	out := make([]string, 0, rows)
-	for i := start; i < end; i++ {
-		content := clean(logical[i])
-		if focused && i == line {
-			content = cursor(content, min(area.Column(), len([]rune(content))), max(width-4, 1))
+	if area == nil || rows == 0 {
+		return out
+	}
+
+	// The textarea model owns soft wrapping and its viewport. Keep its actual
+	// dimensions in sync with the rendered control so vertical cursor movement
+	// and the next Update use the same line breaks the user can see.
+	contentWidth := max(width-4, 1)
+	area.SetWidth(contentWidth)
+	area.SetHeight(rows)
+	area.SetVirtualCursor(false)
+	// View primes Bubbles' viewport content after a width change. Reapplying
+	// the height then lets its own cursor-aware scroll logic place the current
+	// soft-wrapped line inside the viewport on this same frame.
+	_ = area.View()
+	area.SetHeight(rows)
+	rendered := strings.Split(ansi.Strip(area.View()), "\n")
+
+	var cursorX, cursorY int
+	hasCursor := false
+	if focused {
+		if position := area.Cursor(); position != nil {
+			cursorX, cursorY, hasCursor = position.Position.X, position.Position.Y, true
 		}
-		out = append(out, "    "+ansi.Truncate(content, max(width-4, 0), ""))
+	}
+	for index := 0; index < len(rendered) && len(out) < rows; index++ {
+		content := strings.TrimRight(clean(rendered[index]), " ")
+		if hasCursor && index == cursorY && cursor != nil {
+			content = cursor(content, runeIndexAtCell(content, cursorX), contentWidth)
+		}
+		out = append(out, "    "+ansi.Truncate(content, contentWidth, ""))
 	}
 	for len(out) < rows {
 		out = append(out, "    ")
 	}
 	return out
+}
+
+func runeIndexAtCell(value string, cell int) int {
+	cell = max(cell, 0)
+	runes := []rune(value)
+	for index := range runes {
+		if ansi.StringWidth(string(runes[:index+1])) > cell {
+			return index
+		}
+	}
+	return len(runes)
 }

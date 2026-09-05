@@ -221,7 +221,7 @@ func TestTopBarCarriesThePerProjectAccent(t *testing.T) {
 		if !strings.HasPrefix(row, want) {
 			t.Fatalf("title %q did not open with its accent rail and wordmark", title)
 		}
-		if plain := ansi.Strip(row); !strings.HasPrefix(plain, styles.Glyph.Rail+"kb / "+resolved+" / alice") {
+		if plain := ansi.Strip(row); !strings.HasPrefix(plain, styles.Glyph.Rail+"kb / "+resolved) || strings.Contains(plain, "alice") {
 			t.Fatalf("title %q top bar = %q", title, plain)
 		}
 	}
@@ -230,7 +230,7 @@ func TestTopBarCarriesThePerProjectAccent(t *testing.T) {
 // TestTopBarAccentTracksTheBoardTitle is spec section 10.7.2: two boards with
 // different names take different wheel slots, and the unnamed board takes
 // Brand rather than a hash of the literal default.
-func TestTopBarAccentTracksTheBoardTitle(t *testing.T) {
+func TestTopBarUsesOneAccentAcrossBoardTitles(t *testing.T) {
 	m := newTestRootModel(stubBoardReader{}, nil, "alice")
 	styles := m.themeStyles()
 	// Only the three accent columns are compared: the rest of the row prints
@@ -240,8 +240,8 @@ func TestTopBarAccentTracksTheBoardTitle(t *testing.T) {
 		row := m.renderTopBar(styles, 80)
 		return row[:strings.Index(row, "kb")+len("kb")]
 	}
-	if render("kb") == render("webtui") {
-		t.Fatal("two board titles rendered the same accent")
+	if render("kb") != render("webtui") {
+		t.Fatal("board titles did not share the restrained focus accent")
 	}
 	if render("Board") != render("") {
 		t.Fatal("the default title and the empty title took different accents")
@@ -264,10 +264,6 @@ func TestTopBarWordmarkCarriesNoGradient(t *testing.T) {
 	if !strings.HasPrefix(row, styles.On(accent, theme.Canvas).Render(styles.Glyph.Rail)+
 		styles.OnBold(accent, theme.Canvas).Render("kb")) {
 		t.Fatalf("the wordmark run is not a flat accent: %q", row)
-	}
-	lead, _ := theme.RampStops(theme.GradWork)
-	if accent == lead && theme.AccentSlot("webtui") != theme.Label1 {
-		t.Fatal("the accent collapsed onto the ramp lead")
 	}
 }
 

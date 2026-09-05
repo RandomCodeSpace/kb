@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/golden"
@@ -363,6 +364,30 @@ func TestCardDetailActionGolden(t *testing.T) {
 		lines[i] = strings.TrimSpace(lines[i])
 	}
 	golden.RequireEqual(t, strings.Trim(strings.Join(lines, "\n"), "\n")+"\n")
+}
+
+func TestCommentEditorSoftWrapsLongMarkdownWithoutChangingSource(t *testing.T) {
+	input := textarea.New()
+	input.Prompt = ""
+	input.ShowLineNumbers = false
+	source := "**note** https://example.com/a/very/long/path 🧠 tail"
+	input.SetValue(source)
+	input.Focus()
+	wantLine, wantColumn := input.Line(), input.Column()
+
+	lines := textareaLines(&input, 18, 5)
+	for index, line := range lines {
+		if width := ansi.StringWidth(line); width > 18 {
+			t.Fatalf("row %d width = %d: %q", index, width, line)
+		}
+	}
+	joined := strings.ReplaceAll(strings.Join(lines, ""), " ", "")
+	if !strings.Contains(joined, "https://example.com/a/very/long/path") || !strings.Contains(joined, "🧠tail") {
+		t.Fatalf("wrapped comment omitted source: %#v", lines)
+	}
+	if input.Value() != source || input.Line() != wantLine || input.Column() != wantColumn {
+		t.Fatalf("render changed comment state: value=%q line=%d column=%d", input.Value(), input.Line(), input.Column())
+	}
 }
 
 // renderCompletionGate is the gate as one line, the form it had before its

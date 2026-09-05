@@ -795,6 +795,9 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			}
 			switch msg.String() {
 			case "esc":
+				if m.detail.ClearSelection() {
+					return m, nil
+				}
 				m.detail.Close()
 				return m, nil
 			case "e":
@@ -1114,6 +1117,7 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			m.height = msg.Height
 		}
 		m.detail.Resize(m.width, m.height)
+		m.editor.Resize(m.width, m.height)
 	case brandStepMsg:
 		return m, batchCommands(detailCmd, m.stepBrand(msg))
 	case boardLoadedMsg:
@@ -1501,12 +1505,20 @@ func (m Model) composeSnapshot(base boardRenderBase) coldRenderSnapshot {
 		hits = nil
 	}
 	if m.detail.IsOpen() {
-		surface := m.detail.PointerSurface(content, m.width, m.height)
-		content = surface.Content
-		overlayMouse = surface.Pointer
-		overlayTopology = surface.Topology
-		ownerEpoch = m.detail.PointerSession()
-		handler = renderHandlerDetail
+		if m.detail.TerminalSelectionActive() {
+			content = m.detail.TerminalSelectionView(m.width, m.height)
+			overlayMouse = nil
+			overlayTopology = pointer.Topology{}
+			ownerEpoch = m.detail.PointerSession()
+			handler = renderHandlerDetail
+		} else {
+			surface := m.detail.PointerSurface(content, m.width, m.height)
+			content = surface.Content
+			overlayMouse = surface.Pointer
+			overlayTopology = surface.Topology
+			ownerEpoch = m.detail.PointerSession()
+			handler = renderHandlerDetail
+		}
 		hits = nil
 	}
 	if m.settings != nil {
@@ -1527,10 +1539,16 @@ func (m Model) composeSnapshot(base boardRenderBase) coldRenderSnapshot {
 		hits = nil
 	}
 	if m.editor.IsOpen() {
-		content = m.editor.Overlay(content, m.width, m.height)
-		surface := m.editor.PointerSurface(m.width, m.height)
-		overlayMouse = surface.Pointer
-		overlayTopology = surface.Topology
+		if m.editor.TerminalSelectionActive() {
+			content = m.editor.TerminalSelectionView(m.width, m.height)
+			overlayMouse = nil
+			overlayTopology = pointer.Topology{}
+		} else {
+			content = m.editor.Overlay(content, m.width, m.height)
+			surface := m.editor.PointerSurface(m.width, m.height)
+			overlayMouse = surface.Pointer
+			overlayTopology = surface.Topology
+		}
 		ownerEpoch = m.editor.PointerSession()
 		handler = renderHandlerEditor
 		hits = nil
@@ -1567,6 +1585,9 @@ func (m Model) composeSnapshot(base boardRenderBase) coldRenderSnapshot {
 	// All-motion is safe only after semantic admission has resolved same-target
 	// observations to the retained no-op path.
 	view.MouseMode = tea.MouseModeAllMotion
+	if m.detail.TerminalSelectionActive() || m.editor.TerminalSelectionActive() {
+		view.MouseMode = tea.MouseModeNone
+	}
 	view.KeyboardEnhancements.ReportEventTypes = true
 	if overlayMouse != nil {
 		view.OnMouse = overlayMouse
