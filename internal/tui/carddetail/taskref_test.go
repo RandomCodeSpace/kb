@@ -52,7 +52,11 @@ func activateReference(t *testing.T, m *Model, reference string) tea.Msg {
 	if press == nil {
 		t.Fatalf("reference %q ignored the press", reference)
 	}
-	m.Update(busyResult(t, press))
+	pressMessage := busyResult(t, press)
+	if resolved, guarded := m.ResolvePointerMessage(pressMessage); guarded {
+		pressMessage = resolved
+	}
+	m.Update(pressMessage)
 	pressed := m.PointerSurface("board", pointerWidth, pointerHeight)
 	if !containsReverseVideo(pressed.Content) {
 		t.Fatalf("reference %q rendered no pressed feedback", reference)
@@ -61,7 +65,11 @@ func activateReference(t *testing.T, m *Model, reference string) tea.Msg {
 	if release == nil {
 		t.Fatalf("reference %q ignored the release", reference)
 	}
-	activate := m.Update(busyResult(t, release))
+	releaseMessage := busyResult(t, release)
+	if resolved, guarded := m.ResolvePointerMessage(releaseMessage); guarded {
+		releaseMessage = resolved
+	}
+	activate := m.Update(releaseMessage)
 	if activate == nil {
 		t.Fatalf("reference %q release produced no activation", reference)
 	}

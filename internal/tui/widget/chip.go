@@ -23,6 +23,7 @@ type ChipOpts struct {
 	Hovered bool       // the pointer rests on this pill
 	Dim     bool       // the inactive form: the fill withdrawn, the hue kept on the text
 	Focused bool       // the keyboard cursor rests on this pill
+	Neutral bool       // ordinary label treatment: neutral depth and text, no category hue
 }
 
 // chipPad is the pill's end padding: one cell of the pill's own ground, spent
@@ -44,7 +45,9 @@ func Chip(styles *theme.Styles, opts ChipOpts) string {
 		return ""
 	}
 	runs := styles.ChipRuns(opts.Fill, opts.On)
-	if opts.Dim {
+	if opts.Neutral {
+		runs = styles.NeutralChipRuns(opts.On)
+	} else if opts.Dim {
 		runs = styles.ChipRunsTint(opts.Fill, opts.On)
 	}
 	body, flat := chipBody(runs, opts)
@@ -89,7 +92,7 @@ func chipBody(runs theme.ChipStyles, opts ChipOpts) (body, flat lipgloss.Style) 
 }
 
 // labelParts splits one tag into the pill runs of spec section 3.5: a scoped
-// key::value tag becomes a two-tone pill, a plain tag a single-tone #tag pill,
+// key::value tag becomes a scope and value pair, a plain tag a #tag pill,
 // and the compact form drops the padding, keeping only the value when scoped and
 // the hash prefix when plain. It is the one place the wheel hue and the scoped
 // cut are decided, so the board pill and the filter pill cannot fork.
@@ -102,7 +105,7 @@ func labelParts(styles *theme.Styles, tag string, flat bool) (text, key string, 
 	if flat {
 		return value, "", fill
 	}
-	return value, scopeKey + ":", fill
+	return value, scopeKey + " ", fill
 }
 
 // Label renders one label pill, wheel-hued by the hash of spec section 1.6.
@@ -121,10 +124,9 @@ func Label(styles *theme.Styles, tag string, on theme.Slot, flat, hovered bool) 
 // FilterLabel renders one filter-bar label pill: the section 3.6 pill the board
 // cards already carry, plus the two states the toolbar needs on top of it.
 //
-// selected fills the pill with its wheel hue; unselected withdraws the fill to
-// the tinted form of ChipRunsTint, which keeps that same wheel hue on the body
-// text, so the row reads as a set of offers with the active ones lit and every
-// offer still matchable by eye to the label pills on the cards (issue #208).
+// Both states keep the label's muted wheel fill, so the filter stays matchable
+// by eye to the same label on a card. The leading mark distinguishes selected
+// from unselected without changing the tag's color identity.
 // focused bolds the body run, the zero-cell cue that replaced the thickened end
 // caps when issue #227 retired them. Neither changes a cell count,
 // so toggling or traversing a label never reflows the toolbar (section 10.4.4),
@@ -141,7 +143,7 @@ func FilterLabel(styles *theme.Styles, tag string, on theme.Slot, selected, focu
 	text, key, fill := labelParts(styles, tag, false)
 	return Chip(styles, ChipOpts{
 		Text: text, Key: key, Mark: mark, Fill: fill, On: on,
-		Dim: !selected, Focused: focused, Hovered: hovered,
+		Focused: focused, Hovered: hovered,
 	})
 }
 
@@ -199,10 +201,11 @@ func LabelWheel(tag string) int { return theme.WheelIndex(tag) }
 // row is shorter.
 func Priority(styles *theme.Styles, priority int, on theme.Slot, flat bool) string {
 	return Chip(styles, ChipOpts{
-		Text: strconv.Itoa(priorityLabel(priority)),
-		Fill: theme.PrioritySlot(priority),
-		On:   on,
-		Flat: flat,
+		Text:    strconv.Itoa(priorityLabel(priority)),
+		Fill:    theme.PrioritySlot(priority),
+		On:      on,
+		Flat:    flat,
+		Neutral: priorityLabel(priority) != 1,
 	})
 }
 

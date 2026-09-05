@@ -75,11 +75,11 @@ func TestModelLoadsAndRendersFullDetail(t *testing.T) {
 	m.Update(busyResult(t, command))
 	body := ansi.Strip(m.renderBody(72))
 	for _, want := range []string{
-		"DETAIL", "status      cancelled  blocked", "priority    1", "due         2026-08-19",
-		"effort      M", "labels       type:feature ", "links       [github#86]",
+		"OVERVIEW", "status      cancelled  blocked", "priority    1", "due         2026-08-19",
+		"effort      M", "labels       type feature ", "links       [github#86]",
 		"killed 17 Aug 2026", "superseded", "Plan", "first",
 		"CHECKLIST", "1/2", "☑ done", "☐ left", "blocks      [#9 todo]", "blocked by  [✓ legacy done]",
-		"COMMENTS", "c3  alice  17 Aug 2026", "looks", "good",
+		"COMMENTS", "17 Aug 2026 12:00 UTC", "looks", "good",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail body missing %q:\n%s", want, body)
@@ -97,6 +97,77 @@ func TestModelLoadsAndRendersFullDetail(t *testing.T) {
 		if ansi.StringWidth(line) > 80 {
 			t.Fatalf("overlay line wider than terminal: %d: %q", ansi.StringWidth(line), line)
 		}
+	}
+}
+
+func TestDetailSectionAndCommentSpacing(t *testing.T) {
+	first := time.Date(2026, 9, 4, 10, 30, 0, 0, time.UTC)
+	second := first.Add(24 * time.Hour)
+	m := New(stubReader{comments: []store.Comment{
+		{ID: 1, Body: "first body", CreatedAt: first},
+		{ID: 2, Body: "second body", CreatedAt: second},
+	}}, "alice", testStyles())
+	m.Update(busyResult(t, m.Open(board.Task{ID: "task-1", Title: "Spacing", Desc: "description body", Status: board.StatusTodo})))
+	rows, _, _ := m.detailRows(72)
+	plain := make([]string, len(rows))
+	for index, row := range rows {
+		plain[index] = strings.TrimSpace(ansi.Strip(row))
+	}
+	if plain[0] != "" {
+		t.Fatalf("first inner row = %q, want blank gap after popup title", plain[0])
+	}
+	find := func(want string) int {
+		t.Helper()
+		for index, row := range plain {
+			if strings.Contains(row, want) {
+				return index
+			}
+		}
+		t.Fatalf("detail rows missing %q:\n%s", want, strings.Join(plain, "\n"))
+		return -1
+	}
+	for _, section := range []string{"OVERVIEW", "DESCRIPTION", "RELATED", "COMMENTS"} {
+		index := find(section)
+		if index+1 >= len(plain) {
+			t.Errorf("%s has no content row", section)
+			continue
+		}
+		if plain[index+1] != "" {
+			t.Errorf("%s first content row = %q, want blank gap", section, plain[index+1])
+		}
+	}
+	firstStamp := find("4 Sep 2026 10:30 UTC")
+	secondStamp := find("5 Sep 2026 10:30 UTC")
+	if secondStamp < 3 || plain[secondStamp-1] != "" || !strings.Contains(plain[secondStamp-2], "─") || plain[secondStamp-3] != "" {
+		t.Fatalf("second comment lacks blank/divider/blank separation: %q", plain[max(secondStamp-3, 0):secondStamp+1])
+	}
+	wantTimestamp := m.styles.On(theme.FgSubtle, theme.OverlaySurf).Render("4 Sep 2026 10:30 UTC")
+	if !strings.Contains(rows[firstStamp], wantTimestamp) {
+		t.Fatal("comment timestamp does not use readable secondary text")
+	}
+}
+
+func TestDetailLabelsKeepOverwideContentAcrossRows(t *testing.T) {
+	styles := testStyles()
+	m := New(nil, "alice", styles)
+	const tag = "supercalifragilistic-🙂-label"
+	_ = m.Open(board.Task{ID: "one", Title: "One", Tags: []string{tag}})
+	rows := m.fieldRows(20)
+	valueColumn := styles.Metrics.OverlayInsetX + styles.Metrics.OverlayLabelW
+	var joined string
+	labelsStarted := false
+	for _, row := range rows {
+		plain := ansi.Strip(row)
+		if strings.Contains(plain, "labels") {
+			labelsStarted = true
+		}
+		if !labelsStarted {
+			continue
+		}
+		joined += strings.TrimSpace(ansi.Cut(plain, valueColumn, ansi.StringWidth(plain)))
+	}
+	if joined != styles.Glyph.MarkTag+tag {
+		t.Fatalf("detail label = %q, want %q", joined, styles.Glyph.MarkTag+tag)
 	}
 }
 
@@ -370,7 +441,8 @@ func TestNilReaderAndRenderingHelpers(t *testing.T) {
 		t.Fatalf("fallback task chip = %q", got)
 	}
 	m.comments = []store.Comment{{ID: 1, Author: "a", Body: "body"}}
-	if got := ansi.Strip(strings.Join(m.commentRows(36, 40), "\n")); !strings.Contains(got, "1 Jan 0001") {
+	commentRows, _ := m.commentRowsSelectable(36, 40, 0)
+	if got := ansi.Strip(strings.Join(commentRows, "\n")); !strings.Contains(got, "1 Jan 0001") {
 		t.Fatalf("zero-time comment = %q", got)
 	}
 	if got := safeText("ok\x1b[31m red\a\nnext", true); got != "ok red\nnext" {
@@ -435,7 +507,7 @@ func TestCardDetailGolden(t *testing.T) {
 	task := fullTask()
 	task.Status = board.StatusDoing
 	m.Open(task)
-	lines := strings.Split(ansi.Strip(m.View(60, 20)), "\n")
+	lines := strings.Split(ansi.Strip(m.View(60, 36)), "\n")
 	for i := range lines {
 		lines[i] = strings.TrimSpace(lines[i])
 	}
@@ -451,8 +523,8 @@ func TestCardDetailColorGolden(t *testing.T) {
 	task := fullTask()
 	task.Status = board.StatusDoing
 	m.Open(task)
-	board := strings.TrimRight(strings.Repeat(strings.Repeat("-", 60)+"\n", 20), "\n")
-	surface := m.PointerSurface(board, 60, 20)
+	board := strings.TrimRight(strings.Repeat(strings.Repeat("-", 60)+"\n", 36), "\n")
+	surface := m.PointerSurface(board, 60, 36)
 	golden.RequireEqual(t, theme.Downsample(surface.Content, theme.ColorProfile)+"\n")
 }
 

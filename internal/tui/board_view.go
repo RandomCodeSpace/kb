@@ -691,7 +691,7 @@ func (m Model) renderTopBar(styles *theme.Styles, width int) string {
 	accent := theme.AccentSlot(title)
 	line := styles.On(accent, theme.Canvas).Render(styles.Glyph.Rail) +
 		styles.OnBold(accent, theme.Canvas).Render("kb") +
-		styles.Board.TopBar.Render(" / "+title+" / "+sanitizeTerminal(m.user))
+		styles.Board.TopBar.Render(" / "+title)
 	if shipped := m.shippedCount(); shipped > 0 {
 		// The space after the multiplication sign is the section 10.4.1
 		// adjacency rule: U+00D7 is East Asian Ambiguous, so a digit written

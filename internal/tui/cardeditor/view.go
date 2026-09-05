@@ -7,12 +7,14 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/formview"
+	"github.com/RandomCodeSpace/kb/internal/tui/mdparity"
 	"github.com/RandomCodeSpace/kb/internal/tui/pointer"
 	"github.com/RandomCodeSpace/kb/internal/tui/theme"
 	"github.com/RandomCodeSpace/kb/internal/tui/widget"
@@ -91,7 +93,7 @@ func (m *Model) PointerSurface(width, height int) pointer.Surface {
 	if !m.open {
 		return pointer.Surface{}
 	}
-	session := m.session
+	session := m.pointerSession
 	var hitMap pointer.Map
 	for _, hit := range m.pointerHits(width, height) {
 		target := hit.target
@@ -102,7 +104,7 @@ func (m *Model) PointerSurface(width, height int) pointer.Surface {
 	frame := m.layout(width, height)
 	maxScroll := max(len(frame.rows)-frame.bodyHeight, 0)
 	hitMap.AddWheel(pointer.Rect{X0: frame.x, Y0: frame.y, X1: frame.x + frame.width, Y1: frame.y + frame.height}, func(delta int) tea.Msg {
-		return pointerWheelMsg{session: session, current: frame.scroll,
+		return pointerWheelMsg{session: session, preview: m.preview, current: frame.scroll,
 			target: min(max(frame.scroll+delta, 0), maxScroll), maxScroll: maxScroll}
 	})
 	// Rows 6 and 9 of spec section 10.5.2: a wheel scroll or a resize moves the
@@ -113,7 +115,7 @@ func (m *Model) PointerSurface(width, height int) pointer.Surface {
 }
 
 // PointerSession identifies this open editor owner across harmless renders.
-func (m Model) PointerSession() uint64 { return m.session }
+func (m Model) PointerSession() uint64 { return m.pointerSession }
 
 func (m Model) pointerHits(width, height int) []pointerHit {
 	frame := m.layout(width, height)
@@ -152,6 +154,20 @@ func (m Model) pointerHits(width, height int) []pointerHit {
 			})
 		}
 	}
+	if m.preview {
+		footerY := frame.y + frame.height - 1
+		footerX := frame.x + m.themeStyles().Metrics.OverlayInsetX
+		for _, target := range []struct{ label, target string }{
+			{label: "[Edit source]", target: "source-preview"},
+			{label: "[Select text]", target: "terminal-select"},
+		} {
+			start := strings.Index(ansi.Strip(m.footerLine(frame.inner)), target.label)
+			if start >= 0 {
+				hits = append(hits, pointerHit{x0: footerX + start, x1: footerX + start + ansi.StringWidth(target.label),
+					y0: footerY, y1: footerY + 1, target: target.target})
+			}
+		}
+	}
 	return hits
 }
 
@@ -163,6 +179,7 @@ func (m *Model) View(width, height int) string {
 		return ""
 	}
 	width, height = max(width, 1), max(height, 1)
+	m.width, m.height = width, height
 	frame := m.layout(width, height)
 	panel := fitTerminal(widget.Overlay(m.themeStyles(), m.panelOpts(frame)), width, height)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, panel)
@@ -176,6 +193,7 @@ func (m *Model) Overlay(background string, width, height int) string {
 		return background
 	}
 	width, height = max(width, 1), max(height, 1)
+	m.width, m.height = width, height
 	background = fitTerminal(background, width, height)
 	frame := m.layout(width, height)
 	layers := append(
@@ -227,7 +245,7 @@ func (m *Model) layout(width, height int) editorFrame {
 	bodyHeight := max(paneHeight-2, 1)
 
 	rows := m.bodyRows(inner)
-	focusLine := 0
+	focusLine := -1
 	for index, row := range rows {
 		if row.target != "" && row.target == m.focus {
 			focusLine = index
@@ -235,15 +253,19 @@ func (m *Model) layout(width, height int) editorFrame {
 		}
 	}
 	maxScroll := max(len(rows)-bodyHeight, 0)
-	if !m.manualScroll {
-		if focusLine < m.scroll {
-			m.scroll = focusLine
+	scroll := &m.scroll
+	if m.preview {
+		scroll = &m.previewScroll
+	}
+	if !m.manualScroll && focusLine >= 0 {
+		if focusLine < *scroll {
+			*scroll = focusLine
 		}
-		if focusLine >= m.scroll+bodyHeight {
-			m.scroll = focusLine - bodyHeight + 1
+		if focusLine >= *scroll+bodyHeight {
+			*scroll = focusLine - bodyHeight + 1
 		}
 	}
-	m.scroll = min(max(m.scroll, 0), maxScroll)
+	*scroll = min(max(*scroll, 0), maxScroll)
 	return editorFrame{
 		x:          max((width-paneWidth)/2, 0),
 		y:          max((height-paneHeight)/2, 0),
@@ -252,7 +274,7 @@ func (m *Model) layout(width, height int) editorFrame {
 		inner:      inner,
 		bodyHeight: bodyHeight,
 		rows:       rows,
-		scroll:     m.scroll,
+		scroll:     *scroll,
 	}
 }
 
@@ -398,6 +420,11 @@ func (m *Model) sequenceTag() string {
 // the contrast floor on OverlayBand, so a failure is reported in a body row
 // above the action row and the band goes back to hints.
 func (m *Model) footerLine(width int) string {
+	if m.preview {
+		line := fit("[Edit source] [Select text] | F2/Esc edit source | F3 select text", width)
+		line = strings.Replace(line, "[Edit source]", m.pressedLabel("source-preview", "[Edit source]"), 1)
+		return strings.Replace(line, "[Select text]", m.pressedLabel("terminal-select", "[Select text]"), 1)
+	}
 	if m.guardClose {
 		line := fit("[Discard] [Keep editing] | D discard | esc keep editing", width)
 		line = strings.Replace(line, "[Discard]", m.pressedLabel("discard", "[Discard]"), 1)
@@ -469,11 +496,14 @@ func (m *Model) bodyLines(width int) []string {
 }
 
 func (m *Model) bodyRows(width int) []editorRow {
+	if m.preview {
+		return m.previewRows(width)
+	}
 	inner := max(width-m.gutterWidth(), 1)
 	rows := []editorRow{}
 	if m.runner != nil {
 		rows = append(rows, editorRow{text: "Draft with AI (fills the form; review before Save)", kind: rowSection})
-		rows = append(rows, m.areaBlock("ai-prompt", "Request", m.draftPrompt, inner, 2)...)
+		rows = append(rows, m.areaBlock("ai-prompt", "Request", &m.draftPrompt, inner, 2)...)
 		action := "Draft"
 		if m.drafting {
 			action = "Cancel draft (Esc)"
@@ -490,7 +520,7 @@ func (m *Model) bodyRows(width int) []editorRow {
 		rows = append(rows, m.errorRows(width,
 			"one Extended_Pictographic character plus optional variation selector", "")...)
 	}
-	rows = append(rows, m.areaBlock("desc", "Description", m.desc, inner, 3)...)
+	rows = append(rows, m.areaBlock("desc", "Description", &m.desc, inner, 3)...)
 	rows = append(rows,
 		m.choiceRow("prio", "Priority", fmt.Sprintf("%d (%s)  left/right", m.prio, priorityName(m.prio))),
 		m.inputRow("due", "Due", m.due, inner, "  [/] day; ctrl+x clear"),
@@ -506,7 +536,7 @@ func (m *Model) bodyRows(width int) []editorRow {
 	if m.labelsErr != nil {
 		rows = append(rows, m.errorRows(width, safeError(m.labelsErr), "")...)
 	}
-	rows = append(rows, m.areaBlock("checks", "Checklist (x prefix = done)", m.checks, inner, 3)...)
+	rows = append(rows, m.areaBlock("checks", "Checklist (x prefix = done)", &m.checks, inner, 3)...)
 	rows = append(rows, m.similarRows(width)...)
 	if m.stale {
 		rows = append(rows, editorRow{text: "  external refresh withheld while form is dirty", kind: rowHint})
@@ -521,8 +551,34 @@ func (m *Model) bodyRows(width int) []editorRow {
 		}
 	}
 	return append(rows, editorRow{},
+		m.actionRow("source-preview", "Preview description (F2)", theme.ButtonNeutral),
+		m.actionRow("terminal-select", "Select description (F3)", theme.ButtonNeutral),
 		m.actionRow("cancel", "Cancel", theme.ButtonNeutral),
 		m.actionRow("save", "Save card", theme.ButtonPrimary))
+}
+
+func (m *Model) previewRows(width int) []editorRow {
+	source := safeMarkdownSource(m.desc.Value())
+	if strings.TrimSpace(source) == "" {
+		return []editorRow{{text: "Description is empty", kind: rowHint}}
+	}
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStyles(m.themeStyles().Markdown),
+		glamour.WithWordWrap(max(width, 1)),
+	)
+	if err != nil {
+		return []editorRow{{text: sanitize(source), kind: rowBody}}
+	}
+	rendered, err := renderer.Render(mdparity.Parity(source))
+	if err != nil {
+		return []editorRow{{text: sanitize(source), kind: rowBody}}
+	}
+	lines := strings.Split(strings.Trim(rendered, "\r\n"), "\n")
+	rows := make([]editorRow, 0, len(lines))
+	for _, line := range lines {
+		rows = append(rows, editorRow{text: ansi.Strip(line), rendered: line, kind: rowWidget})
+	}
+	return rows
 }
 
 // errorRows is the error block of spec section 10.8.5, one editor row per
@@ -585,7 +641,7 @@ const buttonPadding = " "
 // areaBlock is a textarea and its label. Every line the area wraps to carries
 // the same gutter, so the focus bar runs unbroken down the whole control
 // instead of marking only the row the label sits on (spec section 10.4.3).
-func (m *Model) areaBlock(target, label string, area textarea.Model, width, rows int) []editorRow {
+func (m *Model) areaBlock(target, label string, area *textarea.Model, width, rows int) []editorRow {
 	out := []editorRow{{
 		mark:   m.gutterMark(target),
 		text:   label + ":",
@@ -700,7 +756,7 @@ func inputDisplay(input textinput.Model, focused bool, width int) string {
 	return formview.Input(input, focused, width, sanitize, cursorViewport)
 }
 
-func areaDisplay(area textarea.Model, focused bool, width, rows int) []string {
+func areaDisplay(area *textarea.Model, focused bool, width, rows int) []string {
 	return formview.Area(area, focused, width, rows, sanitize, cursorViewport)
 }
 

@@ -131,22 +131,27 @@ type Model struct {
 	// their rendered positions rather than recovered from the rendered rows
 	// (issue #222, spec section 10.5.3).
 	chipHits       []taskChipHit
+	selectable     []selectableRow
 	bodyWidth      int
 	pointerSession uint64
 	pointerState   pointer.State
 
-	action        actionMode
-	actionSession uint64
-	commentInput  textarea.Model
-	linkInput     textinput.Model
-	mark          formview.Mark
-	currentBlocks bool
-	selection     int
-	confirm       bool
-	saving        bool
-	changed       bool
-	statusMessage string
-	statusIsError bool
+	action            actionMode
+	actionSession     uint64
+	commentInput      textarea.Model
+	linkInput         textinput.Model
+	mark              formview.Mark
+	currentBlocks     bool
+	selection         int
+	confirm           bool
+	saving            bool
+	changed           bool
+	statusMessage     string
+	statusIsError     bool
+	textSelection     textSelection
+	terminalSelection bool
+	terminalSnapshot  string
+	terminalOffset    int
 
 	driftBackend    DriftBackend
 	driftContext    context.Context
@@ -225,6 +230,11 @@ func (m *Model) SetClock(now func() time.Time) { m.now = now }
 // IsOpen reports whether the overlay currently owns input and rendering.
 func (m Model) IsOpen() bool { return m.open }
 
+func (m *Model) resetPointerSession() {
+	m.pointerSession++
+	m.pointerState = pointer.State{}
+}
+
 // TaskID returns the displayed task's durable ID, or empty while closed.
 func (m Model) TaskID() string {
 	if !m.open {
@@ -236,8 +246,7 @@ func (m Model) TaskID() string {
 // Open resets the pane to task and returns the asynchronous enrichment load.
 func (m *Model) Open(task board.Task) tea.Cmd {
 	m.cancelDrift()
-	m.pointerSession++
-	m.pointerState = pointer.State{}
+	m.resetPointerSession()
 	m.actionSession++
 	m.task = task
 	m.comments = nil
@@ -257,6 +266,10 @@ func (m *Model) Open(task board.Task) tea.Cmd {
 	m.changed = false
 	m.statusMessage = ""
 	m.statusIsError = false
+	m.textSelection = textSelection{}
+	m.terminalSelection = false
+	m.terminalSnapshot = ""
+	m.terminalOffset = 0
 	if m.reader == nil {
 		m.rebuildBody()
 		return nil
@@ -272,6 +285,9 @@ func (m *Model) Refresh(task board.Task) tea.Cmd {
 		return nil
 	}
 	m.task = task
+	if !m.terminalSelection {
+		m.textSelection = textSelection{}
+	}
 	if m.reader == nil {
 		m.rebuildBody()
 		return nil
@@ -288,8 +304,7 @@ func (m *Model) Refresh(task board.Task) tea.Cmd {
 // the current task identity.
 func (m *Model) Close() {
 	m.cancelDrift()
-	m.pointerSession++
-	m.pointerState = pointer.State{}
+	m.resetPointerSession()
 	m.generation++
 	m.actionSession++
 	m.open = false
@@ -297,6 +312,7 @@ func (m *Model) Close() {
 	m.reloadPending = false
 	m.task = board.Task{}
 	m.bodyLines = nil
+	m.selectable = nil
 	m.bodyWidth = 0
 	m.syncScroll()
 	m.action = actionNone
@@ -306,6 +322,10 @@ func (m *Model) Close() {
 	m.changed = false
 	m.statusMessage = ""
 	m.statusIsError = false
+	m.textSelection = textSelection{}
+	m.terminalSelection = false
+	m.terminalSnapshot = ""
+	m.terminalOffset = 0
 }
 
 // Resize updates the viewport used to bound persistent scroll state.
@@ -325,6 +345,12 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	if !m.open {
 		return nil
 	}
+	if m.terminalSelection {
+		if msg, ok := message.(tea.KeyPressMsg); ok {
+			m.updateTerminalSelection(msg.String())
+			return nil
+		}
+	}
 	if pointer.IsMessage(message) {
 		pressed, hovered := m.pointerState.Pressed(), m.pointerState.Hovered()
 		next, command, _ := m.pointerState.Update(message)
@@ -335,6 +361,41 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		return command
 	}
 	switch msg := message.(type) {
+	case selectionStartMsg:
+		m.textSelection = textSelection{active: true, anchor: msg.point, head: msg.point, clickSeq: msg.seq}
+		m.rebuildBody()
+		return nil
+	case selectionMoveMsg:
+		if m.textSelection.active {
+			m.textSelection.head = msg.point
+			m.textSelection.moved = m.textSelection.moved || msg.point != m.textSelection.anchor
+			m.rebuildBody()
+		}
+		return nil
+	case selectionEndMsg:
+		if !m.textSelection.active {
+			return nil
+		}
+		m.textSelection.head = msg.point
+		m.textSelection.moved = m.textSelection.moved || msg.point != m.textSelection.anchor
+		if !m.textSelection.moved && m.textSelection.clickSeq > 0 {
+			seq := m.textSelection.clickSeq
+			m.textSelection = textSelection{}
+			m.rebuildBody()
+			session := pointerControlMsg{
+				pointerSession: m.pointerSession, actionSession: m.actionSession,
+				driftSession: m.driftSession, driftGeneration: m.driftGeneration,
+				message: OpenTaskRefMsg{Seq: seq},
+			}
+			return func() tea.Msg { return session }
+		}
+		if !m.textSelection.moved {
+			m.textSelection = textSelection{}
+			m.rebuildBody()
+			return nil
+		}
+		m.rebuildBody()
+		return nil
 	case spin.StepMsg:
 		return m.brandStep(msg)
 	case spinner.TickMsg:
@@ -373,6 +434,9 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 		m.commentsErr = msg.commentsErr
 		m.linksErr = msg.linksErr
 		m.tombstoneErr = msg.tombstoneErr
+		if !m.terminalSelection {
+			m.textSelection = textSelection{}
+		}
 		m.reconcileDeleteActionAfterRefresh()
 		m.rebuildBody()
 	case mouseScrollMsg:
@@ -393,6 +457,14 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 			m.rebuildBody()
 		}
 		switch msg.String() {
+		case "ctrl+a":
+			m.selectAllText()
+			return nil
+		case "y":
+			return m.copySelection()
+		case "V":
+			m.enterTerminalSelection()
+			return nil
 		case "v":
 			return m.beginDrift()
 		case "c":
@@ -437,7 +509,7 @@ func (m *Model) ResolvePointerMessage(message tea.Msg) (tea.Msg, bool) {
 	if !ok {
 		return message, false
 	}
-	if !m.open || msg.pointerSession != m.pointerSession ||
+	if !m.open || m.terminalSelection || msg.pointerSession != m.pointerSession ||
 		msg.actionSession != m.actionSession || msg.driftSession != m.driftSession ||
 		msg.driftGeneration != m.driftGeneration {
 		return nil, true
@@ -717,7 +789,69 @@ func (m *Model) PointerSurface(background string, width, height int) pointer.Sur
 		layers = append(layers, lipgloss.NewLayer(widget.Overlay(m.styles, layout.opts)).X(x).Y(y).Z(1))
 	}
 	content := fitTerminal(lipgloss.NewCompositor(layers...).Render(), width, height)
-	return pointer.Surface{Content: content, Pointer: hitMap.Handler(), Topology: hitMap.Topology()}
+	baseHandler := hitMap.Handler()
+	selectionHandler := m.selectionPointerHandler(baseHandler, x, y, paneWidth, bodyBottom)
+	return pointer.Surface{Content: content, Pointer: selectionHandler, Topology: hitMap.Topology()}
+}
+
+func (m *Model) selectionPointerHandler(base func(tea.MouseMsg) tea.Cmd, x, y, paneWidth, bodyBottom int) func(tea.MouseMsg) tea.Cmd {
+	if !m.detailBody() || len(m.selectable) == 0 {
+		return base
+	}
+	selecting := m.textSelection.active
+	pointAt := func(mouse tea.Mouse, nearest bool) (textPoint, bool) {
+		panelCell := min(max(mouse.X-x, 0), paneWidth-1)
+		logicalRow := m.scrollOffset() + mouse.Y - (y + 1)
+		if nearest {
+			return m.nearestSelectablePoint(logicalRow, panelCell)
+		}
+		if mouse.Y < y+1 || mouse.Y >= bodyBottom {
+			return textPoint{}, false
+		}
+		return m.selectablePoint(logicalRow, panelCell)
+	}
+	wrap := func(message tea.Msg) tea.Cmd {
+		return func() tea.Msg {
+			return pointerControlMsg{
+				pointerSession: m.pointerSession, actionSession: m.actionSession,
+				driftSession: m.driftSession, driftGeneration: m.driftGeneration,
+				message: message,
+			}
+		}
+	}
+	return func(message tea.MouseMsg) tea.Cmd {
+		mouse := message.Mouse()
+		switch message.(type) {
+		case tea.MouseClickMsg:
+			if mouse.Button == tea.MouseLeft {
+				if point, ok := pointAt(mouse, false); ok {
+					selecting = true
+					seq := 0
+					for _, hit := range taskRefHits(m.bodyLines) {
+						if hit.row == point.row && mouse.X-x >= hit.column && mouse.X-x < hit.column+hit.width {
+							seq = hit.seq
+							break
+						}
+					}
+					return wrap(selectionStartMsg{point: point, seq: seq})
+				}
+			}
+		case tea.MouseMotionMsg:
+			if mouse.Button == tea.MouseLeft && selecting {
+				if point, ok := pointAt(mouse, true); ok {
+					return wrap(selectionMoveMsg{point: point})
+				}
+			}
+		case tea.MouseReleaseMsg:
+			if selecting && (mouse.Button == tea.MouseLeft || mouse.Button == tea.MouseNone) {
+				selecting = false
+				if point, ok := pointAt(mouse, true); ok {
+					return wrap(selectionEndMsg{point: point})
+				}
+			}
+		}
+		return base(message)
+	}
 }
 
 // PointerSession identifies one open detail owner independently of harmless
@@ -917,15 +1051,18 @@ func (m *Model) rebuildBody() {
 	if !m.open {
 		m.bodyLines = nil
 		m.chipHits = nil
+		m.selectable = nil
 		m.bodyWidth = 0
 		m.body.SetYOffset(0)
 		return
 	}
 	paneWidth, _, _ := m.paneSize(m.width, m.height)
-	rows, chips := m.renderBodyRows(paneWidth)
+	rows, chips, selectable := m.renderBodyRows(paneWidth)
 	m.bodyLines = strings.Split(strings.TrimRight(strings.Join(rows, "\n"), "\n"), "\n")
 	m.chipHits = chips
+	m.selectable = selectable
 	m.markTaskRefs()
+	m.markTextSelection()
 	m.bodyWidth = paneWidth
 	m.syncScroll()
 }
@@ -951,7 +1088,8 @@ func (m *Model) markTaskRefs() {
 	if !m.detailBody() {
 		return
 	}
-	if !m.pointerState.Active() && m.pointerState.Hovered() == "" {
+	if !m.pointerState.Active() && m.pointerState.Hovered() == "" &&
+		!(m.textSelection.active && !m.textSelection.moved && m.textSelection.clickSeq > 0) {
 		return
 	}
 	hits := taskRefHits(m.bodyLines)
@@ -961,6 +1099,8 @@ func (m *Model) markTaskRefs() {
 		line := m.bodyLines[hit.row]
 		run := line[hit.byteStart:hit.byteEnd]
 		switch {
+		case m.textSelection.active && !m.textSelection.moved && m.textSelection.clickSeq == hit.seq:
+			run = m.styles.PressedRun(run)
 		case m.pointerState.IsPressed(id):
 			run = m.styles.PressedRun(run)
 		case m.pointerState.IsHovered(id):
@@ -990,19 +1130,19 @@ func fitTerminal(rendered string, width, height int) string {
 // It also reports the recorded bounds of the activatable blocker chips (issue
 // #222). An action or drift pane replaces the card's rows with its own and
 // draws no chip, so neither records one.
-func (m Model) renderBodyRows(width int) ([]string, []taskChipHit) {
+func (m Model) renderBodyRows(width int) ([]string, []taskChipHit, []selectableRow) {
 	if m.driftMode != driftNone {
-		return m.paneRows(m.driftBody(m.contentWidth(width)), width), nil
+		return m.paneRows(m.driftBody(m.contentWidth(width)), width), nil, nil
 	}
 	if m.action != actionNone {
-		return m.paneRows(m.actionBody(m.contentWidth(width)), width), nil
+		return m.paneRows(m.actionBody(m.contentWidth(width)), width), nil, nil
 	}
 	return m.detailRows(width)
 }
 
 // renderBody is renderBodyRows joined, for the callers that only want the text.
 func (m Model) renderBody(width int) string {
-	rows, _ := m.renderBodyRows(width)
+	rows, _, _ := m.renderBodyRows(width)
 	return strings.Join(rows, "\n")
 }
 
@@ -1057,6 +1197,15 @@ func (m Model) hoveredChoiceRow(row int) bool {
 // row renders one body row of plain text on the panel surface.
 func (m Model) row(text string, width int) string {
 	return widget.OverlayRow(m.styles, m.styles.Overlay.Surf.Render(text), width)
+}
+
+// subtleRow is secondary body metadata on the overlay surface.
+func (m Model) subtleRow(text string, width int) string {
+	return widget.OverlayRow(m.styles, m.styles.On(theme.FgSubtle, theme.OverlaySurf).Render(text), width)
+}
+
+func (m Model) commentDivider(width int) string {
+	return m.subtleRow(strings.Repeat("─", m.contentWidth(width)), width)
 }
 
 // section renders one section break carrying the pane's current mode. Spec
@@ -1114,33 +1263,43 @@ func (m Model) errorTextRows(message, key string, width int) []string {
 // blank is one empty body row: a section separator that is not a break.
 func (m Model) blank(width int) string { return m.row("", width) }
 
-func (m Model) detailRows(width int) ([]string, []taskChipHit) {
+func (m Model) detailRows(width int) ([]string, []taskChipHit, []selectableRow) {
 	content := m.contentWidth(width)
-	rows := []string{m.section("DETAIL", "", width)}
+	var selectable []selectableRow
+	rows := []string{m.blank(width), m.section("OVERVIEW", "", width), m.blank(width)}
 	rows = append(rows, m.fieldRows(width)...)
 	if strings.TrimSpace(m.task.Desc) != "" {
-		rows = append(rows, m.blank(width))
-		rows = append(rows, m.markdownRows(m.task.Desc, content, width)...)
+		rows = append(rows, m.blank(width), m.section("DESCRIPTION", "", width), m.blank(width))
+		description := m.markdownRows(m.task.Desc, content, width)
+		selectable = append(selectable, selectableRows(len(rows), 0, width, m.styles.Metrics.OverlayInsetX, description)...)
+		rows = append(rows, description...)
 	}
 	if len(m.task.Checks) > 0 {
+		rows = append(rows, m.blank(width))
 		rows = append(rows, m.checklistRows(width)...)
 	}
 	// Every row above is exactly one line, so the count so far is the logical
 	// body row the context block starts at, and the chips it recorded relative
 	// to itself become body rows by the same addition.
 	context, hits := m.contextRows(width)
-	for index := range hits {
-		hits[index].row += len(rows)
+	if len(context) > 0 {
+		rows = append(rows, m.blank(width), m.section("RELATED", "", width), m.blank(width))
+		for index := range hits {
+			hits[index].row += len(rows)
+		}
+		rows = append(rows, context...)
 	}
-	rows = append(rows, context...)
-	rows = append(rows, m.commentRows(content, width)...)
+	rows = append(rows, m.blank(width))
+	comments, commentText := m.commentRowsSelectable(content, width, len(rows))
+	rows = append(rows, comments...)
+	selectable = append(selectable, commentText...)
 	// A failure is not a body row: spec section 10.8.5 pins it directly above
 	// the action row so the error and the control that will retry it are
 	// adjacent. A non-failure notice is ordinary body text and stays here.
 	if m.statusMessage != "" && !m.statusIsError {
 		rows = append(rows, m.blank(width), m.row("status: "+m.statusMessage, width))
 	}
-	return rows, hits
+	return rows, hits, selectable
 }
 
 // pinnedErrorRows is the panel-level failure block of spec section 10.8.5,
@@ -1234,7 +1393,7 @@ func (m Model) checklistRows(width int) []string {
 		}
 	}
 	rows := []string{m.section("CHECKLIST",
-		fmt.Sprintf("%d/%d", done, len(m.task.Checks)), width)}
+		fmt.Sprintf("%d/%d", done, len(m.task.Checks)), width), m.blank(width)}
 	for _, check := range m.task.Checks {
 		state := widget.CheckOpen
 		if check.Done {
@@ -1291,28 +1450,29 @@ func (m Model) chipFieldRow(section, label string, tasks []board.Task, row, widt
 	return line, appendChipHits(nil, spans, row, column, column+visibleCells(run, cells))
 }
 
-func (m Model) commentRows(content, width int) []string {
+func (m Model) commentRowsSelectable(content, width, start int) ([]string, []selectableRow) {
 	if m.loading {
 		// Loading beats empty: a section waiting on its first content says so
 		// rather than reporting that it holds nothing (spec section 10.8.4).
 		return []string{
 			m.section("COMMENTS", "", width),
+			m.blank(width),
 			widget.OverlayRow(m.styles, m.sectionBusy(commentsLabel, m.contentWidth(width)), width),
-		}
+		}, nil
 	}
 	if m.commentsErr != nil {
 		// The pane cannot re-fetch, so the tail names the dismissal rather than
 		// a retry that does not exist (spec section 10.8.7).
 		return append(
-			[]string{m.section("COMMENTS", "", width)},
+			[]string{m.section("COMMENTS", "", width), m.blank(width)},
 			m.errorRows(m.commentsErr, "Close", width)...,
-		)
+		), nil
 	}
 	count := "none"
 	if len(m.comments) > 0 {
 		count = strconv.Itoa(len(m.comments))
 	}
-	rows := []string{m.section("COMMENTS", count, width)}
+	rows := []string{m.section("COMMENTS", count, width), m.blank(width)}
 	if len(m.comments) == 0 {
 		return append(rows, widget.OverlayRow(m.styles, widget.Empty(m.styles, widget.EmptyOpts{
 			Headline: "no comments",
@@ -1320,16 +1480,20 @@ func (m Model) commentRows(content, width int) []string {
 			Verb:     "comment",
 			On:       theme.OverlaySurf,
 			Width:    m.contentWidth(width),
-		}), width))
+		}), width)), nil
 	}
-	for _, comment := range m.comments {
-		date := comment.CreatedAt.UTC().Format("2 Jan 2006")
-		rows = append(rows, m.row(fmt.Sprintf("c%d  %s  %s",
-			comment.ID, safeText(comment.Author, false), date), width))
-		rows = append(rows, m.markdownRows(comment.Body, content, width)...)
-		rows = append(rows, m.blank(width))
+	var selectable []selectableRow
+	for index, comment := range m.comments {
+		if index > 0 {
+			rows = append(rows, m.blank(width), m.commentDivider(width), m.blank(width))
+		}
+		date := comment.CreatedAt.UTC().Format("2 Jan 2006 15:04 UTC")
+		rows = append(rows, m.subtleRow(date, width))
+		body := m.markdownRows(comment.Body, content, width)
+		selectable = append(selectable, selectableRows(start+len(rows), index+1, width, m.styles.Metrics.OverlayInsetX, body)...)
+		rows = append(rows, body...)
 	}
-	return rows
+	return rows, selectable
 }
 
 func (m Model) markdown(source string, width int) string {

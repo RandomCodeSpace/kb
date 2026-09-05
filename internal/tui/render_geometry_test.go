@@ -3,10 +3,12 @@ package tui
 import (
 	"math/bits"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 )
@@ -445,40 +447,94 @@ func TestChangedRefreshTaskMissesStableArtifactIdentity(t *testing.T) {
 }
 
 func TestCompactRefreshInsertAndReorderUseActualAlternateIdentity(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		mutate func(board.Board) board.Board
+	labels := []struct {
+		name string
+		tags []string
 	}{
-		{name: "insert", mutate: func(current board.Board) board.Board {
+		{name: "none"},
+		{name: "multiple-rows", tags: []string{
+			"alpha-label", "bravo-label", "charlie-label", "delta-label", "echo-label", "foxtrot-label",
+		}},
+		{name: "overwide", tags: []string{strings.Repeat("overwide-label-", 8)}},
+	}
+	mutations := []struct {
+		name   string
+		mutate func(board.Board, []string) board.Board
+	}{
+		{name: "insert", mutate: func(current board.Board, tags []string) board.Board {
 			next := cloneBoard(current)
-			inserted := board.Task{ID: "compact-insert", Title: "compact insert", Status: board.StatusTodo}
+			inserted := board.Task{
+				ID: "compact-insert", Title: "compact insert", Status: board.StatusTodo,
+				Tags: append([]string(nil), tags...),
+			}
 			next.Tasks = append([]board.Task{inserted}, next.Tasks...)
 			return next
 		}},
-		{name: "reorder", mutate: func(current board.Board) board.Board {
+		{name: "reorder", mutate: func(current board.Board, _ []string) board.Board {
 			next := cloneBoard(current)
 			next.Tasks[0], next.Tasks[1] = next.Tasks[1], next.Tasks[0]
 			return next
 		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			model := performanceModel(120, "", 80, 16)
-			column := model.current.geometry.columns[statusIndexExact(board.StatusTodo)]
-			if !column.density.Compact() {
-				t.Fatal("compact artifact fixture selected a non-compact density")
-			}
-			before := model.RenderPlanStats()
-			updated, _ := model.Update(boardLoadedMsg{board: test.mutate(model.board)})
-			model = updated.(Model)
-			after := model.RenderPlanStats()
-			if after.NavigationArtifactFallbacks != before.NavigationArtifactFallbacks {
-				t.Fatal("compact refresh fell back instead of comparing exact alternate identity")
-			}
-			if after.NavigationArtifactMisses == before.NavigationArtifactMisses {
-				t.Fatal("compact insert/reorder reused cards whose alternate bit changed")
-			}
-			assertArtifactColdSurfaceParity(t, model)
-		})
+	}
+	for _, labelFixture := range labels {
+		for _, mutation := range mutations {
+			t.Run(labelFixture.name+"/"+mutation.name, func(t *testing.T) {
+				model := performanceModel(120, "", 80, 16)
+				fixture := cloneBoard(model.board)
+				for index := range fixture.Tasks {
+					if fixture.Tasks[index].Status == board.StatusTodo {
+						fixture.Tasks[index].Tags = append([]string(nil), labelFixture.tags...)
+					}
+				}
+				updated, commands := model.updateWithCommands(boardLoadedMsg{board: fixture})
+				model = updated
+				settlePerformanceGeometryCommand(t, &model, commands.geometry)
+				column := model.current.geometry.columns[statusIndexExact(board.StatusTodo)]
+				if !column.density.Compact() {
+					t.Fatal("compact artifact fixture selected a non-compact density")
+				}
+				before := model.RenderPlanStats()
+				updated, commands = model.updateWithCommands(boardLoadedMsg{
+					board: mutation.mutate(model.board, labelFixture.tags),
+				})
+				model = updated
+				after := model.RenderPlanStats()
+				if after.NavigationArtifactFallbacks != before.NavigationArtifactFallbacks {
+					t.Fatal("compact refresh fell back instead of comparing exact alternate identity")
+				}
+				if after.NavigationArtifactMisses == before.NavigationArtifactMisses {
+					t.Fatal("compact insert/reorder reused cards whose alternate bit changed")
+				}
+				settlePerformanceGeometryCommand(t, &model, commands.geometry)
+				assertArtifactColdSurfaceParity(t, model)
+			})
+		}
+	}
+}
+
+func TestTallCompactCardScrollsThroughAllLabelRows(t *testing.T) {
+	tags := []string{
+		"alpha-label-that-consumes-most-of-a-row", "bravo-label-that-consumes-most-of-a-row",
+		"charlie-label-that-consumes-most-of-a-row", "delta-label-that-consumes-most-of-a-row",
+		"echo-label-that-consumes-most-of-a-row", "foxtrot-label-that-consumes-most-of-a-row",
+		"golf-label-that-consumes-most-of-a-row", "hotel-label-that-consumes-most-of-a-row",
+		"india-label-that-consumes-most-of-a-row", "juliet-label-that-consumes-most-of-a-row",
+		"kilo-label-that-consumes-most-of-a-row", "zz-final",
+	}
+	task := board.Task{ID: "tall", Title: "Tall compact", Status: board.StatusTodo, Tags: tags}
+	fixture := board.Board{Title: "Work", Tasks: []board.Task{task}}
+	model := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
+	completeBoardLoad(t, &model, model.Init())
+	updateTestModel(t, &model, tea.WindowSizeMsg{Width: 80, Height: 16})
+	column := model.current.geometry.columns[statusIndexExact(board.StatusTodo)]
+	if !column.density.Compact() || column.index.recordAt(0).height <= column.contentHeight {
+		t.Fatalf("fixture is not a tall compact card: compact=%v height=%d viewport=%d",
+			column.density.Compact(), column.index.recordAt(0).height, column.contentHeight)
+	}
+	offset := column.totalRows() - column.contentHeight
+	updateTestModel(t, &model, boardColumnScrolledMsg{status: board.StatusTodo, offset: offset, max: offset})
+	if content := ansi.Strip(model.View().Content); !strings.Contains(content, "#zz-final") {
+		t.Fatalf("last compact label is not reachable at scroll offset %d:\n%s", offset, content)
 	}
 }
 

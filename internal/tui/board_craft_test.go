@@ -628,16 +628,18 @@ func TestBoardRowsAreExactlyFrameWidthAtEveryPinnedSize(t *testing.T) {
 	}
 }
 
-// TestBoardCardNeverExceedsItsCeiling is what replaced the reservation invariant
-// of issues #232 and #240. A card's height is its content's business now, but
-// the section 2.6 ladder still bounds it: Metrics.CardRows is the tallest a card
-// may be at a density and frame height, and a card that drew past it would be
-// spending rows the ladder never budgeted at that terminal size.
-func TestBoardCardNeverExceedsItsCeiling(t *testing.T) {
+// TestBoardCardKeepsEveryLabelPastTheFormerCeiling covers the board caller,
+// including compact density. Card height may grow beyond the former label-row
+// cap, and every raw tag must still own at least one rendered pointer span.
+func TestBoardCardKeepsEveryLabelPastTheFormerCeiling(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	fixture := boardViewFixture(now)
 	fixture.Tasks[0].Title = "a title long enough to wrap onto the second allotted row and beyond it"
 	fixture.Tasks[0].Desc = strings.Repeat("description ", 40)
+	fixture.Tasks[0].Tags = []string{
+		"alpha", "scope::bravo", "charlie", "delta",
+		"terminal-selection-label-that-is-longer-than-the-narrow-card-row", "zulu",
+	}
 	for _, size := range []struct{ width, height int }{{120, 40}, {60, 50}, {60, 80}, {40, 20}, {200, 90}} {
 		m := newTestRootModel(stubBoardReader{board: fixture}, nil, "alice")
 		m.loading = false
@@ -649,18 +651,26 @@ func TestBoardCardNeverExceedsItsCeiling(t *testing.T) {
 		metrics := m.themeStyles().Metrics
 		layout := boardColumnLayout(metrics, size.width, len(m.boardView.visibleStatuses()))
 		density := metrics.DensityFor(size.height, layout.inner)
-		ceiling := metrics.CardRows(max(m.height, 8), density)
-
 		tasks := tasksInStatus(m.filteredBoard(), board.StatusTodo)
 		width := max(layout.widths[0]-2*metrics.ColumnPad(density), 0)
-		_, owners, _ := m.renderTaskLines(tasks, board.StatusTodo, width, density)
+		_, owners, spans := m.renderTaskLines(tasks, board.StatusTodo, width, density)
 		for index, rows := range drawnCardRows(owners) {
-			if rows > ceiling {
-				t.Errorf("%dx%d: card %d drew %d rows, the ladder caps it at %d",
-					size.width, size.height, index, rows, ceiling)
-			}
 			if rows < 1 {
 				t.Errorf("%dx%d: card %d drew no rows at all", size.width, size.height, index)
+			}
+		}
+		seen := make(map[string]bool)
+		for row, owner := range owners {
+			if owner != fixture.Tasks[0].ID {
+				continue
+			}
+			for _, span := range spans[row] {
+				seen[span.tag] = true
+			}
+		}
+		for _, tag := range fixture.Tasks[0].Tags {
+			if !seen[tag] {
+				t.Errorf("%dx%d: label %q has no rendered span", size.width, size.height, tag)
 			}
 		}
 	}

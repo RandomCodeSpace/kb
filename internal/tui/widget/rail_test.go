@@ -47,14 +47,14 @@ func TestRailComposesUncachedSurfaces(t *testing.T) {
 	}
 }
 
-func TestRailHuesFollowPriority(t *testing.T) {
+func TestRailReservesDangerForHighPriority(t *testing.T) {
 	styles := theme.New(true)
 	seen := map[string]bool{}
 	for _, priority := range []int{1, 2, 3} {
 		seen[Rail(styles, priority, theme.Card, false)] = true
 	}
-	if len(seen) != 3 {
-		t.Errorf("three priorities produced %d distinct rails", len(seen))
+	if len(seen) != 2 {
+		t.Errorf("priority rails produced %d treatments, want danger and neutral", len(seen))
 	}
 	// Issue #232 collapsed the scale to three values at the render seam. The
 	// stored 4 the migration has not reached yet reads as the low rail, which is

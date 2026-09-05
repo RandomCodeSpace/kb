@@ -6,7 +6,7 @@ import "testing"
 // The accent is a recognition cue and nothing else, so what matters is that it
 // is deterministic, total over {Brand, Label1..Label5}, and that the unnamed
 // board looks exactly like kb looks without one.
-func TestAccentSlotWorkedExamples(t *testing.T) {
+func TestAccentSlotUsesTheSharedFocusAccent(t *testing.T) {
 	cases := []struct {
 		title string
 		want  Slot
@@ -16,11 +16,11 @@ func TestAccentSlotWorkedExamples(t *testing.T) {
 		{"   ", Brand},
 		{"board", Brand},
 		{"  BOARD  ", Brand},
-		{"webtui", Label1},
-		{"Strata", Label2},
-		{"roadmap", Label2},
-		{"kb-tui", Label4},
-		{"kb", Label5},
+		{"webtui", Brand},
+		{"Strata", Brand},
+		{"roadmap", Brand},
+		{"kb-tui", Brand},
+		{"kb", Brand},
 	}
 	for _, testCase := range cases {
 		if got := AccentSlot(testCase.title); got != testCase.want {
@@ -33,12 +33,12 @@ func TestAccentSlotWorkedExamples(t *testing.T) {
 // 10.7.2: TrimSpace then ToLower, so KB and kb are one board, and nothing
 // beyond that, because any further folding would make the accent disagree with
 // the label wheel on the same string.
-func TestAccentSlotFoldsCaseOnly(t *testing.T) {
+func TestAccentSlotIsIndependentOfProjectName(t *testing.T) {
 	if AccentSlot("KB") != AccentSlot("  kb ") {
 		t.Error("case and surrounding space must not change a board's accent")
 	}
-	if AccentSlot("kb") == AccentSlot("kb-tui") {
-		t.Error("two different titles collided where the wheel does not")
+	if AccentSlot("kb") != AccentSlot("kb-tui") {
+		t.Error("project names must share the restrained focus accent")
 	}
 }
 
