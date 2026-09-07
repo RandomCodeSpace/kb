@@ -37,8 +37,18 @@ func TestStaticServing(t *testing.T) {
 			t.Fatalf("%s: headers %v", path, rec.Header())
 		}
 	}
-	// Real files are served by extension; the exact set depends on the UI,
-	// so only files that are present are checked.
+	// /api never falls back to the UI.
+	rec := call(t, h, "GET", "/api/", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("/api/: %d", rec.Code)
+	}
+}
+
+// TestStaticAssets checks that every embedded file other than index.html is
+// served by its own name; the exact set depends on the UI, so only files
+// that are present are checked.
+func TestStaticAssets(t *testing.T) {
+	h, _ := newTestHandler(t)
 	entries, _ := fs.ReadDir(staticFS, "static")
 	for _, e := range entries {
 		name := e.Name()
@@ -64,20 +74,28 @@ func TestStaticServing(t *testing.T) {
 func TestStaticHandlerEdgeCases(t *testing.T) {
 	files := fstest.MapFS{
 		"index.html":   {Data: []byte("<html>x</html>")},
+		"app.js":       {Data: []byte("js")},
 		"dir/file.txt": {Data: []byte("f")},
 	}
-	h := &staticHandler{files: files, index: []byte("<html>x</html>")}
+	h := newStaticHandlerFS(files)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/dir", nil))
 	if rec.Code != http.StatusOK || rec.Body.String() != "<html>x</html>" {
 		t.Fatalf("directory path: %d %q", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/app.js", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "js" {
+		t.Fatalf("top-level file: %d %q", rec.Code, rec.Body.String())
+	}
+	// Only top-level embedded files are served; nested paths are client
+	// routes and load the app.
+	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/dir/file.txt", nil))
-	if rec.Code != http.StatusOK || rec.Body.String() != "f" {
+	if rec.Code != http.StatusOK || rec.Body.String() != "<html>x</html>" {
 		t.Fatalf("nested file: %d %q", rec.Code, rec.Body.String())
 	}
-	missing := &staticHandler{files: fstest.MapFS{}}
+	missing := newStaticHandlerFS(fstest.MapFS{})
 	rec = httptest.NewRecorder()
 	missing.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != http.StatusNotFound {
@@ -201,7 +219,7 @@ func TestRunServesUntilCancelled(t *testing.T) {
 	if !strings.Contains(stderr.String(), "open browser: no browser") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
-	if lines := strings.Count(stdout.String(), "\n"); lines != 1 {
+	if strings.Count(stdout.String(), "\n") != 1 {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }

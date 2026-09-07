@@ -155,18 +155,33 @@ func browserCommand(goos, url string) (string, []string) {
 type staticHandler struct {
 	files fs.FS
 	index []byte
+	// names lists the embedded top-level files. A request is served only
+	// when its path equals one of them, so the served name always comes from
+	// the embed, never from the request.
+	names []string
 }
 
 func newStaticHandler() *staticHandler {
 	files, _ := fs.Sub(staticFS, "static")
+	return newStaticHandlerFS(files)
+}
+
+func newStaticHandlerFS(files fs.FS) *staticHandler {
 	index, _ := fs.ReadFile(files, "index.html")
-	return &staticHandler{files: files, index: index}
+	h := &staticHandler{files: files, index: index}
+	entries, _ := fs.ReadDir(files, ".")
+	for _, e := range entries {
+		if !e.IsDir() && e.Name() != "index.html" {
+			h.names = append(h.names, e.Name())
+		}
+	}
+	return h
 }
 
 func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
-	if name != "" && name != "index.html" {
-		if info, err := fs.Stat(h.files, name); err == nil && !info.IsDir() {
+	requested := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+	for _, name := range h.names {
+		if name == requested {
 			http.ServeFileFS(w, r, h.files, name)
 			return
 		}

@@ -352,12 +352,10 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 		if filepath.Dir(path) == "." {
 			mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
 		}
-	case strings.HasPrefix(path, "internal/ai/skills/") && strings.HasSuffix(path, ".md"):
-		mark("focused_quality", &result.Checks.FocusedQuality)
-		mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
-	case strings.HasPrefix(path, "internal/webui/static/"):
-		// Embedded browser assets compile into the binary and are served by
-		// the webui package, so its tests own them.
+	case strings.HasPrefix(path, "internal/ai/skills/") && strings.HasSuffix(path, ".md"),
+		strings.HasPrefix(path, "internal/webui/static/"):
+		// Embedded assets (AI skills, browser UI) compile into the binary and
+		// are served by their package, so its tests own them.
 		mark("focused_quality", &result.Checks.FocusedQuality)
 		mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
 	case path == "scripts/check-go-coverage.sh" || path == "scripts/check-go-format.sh" ||

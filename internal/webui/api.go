@@ -26,6 +26,12 @@ import (
 // with a long markdown description.
 const maxBodyBytes = 1 << 20
 
+const (
+	taskPattern     = "/api/tasks/{ref}"
+	contentType     = "Content-Type"
+	jsonContentType = "application/json"
+)
+
 // server holds the per-process API state: one store, one fixed user, and the
 // data directory the active project is resolved from.
 type server struct {
@@ -48,9 +54,9 @@ func (s *server) routes(mux *http.ServeMux) {
 		{"GET", "/api/meta", s.meta},
 		{"GET", "/api/tasks", s.listTasks},
 		{"POST", "/api/tasks", s.addTask},
-		{"GET", "/api/tasks/{ref}", s.getTask},
-		{"PATCH", "/api/tasks/{ref}", s.patchTask},
-		{"DELETE", "/api/tasks/{ref}", s.deleteTask},
+		{"GET", taskPattern, s.getTask},
+		{"PATCH", taskPattern, s.patchTask},
+		{"DELETE", taskPattern, s.deleteTask},
 		{"POST", "/api/tasks/{ref}/move", s.moveTask},
 		{"POST", "/api/tasks/{ref}/cancel", s.cancelTask},
 		{"POST", "/api/tasks/{ref}/restore", s.restoreTask},
@@ -92,7 +98,7 @@ func secure(next http.Handler) http.Handler {
 				writeError(w, http.StatusForbidden, "cross-origin request refused")
 				return
 			}
-			if r.ContentLength != 0 && !isJSONContentType(r.Header.Get("Content-Type")) {
+			if r.ContentLength != 0 && !isJSONContentType(r.Header.Get(contentType)) {
 				writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 				return
 			}
@@ -127,7 +133,7 @@ func originAllowed(r *http.Request) bool {
 
 func isJSONContentType(ct string) bool {
 	mt, _, err := mime.ParseMediaType(ct)
-	return err == nil && mt == "application/json"
+	return err == nil && mt == jsonContentType
 }
 
 // --- wire types ---
@@ -286,7 +292,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 		writeError(w, http.StatusInternalServerError, "encode response: "+err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentType, jsonContentType)
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
 }
@@ -463,7 +469,7 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentType, jsonContentType)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
