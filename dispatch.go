@@ -24,6 +24,7 @@ var subcommands = map[string]func(args []string) error{
 	"mcp":     runMCP,
 	"tui":     runTUI,
 	"version": runVersion,
+	"web":     runWeb,
 }
 
 var mcpRun = mcpserv.Run

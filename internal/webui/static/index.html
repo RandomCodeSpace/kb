@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>kb</title>
+<link rel="stylesheet" href="/app.css">
+<script>
+try {
+  var s = JSON.parse(localStorage.getItem('kb-web-settings') || '{}');
+  if (s.theme === 'light' || s.theme === 'dark') document.documentElement.dataset.theme = s.theme;
+  if (s.density === 'compact') document.documentElement.dataset.density = 'compact';
+} catch (e) {}
+</script>
+</head>
+<body>
+<a class="skip" href="#board">Skip to board</a>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-name" aria-label="kb">kb</span>
+    <label class="sr-only" for="project">Project</label>
+    <select id="project" class="project-select" title="Project (p / P)"></select>
+  </div>
+  <div id="stats" class="stats phone-hide" aria-label="Board stats"></div>
+  <div class="topbar-actions">
+    <button type="button" id="palette-btn" class="btn ghost phone-hide" title="Command palette (Ctrl+K)">
+      <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3h10v10H3z" stroke="currentColor" stroke-width="1.5" fill="none" rx="2"/><path d="M6 8h4M8 6v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <span>Commands</span><kbd>Ctrl K</kbd>
+    </button>
+    <button type="button" id="filters-toggle" class="btn icon phone-only" aria-label="Search and filters" aria-expanded="false" aria-controls="filters">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M4 8h8M6 12h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"/></svg>
+      <span id="filter-count" class="count-badge" hidden></span>
+    </button>
+    <button type="button" id="new-task" class="btn primary" title="New task (n)"><span class="phone-hide">New task</span><span class="phone-only" aria-hidden="true">+</span></button>
+    <button type="button" id="settings-btn" class="btn icon" aria-label="Display options" title="Display options (s)" aria-expanded="false" aria-controls="settings">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M3.6 12.4 5 11M11 5l1.4-1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </button>
+    <button type="button" id="theme-toggle" class="btn icon" aria-label="Toggle theme" title="Toggle theme">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M8 2.5v11A5.5 5.5 0 0 0 8 2.5z" fill="currentColor"/></svg>
+    </button>
+    <button type="button" id="help-btn" class="btn icon phone-hide" title="Keyboard help (?)" aria-label="Keyboard help">?</button>
+    <span id="conn" class="conn" title="Connected"><span class="dot" aria-hidden="true"></span><span id="version" class="num"></span></span>
+  </div>
+</header>
+
+<section id="filters" class="filters" aria-label="Search and filters">
+  <div class="filters-row">
+    <div class="search-wrap">
+      <svg class="search-icon" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <label class="sr-only" for="search">Search tasks. Supports tag:, prio:, due:, is:blocked, has:checklist, effort:, #number</label>
+      <input id="search" type="search" placeholder="Search  tag:web prio:high due:week is:blocked #12" autocomplete="off" spellcheck="false">
+      <kbd class="search-kbd phone-hide" aria-hidden="true">/</kbd>
+    </div>
+    <div id="quick" class="quick" role="group" aria-label="Quick filters"></div>
+  </div>
+  <div class="filters-row">
+    <div id="labels" class="labels" role="group" aria-label="Label filter"></div>
+    <div id="active" class="active" aria-label="Active filters"></div>
+    <button type="button" id="clear-filters" class="btn ghost sm" title="Clear filters (X)" hidden>Clear all</button>
+    <span id="result-count" class="hint num result-count"></span>
+  </div>
+  <button type="button" id="filters-done" class="btn primary phone-only">Done</button>
+</section>
+<div id="filters-scrim" class="scrim" hidden></div>
+
+<div id="segments" class="segments" role="tablist" aria-label="Column">
+  <button type="button" role="tab" data-status="todo" aria-selected="true">Todo <span class="num seg-count"></span></button>
+  <button type="button" role="tab" data-status="doing">Doing <span class="num seg-count"></span></button>
+  <button type="button" role="tab" data-status="done">Done <span class="num seg-count"></span></button>
+  <button type="button" role="tab" data-status="cancelled">Cancelled <span class="num seg-count"></span></button>
+</div>
+
+<div id="banner" class="banner" role="status" hidden>Connection lost. Retrying&hellip;</div>
+
+<div class="workspace">
+  <main id="board" class="board" aria-label="Board" tabindex="-1"></main>
+  <aside id="panel" class="panel" hidden aria-label="Task details">
+    <div id="panel-handle" class="panel-handle" role="separator" aria-orientation="vertical" aria-label="Resize panel" tabindex="0"></div>
+  </aside>
+</div>
+
+<!-- The detail subtree is mounted into #panel on wide screens and into #detail-dialog otherwise. -->
+<section id="detail" class="detail" aria-labelledby="detail-title" hidden>
+  <div class="dialog-head">
+    <h2 id="detail-title" class="detail-title"></h2>
+    <button type="button" class="btn icon" id="detail-close" aria-label="Close">&times;</button>
+  </div>
+  <div id="detail-body" class="dialog-body detail-body"></div>
+  <footer class="dialog-foot" id="detail-actions"></footer>
+</section>
+<dialog id="detail-dialog" class="dialog wide sheet" aria-label="Task details"></dialog>
+
+<div id="bulkbar" class="bulkbar" role="toolbar" aria-label="Selection actions" hidden></div>
+<div id="settings" class="popover" role="dialog" aria-label="Display options" hidden></div>
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+<div id="live" class="sr-only" aria-live="polite"></div>
+
+<dialog id="palette" class="dialog palette" aria-label="Command palette">
+  <div class="palette-input">
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <input id="palette-search" type="text" placeholder="Type a command, #number, project or label" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list">
+    <kbd>Esc</kbd>
+  </div>
+  <ul id="palette-list" class="palette-list" role="listbox"></ul>
+</dialog>
+
+<dialog id="edit-dialog" class="dialog sheet" aria-labelledby="edit-title">
+  <form id="edit-form" method="dialog" novalidate>
+    <header class="dialog-head">
+      <h2 id="edit-title">New task</h2>
+      <button type="button" class="btn icon" data-close aria-label="Close">&times;</button>
+    </header>
+    <div class="dialog-body form-grid">
+      <label class="span2">Title
+        <input name="title" required autocomplete="off" placeholder="What needs doing?">
+      </label>
+      <label>Emoji
+        <input name="emoji" autocomplete="off" maxlength="8" placeholder="🚀">
+      </label>
+      <label>Status
+        <select name="status">
+          <option value="todo">Todo</option>
+          <option value="doing">Doing</option>
+          <option value="done">Done</option>
+          <option value="cancelled">Cancelled</option>
+        </select>
+      </label>
+      <label class="span2">Description
+        <textarea name="desc" rows="6" placeholder="Markdown: **bold**, _italic_, `code`, - lists, - [ ] checks, [links](https://...)"></textarea>
+      </label>
+      <label>Priority
+        <select name="prio">
+          <option value="1">1 &middot; High</option>
+          <option value="2">2 &middot; Medium</option>
+          <option value="3" selected>3 &middot; Low</option>
+        </select>
+      </label>
+      <label>Due
+        <input name="due" type="date">
+      </label>
+      <label>Effort
+        <select name="effort">
+          <option value="">&mdash;</option>
+          <option value="S">S</option>
+          <option value="M">M</option>
+          <option value="L">L</option>
+        </select>
+      </label>
+      <label>Project
+        <select name="project"></select>
+      </label>
+      <label class="span2">Tags <span class="hint">comma or space separated</span>
+        <input name="tags" autocomplete="off" placeholder="docs release type::bug">
+      </label>
+      <label class="span2">Checklist <span class="hint">one per line, prefix <code>x </code> when done</span>
+        <textarea name="checks" rows="4" placeholder="x reproduce locally&#10;write regression test"></textarea>
+      </label>
+      <label class="check-row span2">
+        <input name="blocked" type="checkbox" class="cb"> Blocked
+      </label>
+    </div>
+    <footer class="dialog-foot">
+      <span class="hint phone-hide">Ctrl+S or Ctrl+Enter saves</span>
+      <span class="grow"></span>
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="submit" class="btn primary" id="edit-save">Save</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="help-dialog" class="dialog" aria-labelledby="help-title">
+  <div class="dialog-head">
+    <h2 id="help-title">Keyboard</h2>
+    <button type="button" class="btn icon" data-close aria-label="Close">&times;</button>
+  </div>
+  <div class="dialog-body help-grid">
+    <dl class="keys">
+      <dt><kbd>j</kbd> <kbd>k</kbd> <kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Select card</dd>
+      <dt><kbd>h</kbd> <kbd>l</kbd> <kbd>Tab</kbd> <kbd>⇧Tab</kbd></dt><dd>Move between columns</dd>
+      <dt><kbd>Enter</kbd></dt><dd>Open card</dd>
+      <dt><kbd>Space</kbd></dt><dd>Lift card, move with h/j/k/l, Space drops</dd>
+      <dt><kbd>n</kbd> <kbd>e</kbd></dt><dd>Create / edit</dd>
+      <dt><kbd>t</kbd> <kbd>x</kbd> <kbd>r</kbd></dt><dd>Ship / cancel / restore</dd>
+      <dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Set priority</dd>
+      <dt><kbd>c</kbd></dt><dd>Comment on the card</dd>
+      <dt><kbd>v</kbd> <kbd>Ctrl A</kbd></dt><dd>Select card / whole column</dd>
+    </dl>
+    <dl class="keys">
+      <dt><kbd>/</kbd> <kbd>f</kbd> <kbd>X</kbd></dt><dd>Search / label filter / clear filters</dd>
+      <dt><kbd>p</kbd> <kbd>P</kbd></dt><dd>Next / previous project</dd>
+      <dt><kbd>Ctrl K</kbd></dt><dd>Command palette</dd>
+      <dt><kbd>s</kbd></dt><dd>Display options</dd>
+      <dt><kbd>Ctrl S</kbd> <kbd>Ctrl Enter</kbd></dt><dd>Save form / submit comment</dd>
+      <dt><kbd>Esc</kbd></dt><dd>Close, cancel lift, clear selection</dd>
+      <dt><kbd>?</kbd></dt><dd>This help</dd>
+      <dt><kbd>Shift</kbd>+click <kbd>Ctrl</kbd>+click</dt><dd>Range / toggle selection</dd>
+      <dt>Drag</dt><dd>Move cards; touch: long-press to lift</dd>
+    </dl>
+  </div>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>

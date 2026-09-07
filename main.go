@@ -26,6 +26,7 @@ commands:
   mcp        expose the local board to AI agents over MCP stdio
   tui        open the local board in a full-screen terminal UI
   version    print the kb version
+  web        open the local board in a browser (binds 127.0.0.1 only)
   help       task CLI reference
 `
 
