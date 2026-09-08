@@ -46,7 +46,7 @@ try {
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M4 8h8M6 12h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>
     <span id="filter-count" class="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 font-mono text-[10px] font-semibold text-on-accent" hidden></span>
   </button>
-  <button type="button" id="palette-btn" class="btn btn-ghost btn-icon phone-hide" data-tip="Commands  Ctrl K" aria-label="Command palette">
+  <button type="button" id="palette-btn" class="btn btn-ghost btn-icon" data-tip="Commands  Ctrl K" aria-label="Command palette" aria-haspopup="dialog">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5.5 6 8l-3 2.5M8 11h5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
   <button type="button" id="new-task" class="btn btn-primary ml-1" title="New task (n)">
@@ -54,10 +54,13 @@ try {
     <span class="phone-hide">New task</span>
   </button>
   <span class="mx-1 hidden h-4 w-px bg-line md:block" aria-hidden="true"></span>
-  <button type="button" id="settings-btn" class="btn btn-ghost btn-icon" aria-label="Display options" data-tip="Display  s" aria-expanded="false" aria-controls="settings">
+  <button type="button" id="display-btn" class="btn btn-ghost btn-icon" aria-label="Display options" data-tip="Display  d" aria-haspopup="dialog" aria-expanded="false" aria-controls="display">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h5M10.5 4.5h3M2.5 8h9M13.5 8h0M2.5 11.5h2M7.5 11.5h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8.5" cy="4.5" r="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/><circle cx="12.5" cy="8" r="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/><circle cx="5.5" cy="11.5" r="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
   </button>
-  <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon" aria-label="Toggle theme" data-tip="Theme">
+  <button type="button" id="settings-btn" class="btn btn-ghost btn-icon phone-hide" aria-label="Settings" data-tip="Settings  s" aria-haspopup="dialog">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6l1 1.7 1.9-.4.6 1.9 1.9.6-.4 1.9 1.2 1.5-1.2 1.5.4 1.9-1.9.6-.6 1.9-1.9-.4-1 1.7-1-1.7-1.9.4-.6-1.9-1.9-.6.4-1.9L1.8 8 3 6.5l-.4-1.9 1.9-.6.6-1.9 1.9.4z"/></svg>
+  </button>
+  <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon phone-hide" aria-label="Toggle theme" data-tip="Theme">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 2.5v11A5.5 5.5 0 0 0 8 2.5z" fill="currentColor"/></svg>
   </button>
   <button type="button" id="help-btn" class="btn btn-ghost btn-icon phone-hide tip-left" data-tip="Keyboard  ?" aria-label="Keyboard help">
@@ -111,7 +114,7 @@ try {
 <dialog id="detail-dialog" class="dialog dialog-wide sheet" aria-label="Task details"></dialog>
 
 <div id="bulkbar" class="bulkbar" role="toolbar" aria-label="Selection actions" hidden></div>
-<div id="settings" class="pop right-2 top-12 w-[340px] max-w-[calc(100vw-16px)] p-3" role="dialog" aria-label="Display options" hidden></div>
+<div id="display" class="pop right-2 top-12 w-[340px] max-w-[calc(100vw-16px)] p-3" role="dialog" aria-label="Display options" hidden></div>
 <div id="toasts" class="pointer-events-none fixed inset-x-0 bottom-4 z-40 flex flex-col items-center gap-2 px-4" style="bottom: calc(16px + env(safe-area-inset-bottom))" role="status" aria-live="polite"></div>
 <div id="live" class="sr-only" aria-live="polite"></div>
 
@@ -143,6 +146,8 @@ try {
           <input name="title" class="input" required autocomplete="off" placeholder="What needs doing?" enterkeyhint="done">
         </label>
       </div>
+      <div class="sm:col-span-2" id="edit-similar" hidden></div>
+      <div class="sm:col-span-2" id="edit-ai" hidden></div>
       <div class="sm:col-span-2">
         <span class="label-11 mb-1 block" id="edit-desc-label">Description</span>
         <div id="edit-desc" aria-labelledby="edit-desc-label"></div>
@@ -206,31 +211,63 @@ try {
       <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
     </button>
   </div>
-  <div class="dialog-body grid grid-cols-1 gap-x-8 gap-y-1 sm:grid-cols-2 [&_dd]:text-13 [&_dd]:text-fg-2 [&_dt]:flex [&_dt]:flex-wrap [&_dt]:items-center [&_dt]:gap-1 [&_dl]:grid [&_dl]:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)] [&_dl]:items-center [&_dl]:gap-x-3 [&_dl]:gap-y-2">
-    <dl>
-      <dt><kbd class="kbd">j</kbd> <kbd class="kbd">k</kbd> <kbd class="kbd">↑</kbd> <kbd class="kbd">↓</kbd></dt><dd>Select card</dd>
-      <dt><kbd class="kbd">h</kbd> <kbd class="kbd">l</kbd> <kbd class="kbd">Tab</kbd> <kbd class="kbd">⇧ Tab</kbd></dt><dd>Move between columns</dd>
-      <dt><kbd class="kbd">Enter</kbd></dt><dd>Open card</dd>
-      <dt><kbd class="kbd">Space</kbd></dt><dd>Lift card, move with h j k l, Space drops</dd>
-      <dt><kbd class="kbd">n</kbd> <kbd class="kbd">e</kbd></dt><dd>Create / edit</dd>
-      <dt><kbd class="kbd">t</kbd> <kbd class="kbd">x</kbd> <kbd class="kbd">r</kbd></dt><dd>Ship / cancel / restore</dd>
-      <dt><kbd class="kbd">1</kbd> <kbd class="kbd">2</kbd> <kbd class="kbd">3</kbd></dt><dd>Set priority</dd>
-      <dt><kbd class="kbd">c</kbd></dt><dd>Comment on the card</dd>
-      <dt><kbd class="kbd">v</kbd> <kbd class="kbd">Ctrl A</kbd></dt><dd>Select card / whole column</dd>
-    </dl>
-    <dl>
-      <dt><kbd class="kbd">/</kbd> <kbd class="kbd">f</kbd> <kbd class="kbd">X</kbd></dt><dd>Search / label filter / clear filters</dd>
-      <dt><kbd class="kbd">p</kbd> <kbd class="kbd">P</kbd></dt><dd>Next / previous project</dd>
-      <dt><kbd class="kbd">Ctrl K</kbd></dt><dd>Command palette</dd>
-      <dt><kbd class="kbd">s</kbd></dt><dd>Display options</dd>
-      <dt><kbd class="kbd">Ctrl B</kbd> <kbd class="kbd">Ctrl I</kbd> <kbd class="kbd">Ctrl K</kbd> <kbd class="kbd">Ctrl E</kbd></dt><dd>Editor: bold / italic / link / code</dd>
-      <dt><kbd class="kbd">Ctrl Enter</kbd> <kbd class="kbd">Esc</kbd></dt><dd>Editor: save / cancel</dd>
-      <dt><kbd class="kbd">Esc</kbd></dt><dd>Close, cancel lift, clear selection</dd>
-      <dt><kbd class="kbd">?</kbd></dt><dd>This help</dd>
-      <dt><kbd class="kbd">Shift</kbd> click <kbd class="kbd">Ctrl</kbd> click</dt><dd>Range / toggle selection</dd>
-      <dt>Drag</dt><dd>Move cards; on touch, long-press to lift</dd>
-    </dl>
+  <div class="dialog-body grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2" id="help-body"></div>
+</dialog>
+
+<dialog id="settings-dialog" class="dialog dialog-wide sheet" aria-labelledby="settings-dialog-title">
+  <div class="sheet-col">
+    <header class="dialog-head">
+      <h2 id="settings-dialog-title">Settings</h2>
+      <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <div class="dialog-body" id="settings-dialog-body"></div>
+    <footer class="dialog-foot">
+      <span class="phone-hide text-12 text-fg-3"><kbd class="kbd" id="settings-mod">Ctrl</kbd> <kbd class="kbd">S</kbd> saves the section you are in</span>
+      <span class="flex-1"></span>
+      <button type="button" class="btn" data-close>Close</button>
+    </footer>
   </div>
+</dialog>
+
+<dialog id="split-dialog" class="dialog dialog-wide sheet" aria-labelledby="split-dialog-title">
+  <div class="sheet-col">
+    <header class="dialog-head">
+      <h2 id="split-dialog-title">Split ADR into stories</h2>
+      <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <div class="dialog-body" id="split-dialog-body"></div>
+    <footer class="dialog-foot" id="split-dialog-foot"></footer>
+  </div>
+</dialog>
+
+<dialog id="import-dialog" class="dialog dialog-wide sheet" aria-labelledby="import-dialog-title">
+  <div class="sheet-col">
+    <header class="dialog-head">
+      <h2 id="import-dialog-title">Forge issue import</h2>
+      <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <div class="dialog-body" id="import-dialog-body"></div>
+    <footer class="dialog-foot" id="import-dialog-foot"></footer>
+  </div>
+</dialog>
+
+<dialog id="ask-dialog" class="dialog" aria-labelledby="ask-title" aria-describedby="ask-body">
+  <form id="ask-form" novalidate>
+    <header class="dialog-head">
+      <h2 id="ask-title"></h2>
+      <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <div class="dialog-body" id="ask-body"></div>
+    <footer class="dialog-foot" id="ask-foot"></footer>
+  </form>
 </dialog>
 
 <script src="/marked.min.js"></script>

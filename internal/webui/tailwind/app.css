@@ -475,4 +475,33 @@
   .comment:hover .rm, .comment:focus-within .rm { opacity: 1; }
 
   .pick { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 50; max-height: 240px; overflow: auto; padding: 4px; border-radius: var(--radius-lg); background: var(--t-overlay); border: 1px solid var(--t-line); box-shadow: var(--t-shadow-md); }
+
+  /* one busy ring for every request the user waits on. Always paired with text,
+     so it still reads as "working" when reduced motion freezes it. */
+  .spinner { width: 14px; height: 14px; flex: none; border-radius: 9999px; border: 2px solid color-mix(in srgb, currentColor, transparent 72%); border-top-color: currentColor; animation: spin 700ms linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* settings, split and import forms: label over control, message under it */
+  .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .field-msg { font-size: 12px; line-height: 18px; color: var(--t-fg-2); overflow-wrap: anywhere; }
+  .field-msg.is-error { color: var(--t-danger); }
+  .field-msg.is-warn { color: var(--t-warn); }
+  .field-msg.is-ok { color: var(--t-ok); }
+  .field-msg:empty { display: none; }
+
+  /* a bordered list of rows: forge sources, proposed stories, fetched issues */
+  .rows { border: 1px solid var(--t-line); border-radius: var(--radius-md); background: var(--t-surface); overflow: hidden; }
+  .rows > * + * { border-top: 1px solid var(--t-line); }
+  .row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; }
+  /* an unticked row stays fully legible: the checkbox says it is out, not a dimmed label */
+  .row.is-off { background: var(--t-canvas); }
+  .row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+
+  /* a card reaching done: the column header takes its hue for one beat */
+  .col-head.shipped { animation: shipped 900ms var(--ease-out); }
+  @keyframes shipped {
+    0% { background: transparent; }
+    25% { background: color-mix(in srgb, var(--hue), transparent 78%); }
+    100% { background: transparent; }
+  }
 }

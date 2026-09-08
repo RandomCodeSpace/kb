@@ -4,7 +4,8 @@
    Sections: utilities · labels · markdown · settings · state · api/polling · filters
    · render (header, filters, board, cards) · drag and drop · keyboard, lift, selection, bulk
    · markdown editor · label editor · detail panel · edit dialog · composer · palette
-   · display options · toasts · routing · handlers · init */
+   · display options · ask dialog · settings dialog · AI in the editor · split ADR
+   · forge import · provenance and drift · actions and help · toasts · routing · handlers · init */
 'use strict';
 
 /* ============================== utilities ============================== */
@@ -53,6 +54,8 @@ function appendChildren(node, children) {
   }
 }
 const clean = (list) => list.filter(Boolean);
+// replaceChildren() stringifies null; this drops the empty slots first.
+const setKids = (node, ...children) => node.replaceChildren(...clean(children.flat()));
 // 16px stroke icon on the text's optical center.
 function icon(name, size = 16) {
   const d = ICONS[name];
@@ -75,6 +78,12 @@ const ICONS = {
   eye: ['M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z', 'M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z'], pencil: ['M11.5 2.5l2 2-8 8H3.5v-2z'],
   sun: ['M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1'],
   grip: ['M6 4h.01M10 4h.01M6 8h.01M10 8h.01M6 12h.01M10 12h.01'],
+  minus: 'M3.5 8h9',
+  sparkle: ['M6.5 2.5 7.6 5.4 10.5 6.5 7.6 7.6 6.5 10.5 5.4 7.6 2.5 6.5 5.4 5.4z', 'M11.5 9.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z'],
+  gear: ['M8 5.9a2.1 2.1 0 1 0 0 4.2 2.1 2.1 0 0 0 0-4.2z', 'M8 1.7l.9 1.6 1.8-.4.6 1.8 1.8.6-.4 1.8L13.9 8l-1.2 1.4.4 1.8-1.8.6-.6 1.8-1.8-.4L8 14.3l-.9-1.6-1.8.4-.6-1.8-1.8-.6.4-1.8L2.1 8l1.2-1.4-.4-1.8 1.8-.6.6-1.8 1.8.4z'],
+  upload: ['M8 11V3', 'M5 6l3-3 3 3', 'M2.5 11v2h11v-2'],
+  sync: ['M13.5 8a5.5 5.5 0 0 1-9.6 3.6', 'M2.5 8a5.5 5.5 0 0 1 9.6-3.6', 'M2.5 4.8v3.4h3.4', 'M13.5 11.2V7.8h-3.4'],
+  alert: ['M8 2.6 14.4 13.2H1.6z', 'M8 6.4v3', 'M8 11.3h.01'],
 };
 
 function animate(node, frames, ms, extra) {
@@ -124,6 +133,71 @@ function relTime(iso) {
 }
 const isOpen = (t) => t.status === 'todo' || t.status === 'doing';
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+const sentence = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');
+let uidN = 0;
+const uid = (prefix) => `${prefix}-${++uidN}`;
+// Swaps a button for a spinner while its request is in flight. Returns the undo.
+// Disabling drops focus to the body, so remember which control to hand it back to:
+// the re-render that usually follows reads this.
+let busyFocusKey = '';
+function busy(btn, label) {
+  const kids = Array.from(btn.childNodes);
+  const width = btn.offsetWidth;
+  if (document.activeElement === btn) busyFocusKey = btn.dataset.k || '';
+  btn.disabled = true;
+  btn.style.minWidth = width + 'px';
+  btn.replaceChildren(el('span', { class: 'spinner' }), label || 'Working…');
+  return () => {
+    btn.disabled = false;
+    btn.style.minWidth = '';
+    btn.replaceChildren(...kids);
+    if (busyFocusKey && btn.isConnected && btn.dataset.k === busyFocusKey) { btn.focus(); busyFocusKey = ''; }
+  };
+}
+// label over control over message, with the message wired up as the control's description.
+// setMsg(group, text, tone) writes that line; an error tone also marks the control invalid.
+function fieldGroup(label, control, opts = {}) {
+  if (!control.id) control.id = uid('f');
+  const msgID = control.id + '-msg';
+  control.setAttribute('aria-describedby', msgID);
+  const msg = el('p', { class: 'field-msg' + (opts.tone ? ' is-' + opts.tone : ''), id: msgID });
+  if (opts.message) msg.textContent = opts.message;
+  if (opts.tone === 'error') control.setAttribute('aria-invalid', 'true');
+  return el('div', { class: 'field' + (opts.class ? ' ' + opts.class : '') },
+    el('label', { class: 'label-11', for: control.id }, label, opts.hint ? el('span', { class: 'ml-1.5 font-normal tracking-normal text-fg-3' }, opts.hint) : null),
+    control, msg);
+}
+function setMsg(group, text, tone) {
+  const p = group && group.querySelector('.field-msg');
+  if (!p) return;
+  p.className = 'field-msg' + (tone ? ' is-' + tone : '');
+  p.textContent = text || '';
+  const control = group.querySelector('input, textarea, select');
+  if (control) { if (tone === 'error') control.setAttribute('aria-invalid', 'true'); else control.removeAttribute('aria-invalid'); }
+}
+// A bounded count control: two buttons and a number input that always agree.
+function stepper(label, value, onChange, min = 1, max = 20) {
+  const input = el('input', { type: 'number', class: 'input num w-16 text-center', min: String(min), max: String(max), step: '1', inputmode: 'numeric', value: String(value), 'aria-label': label,
+    onchange: (e) => { const n = clamp(Math.round(Number(e.target.value) || min), min, max); e.target.value = String(n); onChange(n); bounds(); } });
+  const down = el('button', { type: 'button', class: 'btn btn-icon', 'aria-label': `One fewer, ${label}`, onclick: () => step(-1) }, icon('minus', 14));
+  const up = el('button', { type: 'button', class: 'btn btn-icon', 'aria-label': `One more, ${label}`, onclick: () => step(1) }, icon('plus', 14));
+  const bounds = () => { const n = Number(input.value) || min; down.disabled = n <= min; up.disabled = n >= max; };
+  const step = (d) => { const n = clamp((Number(input.value) || min) + d, min, max); input.value = String(n); onChange(n); bounds(); };
+  bounds();
+  return el('div', { class: 'flex items-center gap-1' }, down, input, up);
+}
+// Segmented control over [[value, label]…]. Same shape the board's other segments use:
+// a group of toggles, so every option stays a tab stop and aria-pressed carries the state.
+function segGroup(label, options, current, onPick, cls = 'seg seg-sm') {
+  return el('div', { class: cls, role: 'group', 'aria-label': label }, ...options.map(([value, text]) => el('button', {
+    type: 'button', class: 'seg-btn', 'aria-pressed': current === value ? 'true' : 'false', onclick: () => onPick(value),
+  }, text)));
+}
+const utf8Bytes = (s) => new TextEncoder().encode(s).length;
+const openLink = (href, text) => el('a', { class: 'text-accent underline decoration-line-2 underline-offset-2 hover:decoration-current', href, target: '_blank', rel: 'noopener noreferrer' }, text || href, icon('open', 11));
+// An inline "go to settings" button that reads as prose, not as a control.
+const settingsLink = (text, section) => el('button', { type: 'button', class: 'text-accent underline decoration-line-2 underline-offset-2 hover:decoration-current', onclick: () => openSettings(section) }, text);
 // Subsequence fuzzy match: returns {score, positions} or null.
 function fuzzy(query, text) {
   const q = query.toLowerCase(), t = text.toLowerCase();
@@ -152,7 +226,11 @@ function insertText(ta, text) {
 /* ============================== labels ============================== */
 // A label is `name` or `scope::value`. The project:: scope is data, never a chip on a card.
 const isProjectTag = (tag) => tag.startsWith('project::');
+// link:: and import:: are import provenance, not labels anyone filters by: the detail
+// panel's Provenance section reads them. They stay in the editor so a save cannot drop them.
+const isProvenanceTag = (tag) => tag.startsWith('link::') || tag.startsWith('import::');
 const userTags = (t) => (t.tags || []).filter((tag) => !isProjectTag(tag));
+const shownTags = (t) => userTags(t).filter((tag) => !isProvenanceTag(tag));
 function splitLabel(tag) {
   const i = tag.indexOf('::');
   return i > 0 ? { scope: tag.slice(0, i), value: tag.slice(i + 2) } : { scope: '', value: tag };
@@ -320,27 +398,46 @@ const state = {
   focusId: null, lifted: null, liftOrigin: null, selected: new Set(), anchorId: null,
   detail: null, detailJSON: '', detailData: null, detailPending: null, commentCounts: {},
   editing: null, editSnapshot: '', pollTimer: 0, paletteIndex: 0, paletteItems: [],
+  actions: [], projects: [], activeProject: '', shipped: null, ai: null, drift: {},
 };
+const ALL_PROJECTS = '::all'; // client-side pseudo-project, like the TUI's "all" scope
 const dom = {
   board: $('#board'), panel: $('#panel'), panelHandle: $('#panel-handle'), detail: $('#detail'),
   labels: $('#labels'), quick: $('#quick'), active: $('#active'), resultCount: $('#result-count'), stats: $('#stats'),
   search: $('#search'), searchWrap: $('#search-wrap'), searchSlot: $('#search-slot'), projectBtn: $('#project-btn'), projectName: $('#project-name'), projectMenu: $('#project-menu'),
   clear: $('#clear-filters'), banner: $('#banner'), conn: $('#conn'), connDot: $('#conn-dot'), version: $('#version'),
   toasts: $('#toasts'), live: $('#live'), segments: $('#segments'), filters: $('#filters'), scrim: $('#filters-scrim'), filterCount: $('#filter-count'),
-  bulkbar: $('#bulkbar'), settings: $('#settings'),
+  bulkbar: $('#bulkbar'), display: $('#display'),
   editDialog: $('#edit-dialog'), editForm: $('#edit-form'), editTitle: $('#edit-title'), editDesc: $('#edit-desc'), editLabels: $('#edit-labels'), editEffort: $('#edit-effort'),
   detailDialog: $('#detail-dialog'), detailSeq: $('#detail-seq'), detailTitle: $('#detail-title'), detailBody: $('#detail-body'), detailActions: $('#detail-actions'),
-  helpDialog: $('#help-dialog'), palette: $('#palette'), paletteInput: $('#palette-search'), paletteList: $('#palette-list'),
+  helpDialog: $('#help-dialog'), helpBody: $('#help-body'), palette: $('#palette'), paletteInput: $('#palette-search'), paletteList: $('#palette-list'),
+  editSimilar: $('#edit-similar'), editAI: $('#edit-ai'),
+  settingsDialog: $('#settings-dialog'), settingsBody: $('#settings-dialog-body'),
+  splitDialog: $('#split-dialog'), splitBody: $('#split-dialog-body'), splitFoot: $('#split-dialog-foot'),
+  importDialog: $('#import-dialog'), importBody: $('#import-dialog-body'), importFoot: $('#import-dialog-foot'),
+  askDialog: $('#ask-dialog'), askForm: $('#ask-form'), askTitle: $('#ask-title'), askBody: $('#ask-body'), askFoot: $('#ask-foot'),
 };
 const cols = {}; // status -> {col, body, count, composer}
 const dropSlot = el('div', { class: 'drop-slot', 'aria-hidden': 'true' });
 
 /* ============================== api / polling ============================== */
-async function api(method, path, body) {
+async function api(method, path, body, opts = {}) {
   const init = { method, headers: { Accept: 'application/json' } };
   if (method !== 'GET') init.headers['Content-Type'] = 'application/json';
   if (body !== undefined) init.body = JSON.stringify(body);
-  const res = await fetch(path, init);
+  let timer = 0;
+  if (opts.timeout) {
+    const ac = new AbortController();
+    init.signal = ac.signal;
+    timer = setTimeout(() => ac.abort(), opts.timeout);
+  }
+  let res;
+  try {
+    res = await fetch(path, init);
+  } catch (err) {
+    if (err && err.name === 'AbortError') throw new Error(`No answer after ${Math.round(opts.timeout / 1000)} seconds. The request was stopped.`);
+    throw err;
+  } finally { clearTimeout(timer); }
   if (res.status === 204) return null;
   const text = await res.text();
   let data = null;
@@ -354,24 +451,41 @@ async function api(method, path, body) {
   return data;
 }
 const taskPath = (id) => `/api/tasks/${encodeURIComponent(id)}`;
-// Runs run(force). On a 409 completion guard, asks and retries with force. Returns undefined if the user declines.
-async function withForce(run) {
+// Runs run(force). On a 409 completion guard, offers the TUI's three ways out — tick the open
+// checks and retry, finish anyway, or back out — and returns undefined if the user backs out.
+// task is the card the guard refused, when the caller knows it: it decides whether ticking is on offer.
+async function withForce(run, task) {
   try {
     return await run(false);
   } catch (err) {
-    if (err.status === 409 && err.body && err.body.completionBlocked) {
-      if (!confirm(`${err.message}\n\nFinish anyway?`)) return undefined;
-      return run(true);
-    }
-    throw err;
+    if (!(err.status === 409 && err.body && err.body.completionBlocked)) throw err;
+    const card = task && (findTask(task.id) || task);
+    const checks = (card && card.checks) || [];
+    const open = checks.filter((c) => !c.done).length;
+    const choice = await ask({
+      title: card ? `Move “${card.title}” to Done?` : 'Finish this card?',
+      // The guard's message is CLI-shaped: drop the --force advice, and the card it names
+      // when the dialog title already names it.
+      message: err.message.replace(/;\s*re-run with --force.*$/i, '').replace(card ? /\s+on #\d+\s+".*"$/ : /$^/, '') + '.',
+      actions: clean([
+        { value: null, label: 'Cancel' },
+        { value: 'force', label: 'Ship anyway', class: open ? 'btn btn-danger' : 'btn btn-primary' },
+        open ? { value: 'tick', label: 'Tick everything', class: 'btn btn-primary' } : null,
+      ]),
+    });
+    if (!choice || !choice.value) return undefined;
+    if (choice.value === 'force') return run(true);
+    const ticked = checks.map((c) => ({ text: c.text, done: true }));
+    await api('PATCH', taskPath(card.id), { checks: ticked });
+    return withForce(run, Object.assign({}, card, { checks: ticked }));
   }
 }
 const moveBody = (status, index, force) => Object.assign({ status }, index === undefined ? {} : { index }, force ? { force: true } : {});
-const patchTask = (id, patch) => withForce((force) => api('PATCH', taskPath(id), force ? Object.assign({ force: true }, patch) : patch));
+const patchTask = (id, patch) => withForce((force) => api('PATCH', taskPath(id), force ? Object.assign({ force: true }, patch) : patch), findTask(id));
 
 function tasksURL(unfiltered) {
   const params = new URLSearchParams();
-  if (state.project) params.set('project', state.project);
+  if (state.project && state.project !== ALL_PROJECTS) params.set('project', state.project);
   if (!unfiltered) {
     if (state.q) params.set('q', state.q);
     for (const tag of state.tags) params.append('tag', tag);
@@ -426,6 +540,39 @@ async function refreshMeta() {
     renderLabels();
   } catch (err) { /* polling reports connectivity */ }
 }
+// The project list the CLI and the TUI agree on, with per-project counts.
+async function refreshProjects() {
+  try {
+    const out = await api('GET', '/api/projects');
+    state.projects = out.projects || [];
+    state.activeProject = out.active || '';
+    if (!state.project) state.project = state.activeProject;
+    renderHeader();
+  } catch (err) { /* the header falls back to /api/meta */ }
+}
+// The TUI keyboard registry: one source for the palette and the help sheet.
+async function refreshActions() {
+  try { state.actions = (await api('GET', '/api/actions')).actions || []; } catch (err) { state.actions = []; }
+  renderHelp();
+}
+async function refreshAIStatus() {
+  try { state.ai = await api('GET', '/api/ai/status'); } catch (err) { state.ai = { configured: false }; }
+  return state.ai;
+}
+async function refreshShipped() {
+  try { state.shipped = await api('GET', '/api/shipped'); renderStats(); } catch (err) { /* the tally stays stale */ }
+}
+// One beat of the DONE column's own hue, then a fresh shipped-today tally.
+function celebrateShip() {
+  const head = cols.done && cols.done.col.querySelector('.col-head');
+  if (head && dur(1)) {
+    head.classList.remove('shipped');
+    void head.offsetWidth;
+    head.classList.add('shipped');
+    setTimeout(() => head.classList.remove('shipped'), 1000);
+  }
+  refreshShipped();
+}
 function invalidate() {
   state.etag = null;
   return refreshTasks();
@@ -468,7 +615,7 @@ const QUICK = [
   { id: 'high', label: 'High', test: (t) => t.prio === 1 },
   { id: 'blocked', label: 'Blocked', test: (t) => !!t.blocked },
   { id: 'checklist', label: 'Checklist', test: (t) => (t.checks || []).some((c) => !c.done) },
-  { id: 'nolabels', label: 'Unlabelled', test: (t) => userTags(t).length === 0 },
+  { id: 'nolabels', label: 'Unlabelled', test: (t) => shownTags(t).length === 0 },
 ];
 const quickById = (id) => QUICK.find((q) => q.id === id);
 const PRIO_WORDS = { high: 1, medium: 2, med: 2, low: 3, 1: 1, 2: 2, 3: 3 };
@@ -556,7 +703,7 @@ function clearFilters() {
 function renderHeader() {
   const { meta } = state;
   dom.version.textContent = meta.version ? 'v' + String(meta.version).replace(/^v/, '') : '';
-  dom.projectName.textContent = state.project || 'No project';
+  dom.projectName.textContent = state.project === ALL_PROJECTS ? 'All projects' : state.project || 'No project';
   if (!dom.projectMenu.hidden) renderProjectMenu();
   if (!dom.editDialog.open) {
     const sel = dom.editForm.elements.project;
@@ -564,14 +711,31 @@ function renderHeader() {
   }
   renderStats();
 }
-const projectList = (extra) => Array.from(new Set([...(state.meta.projects || []), state.project, extra].filter(Boolean)));
+// Every project on the board plus the active one, as /api/projects reports it; ALL is client-side.
+const projectNames = () => (state.projects.length ? state.projects.map((p) => p.name) : (state.meta.projects || []));
+const projectList = (extra) => Array.from(new Set([...projectNames(), state.project, extra].filter((p) => p && p !== ALL_PROJECTS)));
+// Where a new card lands. In the "all" scope the server stamps the CLI's active project,
+// so name that rather than the scope the board is showing.
+const writeProject = () => (state.project && state.project !== ALL_PROJECTS ? state.project : state.activeProject || 'inbox');
+const projectCount = (name) => {
+  const p = state.projects.find((x) => x.name === name);
+  if (!p) return null;
+  return STATUSES.reduce((n, s) => n + (p.counts[s] || 0), 0);
+};
 function renderProjectMenu() {
-  const list = projectList();
-  dom.projectMenu.replaceChildren(el('div', { class: 'menu-head' }, 'Projects'), ...list.map((p, i) => el('button', {
-    type: 'button', role: 'option', class: 'menu-item', id: 'proj-' + i, 'aria-selected': p === state.project ? 'true' : 'false', 'aria-current': p === state.project ? 'true' : null,
-    onclick: () => { setProject(p); toggleProjectMenu(false); },
-  }, el('span', { class: 'grid size-4 place-items-center text-accent' }, p === state.project ? icon('check', 12) : null), el('span', { class: 'truncate' }, p),
-    el('span', { class: 'num ml-auto text-11 text-fg-3' }, p === state.project ? String(state.all.length || state.tasks.length) : ''))));
+  const list = [ALL_PROJECTS, ...projectList()];
+  const total = state.projects.reduce((n, p) => n + STATUSES.reduce((m, s) => m + (p.counts[s] || 0), 0), 0);
+  dom.projectMenu.replaceChildren(el('div', { class: 'menu-head' }, 'Projects'), ...list.map((p, i) => {
+    const all = p === ALL_PROJECTS;
+    const count = all ? total : projectCount(p);
+    return el('button', {
+      type: 'button', role: 'option', class: 'menu-item', id: 'proj-' + i, 'aria-selected': p === state.project ? 'true' : 'false', 'aria-current': p === state.project ? 'true' : null,
+      title: all ? 'Every project on the board' : p === state.activeProject ? `${p} — also the project the CLI writes to` : p,
+      onclick: () => { setProject(p); toggleProjectMenu(false); },
+    }, el('span', { class: 'grid size-4 place-items-center text-accent' }, p === state.project ? icon('check', 12) : null),
+      el('span', { class: 'truncate' }, all ? 'All projects' : p),
+      el('span', { class: 'num ml-auto text-11 text-fg-3' }, count === null ? '' : String(count)));
+  }));
 }
 function toggleProjectMenu(open = dom.projectMenu.hidden) {
   dom.projectMenu.hidden = !open;
@@ -592,7 +756,11 @@ function renderStats() {
     type: 'button', class: 'btn btn-ghost btn-sm px-1.5 font-normal text-fg-2' + (quick && state.quick.has(quick) ? ' btn-on' : ''), 'aria-pressed': quick ? (state.quick.has(quick) ? 'true' : 'false') : null,
     title: quick ? `Filter: ${quickById(quick).label}` : null, onclick: quick ? () => toggleQuick(quick) : null, disabled: !quick,
   }, el('span', { class: 'num font-medium text-fg' }, n), label);
-  dom.stats.replaceChildren(item(open, 'open'), item(week, 'this week', 'week'), item(blocked, 'blocked', 'blocked'));
+  const shipped = state.shipped ? state.shipped.count : null;
+  dom.stats.replaceChildren(item(open, 'open'), item(week, 'this week', 'week'), item(blocked, 'blocked', 'blocked'),
+    ...(shipped === null ? [] : [el('span', { class: 'mx-0.5 h-4 w-px bg-line', 'aria-hidden': 'true' }),
+      el('span', { class: 'flex h-7 items-center gap-1 px-1.5 text-fg-2', title: shipped ? `Cards moved to Done today: ${(state.shipped.seqs || []).map((s) => '#' + s).join(' ')}` : 'No cards have reached Done today' },
+        el('span', { class: 'num font-medium text-fg' }, shipped), 'shipped today')]));
 }
 
 /* ============================== render: filters ============================== */
@@ -621,9 +789,9 @@ function renderResultCount() {
   dom.resultCount.textContent = anyFilter() ? (total === null ? `${shown} shown` : `${shown} of ${total}`) : plural(shown, 'task');
 }
 function allLabels() {
-  const labels = (state.meta.labels || []).filter((l) => !isProjectTag(l));
+  const labels = (state.meta.labels || []).filter((l) => !isProjectTag(l) && !isProvenanceTag(l));
   for (const tag of state.tags) if (!labels.includes(tag)) labels.push(tag);
-  for (const t of state.tasks) for (const tag of userTags(t)) if (!labels.includes(tag)) labels.push(tag);
+  for (const t of state.tasks) for (const tag of shownTags(t)) if (!labels.includes(tag)) labels.push(tag);
   return labels.sort((a, b) => a.localeCompare(b));
 }
 // Label filter row: scoped labels grouped under a scope header (click = any scope::*), plain labels after.
@@ -697,7 +865,7 @@ function cardEl(t) {
   const show = settings.show;
   const checks = t.checks || [];
   const doneCount = checks.filter((c) => c.done).length;
-  const tags = show.tags ? userTags(t) : [];
+  const tags = show.tags ? shownTags(t) : [];
   const commentCount = show.comments ? state.commentCounts[t.id] : undefined;
   const selected = state.selected.has(t.id);
   const meta = clean([
@@ -1001,13 +1169,14 @@ async function moveMany(ids, status, index) {
   let moved = 0;
   for (let i = 0; i < ids.length; i++) {
     try {
-      const out = await withForce((force) => api('POST', taskPath(ids[i]) + '/move', moveBody(status, index === undefined ? undefined : index + i, force)));
+      const out = await withForce((force) => api('POST', taskPath(ids[i]) + '/move', moveBody(status, index === undefined ? undefined : index + i, force)), findTask(ids[i]));
       if (out === undefined) break;
       moved++;
     } catch (err) { toast(err.message, 'error'); break; }
   }
   invalidate();
   if (!moved) return;
+  if (status === 'done') celebrateShip();
   const label = moved === 1 ? `#${findTask(ids[0]).seq}` : plural(moved, 'task');
   announce(`Moved ${label} to ${STATUS_LABEL[status]}`);
   const undo = async () => {
@@ -1088,8 +1257,9 @@ async function dropLifted() {
   const node = cardNode(id);
   if (node) node.classList.remove('is-lifted');
   if (origin && origin.status === t.status && origin.index === index) return;
-  const out = await mutate(() => withForce((force) => api('POST', taskPath(id) + '/move', moveBody(t.status, index, force))), `Moved #${t.seq} to ${STATUS_LABEL[t.status]}`,
-    () => mutate(() => withForce((force) => api('POST', taskPath(id) + '/move', moveBody(origin.status, origin.index, force)))));
+  const out = await mutate(() => withForce((force) => api('POST', taskPath(id) + '/move', moveBody(t.status, index, force)), t), `Moved #${t.seq} to ${STATUS_LABEL[t.status]}`,
+    () => mutate(() => withForce((force) => api('POST', taskPath(id) + '/move', moveBody(origin.status, origin.index, force)), t)));
+  if (out && t.status === 'done') celebrateShip();
   announce(out ? `Moved #${t.seq} to ${STATUS_LABEL[t.status]}` : 'Move cancelled');
   setFocus(id);
 }
@@ -1168,7 +1338,12 @@ async function bulkPatch(ids, patchFor, label) {
   invalidate();
 }
 async function bulkCancel(ids) {
-  if (!confirm(`Cancel ${plural(ids.length, 'task')}?`)) return;
+  const answer = await ask({
+    title: `Cancel ${plural(ids.length, 'task')}?`,
+    note: 'The cards move to Cancelled. You can restore them afterwards.',
+    actions: [{ value: null, label: 'Keep cards' }, { value: 'cancel', label: 'Cancel tasks', class: 'btn btn-danger' }],
+  });
+  if (!answer || !answer.value) return;
   const done = [];
   for (const id of ids) {
     try { await api('POST', taskPath(id) + '/cancel', {}); done.push(id); } catch (err) { toast(err.message, 'error'); break; }
@@ -1432,9 +1607,22 @@ function closeDetail(opts = {}) {
 // busy: an inline editor is open (do not repaint under it). dirty: it holds unsaved changes (confirm before closing).
 const panelBusy = () => !!dom.detail.querySelector('[data-busy]');
 const panelDirty = () => !!dom.detail.querySelector('[data-busy]:not(.editor), .editor[data-busy].is-dirty');
+// The card plus what only other endpoints know: why it was killed, and where it was imported from.
+async function detailExtras(ref, task) {
+  const links = (task.tags || []).filter((t) => t.startsWith('link::')).map((t) => t.slice(6)).filter(Boolean);
+  const [tombstone, provenance, siblings] = await Promise.all([
+    task.status === 'cancelled' ? api('GET', taskPath(ref) + '/tombstone').catch(() => null) : Promise.resolve(null),
+    links.length ? Promise.all(links.map((link) => api('GET', '/api/forge/provenance?link=' + encodeURIComponent(link)).then((r) => r.links || []).catch(() => []))).then((all) => all.flat()) : Promise.resolve([]),
+    // Other cards carrying the same upstream link: the TUI's "already imported?" lookup.
+    links.length ? Promise.all(links.map((link) => api('GET', '/api/by-link?link=' + encodeURIComponent('link::' + link)).then((r) => (r.items || []).filter((i) => i.id !== task.id).map((i) => Object.assign({ link }, i))).catch(() => []))).then((all) => all.flat()) : Promise.resolve([]),
+  ]);
+  return { tombstone, provenance, siblings };
+}
 async function loadDetail(ref, silent) {
   try {
     const data = await api('GET', taskPath(ref));
+    if (state.detail !== String(ref)) return;
+    Object.assign(data, await detailExtras(ref, data.task));
     if (state.detail !== String(ref)) return;
     const json = JSON.stringify(data);
     const count = (data.comments || []).length;
@@ -1461,7 +1649,7 @@ const sectionEl = (title, extra, ...children) => el('section', { class: 'mt-5' }
   el('div', { class: 'mb-2 flex h-6 items-center gap-2' }, el('h3', { class: 'label-11' }, title), ...clean([extra].flat())), ...children);
 
 function renderDetail(data) {
-  const { task, comments = [], links = {} } = data;
+  const { task, comments = [], links = {}, tombstone = null, provenance = [], siblings = [] } = data;
   const draft = dom.detailBody.querySelector('.comment-editor textarea');
   const draftText = draft ? draft.value : '';
   const hadFocus = draft && document.activeElement === draft;
@@ -1517,6 +1705,10 @@ function renderDetail(data) {
     el('dt', {}, 'Project'), el('dd', {}, projectSel),
     el('dt', {}, 'Created'), el('dd', { class: 'text-12 text-fg-2' }, el('time', { class: 'num', datetime: task.createdAt, title: fmtDate(task.createdAt) }, relTime(task.createdAt)),
       task.movedAt && task.movedAt !== task.createdAt ? el('span', { class: 'text-fg-3' }, ' · moved ', el('time', { class: 'num', datetime: task.movedAt, title: fmtDate(task.movedAt) }, relTime(task.movedAt))) : null),
+    ...(tombstone ? [
+      el('dt', {}, 'Killed'), el('dd', { class: 'text-12 text-fg-2' }, el('time', { class: 'num', datetime: tombstone.killedAt, title: fmtDate(tombstone.killedAt) }, fmtDate(tombstone.killedAt))),
+      el('dt', {}, 'Reason'), el('dd', { class: 'text-13' }, tombstone.reason ? mdInline(tombstone.reason) : el('span', { class: 'text-fg-3' }, 'None given')),
+    ] : []),
   );
 
   // description: rendered markdown, click to edit
@@ -1595,7 +1787,7 @@ function renderDetail(data) {
   const commentSection = sectionEl('Comments', comments.length ? el('span', { class: 'num text-11 text-fg-3' }, comments.length) : null,
     el('div', { class: 'mb-3 flex flex-col gap-2' }, ...commentNodes), commentEd.root);
 
-  dom.detailBody.replaceChildren(props, descSection, checkSection, blockSection, commentSection);
+  dom.detailBody.replaceChildren(...clean([props, descSection, checkSection, blockSection, provenance.length ? provenanceSection(provenance, siblings) : null, commentSection]));
   dom.detailBody.scrollTop = scrollTop;
   if (hadFocus) commentEd.focus();
 
@@ -1652,17 +1844,24 @@ async function removeLink(task, other) {
 async function shipTask(task) {
   const groups = groupTasks();
   const prev = { status: task.status, index: groups[task.status].indexOf(findTask(task.id)) };
-  const out = await mutate(() => withForce((force) => api('POST', taskPath(task.id) + '/move', moveBody('done', undefined, force))), `Shipped #${task.seq} ${task.title}`,
-    () => mutate(() => withForce((force) => api('POST', taskPath(task.id) + '/move', moveBody(prev.status, prev.index, force)))));
-  if (out) { announce(`Moved #${task.seq} to Done`); if (state.detail) loadDetail(state.detail, true); }
+  const out = await mutate(() => withForce((force) => api('POST', taskPath(task.id) + '/move', moveBody('done', undefined, force)), task), `Shipped #${task.seq} ${task.title}`,
+    () => mutate(() => withForce((force) => api('POST', taskPath(task.id) + '/move', moveBody(prev.status, prev.index, force)), task)));
+  if (out) { celebrateShip(); announce(`Moved #${task.seq} to Done`); if (state.detail) loadDetail(state.detail, true); }
 }
 async function cancelTask(task) {
-  const reason = prompt(`Cancel #${task.seq}? Reason (optional):`, '');
-  if (reason === null) return;
+  const answer = await ask({
+    title: `Cancel #${task.seq}?`,
+    message: task.title,
+    note: 'The card moves to Cancelled. The reason is optional and is kept with the card.',
+    field: { label: 'Reason', max: 500, placeholder: 'duplicate of #1' },
+    actions: [{ value: null, label: 'Keep card' }, { value: 'cancel', label: 'Cancel card', class: 'btn btn-danger' }],
+  });
+  if (!answer || !answer.value) return;
+  const reason = answer.text.trim();
   const groups = groupTasks();
   const prev = { status: task.status, index: groups[task.status].indexOf(findTask(task.id)) };
-  const out = await mutate(() => api('POST', taskPath(task.id) + '/cancel', reason.trim() ? { reason: reason.trim() } : {}), `Cancelled #${task.seq}`,
-    () => mutate(() => withForce((force) => api('POST', taskPath(task.id) + '/move', moveBody(prev.status, prev.index, force)))));
+  const out = await mutate(() => api('POST', taskPath(task.id) + '/cancel', reason ? { reason } : {}), `Cancelled #${task.seq}`,
+    () => mutate(() => withForce((force) => api('POST', taskPath(task.id) + '/move', moveBody(prev.status, prev.index, force)), task)));
   if (out) { announce(`Cancelled #${task.seq}`); if (state.detail) loadDetail(state.detail, true); }
 }
 async function restoreTask(task) {
@@ -1671,7 +1870,13 @@ async function restoreTask(task) {
   if (out) { announce(`Restored #${task.seq} to Todo`); if (state.detail) loadDetail(state.detail, true); }
 }
 async function deleteTask(task) {
-  if (!confirm(`Delete #${task.seq} permanently? This cannot be undone.`)) return;
+  if (task.status !== 'cancelled') { toast('Cancel the card before deleting it permanently', 'error'); return; }
+  const answer = await ask({
+    title: `Delete “${task.title}” permanently?`,
+    note: 'The card, its comments, links and cancellation reason are removed for good. This cannot be undone.',
+    actions: [{ value: null, label: 'Keep card' }, { value: 'delete', label: 'Delete permanently', class: 'btn btn-danger' }],
+  });
+  if (!answer || !answer.value) return;
   const out = await mutate(() => api('DELETE', taskPath(task.id)), `Deleted #${task.seq}`);
   if (out) closeDetail();
 }
@@ -1730,7 +1935,10 @@ function openEdit(task, preset = {}) {
   dom.editTitle.textContent = task ? `Edit #${task.seq}` : 'New task';
   state.editSnapshot = JSON.stringify(readForm());
   showDialog(dom.editDialog);
+  mountEditAI();
+  mountEditSimilar();
   f.title.focus();
+  if (!task && preset.title) loadSimilar(preset.title.trim());
 }
 const editDirty = () => JSON.stringify(readForm()) !== state.editSnapshot;
 function requestCloseEdit() {
@@ -1864,15 +2072,19 @@ function openComposer(status) {
 function paletteCommands() {
   const items = [];
   const add = (group, label, run, kbd, keywords) => items.push({ group, label, run, kbd, keywords: keywords || '' });
-  add('Action', 'New task', () => openEdit(null), 'n');
-  add('Action', 'Keyboard shortcuts', () => showDialog(dom.helpDialog), '?');
-  add('Action', 'Display options', () => toggleSettings(true), 's');
-  add('Action', `Switch to ${currentTheme() === 'dark' ? 'light' : 'dark'} theme`, toggleTheme, '', 'dark light theme');
-  add('Action', `Density: ${settings.density === 'compact' ? 'comfortable' : 'compact'}`, () => { settings.density = settings.density === 'compact' ? 'comfortable' : 'compact'; applySettings(); }, '', 'compact comfortable');
-  add('Action', `${settings.showCancelled ? 'Hide' : 'Show'} cancelled column`, () => { settings.showCancelled = !settings.showCancelled; applySettings(); }, '', 'column');
-  add('Action', `${settings.hideEmpty ? 'Show' : 'Hide'} empty columns`, () => { settings.hideEmpty = !settings.hideEmpty; applySettings(); });
-  if (anyFilter()) add('Action', 'Clear filters', clearFilters, 'X');
-  for (const p of state.meta.projects || []) if (p !== state.project) add('Project', `Switch to ${p}`, () => setProject(p), '', 'project');
+  // The terminal's own registry first, so ctrl+k lists what the TUI lists.
+  for (const a of listedActions()) {
+    const web = ACTION_WEB[a.id] || {};
+    add(ACTION_GROUP[a.group] || 'Action', sentence(web.name || a.name), ACTION_RUN[a.id], web.hint || a.hint, a.id);
+  }
+  add('View', 'Keyboard shortcuts', () => showDialog(dom.helpDialog), '?', 'help');
+  add('View', 'Display options', () => toggleDisplay(true), 'd');
+  add('View', `Switch to ${currentTheme() === 'dark' ? 'light' : 'dark'} theme`, toggleTheme, '', 'dark light theme');
+  add('View', `Density: ${settings.density === 'compact' ? 'comfortable' : 'compact'}`, () => { settings.density = settings.density === 'compact' ? 'comfortable' : 'compact'; applySettings(); }, '', 'compact comfortable');
+  add('View', `${settings.showCancelled ? 'Hide' : 'Show'} cancelled column`, () => { settings.showCancelled = !settings.showCancelled; applySettings(); }, '', 'column');
+  add('View', `${settings.hideEmpty ? 'Show' : 'Hide'} empty columns`, () => { settings.hideEmpty = !settings.hideEmpty; applySettings(); });
+  if (state.project !== ALL_PROJECTS) add('Project', 'Switch to all projects', () => setProject(ALL_PROJECTS), '', 'project all');
+  for (const p of projectNames()) if (p !== state.project) add('Project', `Switch to ${p}`, () => setProject(p), '', 'project');
   for (const l of allLabels()) add('Label', `${state.tags.has(l) ? 'Remove' : 'Filter'} label ${l}`, () => toggleTag(l), '', 'tag');
   for (const q of QUICK) add('Filter', `${state.quick.has(q.id) ? 'Remove filter' : 'Filter'}: ${q.label}`, () => toggleQuick(q.id));
   for (const s of ['position', 'prio', 'due']) if (settings.sort !== s) add('Sort', `Sort columns by ${s === 'prio' ? 'priority' : s}`, () => { settings.sort = s; applySettings(); });
@@ -1939,15 +2151,15 @@ function runPalette(i) {
 }
 
 /* ============================== display options ============================== */
-function renderSettings() {
+function renderDisplay() {
   const row = (label, control) => el('div', { class: 'flex min-h-8 items-center gap-3' }, el('span', { class: 'flex-1 text-13' }, label), control);
   const seg = (label, options, current, onPick) => row(label, el('div', { class: 'seg seg-sm', role: 'group', 'aria-label': label },
-    ...options.map(([value, text]) => el('button', { type: 'button', class: 'seg-btn', 'aria-pressed': current === value ? 'true' : 'false', onclick: () => { onPick(value); applySettings(); renderSettings(); } }, text))));
+    ...options.map(([value, text]) => el('button', { type: 'button', class: 'seg-btn', 'aria-pressed': current === value ? 'true' : 'false', onclick: () => { onPick(value); applySettings(); renderDisplay(); } }, text))));
   const check = (label, get, set) => el('label', { class: 'flex h-8 cursor-pointer items-center gap-2 text-13' }, el('input', { type: 'checkbox', class: 'cb', checked: get(), onchange: (e) => { set(e.target.checked); applySettings(); } }), label);
   const head = (text) => el('h4', { class: 'label-11 mt-3 mb-1' }, text);
   const props = [['seq', '#seq'], ['emoji', 'Emoji'], ['desc', 'Description'], ['tags', 'Labels'], ['due', 'Due'], ['effort', 'Effort'], ['checks', 'Checklist'], ['comments', 'Comments']];
-  dom.settings.replaceChildren(
-    el('div', { class: 'mb-1 flex h-8 items-center' }, el('h3', { class: 'text-14 font-semibold' }, 'Display'), el('button', { type: 'button', class: 'btn btn-ghost btn-sm btn-icon ml-auto', 'aria-label': 'Close', onclick: () => toggleSettings(false) }, icon('x', 14))),
+  dom.display.replaceChildren(
+    el('div', { class: 'mb-1 flex h-8 items-center' }, el('h3', { class: 'text-14 font-semibold' }, 'Display'), el('button', { type: 'button', class: 'btn btn-ghost btn-sm btn-icon ml-auto', 'aria-label': 'Close', onclick: () => toggleDisplay(false) }, icon('x', 14))),
     seg('Theme', [['light', 'Light'], ['dark', 'Dark'], ['system', 'System']], settings.theme, (v) => { settings.theme = v; }),
     seg('Density', [['comfortable', 'Comfortable'], ['compact', 'Compact']], settings.density, (v) => { settings.density = v; }),
     head('Card properties'),
@@ -1961,25 +2173,821 @@ function renderSettings() {
       onchange: (e) => { const n = Number(e.target.value); if (n > 0) settings.wip[s] = n; else delete settings.wip[s]; applySettings(); } })))),
   );
 }
-function toggleSettings(open = dom.settings.hidden) {
-  const btn = $('#settings-btn');
+function toggleDisplay(open = dom.display.hidden) {
+  const btn = $('#display-btn');
   if (open) {
-    renderSettings();
-    dom.settings.hidden = false;
-    animate(dom.settings, [{ opacity: 0, transform: 'translateY(-4px) scale(0.98)' }, { opacity: 1, transform: 'none' }], 150);
+    renderDisplay();
+    dom.display.hidden = false;
+    animate(dom.display, [{ opacity: 0, transform: 'translateY(-4px) scale(0.98)' }, { opacity: 1, transform: 'none' }], 150);
     btn.setAttribute('aria-expanded', 'true');
-    const first = dom.settings.querySelector('button[aria-pressed], input');
+    const first = dom.display.querySelector('button[aria-pressed], input');
     if (first) first.focus();
   } else {
-    if (dom.settings.hidden) return;
-    dom.settings.hidden = true;
+    if (dom.display.hidden) return;
+    dom.display.hidden = true;
     btn.setAttribute('aria-expanded', 'false');
-    if (dom.settings.contains(document.activeElement) || document.activeElement === document.body) btn.focus();
+    if (dom.display.contains(document.activeElement) || document.activeElement === document.body) btn.focus();
   }
 }
 function toggleTheme() {
   settings.theme = currentTheme() === 'dark' ? 'light' : 'dark';
   applySettings(false);
+}
+
+/* ============================== ask: one modal for confirmations and short prompts ============================== */
+// ask({title, message, note, field, actions}) -> Promise<{value, text} | null>; dismissing resolves null.
+// Actions render left to right, so the recommended one goes last.
+function ask(opts = {}) {
+  return new Promise((resolve) => {
+    const d = dom.askDialog;
+    let settled = false;
+    let input = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      d.removeEventListener('close', onClose);
+      resolve(value === null || value === undefined ? null : { value, text: input ? input.value : '' });
+      closeDialog(d);
+    };
+    const onClose = () => finish(null);
+    dom.askTitle.textContent = opts.title || 'Are you sure?';
+    const parts = [];
+    if (opts.message) parts.push(el('p', { class: 'text-13' }, mdInline(opts.message)));
+    if (opts.note) parts.push(el('p', { class: 'mt-2 text-12 text-fg-2' }, opts.note));
+    const actions = opts.actions && opts.actions.length ? opts.actions : [{ value: null, label: 'Cancel' }, { value: 'ok', label: 'OK', class: 'btn btn-primary' }];
+    const primary = actions[actions.length - 1];
+    let over = false;
+    if (opts.field) {
+      // Never block a paste: the text lands, and the count says it is too long.
+      const max = opts.field.max || 500;
+      input = el('textarea', { class: 'input', rows: '2', placeholder: opts.field.placeholder || '', id: uid('ask') });
+      const group = fieldGroup(opts.field.label, input, { class: 'mt-4' });
+      const check = () => {
+        over = input.value.length > max;
+        setMsg(group, `${input.value.length}/${max}` + (over ? ` — trim ${input.value.length - max} to save` : ''), over ? 'error' : '');
+        group.querySelector('.field-msg').classList.add('num');
+        const go = dom.askFoot.lastElementChild;
+        if (go) go.disabled = over;
+      };
+      input.addEventListener('input', check);
+      parts.push(group);
+      queueMicrotask(check);
+    }
+    dom.askBody.replaceChildren(...parts);
+    dom.askFoot.replaceChildren(el('span', { class: 'flex-1' }), ...actions.map((a) => el('button', {
+      type: a === primary ? 'submit' : 'button', class: a.class || 'btn', onclick: a === primary ? null : () => finish(a.value),
+    }, a.label)));
+    dom.askForm.onsubmit = (e) => { e.preventDefault(); if (!over) finish(primary.value); };
+    d.addEventListener('close', onClose);
+    showDialog(d);
+    const last = dom.askFoot.lastElementChild;
+    if (input) input.focus(); else if (last) last.focus();
+  });
+}
+
+/* ============================== settings dialog: AI endpoint and forge integrations ============================== */
+// Mirrors internal/tui/settings_view.go: the AI row first, then one block per configured integration.
+// Secrets are write-only everywhere: a read reports only whether one is stored.
+const sset = { loaded: false, loadError: '', ai: null, rows: [], draft: null, snapshot: '', savers: {} };
+const FORGE_KINDS = [['gitlab', 'GitLab'], ['github', 'GitHub']];
+const newForgeDraft = () => ({ name: '', kind: 'gitlab', baseURL: '', project: '', token: '', msg: '', tone: '', draft: true, armed: false });
+const ssetState = () => JSON.stringify([sset.ai && [sset.ai.baseURL, sset.ai.model, sset.ai.key, sset.ai.clearKey],
+  sset.rows.map((r) => [r.name, r.kind, r.baseURL, r.project, r.token, r.clearToken]),
+  sset.draft && [sset.draft.name, sset.draft.kind, sset.draft.baseURL, sset.draft.project, sset.draft.token]]);
+
+async function openSettings(section) {
+  showDialog(dom.settingsDialog);
+  if (!sset.loaded) {
+    sset.loadError = '';
+    dom.settingsBody.replaceChildren(el('div', { class: 'flex items-center gap-2 py-8 text-13 text-fg-2' }, el('span', { class: 'spinner' }), 'Loading settings…'));
+    try {
+      const [ai, forge] = await Promise.all([api('GET', '/api/settings/ai'), api('GET', '/api/settings/forge')]);
+      sset.ai = { baseURL: ai.ai.baseURL || '', model: ai.ai.model || '', key: '', hasKey: !!ai.ai.hasKey, clearKey: false, msg: '', tone: '' };
+      sset.rows = (forge.sources || []).map(forgeRowOf);
+      sset.draft = null;
+      sset.loaded = true;
+    } catch (err) {
+      sset.loadError = err.message;
+      sset.snapshot = ssetState(); // nothing was loaded, so nothing is dirty
+      dom.settingsBody.replaceChildren(el('div', { class: 'py-8' }, el('p', { class: 'field-msg is-error', role: 'alert' }, sset.loadError),
+        el('button', { type: 'button', class: 'btn mt-3', onclick: () => { sset.loaded = false; openSettings(section); } }, icon('sync', 14), 'Try again')));
+      return;
+    }
+  }
+  sset.snapshot = ssetState();
+  renderSettingsDialog();
+  const first = dom.settingsBody.querySelector(section === 'forge' ? '[data-k^="forge"]' : '[data-k="ai-base"]') || dom.settingsBody.querySelector('input');
+  if (first) first.focus();
+}
+const forgeRowOf = (s) => ({ name: s.name, kind: s.kind, baseURL: s.baseURL || '', project: '', token: '', hasToken: !!s.hasToken, createdAt: s.createdAt, clearToken: false, msg: '', tone: '', armed: false });
+function closeSettings() {
+  if (ssetState() !== sset.snapshot && !confirm('Discard unsaved settings?')) return;
+  sset.loaded = false;
+  closeDialog(dom.settingsDialog);
+  // A source may have been added while the import wizard sat behind this dialog.
+  if (dom.importDialog.open) { importState.sources = null; openImport(); }
+}
+// Returns whether anything was actually disarmed, so the caller only repaints when it matters.
+function disarmForge(except) {
+  let changed = false;
+  for (const r of sset.rows) if (r !== except && r.armed) { r.armed = false; r.msg = ''; changed = true; }
+  return changed;
+}
+// Rebuilds the whole body and puts the caret back where it was: every control carries a stable data-k.
+function renderSettingsDialog() {
+  const active = document.activeElement;
+  const key = (active && dom.settingsBody.contains(active) ? active.dataset.k : null) || busyFocusKey;
+  busyFocusKey = '';
+  const caret = active && typeof active.selectionStart === 'number' ? active.selectionStart : null;
+  sset.savers = {};
+  dom.settingsBody.replaceChildren(aiSection(), forgeSection());
+  if (!key) return;
+  const again = dom.settingsBody.querySelector(`[data-k="${CSS.escape(key)}"]`);
+  if (!again) return;
+  again.focus();
+  if (caret !== null && again.setSelectionRange) { try { again.setSelectionRange(caret, caret); } catch (e) { /* not a text input */ } }
+}
+const sectionBlock = (title, note, ...children) => el('section', { class: 'mb-6 last:mb-0' },
+  el('h3', { class: 'label-11 mb-1' }, title), note ? el('p', { class: 'mb-3 text-12 text-fg-2' }, note) : null,
+  ...children);
+
+function aiSection() {
+  const ai = sset.ai;
+  const text = (k, attrs) => el('input', Object.assign({ class: 'input', name: k, autocomplete: 'off', spellcheck: 'false', 'data-k': k, id: uid('ai'), oninput: (e) => { ai[k.slice(3)] = e.target.value; } }, attrs));
+  const base = text('ai-baseURL', { type: 'url', value: ai.baseURL, placeholder: 'https://api.openai.com/v1' });
+  base.dataset.k = 'ai-base';
+  const model = text('ai-model', { value: ai.model, placeholder: 'gpt-4o' });
+  const keyInput = el('input', { type: 'password', class: 'input', name: 'ai-key', autocomplete: 'new-password', spellcheck: 'false', 'data-k': 'ai-key', id: uid('ai'), value: ai.key,
+    placeholder: ai.hasKey ? 'blank keeps the saved key' : 'sk-…', oninput: (e) => { ai.key = e.target.value; } });
+  const status = el('p', { class: 'field-msg' + (ai.tone ? ' is-' + ai.tone : ''), role: 'status' }, ai.msg || '');
+  const say = (msg, tone) => { ai.msg = msg; ai.tone = tone; status.className = 'field-msg' + (tone ? ' is-' + tone : ''); status.replaceChildren(msg); };
+  const test = el('button', { type: 'button', class: 'btn', 'data-k': 'ai-test', onclick: async () => {
+    const stop = busy(test, 'Testing…');
+    say('', '');
+    try {
+      await api('POST', '/api/settings/ai/test', { baseURL: ai.baseURL.trim(), model: ai.model.trim(), apiKey: ai.key }, { timeout: 20000 });
+      say('connection ok', 'ok');
+    } catch (err) { say(err.message, 'error'); } finally { stop(); }
+  } }, icon('sync', 14), 'Test connection');
+  const save = el('button', { type: 'submit', class: 'btn btn-primary', 'data-k': 'ai-save' }, 'Save AI settings');
+  sset.savers.ai = () => saveAI(save, say);
+  const keyRow = el('div', { class: 'flex flex-wrap items-end gap-2' },
+    fieldGroup(ai.hasKey ? 'API key (saved)' : 'API key', keyInput, { class: 'min-w-[180px] flex-1' }),
+    ai.hasKey && !ai.clearKey ? el('button', { type: 'button', class: 'btn mb-[18px]', 'data-k': 'ai-clear', onclick: () => { ai.clearKey = true; ai.key = ''; say('The saved key is removed when you save.', 'warn'); renderSettingsDialog(); } }, 'Clear key') : null);
+  if (ai.clearKey) setMsg(keyRow.firstElementChild, 'Cleared on save. Type a new key to keep one.', 'warn');
+  return sectionBlock('AI settings', 'An OpenAI-compatible endpoint. The key is stored sealed and is never sent back to this page.',
+    el('form', { class: 'grid gap-3 sm:grid-cols-2', 'data-save': 'ai', novalidate: true, onsubmit: (e) => { e.preventDefault(); saveAI(save, say); } },
+      fieldGroup('Base URL', base, { class: 'sm:col-span-2' }),
+      fieldGroup('Model', model),
+      el('div', {}, keyRow),
+      el('div', { class: 'flex flex-wrap items-center gap-2 sm:col-span-2' }, test, save, status)));
+}
+async function saveAI(btn, say) {
+  const ai = sset.ai;
+  const stop = busy(btn, 'Saving…');
+  say('', '');
+  try {
+    const body = { baseURL: ai.baseURL.trim(), model: ai.model.trim() };
+    if (ai.clearKey) body.apiKey = ''; else if (ai.key) body.apiKey = ai.key;
+    const out = await api('PUT', '/api/settings/ai', body);
+    ai.baseURL = out.ai.baseURL || '';
+    ai.model = out.ai.model || '';
+    ai.hasKey = !!out.ai.hasKey;
+    ai.key = '';
+    ai.clearKey = false;
+    ai.msg = out.keyCleared ? 'saved; endpoint changed, re-enter the API key' : 'AI settings saved';
+    ai.tone = out.keyCleared ? 'warn' : 'ok';
+    sset.snapshot = ssetState();
+    refreshAIStatus();
+    renderSettingsDialog();
+  } catch (err) { say(err.message, 'error'); stop(); }
+}
+
+function forgeSection() {
+  const rows = sset.rows.map(forgeRow);
+  const draft = sset.draft ? forgeRow(sset.draft) : null;
+  const add = el('button', { type: 'button', class: 'btn mt-3', 'data-k': 'forge-add', onclick: () => { disarmForge(); sset.draft = newForgeDraft(); renderSettingsDialog(); const f = dom.settingsBody.querySelector('[data-k="forge-new-name"]'); if (f) f.focus(); } }, icon('plus', 14), 'Add integration');
+  return sectionBlock('Forge integrations', 'GitLab and GitHub sources the issue import reads from. Tokens are write-only and never leave the server.',
+    rows.length || draft ? el('div', { class: 'rows' }, ...rows, draft) : el('p', { class: 'rounded-md border border-dashed border-line-2 px-3 py-6 text-center text-13 text-fg-3' }, 'No integrations yet.'),
+    add);
+}
+function forgeRow(row) {
+  const isDraft = !!row.draft;
+  const k = (name) => (isDraft ? 'forge-new-' : `forge-${row.name}-`) + name;
+  const text = (name, attrs) => el('input', Object.assign({ class: 'input', name: k(name), autocomplete: 'off', spellcheck: 'false', 'data-k': k(name), id: uid('fg'),
+    oninput: (e) => { row[name] = e.target.value; if (disarmForge()) renderSettingsDialog(); } }, attrs));
+  const status = el('p', { class: 'field-msg' + (row.tone ? ' is-' + row.tone : ''), role: 'status' }, row.msg || '');
+  const say = (msg, tone) => { row.msg = msg; row.tone = tone; status.className = 'field-msg' + (tone ? ' is-' + tone : ''); status.replaceChildren(msg); };
+  const head = isDraft
+    ? el('div', { class: 'flex flex-wrap items-end gap-3' },
+      fieldGroup('Name', text('name', { value: row.name, placeholder: 'work-gitlab' }), { class: 'min-w-[180px] flex-1' }),
+      el('div', { class: 'field' }, el('span', { class: 'label-11' }, 'Kind'),
+        segGroup('Kind', FORGE_KINDS, row.kind, (v) => { row.kind = v; renderSettingsDialog(); }, 'seg'), el('p', { class: 'field-msg' })))
+    : el('div', { class: 'flex flex-wrap items-center gap-2' },
+      el('span', { class: 'chip chip-mono' }, el('span', {}, row.kind)),
+      el('span', { class: 'text-13 font-semibold' }, row.name),
+      el('span', { class: 'text-11 text-fg-3' }, 'name and kind are locked'),
+      row.createdAt ? el('span', { class: 'num ml-auto text-11 text-fg-3', title: fmtDate(row.createdAt) }, 'added ', relTime(row.createdAt)) : null);
+  const tokenInput = el('input', { type: 'password', class: 'input', name: k('token'), autocomplete: 'new-password', spellcheck: 'false', 'data-k': k('token'), id: uid('fg'), value: row.token,
+    placeholder: row.hasToken ? 'blank keeps the saved token' : 'personal access token', oninput: (e) => { row.token = e.target.value; if (disarmForge()) renderSettingsDialog(); } });
+  const test = el('button', { type: 'button', class: 'btn btn-sm', 'data-k': k('test'), onclick: async () => {
+    const stop = busy(test, 'Testing…');
+    say('', '');
+    try {
+      await api('POST', `/api/settings/forge/${encodeURIComponent(row.name.trim().toLowerCase())}/test`,
+        { kind: row.kind, baseURL: row.baseURL.trim(), project: row.project.trim(), token: row.token, saved: !isDraft }, { timeout: 30000 });
+      say('connection ok', 'ok');
+    } catch (err) { say(err.message, 'error'); } finally { stop(); }
+  } }, 'Test');
+  const save = el('button', { type: 'submit', class: 'btn btn-sm btn-primary', 'data-k': k('save') }, 'Save');
+  sset.savers[isDraft ? 'forge:new' : 'forge:' + row.name] = () => saveForge(row, save, say);
+  const remove = el('button', { type: 'button', class: 'btn btn-sm' + (row.armed ? ' btn-danger' : ''), 'data-k': k('remove'), onclick: () => removeForge(row, say) }, row.armed ? 'Confirm remove' : 'Remove');
+  return el('div', { class: 'row' },
+    el('form', { class: 'row-main', 'data-save': isDraft ? 'forge:new' : 'forge:' + row.name, novalidate: true, onsubmit: (e) => { e.preventDefault(); saveForge(row, save, say); } }, head,
+      el('div', { class: 'grid gap-3 sm:grid-cols-2' },
+        fieldGroup('Base URL', text('baseURL', { value: row.baseURL, placeholder: row.kind === 'github' ? 'github.com' : 'gitlab.example.com' })),
+        fieldGroup('Project', text('project', { value: row.project, placeholder: 'owner/project (optional)' }), { hint: 'test only' }),
+        fieldGroup(row.hasToken ? 'Token (saved)' : 'Token', tokenInput, { class: 'sm:col-span-2' })),
+      el('div', { class: 'flex flex-wrap items-center gap-2' }, test, save, remove, status)));
+}
+async function saveForge(row, btn, say) {
+  const focusField = (n) => { const node = dom.settingsBody.querySelector(`[data-k="${CSS.escape((row.draft ? 'forge-new-' : `forge-${row.name}-`) + n)}"]`); if (node) node.focus(); };
+  const name = row.name.trim().toLowerCase();
+  if (!name) { say('integration name is required', 'error'); focusField('name'); return; }
+  if (!/^[a-z0-9._-]{1,64}$/.test(name)) { say('name may use letters, digits, dot, dash and underscore only', 'error'); focusField('name'); return; }
+  if (row.draft && sset.rows.some((r) => r.name.toLowerCase() === name)) { say('integration name already exists', 'error'); focusField('name'); return; }
+  if (!row.baseURL.trim()) { say('forge base URL is required', 'error'); focusField('baseURL'); return; }
+  const stop = busy(btn, 'Saving…');
+  say('', '');
+  try {
+    const body = { kind: row.kind, baseURL: row.baseURL.trim() };
+    if (row.clearToken) body.token = ''; else if (row.token) body.token = row.token;
+    const out = await api('PUT', `/api/settings/forge/${encodeURIComponent(name)}`, body);
+    const saved = forgeRowOf(out.source);
+    saved.project = row.project;
+    saved.msg = out.tokenCleared ? 'saved; endpoint changed, re-enter the token' : 'integration saved';
+    saved.tone = out.tokenCleared ? 'warn' : 'ok';
+    const at = sset.rows.findIndex((r) => r.name === saved.name);
+    if (at >= 0) sset.rows[at] = saved; else sset.rows.push(saved);
+    if (row.draft) sset.draft = null;
+    sset.snapshot = ssetState();
+    renderSettingsDialog();
+  } catch (err) { say(err.message, 'error'); stop(); }
+}
+async function removeForge(row, say) {
+  if (row.draft) { sset.draft = null; renderSettingsDialog(); return; }
+  if (!row.armed) { disarmForge(row); row.armed = true; say(`click Confirm remove to remove ${row.name}`, 'warn'); renderSettingsDialog(); return; }
+  try {
+    await api('DELETE', `/api/settings/forge/${encodeURIComponent(row.name)}`);
+    sset.rows = sset.rows.filter((r) => r !== row);
+    sset.snapshot = ssetState();
+    renderSettingsDialog();
+    toast(`Removed the ${row.name} integration`, 'ok');
+  } catch (err) { row.armed = false; say(err.message, 'error'); renderSettingsDialog(); }
+}
+
+/* ============================== AI in the card editor ============================== */
+// The editor's AI field: a prompt, one round trip, and a filled-in form the user still has to save.
+function mountEditAI() {
+  const box = dom.editAI;
+  box.hidden = false;
+  if (!state.ai || !state.ai.configured) {
+    box.replaceChildren(el('p', { class: 'text-12 text-fg-3' }, 'Drafting with AI is off. ', settingsLink('Add an AI endpoint', 'ai'), ' to write a card from a one-line prompt.'));
+    return;
+  }
+  const ta = el('textarea', { class: 'input font-normal', rows: '2', id: uid('ai-prompt'), placeholder: 'Rate-limit the search endpoint and cover it with a test', autocomplete: 'off' });
+  const status = el('p', { class: 'field-msg', role: 'status' });
+  const commentary = el('div', { class: 'mt-2 text-12 text-fg-2 empty:hidden' });
+  const run = el('button', { type: 'button', class: 'btn', 'data-ai-draft': '', onclick: () => runAIDraft(ta, run, status, commentary) }, icon('sparkle', 14), 'Draft');
+  const group = el('div', { class: 'field' },
+    el('label', { class: 'label-11', for: ta.id }, 'AI draft', el('span', { class: 'ml-1.5 font-normal tracking-normal text-fg-3' }, `${MOD} ⇧ Enter`)),
+    el('div', { class: 'flex items-start gap-2' }, ta, run), status, commentary);
+  ta.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); runAIDraft(ta, run, status, commentary); } });
+  box.replaceChildren(group);
+}
+async function runAIDraft(ta, btn, status, commentary) {
+  const prompt = ta.value.trim();
+  if (!prompt) { status.className = 'field-msg is-error'; status.textContent = 'Say what the card should cover.'; ta.focus(); return; }
+  const form = readForm();
+  const body = { prompt };
+  if (state.editing || form.title || form.desc) body.card = { title: form.title, desc: form.desc, prio: form.prio, due: form.due, effort: form.effort, tags: form.tags, checks: form.checks };
+  const stop = busy(btn, 'Drafting…');
+  status.className = 'field-msg';
+  status.textContent = '';
+  commentary.replaceChildren();
+  try {
+    const out = await api('POST', '/api/ai/draft', body, { timeout: 120000 });
+    applyDraft(out.card || {});
+    status.className = 'field-msg is-ok';
+    status.replaceChildren(...clean(['AI draft applied; review before saving',
+      out.partial ? el('span', { class: 'chip chip-tone ml-2', style: '--tone: var(--t-warn)' }, icon('alert', 11), el('span', {}, 'Partial run')) : null]));
+    if (out.commentary) commentary.replaceChildren(renderMarkdown(out.commentary));
+    announce('AI draft applied; review before saving');
+  } catch (err) {
+    if (err.status === 409 && err.body && err.body.aiUnconfigured) { state.ai = { configured: false }; mountEditAI(); return; }
+    status.className = 'field-msg is-error';
+    status.textContent = err.message;
+  } finally { stop(); }
+}
+// Fills the open editor from a draft card. Nothing is written until the user saves.
+function applyDraft(card) {
+  const f = dom.editForm.elements;
+  if (card.title) f.title.value = card.title;
+  if (card.emoji) f.emoji.value = card.emoji;
+  if (card.desc && editDescEditor) editDescEditor.set(card.desc);
+  if (card.prio) f.prio.value = String(card.prio);
+  if (card.due) f.due.value = card.due;
+  if (card.effort !== undefined) renderEffortSeg(card.effort || '');
+  if (card.tags && card.tags.length && editLabelEditor) editLabelEditor.set(normalizeTags(card.tags));
+  if (card.checks && card.checks.length) f.checks.value = serializeChecks(card.checks);
+  loadSimilar(f.title.value.trim());
+}
+
+// Possible duplicates while the title is being typed: the same store search the TUI runs.
+let similarTimer = 0;
+function mountEditSimilar() {
+  dom.editSimilar.hidden = true;
+  dom.editSimilar.replaceChildren();
+  const title = dom.editForm.elements.title;
+  if (title._similar) title.removeEventListener('input', title._similar);
+  title._similar = () => { clearTimeout(similarTimer); similarTimer = setTimeout(() => loadSimilar(title.value.trim()), 300); };
+  title.addEventListener('input', title._similar);
+}
+async function loadSimilar(q) {
+  if (!dom.editDialog.open) return;
+  if (q.length < 3) { dom.editSimilar.hidden = true; dom.editSimilar.replaceChildren(); return; }
+  let items = [];
+  try { items = (await api('GET', `/api/similar?q=${encodeURIComponent(q)}&limit=10`)).items || []; } catch (err) { return; }
+  if (!dom.editDialog.open) return;
+  // The search answers with card hits (via "card") and upstream import hits (via "import",
+  // which carry a link instead of a task id). Resolve the second kind onto a card when one
+  // carries the link, and never list the same card twice.
+  const seen = new Set(state.editing ? [state.editing.id] : []);
+  const rows = [];
+  for (const i of items) {
+    const byLink = i.link ? state.tasks.find((t) => (t.tags || []).includes('link::' + i.link)) : null;
+    const known = localTask(i.id) || byLink;
+    const id = (known && known.id) || i.id;
+    if (id && seen.has(id)) continue;
+    if (id) seen.add(id);
+    rows.push({ title: i.title, status: (known && known.status) || i.status || 'todo', seq: known && known.seq, id, link: i.via === 'import' ? i.link : '' });
+  }
+  if (!rows.length) { dom.editSimilar.hidden = true; dom.editSimilar.replaceChildren(); return; }
+  dom.editSimilar.hidden = false;
+  dom.editSimilar.replaceChildren(
+    el('p', { class: 'label-11 mb-1', role: 'status' }, `Possible duplicates (${rows.length})`),
+    el('ul', { class: 'flex flex-col gap-0.5' }, ...rows.map((r) => el('li', { class: 'flex items-center gap-1.5' },
+      r.id
+        ? el('button', { type: 'button', class: 'task-link min-w-0', style: `--hue: var(--t-${r.status})`, title: `Open ${r.title}`,
+          onclick: () => { closeDialog(dom.editDialog); openDetail(r.seq || r.id); } },
+          el('i', { class: 'status-dot' }), r.seq ? el('span', { class: 'seq' }, '#' + r.seq) : null, el('span', { class: 't ' + r.status }, r.title))
+        : el('span', { class: 'task-link min-w-0', style: `--hue: var(--t-${r.status})` }, el('i', { class: 'status-dot' }), el('span', { class: 't ' + r.status }, r.title)),
+      r.link ? el('span', { class: 'chip chip-mono', title: 'Imported from this upstream issue' }, el('span', {}, r.link)) : null))));
+}
+
+/* ============================== split an ADR into stories ============================== */
+const MAX_ADR_BYTES = 65536;
+const splitState = { stage: 'input', text: '', max: 8, status: 'todo', cards: [], commentary: '', partial: false, error: '', created: [] };
+function openSplit() {
+  Object.assign(splitState, { stage: 'input', cards: [], commentary: '', partial: false, error: '', created: [] });
+  if (splitState.status === 'cancelled') splitState.status = 'todo';
+  showDialog(dom.splitDialog);
+  renderSplit();
+  const ta = dom.splitBody.querySelector('textarea');
+  if (ta) ta.focus();
+}
+function closeSplit() {
+  if (splitState.stage === 'review' && splitState.cards.some((c) => c.include) && !confirm('Discard the proposed stories?')) return;
+  closeDialog(dom.splitDialog);
+}
+function renderSplit() {
+  $('#split-dialog-title').textContent = splitState.stage === 'input' ? 'Split ADR into stories' : 'Review proposed stories';
+  if (splitState.stage === 'input') renderSplitInput(); else renderSplitReview();
+}
+function renderSplitInput() {
+  const bytes = utf8Bytes(splitState.text);
+  const ta = el('textarea', { class: 'input font-mono text-12', rows: '12', id: uid('adr'), spellcheck: 'false',
+    placeholder: '# ADR 0007: adopt SQLite for the board store\n\n## Context\n…', oninput: (e) => { splitState.text = e.target.value; counter.replaceChildren(byteLabel(utf8Bytes(e.target.value))); } });
+  ta.value = splitState.text;
+  const byteLabel = (n) => `UTF-8 bytes: ${n.toLocaleString()} / ${MAX_ADR_BYTES.toLocaleString()}`;
+  const counter = el('span', {}, byteLabel(bytes));
+  // The input stays out of the tab order; the visible button is the control.
+  const file = el('input', { type: 'file', hidden: true, accept: '.md,.markdown,.txt,text/markdown,text/plain', tabindex: '-1', 'aria-hidden': 'true', onchange: (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    if (f.size > MAX_ADR_BYTES) { splitState.error = `${f.name} is ${Math.round(f.size / 1024)} KiB. The limit is 64 KiB — trim it first.`; renderSplit(); return; }
+    const reader = new FileReader();
+    reader.onload = () => { splitState.text = String(reader.result || ''); splitState.error = ''; renderSplit(); };
+    reader.onerror = () => { splitState.error = `Could not read ${f.name}.`; renderSplit(); };
+    reader.readAsText(f);
+  } });
+  const group = fieldGroup('ADR markdown', ta);
+  group.querySelector('.field-msg').replaceChildren(counter);
+  if (bytes > MAX_ADR_BYTES) setMsg(group, byteLabel(bytes) + ' — over the limit; trim the document', 'error');
+  setKids(dom.splitBody,
+    el('p', { class: 'mb-3 text-12 text-fg-2' }, 'Paste one decision or design document. Nothing is created until you review the stories it proposes.'),
+    group,
+    el('div', { class: 'mt-2 flex flex-wrap items-center gap-2' }, file,
+      el('button', { type: 'button', class: 'btn', onclick: () => file.click() }, icon('upload', 14), 'Read a file…'),
+      splitState.text ? el('button', { type: 'button', class: 'btn btn-ghost btn-sm', onclick: () => { splitState.text = ''; renderSplit(); ta.focus(); } }, 'Clear') : null),
+    el('div', { class: 'mt-4 flex flex-wrap items-end gap-4' },
+      el('div', { class: 'field' }, el('span', { class: 'label-11' }, 'Max stories', el('span', { class: 'ml-1.5 font-normal tracking-normal text-fg-3' }, '1–20')),
+        stepper('Max stories', splitState.max, (n) => { splitState.max = n; }), el('p', { class: 'field-msg' })),
+      fieldGroup('Destination', el('select', { class: 'input w-auto', id: uid('dest'), onchange: (e) => { splitState.status = e.target.value; } },
+        ...STATUSES.filter((s) => s !== 'cancelled').map((s) => el('option', { value: s, selected: splitState.status === s }, STATUS_LABEL[s]))))),
+    splitState.error ? el('p', { class: 'field-msg is-error mt-3', role: 'alert' }, splitState.error) : null,
+    state.ai && !state.ai.configured ? el('p', { class: 'mt-3 text-12 text-fg-3' }, 'Splitting needs an AI endpoint. ', settingsLink('Set one up in Settings', 'ai'), '.') : null);
+  if (splitState.focusText) { splitState.focusText = false; ta.focus(); }
+  const propose = el('button', { type: 'button', class: 'btn btn-primary', onclick: () => runSplit(propose) }, icon('sparkle', 14), 'Propose stories');
+  setKids(dom.splitFoot, el('span', { class: 'flex-1' }), el('button', { type: 'button', class: 'btn', onclick: closeSplit }, 'Cancel'), propose);
+}
+async function runSplit(btn) {
+  const text = splitState.text.trim();
+  if (!text) { splitState.error = 'Paste an ADR first.'; splitState.focusText = true; renderSplit(); return; }
+  if (utf8Bytes(text) > MAX_ADR_BYTES) { splitState.error = 'The document is over 64 KiB. Trim it and try again.'; splitState.focusText = true; renderSplit(); return; }
+  const stop = busy(btn, 'Proposing stories…');
+  splitState.error = '';
+  try {
+    const out = await api('POST', '/api/ai/split', { text, max: splitState.max }, { timeout: 180000 });
+    splitState.cards = (out.cards || []).map((c) => Object.assign({ include: true, created: null, error: '' }, c, { prio: c.prio || 3, effort: c.effort || '' }));
+    splitState.commentary = out.commentary || '';
+    splitState.partial = !!out.partial;
+    if (!splitState.cards.length) { splitState.error = 'The model returned no usable stories.'; stop(); renderSplit(); return; }
+    splitState.stage = 'review';
+    renderSplit();
+    announce(`${splitState.cards.length} stories ready; review before creating`);
+  } catch (err) {
+    splitState.error = err.message;
+    stop();
+    renderSplit();
+  }
+}
+// One review row for a proposed card: include, title, priority, effort.
+// onChange only refreshes the primary button's count; it never rebuilds the row.
+function draftRow(card, onChange, extra, index, noun) {
+  const n = (index || 0) + 1;
+  const label = `${noun || 'Story'} ${n}`;
+  const title = el('input', { class: 'input', value: card.title, 'aria-label': `${label} title`, oninput: (e) => { card.title = e.target.value; if (onChange) onChange(); } });
+  const box = el('input', { type: 'checkbox', class: 'cb mt-2', checked: card.include, 'aria-label': `Include ${label}`, onchange: (e) => { card.include = e.target.checked; row.classList.toggle('is-off', !card.include); if (onChange) onChange(); } });
+  const prio = el('select', { class: 'input w-auto', 'aria-label': `${label} priority`, onchange: (e) => { card.prio = Number(e.target.value); } },
+    ...[1, 2, 3].map((p) => el('option', { value: p, selected: (card.prio || 3) === p }, PRIO_LABEL[p])));
+  const effort = el('select', { class: 'input w-auto', 'aria-label': `${label} effort`, onchange: (e) => { card.effort = e.target.value; } },
+    el('option', { value: '', selected: !card.effort }, 'No effort'), ...EFFORTS.map((x) => el('option', { value: x, selected: card.effort === x }, x)));
+  const row = el('div', { class: 'row' + (card.include ? '' : ' is-off'), role: 'group', 'aria-label': label }, box,
+    el('div', { class: 'row-main' }, title,
+      el('div', { class: 'flex flex-wrap items-center gap-2' }, prio, effort,
+        ...(card.tags || []).filter((t) => !isProjectTag(t) && !isProvenanceTag(t)).map((t) => chipEl(t)),
+        ...clean([extra].flat())),
+      card.error ? el('p', { class: 'field-msg is-error' }, card.error) : null,
+      card.created ? el('p', { class: 'field-msg is-ok' }, `created #${card.created.seq}`) : null));
+  return row;
+}
+function renderSplitReview() {
+  const selected = () => splitState.cards.filter((c) => c.include && c.title.trim() && !c.created).length;
+  const add = el('button', { type: 'button', class: 'btn btn-primary', onclick: () => createSplitCards(add) }, '');
+  const count = () => { const n = selected(); add.disabled = n === 0; add.textContent = `Add selected (${n})`; };
+  setKids(dom.splitFoot, el('span', { class: 'flex-1' }),
+    el('button', { type: 'button', class: 'btn', onclick: () => { splitState.stage = 'input'; renderSplit(); } }, icon('chevL', 14), 'Back to source'),
+    el('button', { type: 'button', class: 'btn', onclick: closeSplit }, 'Close'), add);
+  setKids(dom.splitBody,
+    el('p', { class: 'mb-3 text-12 text-fg-2' }, 'Nothing is created until you add the selected stories. They go to ',
+      el('span', { class: 'font-medium text-fg' }, STATUS_LABEL[splitState.status]), ' in ', el('span', { class: 'font-medium text-fg' }, writeProject()), '.'),
+    splitState.partial ? el('p', { class: 'mb-3 flex items-center gap-2 text-12 text-warn' }, icon('alert', 14), 'The run hit its budget: these stories are real, but the set may be incomplete.') : null,
+    splitState.commentary ? el('div', { class: 'mb-4 rounded-md border border-line bg-surface px-3 py-2' }, renderMarkdown(splitState.commentary)) : null,
+    el('div', { class: 'rows' }, ...splitState.cards.map((c, i) => draftRow(c, count, null, i, 'Story'))),
+    splitState.error ? el('p', { class: 'field-msg is-error mt-3', role: 'alert' }, splitState.error) : null,
+    el('div', { class: 'mt-3 empty:hidden', id: 'split-progress' }));
+  count();
+}
+async function createSplitCards(btn) {
+  const queue = splitState.cards.filter((c) => c.include && c.title.trim() && !c.created);
+  if (!queue.length) return;
+  const stop = busy(btn, 'Adding…');
+  const bar = el('i', { style: 'width:0%' });
+  const line = el('p', { class: 'field-msg', role: 'status' }, `creating card 1 of ${queue.length}…`);
+  const track = el('div', { class: 'check-progress mb-1', role: 'progressbar', 'aria-label': 'Creating stories', 'aria-valuemin': '0', 'aria-valuemax': String(queue.length), 'aria-valuenow': '0' }, bar);
+  $('#split-progress').replaceChildren(track, line);
+  const made = [];
+  for (let i = 0; i < queue.length; i++) {
+    const card = queue[i];
+    line.textContent = `creating card ${i + 1} of ${queue.length}…`;
+    bar.style.width = Math.round((i / queue.length) * 100) + '%';
+    track.setAttribute('aria-valuenow', String(i));
+    try {
+      const body = { title: card.title.trim(), status: splitState.status, prio: card.prio || 3, tags: normalizeTags(card.tags || []), checks: card.checks || [] };
+      if (state.project && state.project !== ALL_PROJECTS) body.project = state.project;
+      for (const k of ['emoji', 'desc', 'due']) if (card[k]) body[k] = card[k];
+      if (card.effort) body.effort = card.effort;
+      card.created = await api('POST', '/api/tasks', body);
+      card.error = '';
+      made.push(card.created);
+    } catch (err) { card.error = err.message; }
+  }
+  bar.style.width = '100%';
+  track.setAttribute('aria-valuenow', String(queue.length));
+  stop();
+  splitState.created = splitState.created.concat(made);
+  const failed = queue.filter((c) => c.error).length;
+  splitState.error = failed ? `created ${made.length}; ${failed} failed — fix the reported rows and retry` : '';
+  renderSplit();
+  invalidate();
+  if (!made.length) return;
+  toast(`Created ${plural(made.length, 'card')} from the ADR`, 'ok', { life: 8000, action: { label: 'Undo', run: () => undoCreated(made) } });
+  announce(`created ${made.length} cards`);
+}
+// Rolls a batch back the only way the store allows: cancel each card it just wrote.
+async function undoCreated(cards) {
+  for (const t of cards) {
+    try { await api('POST', taskPath(t.id) + '/cancel', { reason: 'undone right after import' }); } catch (err) { toast(err.message, 'error'); break; }
+  }
+  invalidate();
+}
+
+/* ============================== import forge issues ============================== */
+const importState = { stage: 'input', sources: null, source: '', ref: '', max: 8, preview: null, drafts: [], error: '', created: [], done: false };
+async function openImport() {
+  Object.assign(importState, { stage: 'input', preview: null, drafts: [], error: '', created: [], done: false });
+  showDialog(dom.importDialog);
+  renderImport();
+  if (importState.sources === null) {
+    try { importState.sources = (await api('GET', '/api/settings/forge')).sources || []; } catch (err) { importState.sources = []; importState.error = err.message; }
+    if (!importState.source && importState.sources.length) importState.source = importState.sources[0].name;
+    renderImport();
+  }
+  const first = dom.importBody.querySelector('select, input');
+  if (first) first.focus();
+}
+function closeImport() {
+  if (importState.stage === 'review' && !importState.done && importState.drafts.some((d) => d.include) && !confirm('Discard the fetched issues?')) return;
+  closeDialog(dom.importDialog);
+}
+function renderImport() {
+  $('#import-dialog-title').textContent = importState.stage === 'input' ? 'Forge issue import' : 'Review fetched issues';
+  if (importState.stage === 'input') renderImportInput(); else renderImportReview();
+}
+function renderImportInput() {
+  const sources = importState.sources;
+  if (sources === null) {
+    setKids(dom.importBody, el('div', { class: 'flex items-center gap-2 py-8 text-13 text-fg-2' }, el('span', { class: 'spinner' }), 'Loading sources…'));
+    setKids(dom.importFoot, el('span', { class: 'flex-1' }), el('button', { type: 'button', class: 'btn', onclick: closeImport }, 'Cancel'));
+    return;
+  }
+  if (!sources.length) {
+    setKids(dom.importBody,
+      el('div', { class: 'rounded-md border border-dashed border-line-2 px-4 py-8 text-center' },
+        el('p', { class: 'text-13 font-medium' }, 'No forge integration configured'),
+        el('p', { class: 'mx-auto mt-1 max-w-[46ch] text-12 text-fg-2' }, 'Add a GitLab or GitHub source with a personal access token, then come back to import its issues.'),
+        el('button', { type: 'button', class: 'btn btn-primary mt-4', onclick: () => openSettings('forge') }, icon('gear', 14), 'Open settings')));
+    setKids(dom.importFoot, el('span', { class: 'flex-1' }), el('button', { type: 'button', class: 'btn', onclick: closeImport }, 'Cancel'));
+    return;
+  }
+  const refInput = el('input', { class: 'input', id: uid('ref'), name: 'forge-ref', value: importState.ref, autocomplete: 'off', spellcheck: 'false',
+    placeholder: 'owner/repo, or an issue, milestone or project URL', oninput: (e) => { importState.ref = e.target.value; } });
+  refInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); const b = dom.importFoot.querySelector('.btn-primary'); if (b) b.click(); } });
+  setKids(dom.importBody,
+    el('div', { class: 'grid gap-3 sm:grid-cols-[minmax(0,200px)_minmax(0,1fr)]' },
+      fieldGroup('Source', el('select', { class: 'input', id: uid('src'), onchange: (e) => { importState.source = e.target.value; } },
+        ...sources.map((s) => el('option', { value: s.name, selected: s.name === importState.source }, `${s.name} · ${s.kind}`)))),
+      fieldGroup('Reference', refInput)),
+    el('div', { class: 'mt-4 field' }, el('span', { class: 'label-11' }, 'Max issues', el('span', { class: 'ml-1.5 font-normal tracking-normal text-fg-3' }, '1–20')),
+      stepper('Max issues', importState.max, (n) => { importState.max = n; }), el('p', { class: 'field-msg' })),
+    importState.error ? el('p', { class: 'field-msg is-error mt-3', role: 'alert' }, importState.error) : null,
+    state.ai && !state.ai.configured
+      ? el('p', { class: 'mt-4 text-12 text-fg-3' }, 'The preview turns fetched issues into cards with the AI endpoint, so it needs one configured. ', settingsLink('Set one up in Settings', 'ai'), '.')
+      : el('p', { class: 'mt-4 text-12 text-fg-3' }, 'The preview fetches the issues and drafts cards from them. Nothing is written until you review them.'));
+  const preview = el('button', { type: 'button', class: 'btn btn-primary', onclick: () => runPreview(preview) }, icon('sync', 14), 'Preview');
+  setKids(dom.importFoot, el('span', { class: 'flex-1' }), el('button', { type: 'button', class: 'btn', onclick: closeImport }, 'Cancel'), preview);
+  if (importState.focusRef) { importState.focusRef = false; refInput.focus(); }
+}
+async function runPreview(btn) {
+  const ref = importState.ref.trim();
+  if (!ref) { importState.error = 'reference required'; importState.focusRef = true; renderImport(); return; }
+  const stop = busy(btn, 'Fetching and drafting…');
+  importState.error = '';
+  try {
+    const out = await api('POST', '/api/forge/preview', { source: importState.source, ref, max: importState.max }, { timeout: 180000 });
+    importState.preview = out;
+    importState.drafts = (out.drafts || []).map((d) => Object.assign({ include: !(d.duplicate && d.duplicate.via === 'link'), created: null, error: '' }, d, { prio: d.prio || 3, effort: d.effort || '' }));
+    if (!importState.drafts.length) { importState.error = 'no issues fetched'; stop(); renderImport(); return; }
+    await resolveDuplicates(importState.drafts);
+    importState.stage = 'review';
+    renderImport();
+    announce('review proposals; exact duplicates start unticked');
+  } catch (err) { importState.error = err.message; stop(); renderImport(); }
+}
+// A duplicate marker names a card id; the reviewer needs its number. Cards outside the
+// current project are not in memory, so look those up once per preview.
+const localTask = (id) => state.all.concat(state.tasks).find((t) => t.id === id);
+async function resolveDuplicates(drafts) {
+  const wanted = [...new Set(drafts.map((d) => d.duplicate && d.duplicate.id).filter((id) => id && !localTask(id)))];
+  await Promise.all(wanted.map(async (id) => {
+    try {
+      const seq = (await api('GET', taskPath(id))).task.seq;
+      for (const d of drafts) if (d.duplicate && d.duplicate.id === id) d.duplicate.seq = seq;
+    } catch (err) { /* the badge falls back to the title */ }
+  }));
+}
+function duplicateBadge(dup) {
+  if (!dup) return null;
+  const known = localTask(dup.id);
+  const seq = known ? known.seq : dup.seq;
+  const label = dup.via === 'link' ? (seq ? `Already imported as #${seq}` : 'Already imported') : `Similar: ${dup.title}`;
+  const tone = dup.via === 'link' ? 'var(--t-warn)' : 'var(--t-fg-2)';
+  if (!seq) return el('span', { class: 'chip chip-tone', style: `--tone: ${tone}`, title: dup.title }, icon('alert', 11), el('span', {}, label));
+  return el('button', { type: 'button', class: 'chip chip-tone', style: `--tone: ${tone}`, title: `Open #${seq} ${dup.title}`,
+    onclick: () => { closeDialog(dom.importDialog); openDetail(seq); } }, icon('alert', 11), el('span', {}, label));
+}
+function renderImportReview() {
+  const p = importState.preview || {};
+  const selected = () => importState.drafts.filter((d) => d.include && d.title.trim() && !d.created).length;
+  const go = el('button', { type: 'button', class: 'btn btn-primary', onclick: () => runImport(go) }, '');
+  const count = () => { const n = selected(); go.disabled = n === 0; go.textContent = `Import selected (${n})`; };
+  setKids(dom.importFoot, el('span', { class: 'flex-1' }),
+    el('button', { type: 'button', class: 'btn', onclick: () => { importState.stage = 'input'; renderImport(); } }, icon('chevL', 14), 'Back'),
+    el('button', { type: 'button', class: 'btn', onclick: closeImport }, 'Close'), go);
+  const fetched = p.totalHint && p.totalHint > p.fetched
+    ? `Fetched ${p.fetched} of about ${p.totalHint}${p.truncated ? '; results truncated' : ''}`
+    : `Fetched ${p.fetched || importState.drafts.length}${p.truncated ? '; results truncated' : ''}`;
+  setKids(dom.importBody,
+    el('p', { class: 'text-12 text-fg-2' }, `${fetched} · ${p.kind || 'issue'} · ${importState.source}`),
+    p.note ? el('p', { class: 'mt-2 flex items-start gap-2 text-12 text-warn' }, icon('alert', 14), p.note) : null,
+    el('p', { class: 'mb-3 mt-2 text-12 text-fg-2' }, 'Cards already carrying the same upstream link start unticked. Nothing is written until you import.'),
+    el('div', { class: 'rows' }, ...importState.drafts.map((d, i) => draftRow(d, count, duplicateBadge(d.duplicate), i, 'Issue'))),
+    importState.error ? el('p', { class: 'field-msg is-error mt-3', role: 'alert' }, importState.error) : null,
+    importState.created.length ? el('div', { class: 'mt-4' }, el('h3', { class: 'label-11 mb-1' }, `Imported (${importState.created.length})`),
+      el('ul', { class: 'flex flex-col gap-0.5' }, ...importState.created.map((t) => el('li', {}, taskLink(t))))) : null,
+    el('div', { class: 'mt-3 empty:hidden', id: 'import-progress' }));
+  count();
+}
+async function runImport(btn) {
+  const queue = importState.drafts.filter((d) => d.include && d.title.trim() && !d.created);
+  if (!queue.length) return;
+  const stop = busy(btn, 'Importing…');
+  const bar = el('i', { style: 'width:0%' });
+  const line = el('p', { class: 'field-msg', role: 'status' }, `writing 1/${queue.length}`);
+  const track = el('div', { class: 'check-progress mb-1', role: 'progressbar', 'aria-label': 'Importing issues', 'aria-valuemin': '0', 'aria-valuemax': String(queue.length), 'aria-valuenow': '0' }, bar);
+  $('#import-progress').replaceChildren(track, line);
+  const made = [];
+  for (let i = 0; i < queue.length; i++) {
+    const d = queue[i];
+    line.textContent = `writing ${i + 1}/${queue.length}`;
+    bar.style.width = Math.round((i / queue.length) * 100) + '%';
+    track.setAttribute('aria-valuenow', String(i));
+    const task = { title: d.title.trim(), prio: d.prio || 3, tags: d.tags || [], checks: d.checks || [] };
+    for (const k of ['emoji', 'desc', 'due']) if (d[k]) task[k] = d[k];
+    if (d.effort) task.effort = d.effort;
+    if (state.project && state.project !== ALL_PROJECTS) task.project = state.project;
+    try {
+      d.created = await api('POST', '/api/forge/import', { source: d.source || importState.source, task, link: { externalKey: d.externalKey, link: d.link, url: d.url, title: d.title, baseline: d.baseline } }, { timeout: 120000 });
+      d.error = '';
+      made.push(d.created);
+    } catch (err) { d.error = err.message; }
+  }
+  bar.style.width = '100%';
+  track.setAttribute('aria-valuenow', String(queue.length));
+  stop();
+  importState.created = importState.created.concat(made);
+  importState.done = importState.drafts.every((d) => d.created || !d.include);
+  const failed = queue.filter((d) => d.error).length;
+  importState.error = failed ? `imported ${made.length}; ${failed} failed — fix the reported rows and retry` : '';
+  renderImport();
+  invalidate();
+  if (!made.length) return;
+  toast(`Imported ${plural(made.length, 'card')} from ${importState.source}`, 'ok', { life: 8000, action: { label: 'Undo', run: () => undoCreated(made) } });
+  announce('import complete');
+}
+
+/* ============================== provenance and upstream drift ============================== */
+const DRIFT_STATE = { unchanged: 'unchanged', drifted: 'drifted', baseline_recorded: 'baseline recorded' };
+function provenanceSection(links, siblings) {
+  return sectionEl('Provenance', el('span', { class: 'text-11 text-fg-3' }, 'kb never syncs upstream changes into a card'),
+    el('div', { class: 'rows' }, ...links.map((l) => provenanceRow(l, siblings.filter((s) => s.link === l.link)))));
+}
+function provenanceRow(link, siblings) {
+  const drift = state.drift[link.externalKey];
+  const body = el('div', { class: 'row-main' },
+    el('div', { class: 'flex flex-wrap items-center gap-2' },
+      el('span', { class: 'chip chip-mono' }, el('span', {}, link.kind || 'forge')),
+      el('span', { class: 'text-13 font-medium' }, link.source),
+      el('span', { class: 'seq' }, link.link)),
+    link.title ? el('p', { class: 'text-13' }, link.title) : null,
+    link.url ? el('p', { class: 'text-12' }, openLink(link.url)) : null,
+    siblings && siblings.length ? el('p', { class: 'text-12 text-fg-2' }, `Also imported onto ${plural(siblings.length, 'other card')}: `,
+      ...siblings.flatMap((s, i) => clean([i ? ', ' : null,
+        el('button', { type: 'button', class: 'text-accent underline decoration-line-2 underline-offset-2 hover:decoration-current', onclick: () => openDetail(s.id) }, s.title)]))) : null,
+    driftBlock(link, drift));
+  return el('div', { class: 'row' }, body);
+}
+function driftBlock(link, drift) {
+  const check = el('button', { type: 'button', class: 'btn btn-sm', onclick: () => checkDrift(link, check) }, icon('sync', 14), 'Check drift');
+  const wrap = el('div', { class: 'flex flex-col gap-2' });
+  if (!drift) { wrap.append(el('div', { class: 'flex flex-wrap items-center gap-2' }, check)); return wrap; }
+  const rows = [];
+  const line = (label, value) => rows.push(el('dt', {}, label), el('dd', {}, value));
+  line('State', el('span', { class: 'chip chip-tone', style: `--tone: var(--t-${drift.state === 'drifted' ? 'warn' : drift.state === 'unchanged' ? 'ok' : 'fg-2'})` }, el('span', {}, DRIFT_STATE[drift.state] || drift.state)));
+  line('Title', drift.titleChanged ? el('span', { class: 'text-warn' }, 'changed upstream') : el('span', { class: 'text-fg-2' }, 'unchanged'));
+  if (drift.upstreamTitle) line('Upstream', drift.upstreamTitle);
+  if (drift.baselineTitle) line('Baseline', drift.baselineTitle);
+  if (drift.checkedAt) line('Checked', el('time', { class: 'num', datetime: drift.checkedAt, title: fmtDate(drift.checkedAt) }, relTime(drift.checkedAt)));
+  wrap.append(el('dl', { class: 'grid grid-cols-[72px_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1 text-12 [&_dd]:text-fg [&_dt]:text-fg-3' }, ...rows));
+  if (drift.state === 'baseline_recorded') wrap.append(el('p', { class: 'field-msg' }, 'No import snapshot existed; the comparison starts from this check.'));
+  if (drift.summary) wrap.append(el('div', { class: 'rounded-md border border-line bg-surface px-3 py-2' }, renderMarkdown(drift.summary)));
+  const accept = el('button', { type: 'button', class: 'btn btn-sm btn-primary', onclick: () => acceptDrift(link, drift, accept) }, 'Update baseline');
+  wrap.append(el('div', { class: 'flex flex-wrap items-center gap-2' }, check, drift.state === 'drifted' && drift.revision ? accept : null));
+  return wrap;
+}
+async function checkDrift(link, btn) {
+  const stop = busy(btn, 'Checking drift…');
+  try {
+    state.drift[link.externalKey] = await api('POST', '/api/forge/drift/check', { source: link.source, externalKey: link.externalKey }, { timeout: 60000 });
+    announce(`Upstream ${link.link} is ${DRIFT_STATE[state.drift[link.externalKey].state] || 'checked'}`);
+  } catch (err) { toast(err.message, 'error'); } finally {
+    stop();
+    if (state.detailData) renderDetail(state.detailData);
+  }
+}
+async function acceptDrift(link, drift, btn) {
+  const stop = busy(btn, 'Updating baseline…');
+  try {
+    await api('POST', '/api/forge/drift/accept', { source: link.source, externalKey: link.externalKey, revision: drift.revision });
+    delete state.drift[link.externalKey];
+    toast('Upstream baseline updated', 'ok');
+    await loadDetail(state.detail, true);
+  } catch (err) {
+    toast(err.status === 409 ? 'Upstream changed again. Check it before updating the card.' : err.message, 'error');
+  } finally {
+    stop();
+    if (state.detailData) renderDetail(state.detailData);
+  }
+}
+
+/* ============================== keyboard registry: palette rows and the help sheet ============================== */
+const ACTION_GROUP = { navigate: 'Navigate', act: 'Actions', dismiss: 'Session' };
+// What the web does differently from the terminal. null hides a row that a browser tab cannot honour.
+const ACTION_WEB = { quit: null, jumpColumn: { hint: 'alt+1-4' } };
+const actionTarget = () => (focusedCard() ? findTask(state.focusId) : null) || (state.detailData ? state.detailData.task : null);
+const ACTION_RUN = {
+  openCard: () => { const t = actionTarget(); if (t) openDetail(t.seq); },
+  liftCard: () => toggleLift(),
+  filterText: () => focusSearch(),
+  filterLabel: () => focusLabels(),
+  filterClear: () => clearFilters(),
+  switchProject: () => toggleProjectMenu(true),
+  shipCard: () => { const t = actionTarget(); if (t && isOpen(t)) shipTask(t); },
+  cancelCard: () => { const t = actionTarget(); if (t && t.status !== 'cancelled') cancelTask(t); },
+  restoreCard: () => { const t = actionTarget(); if (t && t.status === 'cancelled') restoreTask(t); },
+  purgeCard: () => { const t = actionTarget(); if (t) deleteTask(t); },
+  newCard: () => openEdit(null),
+  editCard: () => { const t = actionTarget(); if (t) openEdit(t); },
+  openSettings: () => openSettings(),
+  splitADR: () => openSplit(),
+  importIssue: () => openImport(),
+};
+const listedActions = () => state.actions.filter((a) => a.enabled && a.group !== 'dismiss' && a.id !== 'openPalette' && ACTION_RUN[a.id] && ACTION_WEB[a.id] !== null);
+// "j/k" -> two caps; "ctrl+k" -> one reading "Ctrl K"; "? or esc" -> two; a lone "/" stays one.
+function keyCaps(hint) {
+  return String(hint || '').split(/\s+or\s+|(?<=.)\/(?=.)/).map((s) => s.trim()).filter(Boolean).map((part) => {
+    const bits = part.split('+');
+    return el('kbd', { class: 'kbd' }, bits.map((k) => (k.length > 1 ? sentence(k) : bits.length > 1 ? k.toUpperCase() : k)).join(' '));
+  });
+}
+function renderHelp() {
+  const groups = new Map();
+  for (const a of state.actions) {
+    if (ACTION_WEB[a.id] === null) continue;
+    const g = ACTION_GROUP[a.group] || 'Other';
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(Object.assign({}, a, ACTION_WEB[a.id] || {}));
+  }
+  const block = (title, rows) => el('section', {},
+    el('h3', { class: 'label-11 mb-2' }, title),
+    el('dl', { class: 'grid grid-cols-[minmax(0,124px)_minmax(0,1fr)] items-center gap-x-3 gap-y-2' },
+      ...rows.flatMap(([keys, name]) => [el('dt', { class: 'flex flex-wrap items-center gap-1' }, ...keys), el('dd', { class: 'text-13 text-fg-2' }, name)])));
+  const cap = (...parts) => parts.map((p) => el('kbd', { class: 'kbd' }, p));
+  const named = (title) => (groups.has(title) ? block(title, groups.get(title).map((a) => [keyCaps(a.hint), sentence(a.name)])) : null);
+  // Two columns, filled row by row: the long lists pair up so neither column runs away.
+  const nodes = clean([named('Navigate'), named('Actions')]);
+  nodes.push(block('This board only', [
+    [cap('d'), 'Display options'],
+    [cap('1', '2', '3'), 'Set priority'],
+    [cap('c'), 'Comment on the card'],
+    [cap('v'), 'Select card'],
+    [cap(MOD + ' A'), 'Select the whole column'],
+    [cap('Shift click'), 'Extend the selection'],
+    [cap(MOD + ' click'), 'Toggle one card'],
+    [[el('span', { class: 'text-12 text-fg-3' }, 'Drag')], 'Move cards; on touch, long-press to lift'],
+    [cap(MOD + ' B', MOD + ' I'), 'Editor: bold, italic'],
+    [cap(MOD + ' K', MOD + ' E'), 'Editor: link, inline code'],
+    [cap(MOD + ' Enter'), 'Editor: save'],
+    [cap(MOD + ' ⇧ Enter'), 'Editor: draft with AI'],
+    [cap('Esc'), 'Close, cancel a lift, clear the selection'],
+  ]));
+  for (const [title, rows] of groups) {
+    if (title === 'Navigate' || title === 'Actions') continue;
+    nodes.push(block(title, rows.map((a) => [keyCaps(a.hint), sentence(a.name)])));
+  }
+  dom.helpBody.replaceChildren(...nodes);
 }
 
 /* ============================== toasts / announcements ============================== */
@@ -2015,16 +3023,23 @@ function applyRoute() {
 }
 
 /* ============================== handlers ============================== */
-function setProject(name) {
+// Switching also writes the CLI's active project, so kb, kb tui and this board agree.
+// The "all" scope is a client-side view and leaves that stored value alone.
+async function setProject(name) {
   if (!name || name === state.project) return;
   state.project = name;
   state.selected.clear();
   renderHeader();
   invalidate();
-  announce(`Project ${name}`);
+  announce(name === ALL_PROJECTS ? 'All projects' : `Project ${name}`);
+  if (name === ALL_PROJECTS) return;
+  try {
+    await api('PUT', '/api/projects/active', { name });
+    refreshProjects();
+  } catch (err) { toast(err.message, 'error'); }
 }
 function cycleProject(dir) {
-  const list = state.meta.projects || [];
+  const list = [ALL_PROJECTS, ...projectList()];
   if (list.length < 2) return;
   const i = list.indexOf(state.project);
   setProject(list[(i + dir + list.length) % list.length]);
@@ -2062,8 +3077,16 @@ const isTyping = (target) => !!(target && target.closest && target.closest('inpu
 
 function onKeydown(e) {
   if (e.defaultPrevented) return;
-  const openDlg = document.querySelector('dialog[open]');
+  const stack = $$('dialog[open]');
+  const openDlg = stack[stack.length - 1] || null; // the topmost dialog owns the keyboard
   const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.key.toLowerCase() === 's' && openDlg === dom.settingsDialog) {
+    e.preventDefault();
+    const section = document.activeElement && document.activeElement.closest ? document.activeElement.closest('[data-save]') : null;
+    const save = sset.savers[section ? section.dataset.save : 'ai'] || sset.savers.ai;
+    if (save) save();
+    return;
+  }
   if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); if (openDlg === dom.palette) closeDialog(dom.palette); else { if (openDlg) closeDialog(openDlg); openPalette(); } return; }
   if (openDlg === dom.palette) {
     if (e.key === 'ArrowDown') { e.preventDefault(); selectPalette(Math.min(state.paletteItems.length - 1, state.paletteIndex + 1)); }
@@ -2080,7 +3103,7 @@ function onKeydown(e) {
     if (e.key === 'Tab') { toggleProjectMenu(false); return; }
   }
   if (e.key === 'Escape') {
-    if (!dom.settings.hidden) { e.preventDefault(); toggleSettings(false); return; }
+    if (!dom.display.hidden) { e.preventDefault(); toggleDisplay(false); return; }
     if (openDlg) return; // the dialog's cancel handler closes it
     if (dom.filters.classList.contains('open')) { e.preventDefault(); setFiltersOpen(false); return; }
     if (state.lifted) { e.preventDefault(); cancelLift(); return; }
@@ -2093,6 +3116,17 @@ function onKeydown(e) {
   }
   const onCard = !!(e.target.closest && e.target.closest('.card') && !isTyping(e.target));
   if (mod && e.key.toLowerCase() === 'a' && onCard) { e.preventDefault(); selectColumn(); return; }
+  // alt+1-4 is the TUI's "jump to column"; the bare digits stay priority on the board.
+  if (e.altKey && !mod && /^[1-4]$/.test(e.key) && !openDlg) {
+    const status = STATUSES[Number(e.key) - 1];
+    if (status && !cols[status].col.hidden) {
+      e.preventDefault();
+      cols[status].col.scrollIntoView({ behavior: dur(1) ? 'smooth' : 'auto', inline: 'start', block: 'nearest' });
+      const first = columnCards(status)[0];
+      if (first) setFocus(first.dataset.id); else announce(`${STATUS_LABEL[status]} is empty`);
+    }
+    return;
+  }
   if (isTyping(e.target) || e.altKey || mod) return;
   if (openDlg && openDlg !== dom.detailDialog) return;
   const detailTask = state.detailData ? state.detailData.task : null;
@@ -2117,6 +3151,7 @@ function onKeydown(e) {
     case 't': if (target && isOpen(target)) { e.preventDefault(); shipTask(target); } break;
     case 'x': if (target && target.status !== 'cancelled') { e.preventDefault(); cancelTask(target); } break;
     case 'r': if (target && target.status === 'cancelled') { e.preventDefault(); restoreTask(target); } break;
+    case 'D': if (target) { e.preventDefault(); deleteTask(target); } break;
     case '1': case '2': case '3': if (target) { e.preventDefault(); setPriority(target, Number(e.key)); } break;
     case 'c': if (target) { e.preventDefault(); openDetail(target.seq, { focusComment: true }); } break;
     case 'v': if (focused) { e.preventDefault(); toggleSelect(focused.id); } break;
@@ -2125,7 +3160,10 @@ function onKeydown(e) {
     case 'X': if (!openDlg) { e.preventDefault(); clearFilters(); } break;
     case 'p': if (!openDlg) cycleProject(1); break;
     case 'P': if (!openDlg) cycleProject(-1); break;
-    case 's': if (!openDlg) { e.preventDefault(); toggleSettings(); } break;
+    case 'd': if (!openDlg) { e.preventDefault(); toggleDisplay(); } break;
+    case 's': if (!openDlg) { e.preventDefault(); openSettings(); } break;
+    case 'a': if (!openDlg) { e.preventDefault(); openSplit(); } break;
+    case 'i': if (!openDlg) { e.preventDefault(); openImport(); } break;
     case '?': e.preventDefault(); if (openDlg) closeDialog(openDlg); showDialog(dom.helpDialog); break;
     default: break;
   }
@@ -2179,7 +3217,8 @@ function bind() {
   $('#new-task').addEventListener('click', () => openEdit(null));
   $('#help-btn').addEventListener('click', () => showDialog(dom.helpDialog));
   $('#theme-toggle').addEventListener('click', toggleTheme);
-  $('#settings-btn').addEventListener('click', () => toggleSettings());
+  $('#display-btn').addEventListener('click', () => toggleDisplay());
+  $('#settings-btn').addEventListener('click', () => openSettings());
   $('#palette-btn').addEventListener('click', openPalette);
   $('#filters-toggle').addEventListener('click', () => setFiltersOpen(!dom.filters.classList.contains('open')));
   $('#filters-done').addEventListener('click', () => setFiltersOpen(false));
@@ -2188,19 +3227,29 @@ function bind() {
   dom.paletteInput.addEventListener('input', renderPalette);
 
   dom.editForm.addEventListener('submit', (e) => { e.preventDefault(); saveEdit(); });
-  dom.editForm.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'Enter')) { e.preventDefault(); saveEdit(); } });
+  dom.editForm.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    if (e.shiftKey && e.key === 'Enter') {
+      const run = dom.editAI.querySelector('[data-ai-draft]');
+      if (run && !run.disabled) { e.preventDefault(); run.click(); }
+      return;
+    }
+    if (!e.shiftKey && (e.key === 's' || e.key === 'Enter')) { e.preventDefault(); saveEdit(); }
+  });
   dom.editDialog.addEventListener('cancel', (e) => { e.preventDefault(); requestCloseEdit(); });
   dom.editDialog.addEventListener('close', () => { state.editing = null; });
 
-  for (const d of [dom.editDialog, dom.detailDialog, dom.helpDialog, dom.palette]) {
-    const close = d === dom.editDialog ? requestCloseEdit : d === dom.detailDialog ? () => closeDetail() : () => closeDialog(d);
+  const closers = new Map([[dom.editDialog, requestCloseEdit], [dom.detailDialog, () => closeDetail()],
+    [dom.settingsDialog, closeSettings], [dom.splitDialog, closeSplit], [dom.importDialog, closeImport]]);
+  for (const d of [dom.editDialog, dom.detailDialog, dom.helpDialog, dom.palette, dom.settingsDialog, dom.splitDialog, dom.importDialog, dom.askDialog]) {
+    const close = closers.get(d) || (() => closeDialog(d));
     for (const btn of $$('[data-close]', d)) btn.addEventListener('click', close);
     d.addEventListener('click', (e) => { if (e.target === d) close(); });
     if (d !== dom.editDialog) d.addEventListener('cancel', (e) => { e.preventDefault(); close(); });
   }
   dom.detailDialog.addEventListener('close', () => { if (state.detail && !wideMQ.matches) closeDetail(); });
   document.addEventListener('pointerdown', (e) => {
-    if (!dom.settings.hidden && !dom.settings.contains(e.target) && !e.target.closest('#settings-btn')) toggleSettings(false);
+    if (!dom.display.hidden && !dom.display.contains(e.target) && !e.target.closest('#display-btn')) toggleDisplay(false);
     if (!dom.projectMenu.hidden && !dom.projectMenu.contains(e.target) && !e.target.closest('#project-btn')) toggleProjectMenu(false);
   });
   document.addEventListener('keydown', onKeydown);
@@ -2216,17 +3265,21 @@ function bind() {
 
 /* ============================== init ============================== */
 async function init() {
+  $('#settings-mod').textContent = MOD;
   applySettings(false);
   buildBoard();
   mountSearch();
   bind();
   mountDetail();
-  await refreshMeta();
+  await Promise.all([refreshMeta(), refreshProjects()]);
   const m = /^#\/p\/(.+)$/.exec(decodeURIComponent(location.hash || ''));
   if (m) state.project = m[1];
   await refreshTasks();
   if (!state.loaded) for (const status of STATUSES) cols[status].body.replaceChildren(el('div', { class: 'col-empty' }, 'Waiting for the server…'));
   applyRoute();
   schedulePoll();
+  refreshActions();
+  refreshAIStatus();
+  refreshShipped();
 }
 init();
