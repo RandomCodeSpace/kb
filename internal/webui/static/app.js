@@ -1547,8 +1547,8 @@ function mdEditor(opts = {}) {
 // grouped picker fed by /api/meta labels. One value per scope: picking type::bug replaces type::feature.
 function labelEditor(container, opts = {}) {
   let tags = normalizeTags(opts.tags || []);
-  const row = el('div', { class: 'flex min-h-8 flex-wrap items-center gap-1' });
-  const input = el('input', { type: 'text', class: 'input input-ghost h-7 min-w-[120px] flex-1 px-1.5', placeholder: opts.placeholder || 'Add label…', 'aria-label': opts.placeholder || 'Add label', autocomplete: 'off', spellcheck: 'false', role: 'combobox', 'aria-expanded': 'false', 'aria-autocomplete': 'list' });
+  const row = el('div', { class: 'label-row' });
+  const input = el('input', { type: 'text', class: 'input input-ghost min-w-[120px] flex-1 px-1.5', placeholder: opts.placeholder || 'Add label…', 'aria-label': opts.placeholder || 'Add label', autocomplete: 'off', spellcheck: 'false', role: 'combobox', 'aria-expanded': 'false', 'aria-autocomplete': 'list' });
   const pick = el('div', { class: 'pick', role: 'listbox', hidden: true, 'aria-label': 'Labels' });
   const box = el('div', { class: 'relative' }, row, pick);
   container.replaceChildren(box);

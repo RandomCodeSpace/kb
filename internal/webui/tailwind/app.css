@@ -226,8 +226,8 @@
   .chip-dot::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: 9999px; background: var(--dot, var(--t-fg-3)); }
   [style*="--h:"] { --hue: light-dark(hsl(var(--h) 48% 42%), hsl(var(--h) 55% 68%)); --hue-tint: light-dark(hsl(var(--h) 48% 42% / 0.12), hsl(var(--h) 55% 68% / 0.16)); --dot: var(--hue); }
   .chip-scoped { gap: 0; padding: 0; border: 0; overflow: hidden; background: transparent; }
-  .chip-scoped .k { display: inline-flex; align-items: center; height: 20px; padding: 0 7px 0 8px; background: var(--hue); color: var(--t-hue-fg); font-weight: 600; }
-  .chip-scoped .v { display: inline-flex; align-items: center; height: 20px; padding: 0 8px 0 7px; background: var(--hue-tint); color: var(--t-fg); overflow: hidden; text-overflow: ellipsis; }
+  .chip-scoped .k { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; background: var(--hue); color: var(--t-hue-fg); font-weight: 600; }
+  .chip-scoped .v { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; background: var(--hue-tint); color: var(--t-fg); overflow: hidden; text-overflow: ellipsis; }
   .chip-scoped .v:empty { display: none; }
   button.chip { cursor: pointer; transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), color 160ms var(--ease-out), box-shadow 160ms var(--ease-out); }
   button.chip:hover { border-color: var(--t-line-2); color: var(--t-fg); }
@@ -235,7 +235,10 @@
   button.chip[aria-pressed="true"] { background: var(--t-accent-soft); border-color: transparent; color: var(--t-fg); }
   button.chip-scoped[aria-pressed="true"] { background: transparent; box-shadow: 0 0 0 2px var(--hue); }
   .chip-tone { --tone: var(--t-fg-2); color: var(--tone); border-color: color-mix(in srgb, var(--tone), transparent 70%); background: color-mix(in srgb, var(--tone), transparent 90%); }
-  .chip-mono { font-family: var(--font-mono); font-feature-settings: normal; letter-spacing: -0.01em; }
+  /* "mono" chips (dates, effort, source kinds) keep the sans face at chip size:
+     JetBrains Mono at 11px reads a size larger than Inter beside it. Tabular
+     figures keep dates and counts from jittering. */
+  .chip-mono { font-variant-numeric: tabular-nums; letter-spacing: 0; }
   .chip .x { display: inline-flex; width: 16px; height: 16px; margin-right: -3px; flex: none; align-items: center; justify-content: center; border-radius: 9999px; color: var(--t-fg-3); }
   .chip .x:hover { background: var(--t-raised); color: var(--t-fg); }
   .chip-scoped .x { margin: 0; padding-right: 4px; background: var(--hue-tint); border-radius: 0; height: 20px; width: 20px; }
@@ -360,7 +363,15 @@
   /* property grid: 96px labels */
   .props { display: grid; grid-template-columns: 96px minmax(0, 1fr); column-gap: 12px; row-gap: 2px; align-items: start; }
   .props > dt { font-size: 12px; line-height: 20px; color: var(--t-fg-3); min-height: 32px; display: flex; align-items: center; }
-  .props > dd { min-width: 0; min-height: 32px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0; }
+  .props > dd { min-width: 0; min-height: 32px; display: flex; align-items: center; gap: 0 6px; flex-wrap: wrap; margin: 0; }
+  /* label editor: every wrapped line is 32px tall (chips carry 6px vertical
+     margins, the input is a full control), so a property label's centre meets
+     the first line whether it holds chips or the empty input */
+  .label-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px; min-height: 32px; }
+  .label-row > .chip { margin-block: 6px; }
+  .label-row > .input-ghost { height: 32px; }
+  /* in the property grid the ghost input has no visible box: pull its text flush with the chips */
+  .props .label-row > .input-ghost { margin-left: -7px; }
   .title-edit { width: 100%; padding: 2px 6px; margin: 0 -6px; border-radius: var(--radius-sm); font-size: 16px; line-height: 24px; font-weight: 600; background: transparent; border: 1px solid transparent; }
   .title-edit:hover { background: var(--t-raised); }
   .title-edit:focus-visible { outline: none; border-color: var(--t-focus); background: var(--t-surface); box-shadow: 0 0 0 3px var(--t-accent-soft); }
