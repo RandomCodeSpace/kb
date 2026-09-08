@@ -105,9 +105,9 @@ its provenance.
 The `task` object takes the same fields as `POST /api/tasks`
 (`title, desc, status?, prio?, due?, effort?, tags?, checks?, emoji?, project?`)
 and is validated the same way. Status defaults to `todo`. The project is
-stamped at write time from `cliapp.ProjectTags` — the request's `project`, else
-the active project — so a `kb project use` between preview and import is picked
-up, exactly as the overlay resolves it per card.
+stamped at write time from `cliapp.ProjectTags` — the request's `project` or
+`project::` tag; there is no ambient default, so a card without one is refused
+with 400 `no project given`, exactly as the overlay resolves it per card.
 
 The `link` block must be the draft's own `externalKey`, `link`, `url`, `title`
 and `baseline`. The service re-derives the provenance from the configured

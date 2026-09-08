@@ -339,7 +339,7 @@ func (s *server) forgeTask(in addTaskInput) (board.Task, error) {
 		}
 		t.Status = status
 	}
-	tags, err := cliapp.ProjectTags(in.Tags, in.Project, s.dataDir, "")
+	tags, err := cliapp.ProjectTags(in.Tags, in.Project, "")
 	if err != nil {
 		return board.Task{}, err
 	}

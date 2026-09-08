@@ -38,7 +38,7 @@ const (
 var featureRoutes []func(s *server) []route
 
 // server holds the per-process API state: one store, one fixed user, the data
-// directory the active project is resolved from, and the hub that pushes board
+// directory the skills and the change watcher live in, and the hub that pushes board
 // changes to /api/events.
 type server struct {
 	st      *store.Store
@@ -386,19 +386,13 @@ func doneGuard(force bool, moveTo *board.Status) func(board.Task) error {
 // --- handlers ---
 
 type metaJSON struct {
-	Version       string   `json:"version"`
-	ActiveProject string   `json:"activeProject"`
-	Projects      []string `json:"projects"`
-	Labels        []string `json:"labels"`
-	Statuses      []string `json:"statuses"`
+	Version  string   `json:"version"`
+	Projects []string `json:"projects"`
+	Labels   []string `json:"labels"`
+	Statuses []string `json:"statuses"`
 }
 
 func (s *server) meta(w http.ResponseWriter, _ *http.Request) {
-	active, _, err := cliapp.ActiveProject(s.dataDir)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	tasks, err := s.st.FilterTasks(s.user, store.TaskFilter{})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -414,21 +408,17 @@ func (s *server) meta(w http.ResponseWriter, _ *http.Request) {
 		statuses = append(statuses, string(st))
 	}
 	writeJSON(w, http.StatusOK, metaJSON{
-		Version:       s.version,
-		ActiveProject: active,
-		Projects:      projectNames(tasks, active),
-		Labels:        nonNil(labels),
-		Statuses:      statuses,
+		Version:  s.version,
+		Projects: projectNames(tasks),
+		Labels:   nonNil(labels),
+		Statuses: statuses,
 	})
 }
 
-// projectNames lists the distinct projects on the board plus the active one,
-// sorted with inbox last so the catch-all never shadows a real project.
-func projectNames(tasks []board.Task, active string) []string {
+// projectNames lists the distinct projects on the board, sorted with inbox
+// last so the catch-all never shadows a real project.
+func projectNames(tasks []board.Task) []string {
 	seen := map[string]bool{}
-	if active != "" {
-		seen[active] = true
-	}
 	for _, t := range tasks {
 		named, _ := project.SplitTags(t.Tags)
 		for _, name := range named {
@@ -531,7 +521,7 @@ func (s *server) addTask(w http.ResponseWriter, r *http.Request) {
 		}
 		t.Status = st
 	}
-	tags, err := cliapp.ProjectTags(in.Tags, in.Project, s.dataDir, "")
+	tags, err := cliapp.ProjectTags(in.Tags, in.Project, "")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -641,7 +631,7 @@ func (s *server) applyProjectPatch(ref string, patch *store.TaskPatch, projectNa
 	} else {
 		_, base = project.SplitTags(t.Tags)
 	}
-	tags, err := cliapp.ProjectTags(base, projectName, s.dataDir, cliapp.CurrentProjectOf(t))
+	tags, err := cliapp.ProjectTags(base, projectName, cliapp.CurrentProjectOf(t))
 	if err != nil {
 		return err
 	}

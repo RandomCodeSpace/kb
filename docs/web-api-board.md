@@ -13,17 +13,15 @@ hook so the core route table stays put.
 | Method | Path                            | Body / query           | Response                                                              |
 | ------ | ------------------------------- | ---------------------- | --------------------------------------------------------------------- |
 | GET    | `/api/actions`                  |                        | `{"actions": [action…]}` — the TUI keyboard registry                   |
-| GET    | `/api/projects`                 |                        | `{"active": "web", "projects": [project…]}`                            |
-| PUT    | `/api/projects/active`          | `{name}`               | `{"active": "web"}` (writes the CLI's `state.json`)                    |
+| GET    | `/api/projects`                 |                        | `{"projects": [project…]}`                                             |
 | GET    | `/api/tasks/{ref}/tombstone`    |                        | `tombstone` (404 when the card carries no recorded reason)             |
 | GET    | `/api/by-link`                  | `?link=`               | `{"items": [similar…]}` — cards carrying `link` as one whole tag       |
 | GET    | `/api/shipped`                  | `?date=YYYY-MM-DD`     | `{"date", "count", "seqs": [..]}` — cards that reached done that day   |
 
-Status codes follow the shared table: 400 for a malformed body or an invalid
-field, 404 for an unknown task or a missing tombstone, 405 for an unsupported
-method (with `Allow`), 500 when the store or the CLI state file cannot be read.
-`PUT /api/projects/active` is the only mutating call here, so it is the only one
-subject to the `Origin` and `Content-Type` rules.
+Status codes follow the shared table: 400 for an invalid query, 404 for an
+unknown task or a missing tombstone, 405 for an unsupported method (with
+`Allow`), 500 when the store cannot be read. Every call here is a read, so
+none is subject to the `Origin` and `Content-Type` rules.
 
 `/api/by-link` is deliberately not `/api/tasks/by-link`: a literal path under
 `/api/tasks/` and the method-less 405 catch-all the route table registers for
@@ -63,31 +61,31 @@ rows that are pure client-side navigation. A web palette should list what the TU
 ```
 
 Counts include cancelled cards, as `kb project list` does. Ordering matches
-`/api/meta`'s `projects`: every project label on the board plus the active one,
-sorted, `inbox` last. A card carrying two `project::` labels — only possible on
-a board a foreign writer touched — counts under both.
+`/api/meta`'s `projects`: every project label on the board, sorted, `inbox`
+last. A card carrying two `project::` labels — only possible on a board a
+foreign writer touched — counts under both.
 
 `tombstone`: `{"taskId": "uuid", "reason": "duplicate of #1", "killedAt": "RFC3339"}`
 
-## Active project
+## Selected project
 
-`PUT /api/projects/active` is the web's `kb project use`: the name is validated
-with `project.ValidateName` (trimmed, no whitespace, no leading `#`, no `::`)
-and stored through `cliapp.SetActiveProject`, which writes the same
-`<dataDir>/state.json` the CLI writes, atomically. `kb project current`, the
-TUI's opening scope and `/api/projects` therefore agree.
+The server keeps no active project, and neither does the CLI: `kb add` names
+its project on the command, and so does every card the web creates.
+`POST /api/tasks` and `POST /api/forge/import` require `project` (or a
+`project::` tag) and answer 400 `no project given: pass -p <name> or --tag
+project::<name>` without one; `PATCH /api/tasks/{ref}` keeps the card's project
+unless the patch names another. The name is validated with
+`project.ValidateName` (trimmed, no whitespace, no leading `#`, no `::`).
 
-Resolution order is the CLI's and is unchanged: `KB_PROJECT` beats the stored
-value. With `KB_PROJECT` set in the server's environment, a `PUT` still stores
-the name but `/api/projects` keeps reporting the environment's project.
+The project the board shows is therefore the browser's own view state: the
+web UI remembers it with its other display settings and sends it on every
+create, and `#/p/<name>` in the URL selects one on load. With nothing
+remembered the UI takes the first name `/api/projects` lists, `inbox` on an
+empty board. Switching issues no request.
 
-A project with no cards has no `project::` label anywhere, so it exists only as
-the active selection — which is exactly how the TUI treats it: the switcher's
-list is every project on the board plus `m.activeProject`, so a freshly named
-project is cycleable and is the default for the next card created, and it
-disappears again if the selection moves away before a card is written. There is
-therefore no separate "create project" call: `PUT /api/projects/active` with a
-new name is the creation.
+A project with no cards has no `project::` label anywhere, so it is not
+listed: it comes into being with its first card, and there is no separate
+"create project" call.
 
 ## Shipped
 
@@ -114,7 +112,7 @@ outside it.
 | `/` text filter                      | already covered by `GET /api/tasks?q=`                      |
 | `f` label filter                     | already covered by `GET /api/tasks?tag=` + `GET /api/labels`|
 | `X` clear filter                     | client-side; an unfiltered `GET /api/tasks`                 |
-| `p`/`P` switch project               | `GET /api/projects`, `PUT /api/projects/active`             |
+| `p`/`P` switch project               | `GET /api/projects`; the selection itself is client-side    |
 | `ctrl+k` command palette             | `GET /api/actions`                                          |
 | `t` ship card                        | already covered by `POST /api/tasks/{ref}/move` (`done`)    |
 | `x` cancel card                      | already covered by `POST /api/tasks/{ref}/cancel` (`reason`)|
