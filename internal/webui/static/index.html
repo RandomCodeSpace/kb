@@ -35,12 +35,10 @@ try {
   </div>
   <div id="stats" class="ml-2 hidden items-center gap-1 text-12 text-fg-2 lg:flex" aria-label="Board stats"></div>
   <div class="min-w-0 flex-1"></div>
-  <div id="search-wrap" class="relative hidden w-[260px] md:block xl:w-[320px]">
-    <svg class="pointer-events-none absolute left-2.5 top-2 text-fg-3" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-    <label class="sr-only" for="search">Search tasks. Supports tag:, scope:, prio:, due:, is:blocked, has:checklist, effort:, #number</label>
-    <input id="search" name="q" type="search" class="input pl-8 pr-9" placeholder="Search  tag:web prio:high #12…" autocomplete="off" spellcheck="false" enterkeyhint="search">
-    <kbd class="kbd pointer-events-none absolute right-2 top-[7px] hidden md:inline-flex" aria-hidden="true">/</kbd>
-  </div>
+  <button type="button" id="search-btn" class="btn btn-ghost btn-icon relative" data-tip="Search  /" aria-label="Search tasks" aria-haspopup="dialog" aria-controls="search-dialog">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    <span id="search-dot" class="absolute right-1 top-1 size-1.5 rounded-full bg-accent" hidden aria-hidden="true"></span>
+  </button>
   <button type="button" id="filters-toggle" class="btn btn-ghost btn-icon phone-only relative" aria-label="Search and filters" aria-expanded="false" aria-controls="filters">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M4 8h8M6 12h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>
     <span id="filter-count" class="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 font-mono text-[10px] font-semibold text-on-accent" hidden></span>
@@ -68,8 +66,7 @@ try {
   <span id="conn" class="ml-1 hidden items-center gap-1.5 pl-1 font-mono text-11 text-fg-3 md:flex" data-tip="Connected"><span id="conn-dot" class="size-1.5 rounded-full bg-ok" aria-hidden="true"></span><span id="version"></span></span>
 </header>
 
-<section id="filters" class="filters flex h-[41px] flex-none items-center gap-2 overflow-hidden border-b border-line bg-canvas px-3" aria-label="Search and filters">
-  <div id="search-slot" class="phone-only w-full"></div>
+<section id="filters" class="filters flex flex-none items-center gap-2 overflow-hidden border-b border-line bg-canvas px-3" aria-label="Search and filters">
   <div id="quick" class="seg seg-sm flex-none" role="group" aria-label="Quick filters"></div>
   <span class="mx-1 h-4 w-px flex-none bg-line phone-hide" aria-hidden="true"></span>
   <div id="labels" class="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-1 pr-6 [scrollbar-width:none] [mask-image:linear-gradient(90deg,#000_calc(100%-24px),transparent)] phone:flex-wrap phone:overflow-visible phone:[mask-image:none]" role="group" aria-label="Label filter"></div>
@@ -113,6 +110,25 @@ try {
 <div id="display" class="pop right-2 top-12 w-[342px] max-w-[calc(100vw-16px)] p-3" role="dialog" aria-label="Display options" hidden></div>
 <div id="toasts" class="pointer-events-none fixed inset-x-0 bottom-4 z-40 flex flex-col items-center gap-2 px-4" style="bottom: calc(16px + env(safe-area-inset-bottom))" role="status" aria-live="polite"></div>
 <div id="live" class="sr-only" aria-live="polite"></div>
+
+<dialog id="search-dialog" class="dialog search-dialog mt-[12vh]" aria-label="Search tasks">
+  <form id="search-form" novalidate>
+    <div class="search-box">
+      <svg class="text-fg-3" width="20" height="20" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <label class="sr-only" for="search">Search tasks. Supports tag:, scope:, prio:, due:, is:blocked, has:checklist, effort:, #number</label>
+      <input id="search" name="q" type="text" inputmode="search" placeholder="Search tasks…" autocomplete="off" spellcheck="false" enterkeyhint="search">
+      <button type="button" id="search-clear" class="btn btn-ghost btn-xs btn-icon" aria-label="Clear search" hidden>
+        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+      <kbd class="kbd phone-hide">Esc</kbd>
+    </div>
+    <div class="search-hints">
+      <span class="text-11 text-fg-3 phone-hide">Try</span>
+      <div id="search-syntax" class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto pr-6 [scrollbar-width:none] [mask-image:linear-gradient(90deg,#000_calc(100%-24px),transparent)]"></div>
+      <span id="search-count" class="num flex-none text-12 text-fg-3"></span>
+    </div>
+  </form>
+</dialog>
 
 <dialog id="palette" class="dialog mt-[12vh]" aria-label="Command palette">
   <div class="flex h-12 items-center gap-2 border-b border-line px-3">

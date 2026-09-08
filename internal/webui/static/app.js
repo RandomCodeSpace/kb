@@ -641,7 +641,7 @@ const ALL_PROJECTS = '::all'; // client-side pseudo-project, like the TUI's "all
 const dom = {
   board: $('#board'), detail: $('#detail'),
   labels: $('#labels'), quick: $('#quick'), active: $('#active'), resultCount: $('#result-count'), stats: $('#stats'),
-  search: $('#search'), searchWrap: $('#search-wrap'), searchSlot: $('#search-slot'), projectBtn: $('#project-btn'), projectName: $('#project-name'), projectMenu: $('#project-menu'),
+  search: $('#search'), searchBtn: $('#search-btn'), searchDot: $('#search-dot'), searchDialog: $('#search-dialog'), searchClear: $('#search-clear'), searchSyntax: $('#search-syntax'), searchCount: $('#search-count'), projectBtn: $('#project-btn'), projectName: $('#project-name'), projectMenu: $('#project-menu'),
   clear: $('#clear-filters'), banner: $('#banner'), conn: $('#conn'), connDot: $('#conn-dot'), version: $('#version'),
   toasts: $('#toasts'), live: $('#live'), segments: $('#segments'), filters: $('#filters'), scrim: $('#filters-scrim'), filterCount: $('#filter-count'),
   bulkbar: $('#bulkbar'), display: $('#display'),
@@ -1080,6 +1080,10 @@ function renderResultCount() {
   const shown = visibleTasks().length;
   const total = serverFiltered() && state.all.length ? state.all.length : (serverFiltered() ? null : state.tasks.length);
   dom.resultCount.textContent = anyFilter() ? (total === null ? `${shown} shown` : `${shown} of ${total}`) : plural(shown, 'task');
+  dom.searchCount.textContent = dom.resultCount.textContent;
+  const q = !!dom.search.value.trim();
+  dom.searchDot.hidden = !q;
+  dom.searchClear.hidden = !q;
 }
 // The label pool is scoped like the board: with one project active it holds
 // only the labels that project's cards carry, so another project's vocabulary
@@ -1241,6 +1245,8 @@ function renderBoard() {
     if (seg) tickCounter(seg, String(tasks.length));
     const hidden = (status === 'cancelled' && !settings.showCancelled) || (settings.hideEmpty && tasks.length === 0 && !anyFilter());
     col.hidden = hidden;
+    const tab = dom.segments.querySelector(`[data-status="${status}"]`);
+    if (tab) tab.hidden = hidden; // the phone tab bar follows the column
     const collapsed = !!settings.collapsed[status] && !phoneMQ.matches;
     col.classList.toggle('is-collapsed', collapsed);
     const cbtn = col.querySelector('.collapse-btn');
@@ -3447,12 +3453,28 @@ function cycleProject(dir) {
   const i = list.indexOf(state.project);
   setProject(list[(i + dir + list.length) % list.length]);
 }
+// The search field lives in a centred dialog (Spotlight-style) on every device.
+// Typing filters the board behind it live; Enter or Escape closes and the
+// query stays applied, marked by a dot on the header icon.
+const SEARCH_SYNTAX = [['tag:web', 'Label'], ['prio:high', 'Priority'], ['due:week', 'Due'], ['is:blocked', 'Blocked'], ['has:checklist', 'Checklist'], ['effort:S', 'Effort'], ['#12', 'Number']];
 function mountSearch() {
-  const phone = phoneMQ.matches;
-  const target = phone ? dom.searchSlot : null;
-  if (phone && dom.searchWrap.parentNode !== dom.searchSlot) { dom.searchSlot.append(dom.searchWrap); dom.searchWrap.className = 'relative w-full'; }
-  if (!phone && dom.searchWrap.parentNode === dom.searchSlot) { $('header').insertBefore(dom.searchWrap, $('#filters-toggle')); dom.searchWrap.className = 'relative hidden w-[260px] md:block xl:w-[320px]'; }
-  void target;
+  dom.searchSyntax.replaceChildren(...SEARCH_SYNTAX.map(([token, label]) => el('button', { type: 'button', class: 'chip chip-mono', title: `${label} filter`, onmousedown: (e) => e.preventDefault(), onclick: () => insertSearchToken(token) }, token)));
+  dom.searchClear.addEventListener('click', () => { dom.search.value = ''; applySearchText('', false); dom.search.focus(); });
+  dom.searchBtn.addEventListener('click', () => (dom.searchDialog.open ? closeDialog(dom.searchDialog) : openSearch()));
+  $('#search-form').addEventListener('submit', (e) => { e.preventDefault(); clearTimeout(dom.search._t); applySearchText(dom.search.value.trim(), false); closeDialog(dom.searchDialog); });
+}
+function insertSearchToken(token) {
+  const cur = dom.search.value.trim();
+  if (cur.split(/\s+/).includes(token)) return;
+  dom.search.value = (cur ? cur + ' ' : '') + token + ' ';
+  applySearchText(dom.search.value.trim(), false);
+  dom.search.focus();
+}
+function openSearch() {
+  if (dom.searchDialog.open) { dom.search.focus(); dom.search.select(); return; }
+  showDialog(dom.searchDialog);
+  dom.search.focus();
+  dom.search.select();
 }
 function setFiltersOpen(open) {
   dom.filters.classList.toggle('open', open);
@@ -3460,17 +3482,12 @@ function setFiltersOpen(open) {
   if (open) {
     dom.scrim.hidden = false;
     requestAnimationFrame(() => dom.scrim.classList.add('show'));
-    setTimeout(() => dom.search.focus(), dur(160) + 20); // the sheet is visibility:hidden until its transition ends
   } else {
     dom.scrim.classList.remove('show');
     setTimeout(() => { dom.scrim.hidden = true; }, dur(160));
   }
 }
-function focusSearch() {
-  if (phoneMQ.matches) { setFiltersOpen(true); return; }
-  dom.search.focus();
-  dom.search.select();
-}
+function focusSearch() { openSearch(); }
 function focusLabels() {
   if (phoneMQ.matches) { setFiltersOpen(true); return; }
   const first = dom.labels.querySelector('button');
@@ -3591,7 +3608,10 @@ function bind() {
     clearTimeout(dom.search._t);
     dom.search._t = setTimeout(() => applySearchText(dom.search.value.trim(), false), 200);
   });
-  dom.search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(dom.search._t); applySearchText(dom.search.value.trim(), false); } });
+  dom.search.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(dom.search._t); applySearchText(dom.search.value.trim(), false); closeDialog(dom.searchDialog); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeDialog(dom.searchDialog); } // keep the query; a search-type input would clear it
+  });
   dom.projectBtn.addEventListener('click', () => toggleProjectMenu());
   dom.clear.addEventListener('click', clearFilters);
   $('#new-task').addEventListener('click', () => openEdit(null));
@@ -3621,7 +3641,7 @@ function bind() {
 
   const closers = new Map([[dom.editDialog, requestCloseEdit], [dom.detailDialog, () => closeDetail()],
     [dom.settingsDialog, closeSettings], [dom.splitDialog, closeSplit], [dom.importDialog, closeImport]]);
-  for (const d of [dom.editDialog, dom.detailDialog, dom.helpDialog, dom.palette, dom.settingsDialog, dom.splitDialog, dom.importDialog, dom.askDialog]) {
+  for (const d of [dom.editDialog, dom.detailDialog, dom.helpDialog, dom.palette, dom.searchDialog, dom.settingsDialog, dom.splitDialog, dom.importDialog, dom.askDialog]) {
     const close = closers.get(d) || (() => closeDialog(d));
     for (const btn of $$('[data-close]', d)) btn.addEventListener('click', close);
     d.addEventListener('click', (e) => { if (e.target === d) close(); });
@@ -3645,7 +3665,7 @@ function bind() {
   window.addEventListener('hashchange', applyRoute);
   window.addEventListener('beforeunload', (e) => { if ((dom.editDialog.open && editDirty()) || panelDirty()) e.preventDefault(); });
   wideMQ.addEventListener('change', () => { renderBoard(); });
-  phoneMQ.addEventListener('change', () => { mountSearch(); renderBoard(); });
+  phoneMQ.addEventListener('change', () => { renderBoard(); });
   trackActiveSegment();
   }
 
