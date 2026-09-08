@@ -27,7 +27,7 @@ try {
     <span class="grid size-5 place-items-center rounded-md bg-accent font-mono text-11 font-semibold text-on-accent" aria-hidden="true">kb</span>
   </a>
   <div class="relative min-w-0">
-    <button type="button" id="project-btn" class="btn btn-ghost max-w-[220px] pl-2 pr-1.5" aria-haspopup="listbox" aria-expanded="false" aria-controls="project-menu" title="Project (p / P)">
+    <button type="button" id="project-btn" class="btn btn-ghost max-w-[220px] pl-2 pr-1.5" aria-haspopup="listbox" aria-expanded="false" aria-controls="project-menu" data-tip="Project (p / P)">
       <span id="project-name" class="truncate font-semibold text-fg">…</span>
       <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" class="text-fg-3"><path d="M5 6.5 8 9.5l3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
@@ -48,7 +48,7 @@ try {
   <button type="button" id="palette-btn" class="btn btn-ghost btn-icon" data-tip="Commands  Ctrl K" aria-label="Command palette" aria-haspopup="dialog">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5.5 6 8l-3 2.5M8 11h5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
-  <button type="button" id="new-task" class="btn btn-primary ml-1" title="New task (n)">
+  <button type="button" id="new-task" class="btn btn-primary ml-1" data-tip="New task (n)">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
     <span class="phone-hide">New task</span>
   </button>
@@ -65,7 +65,7 @@ try {
   <button type="button" id="help-btn" class="btn btn-ghost btn-icon phone-hide tip-left" data-tip="Keyboard  ?" aria-label="Keyboard help">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M6.2 6.4a1.9 1.9 0 1 1 2.6 1.8c-.5.2-.8.5-.8 1v.3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/><circle cx="8" cy="11.3" r=".8" fill="currentColor"/></svg>
   </button>
-  <span id="conn" class="ml-1 hidden items-center gap-1.5 pl-1 font-mono text-11 text-fg-3 md:flex" title="Connected"><span id="conn-dot" class="size-1.5 rounded-full bg-ok" aria-hidden="true"></span><span id="version"></span></span>
+  <span id="conn" class="ml-1 hidden items-center gap-1.5 pl-1 font-mono text-11 text-fg-3 md:flex" data-tip="Connected"><span id="conn-dot" class="size-1.5 rounded-full bg-ok" aria-hidden="true"></span><span id="version"></span></span>
 </header>
 
 <section id="filters" class="filters flex h-10 flex-none items-center gap-2 overflow-hidden border-b border-line bg-canvas px-3" aria-label="Search and filters">
@@ -74,7 +74,7 @@ try {
   <span class="mx-1 h-4 w-px flex-none bg-line phone-hide" aria-hidden="true"></span>
   <div id="labels" class="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-1 pr-6 [scrollbar-width:none] [mask-image:linear-gradient(90deg,#000_calc(100%-24px),transparent)] phone:flex-wrap phone:overflow-visible phone:[mask-image:none]" role="group" aria-label="Label filter"></div>
   <div id="active" class="flex flex-none items-center gap-1.5 empty:hidden phone:flex-wrap" aria-label="Active filters"></div>
-  <button type="button" id="clear-filters" class="btn btn-ghost btn-sm flex-none" title="Clear filters (X)" hidden>Clear</button>
+  <button type="button" id="clear-filters" class="btn btn-ghost btn-sm flex-none" data-tip="Clear filters (X)" hidden>Clear</button>
   <span id="result-count" class="num ml-auto flex-none text-12 text-fg-3"></span>
   <button type="button" id="filters-done" class="btn btn-primary phone-only">Done</button>
 </section>

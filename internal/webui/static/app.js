@@ -44,6 +44,7 @@ function setAttrs(node, attrs) {
     else if (key === 'class') node.className = value;
     else if (key === 'style') node.style.cssText = value;
     else if (key === 'checked' || key === 'disabled' || key === 'value' || key === 'selected') node[key] = value;
+    else if (key === 'title') node.setAttribute('data-tip', value); // the board draws its own tooltips
     else node.setAttribute(key, value === true ? '' : value);
   }
 }
@@ -179,9 +180,240 @@ function setMsg(group, text, tone) {
   const control = group.querySelector('input, textarea, select');
   if (control) { if (tone === 'error') control.setAttribute('aria-invalid', 'true'); else control.removeAttribute('aria-invalid'); }
 }
-// A bounded count control: two buttons and a number input that always agree.
+/* ============================== controls ============================== */
+// Every control is drawn by the board rather than the browser, so the UI reads
+// the same on every OS. Selects and date fields keep a hidden native element
+// for value and form semantics and get a button plus popover in front of it;
+// tooltips are one floating node; confirms go through the ask dialog.
+const POPOVER = 'showPopover' in HTMLElement.prototype;
+// Puts pop under anchor in the top layer (absolutely positioned without the Popover API).
+function showPop(pop, anchor) {
+  if (!POPOVER) { pop.hidden = false; return; }
+  pop.showPopover();
+  const r = anchor.getBoundingClientRect();
+  pop.style.minWidth = Math.round(r.width) + 'px';
+  const h = pop.offsetHeight, w = pop.offsetWidth;
+  const below = r.bottom + 4 + h <= window.innerHeight - 8;
+  pop.style.left = Math.round(clamp(r.left, 8, Math.max(8, window.innerWidth - w - 8))) + 'px';
+  pop.style.top = Math.round(below ? r.bottom + 4 : Math.max(8, r.top - 4 - h)) + 'px';
+}
+function hidePop(pop) {
+  if (POPOVER) { if (pop.matches(':popover-open')) pop.hidePopover(); } else pop.hidden = true;
+}
+// Closes the pop when the pointer lands outside it or the page moves; returns the teardown.
+function popDismiss(pop, anchor, close) {
+  const down = (e) => { if (!pop.contains(e.target) && !anchor.contains(e.target)) close(); };
+  const scroll = (e) => { if (!pop.contains(e.target)) close(); };
+  document.addEventListener('pointerdown', down, true);
+  document.addEventListener('scroll', scroll, true);
+  window.addEventListener('resize', close);
+  return () => { document.removeEventListener('pointerdown', down, true); document.removeEventListener('scroll', scroll, true); window.removeEventListener('resize', close); };
+}
+// Swaps the native element for a wrapper holding the trigger, the (hidden)
+// native, and the pop. The native keeps its name, value and form membership;
+// its classes move to the trigger so `input w-auto num` keep meaning.
+function wrapControl(native, trigger, pop) {
+  const wrap = el('div', { class: 'select' + (native.classList.contains('w-auto') ? ' w-auto' : '') });
+  trigger.className = native.className + ' select-trigger';
+  native.replaceWith(wrap);
+  wrap.append(trigger, native, pop);
+  native.className = 'select-native';
+  native.tabIndex = -1;
+  native.setAttribute('aria-hidden', 'true');
+  if (native.id) {
+    const lab = document.querySelector(`label[for="${native.id}"]`);
+    if (lab) { if (!lab.id) lab.id = uid('lab'); trigger.setAttribute('aria-labelledby', lab.id); }
+  }
+  const mirror = () => {
+    for (const a of ['aria-label', 'aria-invalid', 'aria-describedby']) { const v = native.getAttribute(a); if (v === null) trigger.removeAttribute(a); else trigger.setAttribute(a, v); }
+    trigger.disabled = native.disabled;
+  };
+  native.focus = () => trigger.focus();
+  native.addEventListener('focus', () => trigger.focus());
+  if (document.activeElement === native) trigger.focus();
+  return mirror;
+}
+// Instance-level value setter so `sel.value = x` repaints the trigger.
+function hookValue(native, proto, sync) {
+  const d = Object.getOwnPropertyDescriptor(proto, 'value');
+  Object.defineProperty(native, 'value', { get: () => d.get.call(native), set: (v) => { d.set.call(native, v); sync(); } });
+}
+function enhanceSelect(sel) {
+  if (sel.dataset.enhanced !== undefined) return;
+  sel.dataset.enhanced = '';
+  const label = el('span', { class: 'select-value' });
+  const trigger = el('button', { type: 'button', 'aria-haspopup': 'listbox', 'aria-expanded': 'false' }, label, icon('chevD', 14));
+  const pop = el('div', { class: 'pop select-pop', role: 'listbox', hidden: !POPOVER, popover: POPOVER ? 'manual' : null });
+  const mirror = wrapControl(sel, trigger, pop);
+  const sync = () => { const o = sel.selectedOptions[0]; label.textContent = o ? o.textContent : ''; label.classList.toggle('is-empty', !o || !o.value); mirror(); };
+  hookValue(sel, HTMLSelectElement.prototype, sync);
+  new MutationObserver(sync).observe(sel, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled', 'selected', 'aria-label', 'aria-invalid', 'aria-describedby'] });
+  let off = null;
+  const close = () => { if (!off) return; off(); off = null; hidePop(pop); trigger.setAttribute('aria-expanded', 'false'); };
+  const pick = (v) => { const changed = v !== sel.value; close(); trigger.focus(); if (changed) { sel.value = v; sel.dispatchEvent(new Event('change', { bubbles: true })); } };
+  const open = () => {
+    if (off || trigger.disabled) return;
+    const items = [...sel.options].map((o) => el('button', { type: 'button', role: 'option', class: 'menu-item', disabled: o.disabled, 'aria-selected': o.selected ? 'true' : 'false', onclick: () => pick(o.value), onmousemove: (e) => e.currentTarget.focus() },
+      el('span', { class: 'flex-1 truncate' }, o.textContent), o.selected ? icon('check', 14) : null));
+    pop.replaceChildren(...items);
+    showPop(pop, trigger);
+    trigger.setAttribute('aria-expanded', 'true');
+    off = popDismiss(pop, trigger, close);
+    const cur = items.find((b) => b.getAttribute('aria-selected') === 'true' && !b.disabled) || items.find((b) => !b.disabled);
+    if (cur) cur.focus();
+  };
+  trigger.addEventListener('click', () => (off ? close() : open()));
+  trigger.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); open(); } });
+  pop.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    const items = [...pop.querySelectorAll('.menu-item:not(:disabled)')];
+    const i = items.indexOf(document.activeElement);
+    const go = (j) => { e.preventDefault(); items[clamp(j, 0, items.length - 1)].focus(); };
+    if (e.key === 'ArrowDown') go(i + 1);
+    else if (e.key === 'ArrowUp') go(i - 1);
+    else if (e.key === 'Home') go(0);
+    else if (e.key === 'End') go(items.length - 1);
+    else if (e.key === 'Escape') { e.preventDefault(); close(); trigger.focus(); }
+    else if (e.key === 'Tab') close();
+    else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const k = e.key.toLowerCase();
+      const next = items.slice(i + 1).concat(items.slice(0, i + 1)).find((b) => b.textContent.trim().toLowerCase().startsWith(k));
+      if (next) { e.preventDefault(); next.focus(); }
+    }
+  });
+  sync();
+}
+
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const DOW = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+const isoDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const parseDay = (iso) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ''); return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null; };
+// "14 Sep 2026": one fixed shape, whatever the OS locale says.
+function fmtDay(iso) { const d = parseDay(iso); return d ? `${d.getDate()} ${MONTHS[d.getMonth()].slice(0, 3)} ${d.getFullYear()}` : ''; }
+function enhanceDate(input) {
+  if (input.dataset.enhanced !== undefined) return;
+  input.dataset.enhanced = '';
+  const label = el('span', { class: 'select-value' });
+  const trigger = el('button', { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false' }, icon('calendar', 14), label);
+  const pop = el('div', { class: 'pop cal-pop', role: 'dialog', 'aria-label': 'Choose a date', hidden: !POPOVER, popover: POPOVER ? 'manual' : null });
+  const mirror = wrapControl(input, trigger, pop);
+  trigger.classList.remove('num'); // the date reads in the UI face, with tabular figures
+  const sync = () => { const t = fmtDay(input.value); label.textContent = t || 'No date'; label.classList.toggle('is-empty', !t); mirror(); };
+  hookValue(input, HTMLInputElement.prototype, sync);
+  new MutationObserver(sync).observe(input, { attributes: true, attributeFilter: ['disabled', 'aria-label', 'aria-invalid', 'aria-describedby'] });
+  let off = null;
+  let view = null; // {y, m} of the month on show
+  const close = () => { if (!off) return; off(); off = null; hidePop(pop); trigger.setAttribute('aria-expanded', 'false'); };
+  const pick = (iso) => { const changed = iso !== input.value; close(); trigger.focus(); if (changed) { input.value = iso; input.dispatchEvent(new Event('change', { bubbles: true })); } };
+  const render = (focusIso) => {
+    const today = isoDay(new Date());
+    const first = new Date(view.y, view.m, 1);
+    const start = new Date(view.y, view.m, 1 - ((first.getDay() + 6) % 7));
+    const days = [];
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+      const iso = isoDay(d);
+      days.push(el('button', { type: 'button', class: 'day num' + (d.getMonth() !== view.m ? ' is-other' : '') + (iso === today ? ' is-today' : ''), 'data-iso': iso, tabindex: iso === focusIso ? '0' : '-1',
+        'aria-pressed': iso === input.value ? 'true' : 'false', 'aria-label': fmtDay(iso), onclick: () => pick(iso), onmousemove: (e) => e.currentTarget.focus() }, String(d.getDate())));
+    }
+    const nav = (delta, lbl, ic) => el('button', { type: 'button', class: 'btn btn-ghost btn-xs btn-icon', 'aria-label': lbl, onclick: () => { move(delta); const b = pop.querySelector('.day[tabindex="0"]'); if (b) b.focus(); } }, icon(ic, 14));
+    pop.replaceChildren(
+      el('div', { class: 'cal-head' }, nav(-1, 'Previous month', 'chevL'), el('span', { class: 'cal-title' }, `${MONTHS[view.m]} ${view.y}`), nav(1, 'Next month', 'chevR')),
+      el('div', { class: 'cal-grid' }, ...DOW.map((d) => el('span', { class: 'dow', 'aria-hidden': 'true' }, d)), ...days),
+      el('div', { class: 'cal-foot' }, el('button', { type: 'button', class: 'btn btn-ghost btn-xs', onclick: () => pick(today) }, 'Today'), el('span', { class: 'flex-1' }),
+        input.value ? el('button', { type: 'button', class: 'btn btn-ghost btn-xs', onclick: () => pick('') }, 'Clear') : null));
+  };
+  const move = (delta) => { const d = new Date(view.y, view.m + delta, 1); view = { y: d.getFullYear(), m: d.getMonth() }; render(isoDay(d)); };
+  const open = () => {
+    if (off || trigger.disabled) return;
+    const cur = parseDay(input.value) || new Date();
+    view = { y: cur.getFullYear(), m: cur.getMonth() };
+    render(isoDay(cur));
+    showPop(pop, trigger);
+    trigger.setAttribute('aria-expanded', 'true');
+    off = popDismiss(pop, trigger, close);
+    const b = pop.querySelector('.day[tabindex="0"]');
+    if (b) b.focus();
+  };
+  trigger.addEventListener('click', () => (off ? close() : open()));
+  trigger.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); open(); } });
+  pop.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); close(); trigger.focus(); return; }
+    if (e.key === 'Tab') { close(); return; }
+    const cur = parseDay(document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.iso : '');
+    if (!cur) return;
+    const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[e.key];
+    let next = null;
+    if (step) next = new Date(cur.getFullYear(), cur.getMonth(), cur.getDate() + step);
+    else if (e.key === 'Home') next = new Date(cur.getFullYear(), cur.getMonth(), cur.getDate() - ((cur.getDay() + 6) % 7));
+    else if (e.key === 'End') next = new Date(cur.getFullYear(), cur.getMonth(), cur.getDate() + 6 - ((cur.getDay() + 6) % 7));
+    else if (e.key === 'PageUp') next = new Date(cur.getFullYear(), cur.getMonth() - 1, cur.getDate());
+    else if (e.key === 'PageDown') next = new Date(cur.getFullYear(), cur.getMonth() + 1, cur.getDate());
+    if (!next) return;
+    e.preventDefault();
+    if (next.getMonth() !== view.m || next.getFullYear() !== view.y) { view = { y: next.getFullYear(), m: next.getMonth() }; render(isoDay(next)); }
+    for (const b of pop.querySelectorAll('.day')) b.tabIndex = b.dataset.iso === isoDay(next) ? 0 : -1;
+    const b = pop.querySelector(`.day[data-iso="${isoDay(next)}"]`);
+    if (b) b.focus();
+  });
+  sync();
+}
+// Enhances every select and date input under root, now and as they arrive.
+function enhanceControls(root) {
+  if (root.nodeType !== 1) return;
+  if (root.matches('select')) enhanceSelect(root);
+  else if (root.matches('input[type="date"]')) enhanceDate(root);
+  for (const s of root.querySelectorAll('select')) enhanceSelect(s);
+  for (const d of root.querySelectorAll('input[type="date"]')) enhanceDate(d);
+}
+function initControls() {
+  enhanceControls(document.body);
+  new MutationObserver((muts) => { for (const m of muts) for (const n of m.addedNodes) enhanceControls(n); }).observe(document.body, { childList: true, subtree: true });
+  // Auto-grow plain textareas instead of showing the browser's resize grip.
+  document.addEventListener('input', (e) => { if (e.target.matches && e.target.matches('textarea.input')) growTextarea(e.target); });
+  document.addEventListener('focusin', (e) => { if (e.target.matches && e.target.matches('textarea.input')) growTextarea(e.target); });
+}
+function growTextarea(ta) { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight + 2, 320) + 'px'; }
+
+// One floating tooltip for every [data-tip]; el() maps `title` onto it. It is a
+// popover so it sits above open dialogs, and it waits 300ms like a native tip.
+const tip = { node: null, target: null, timer: 0 };
+function showTip(target) {
+  const text = target.dataset.tip;
+  clearTimeout(tip.timer);
+  if (!text || matchMedia('(pointer: coarse)').matches) return;
+  if (!tip.node) { tip.node = el('div', { class: 'tip', role: 'tooltip', hidden: !POPOVER, popover: POPOVER ? 'manual' : null }); document.body.append(tip.node); }
+  tip.target = target;
+  tip.timer = setTimeout(() => {
+    if (!target.isConnected || tip.target !== target) return;
+    tip.node.textContent = text;
+    if (POPOVER) { if (!tip.node.matches(':popover-open')) tip.node.showPopover(); } else tip.node.hidden = false;
+    const r = target.getBoundingClientRect(), t = tip.node.getBoundingClientRect();
+    const x = clamp(r.left + r.width / 2 - t.width / 2, 8, Math.max(8, window.innerWidth - t.width - 8));
+    const y = r.bottom + 6 + t.height <= window.innerHeight - 8 ? r.bottom + 6 : r.top - t.height - 6;
+    tip.node.style.left = Math.round(x) + 'px';
+    tip.node.style.top = Math.round(y) + 'px';
+  }, 300);
+}
+function hideTip() {
+  clearTimeout(tip.timer);
+  tip.target = null;
+  if (!tip.node) return;
+  if (POPOVER) { if (tip.node.matches(':popover-open')) tip.node.hidePopover(); } else tip.node.hidden = true;
+}
+function initTips() {
+  document.addEventListener('mouseover', (e) => { const t = e.target.closest ? e.target.closest('[data-tip]') : null; if (!t) hideTip(); else if (t !== tip.target) showTip(t); });
+  document.addEventListener('focusin', (e) => { const t = e.target.closest ? e.target.closest('[data-tip]') : null; if (t && t.matches(':focus-visible')) showTip(t); else hideTip(); });
+  for (const type of ['mousedown', 'keydown', 'scroll', 'focusout']) document.addEventListener(type, hideTip, true);
+}
+// confirmDiscard(message, {title, ok}) -> Promise<boolean>; the board's own dialog, never window.confirm.
+const confirmDiscard = (message, opts = {}) => ask({ title: opts.title || 'Discard changes?', message,
+  actions: [{ value: null, label: opts.cancel || 'Keep editing' }, { value: 'ok', label: opts.ok || 'Discard', class: 'btn btn-danger' }] }).then((r) => !!(r && r.value));
+
+// A bounded count control: two buttons and a numeric text field that always agree.
 function stepper(label, value, onChange, min = 1, max = 20) {
-  const input = el('input', { type: 'number', class: 'input num w-16 text-center', min: String(min), max: String(max), step: '1', inputmode: 'numeric', value: String(value), 'aria-label': label,
+  const input = el('input', { type: 'text', class: 'input num w-16 text-center', inputmode: 'numeric', autocomplete: 'off', value: String(value), 'aria-label': label,
     onchange: (e) => { const n = clamp(Math.round(Number(e.target.value) || min), min, max); e.target.value = String(n); onChange(n); bounds(); } });
   const down = el('button', { type: 'button', class: 'btn btn-icon', 'aria-label': `One fewer, ${label}`, onclick: () => step(-1) }, icon('minus', 14));
   const up = el('button', { type: 'button', class: 'btn btn-icon', 'aria-label': `One more, ${label}`, onclick: () => step(1) }, icon('plus', 14));
@@ -648,7 +880,7 @@ function setOnline(online) {
   dom.banner.hidden = online;
   dom.connDot.classList.toggle('bg-ok', online);
   dom.connDot.classList.toggle('bg-danger', !online);
-  dom.conn.title = online ? 'Connected' : 'Connection lost';
+  dom.conn.dataset.tip = online ? 'Connected' : 'Connection lost';
 }
 // Wraps a mutation: toasts errors, reconciles with the server afterwards. Returns the result or undefined.
 async function mutate(fn, okMessage, undo) {
@@ -761,7 +993,7 @@ function clearFilters() {
 function renderHeader() {
   const { meta } = state;
   dom.version.textContent = meta.version ? 'v' + String(meta.version).replace(/^v/, '') : '';
-  dom.version.title = state.mode === 'stream' ? 'Live updates: server push' : 'Live updates: polling every 5 seconds';
+  dom.version.dataset.tip = state.mode === 'stream' ? 'Live updates: server push' : 'Live updates: polling every 5 seconds';
   dom.projectName.textContent = state.project === ALL_PROJECTS ? 'All projects' : state.project || 'No project';
   if (!dom.projectMenu.hidden) renderProjectMenu();
   if (!dom.editDialog.open) {
@@ -1002,7 +1234,7 @@ function renderBoard() {
     const over = limit > 0 && tasks.length > limit;
     col.classList.toggle('is-over', over);
     tickCounter(count, limit ? `${tasks.length}/${limit}` : String(tasks.length));
-    count.title = over ? `Over the WIP limit of ${limit}` : limit ? `WIP limit ${limit}` : '';
+    if (limit) count.dataset.tip = over ? `Over the WIP limit of ${limit}` : `WIP limit ${limit}`; else delete count.dataset.tip;
     const seg = dom.segments.querySelector(`[data-status="${status}"] .seg-count`);
     if (seg) tickCounter(seg, String(tasks.length));
     const hidden = (status === 'cancelled' && !settings.showCancelled) || (settings.hideEmpty && tasks.length === 0 && !anyFilter());
@@ -1505,7 +1737,7 @@ function mdEditor(opts = {}) {
   root.append(...clean([bar, el('div', { class: 'editor-body' }, ta, preview), foot]));
   const api_ = { root, ta, get value() { return ta.value; }, set(v) { ta.value = v; refresh(); }, focus() { refresh(); ta.focus(); ta.setSelectionRange(0, 0); ta.scrollTop = 0; }, dirty: () => ta.value !== initial, refresh };
   const save = () => { if (opts.onSave) opts.onSave(ta.value, api_); };
-  const cancel = () => { if (!opts.onCancel) return false; if (api_.dirty() && !confirm('Discard changes?')) return true; opts.onCancel(api_); return true; };
+  const cancel = async () => { if (!opts.onCancel) return; if (api_.dirty() && !(await confirmDiscard('The text you typed here has not been saved.'))) return; opts.onCancel(api_); };
   ta.addEventListener('input', () => { refresh(); root.classList.toggle('is-dirty', ta.value !== initial); });
   ta.addEventListener('keydown', (e) => {
     const mod = e.ctrlKey || e.metaKey;
@@ -1661,9 +1893,10 @@ function openDetail(ref, opts = {}) {
   if (!opts.route && location.hash !== '#/t/' + key) location.hash = '#/t/' + key;
   loadDetail(key).then(() => { if (opts.focusComment) focusComposer(); });
 }
-function closeDetail(opts = {}) {
+async function closeDetail(opts = {}) {
   if (!state.detail) return;
-  if (panelDirty() && !confirm('Discard unsaved changes?')) return;
+  if (panelDirty() && !(await confirmDiscard('This card has edits that have not been saved.'))) return;
+  if (!state.detail) return;
   const t = state.detailData && state.detailData.task;
   state.detail = null;
   state.detailJSON = '';
@@ -1843,7 +2076,7 @@ function renderDetail(data) {
   // blockers
   const linkNumber = el('input', { type: 'text', inputmode: 'numeric', class: 'input w-20 num', placeholder: '#12', 'aria-label': 'Task number', required: true, pattern: '#?\\d+', autocomplete: 'off' });
   const linkDir = el('select', { class: 'input w-auto', 'aria-label': 'Link direction' }, el('option', { value: 'blockedBy' }, 'Blocked by'), el('option', { value: 'blocks' }, 'Blocks'));
-  const linkForm = el('form', { class: 'mt-3 flex items-center gap-2', onsubmit: (e) => { e.preventDefault(); addLink(task, linkDir.value, linkNumber.value); } },
+  const linkForm = el('form', { class: 'mt-3 flex items-center gap-2', novalidate: true, onsubmit: (e) => { e.preventDefault(); addLink(task, linkDir.value, linkNumber.value); } },
     linkDir, linkNumber, el('button', { type: 'submit', class: 'btn' }, icon('link', 14), 'Link'));
   // The two link lists share the property grid, so their labels sit in the same
   // 96px column as every other label in the modal.
@@ -2068,8 +2301,8 @@ function openEdit(task, preset = {}) {
   if (!task && preset.title) loadSimilar(preset.title.trim());
 }
 const editDirty = () => JSON.stringify(readForm()) !== state.editSnapshot;
-function requestCloseEdit() {
-  if (editDirty() && !confirm('Discard changes?')) return;
+async function requestCloseEdit() {
+  if (editDirty() && !(await confirmDiscard('The card has changes that have not been saved.'))) return;
   closeDialog(dom.editDialog);
 }
 async function saveEdit() {
@@ -2296,7 +2529,7 @@ function renderDisplay() {
     row('Sort', el('select', { class: 'input w-auto', 'aria-label': 'Column sort', onchange: (e) => { settings.sort = e.target.value; applySettings(); } },
       ...[['position', 'Position'], ['prio', 'Priority'], ['due', 'Due date']].map(([v, t]) => el('option', { value: v, selected: settings.sort === v }, t)))),
     head('WIP limits'),
-    el('div', { class: 'grid grid-cols-4 gap-2' }, ...STATUSES.map((s) => el('label', { class: 'flex flex-col gap-1 text-11 text-fg-3' }, STATUS_LABEL[s], el('input', { type: 'number', class: 'input num px-2', min: '0', step: '1', inputmode: 'numeric', value: settings.wip[s] || '', placeholder: '∞', 'aria-label': `WIP limit for ${STATUS_LABEL[s]}`,
+    el('div', { class: 'grid grid-cols-4 gap-2' }, ...STATUSES.map((s) => el('label', { class: 'flex flex-col gap-1 text-11 text-fg-3' }, STATUS_LABEL[s], el('input', { type: 'text', class: 'input num px-2', inputmode: 'numeric', autocomplete: 'off', value: settings.wip[s] || '', placeholder: '∞', 'aria-label': `WIP limit for ${STATUS_LABEL[s]}`,
       onchange: (e) => { const n = Number(e.target.value); if (n > 0) settings.wip[s] = n; else delete settings.wip[s]; applySettings(); } })))),
   );
 }
@@ -2407,8 +2640,8 @@ async function openSettings(section) {
   if (first) first.focus();
 }
 const forgeRowOf = (s) => ({ name: s.name, kind: s.kind, baseURL: s.baseURL || '', project: '', token: '', hasToken: !!s.hasToken, createdAt: s.createdAt, clearToken: false, editToken: false, msg: '', tone: '', armed: false });
-function closeSettings() {
-  if (ssetState() !== sset.snapshot && !confirm('Discard unsaved settings?')) return;
+async function closeSettings() {
+  if (ssetState() !== sset.snapshot && !(await confirmDiscard('Settings you changed here have not been saved.', { title: 'Discard unsaved settings?' }))) return;
   sset.loaded = false;
   closeDialog(dom.settingsDialog);
   // A source may have been added while the import wizard sat behind this dialog.
@@ -2719,8 +2952,8 @@ function openSplit() {
   const ta = dom.splitBody.querySelector('textarea');
   if (ta) ta.focus();
 }
-function closeSplit() {
-  if (splitState.stage === 'review' && splitState.cards.some((c) => c.include) && !confirm('Discard the proposed stories?')) return;
+async function closeSplit() {
+  if (splitState.stage === 'review' && splitState.cards.some((c) => c.include) && !(await confirmDiscard('The proposed stories have not been created yet.', { title: 'Discard the proposed stories?', cancel: 'Keep reviewing' }))) return;
   closeDialog(dom.splitDialog);
 }
 function renderSplit() {
@@ -2881,8 +3114,8 @@ async function openImport() {
   const first = dom.importBody.querySelector('select, input');
   if (first) first.focus();
 }
-function closeImport() {
-  if (importState.stage === 'review' && !importState.done && importState.drafts.some((d) => d.include) && !confirm('Discard the fetched issues?')) return;
+async function closeImport() {
+  if (importState.stage === 'review' && !importState.done && importState.drafts.some((d) => d.include) && !(await confirmDiscard('The fetched issues have not been imported yet.', { title: 'Discard the fetched issues?', cancel: 'Keep reviewing' }))) return;
   closeDialog(dom.importDialog);
 }
 function renderImport() {
@@ -3411,6 +3644,8 @@ function bind() {
 /* ============================== init ============================== */
 async function init() {
   $('#settings-mod').textContent = MOD;
+  initControls();
+  initTips();
   applySettings(false);
   buildBoard();
   mountSearch();
