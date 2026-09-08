@@ -15,8 +15,8 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
-// testProject is the project the shared harness makes active, and the label
-// every card an MCP test creates is expected to carry.
+// testProject is the project every add_task call in the shared harness
+// names, and the label every card an MCP test creates is expected to carry.
 const testProject = "mcp"
 
 const testProjectLabel = "project::" + testProject
@@ -77,14 +77,11 @@ func connect(t *testing.T) *mcp.ClientSession {
 // connectWithStore also returns the real SQLite store so MCP tests can seed
 // fixtures through the same write paths used by the other application surfaces.
 //
-// Every write path now demands a project, so the harness sets KB_PROJECT the
-// way the CLI test env does: tests about something else need not spell one
-// out, and the ones about projects override it per call.
+// add_task demands a project and nothing supplies one implicitly, so every
+// add_task call here passes testProject unless the test is about projects.
 func connectWithStore(t *testing.T) (*mcp.ClientSession, *store.Store) {
 	t.Helper()
-	dataDir := t.TempDir()
-	t.Setenv("KB_PROJECT", testProject)
-	st, err := store.Open(filepath.Join(dataDir, "kb.db"), []byte("test-secret"))
+	st, err := store.Open(filepath.Join(t.TempDir(), "kb.db"), []byte("test-secret"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -92,7 +89,7 @@ func connectWithStore(t *testing.T) (*mcp.ClientSession, *store.Store) {
 
 	serverT, clientT := mcp.NewInMemoryTransports()
 	ctx := context.Background()
-	ss, err := newServer(st, "tester", dataDir, "test-version").Connect(ctx, serverT, nil)
+	ss, err := newServer(st, "tester", "test-version").Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -448,15 +445,16 @@ func TestAddListRoundTrip(t *testing.T) {
 
 	var created taskJSON
 	callOK(t, cs, "add_task", map[string]any{
-		"title":  "Write MCP docs",
-		"desc":   "cover all five tools",
-		"status": "doing",
-		"prio":   2,
-		"due":    "2026-08-01",
-		"effort": "M",
-		"tags":   []string{"docs", "mcp"},
-		"checks": []map[string]any{{"text": "outline", "done": true}, {"text": "draft"}},
-		"emoji":  "📝",
+		"title":   "Write MCP docs",
+		"project": testProject,
+		"desc":    "cover all five tools",
+		"status":  "doing",
+		"prio":    2,
+		"due":     "2026-08-01",
+		"effort":  "M",
+		"tags":    []string{"docs", "mcp"},
+		"checks":  []map[string]any{{"text": "outline", "done": true}, {"text": "draft"}},
+		"emoji":   "📝",
 	}, &created)
 	if created.ID == "" {
 		t.Fatal("created task has no id")
@@ -490,7 +488,7 @@ func TestUpdateMoveDelete(t *testing.T) {
 	cs := connect(t)
 
 	var created taskJSON
-	callOK(t, cs, "add_task", map[string]any{"title": "Ship it"}, &created)
+	callOK(t, cs, "add_task", map[string]any{"title": "Ship it", "project": testProject}, &created)
 
 	var updated taskJSON
 	callOK(t, cs, "update_task", map[string]any{"id": created.ID[:9], "prio": 1, "tags": []string{"release"}}, &updated)
@@ -540,7 +538,7 @@ func TestDeleteTaskIsSoftByDefault(t *testing.T) {
 	cs := connect(t)
 
 	var created taskJSON
-	callOK(t, cs, "add_task", map[string]any{"title": "Maybe not"}, &created)
+	callOK(t, cs, "add_task", map[string]any{"title": "Maybe not", "project": testProject}, &created)
 
 	var deleted taskJSON
 	callOK(t, cs, "delete_task", map[string]any{"id": created.ID}, &deleted)
@@ -580,8 +578,9 @@ func TestMoveToDoneNeedsForce(t *testing.T) {
 
 	var created taskJSON
 	callOK(t, cs, "add_task", map[string]any{
-		"title":  "Ship it",
-		"checks": []map[string]any{{"text": "write tests", "done": true}, {"text": "update docs"}},
+		"title":   "Ship it",
+		"project": testProject,
+		"checks":  []map[string]any{{"text": "write tests", "done": true}, {"text": "update docs"}},
 	}, &created)
 
 	msg := callErr(t, cs, "move_task", map[string]any{"id": created.ID, "status": "done"})
@@ -611,7 +610,7 @@ func TestMoveToDoneNeedsForce(t *testing.T) {
 
 	// A blocked task with nothing open is still guarded, and says why.
 	var blocked taskJSON
-	callOK(t, cs, "add_task", map[string]any{"title": "Waiting", "blocked": true}, &blocked)
+	callOK(t, cs, "add_task", map[string]any{"title": "Waiting", "project": testProject, "blocked": true}, &blocked)
 	if !blocked.Blocked {
 		t.Fatalf("add_task did not set blocked: %+v", blocked)
 	}
@@ -639,8 +638,9 @@ func TestUpdateToDoneIsGuardedAndAtomic(t *testing.T) {
 
 	var created taskJSON
 	callOK(t, cs, "add_task", map[string]any{
-		"title":  "Ship it",
-		"checks": []map[string]any{{"text": "write tests"}, {"text": "update docs"}},
+		"title":   "Ship it",
+		"project": testProject,
+		"checks":  []map[string]any{{"text": "write tests"}, {"text": "update docs"}},
 	}, &created)
 
 	// Refused: both items are still open once this patch lands. The title
@@ -682,7 +682,7 @@ func TestUpdateToDoneIsGuardedAndAtomic(t *testing.T) {
 
 	// force: true skips the guard here exactly as it does on move_task.
 	var blocked taskJSON
-	callOK(t, cs, "add_task", map[string]any{"title": "Waiting", "blocked": true}, &blocked)
+	callOK(t, cs, "add_task", map[string]any{"title": "Waiting", "project": testProject, "blocked": true}, &blocked)
 	callOK(t, cs, "update_task", map[string]any{"id": blocked.ID, "status": "done", "force": true}, &blocked)
 	if blocked.Status != "done" {
 		t.Errorf("forced update_task: status %q, want done", blocked.Status)
@@ -693,7 +693,7 @@ func TestUpdateToDoneIsGuardedAndAtomic(t *testing.T) {
 // path that resolves the task itself before moving it.
 func TestUnknownIdOnGuardedMove(t *testing.T) {
 	cs := connect(t)
-	callOK(t, cs, "add_task", map[string]any{"title": "Only one"}, &taskJSON{})
+	callOK(t, cs, "add_task", map[string]any{"title": "Only one", "project": testProject}, &taskJSON{})
 	if msg := callErr(t, cs, "move_task", map[string]any{"id": "nope", "status": "done"}); !strings.Contains(msg, "list_tasks") {
 		t.Errorf("unknown id error %q does not point at list_tasks", msg)
 	}
