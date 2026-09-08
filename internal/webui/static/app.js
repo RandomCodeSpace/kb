@@ -2040,15 +2040,13 @@ function renderDetail(data) {
     ] : []),
   );
 
-  // description: rendered markdown, click to edit
+  // description: rendered markdown in a bordered box; the pencil opens the editor
   const descBox = el('div', {});
   const descEdit = el('button', { type: 'button', class: 'btn btn-ghost btn-xs btn-icon ml-auto', 'aria-label': 'Edit description', 'data-tip': 'Edit description', onclick: () => editDesc() }, icon('pencil', 12));
   const showDesc = () => {
     descEdit.hidden = false;
-    const view = renderMarkdown(task.desc, { empty: 'No description. Click to add one.' });
-    view.classList.add('cursor-text', 'rounded-md', '-mx-2', 'px-2', 'py-1', 'hover:bg-raised');
-    view.addEventListener('click', (e) => { if (!e.target.closest('a, button')) editDesc(); });
-    descBox.replaceChildren(view);
+    const view = renderMarkdown(task.desc, { empty: 'No description yet.' });
+    descBox.replaceChildren(el('div', { class: 'desc-box' }, view));
   };
   const editDesc = () => {
     descEdit.hidden = true;
@@ -2212,6 +2210,8 @@ async function addLink(task, direction, number) {
   const body = direction === 'blocks' ? { blocker: String(task.seq), blocked: other } : { blocker: other, blocked: String(task.seq) };
   try {
     await api('POST', '/api/links', body);
+    // A new blocker flips the card's blocked flag, so the toggle and the chip follow the link.
+    if (direction === 'blockedBy' && !task.blocked) { await patchTask(task.id, { blocked: true }); task.blocked = true; }
     toast(`Linked #${task.seq} and #${other}`, 'ok');
     loadDetail(state.detail, true);
     invalidate();
@@ -2221,6 +2221,9 @@ async function removeLink(task, other) {
   const blocks = (state.detailData && state.detailData.links && state.detailData.links.blocks || []).some((t) => t.id === other.id);
   try {
     await api('DELETE', '/api/links', { a: task.id, b: other.id });
+    // The last blocker gone clears the flag it set.
+    const left = (state.detailData && state.detailData.links && state.detailData.links.blockedBy || []).filter((t) => t.id !== other.id);
+    if (!blocks && task.blocked && !left.length) { await patchTask(task.id, { blocked: false }); task.blocked = false; }
     loadDetail(state.detail, true);
     invalidate();
     const relink = blocks ? { blocker: task.id, blocked: other.id } : { blocker: other.id, blocked: task.id };
