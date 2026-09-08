@@ -115,10 +115,15 @@ matching `kb restore`. Cancel semantics: `store.CancelTask(user, ref, reason)`.
 
 ## Static UI
 
-Embedded from `internal/webui/static/` via `embed.FS`:
-`index.html`, `app.css`, `app.js`. No build step, no external network fetches,
-no CDN. Served at `/` with `Content-Type` by extension. Unknown paths under `/`
-fall back to `index.html`; `/api/*` never falls back.
+Embedded from `internal/webui/static/` via `embed.FS`: `index.html`, `app.css`,
+`app.js`, plus the vendored `marked.min.js` and `purify.min.js` (see
+`static/VENDOR.md`). `app.css` is generated: edit
+`internal/webui/tailwind/app.css` and run `sh scripts/build-web-css.sh`
+(`--check` verifies the committed output). No bundler and no runtime script
+CDN; the only external fetch is the Inter / JetBrains Mono stylesheet from
+Google Fonts, with a system font fallback when offline. Served at `/` with
+`Content-Type` by extension. Unknown paths under `/` fall back to
+`index.html`; `/api/*` never falls back.
 
 ## Change detection
 
