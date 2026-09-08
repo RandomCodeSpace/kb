@@ -59,12 +59,30 @@ func TestLocalDoneGuardReevaluatesAfterConcurrentUpdate(t *testing.T) {
 	}
 }
 
+// implicitProject makes runCmd add "-p inbox" to an add that names no
+// project, so tests about something else need not spell it out. Tests about
+// the project rule itself switch it off through noProjectEnv.
+var implicitProject = true
+
 // runCmd invokes Run capturing both streams.
 func runCmd(t *testing.T, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
+	args = withImplicitProject(args)
 	var out, errb bytes.Buffer
 	code = Run(args, &out, &errb)
 	return out.String(), errb.String(), code
+}
+
+func withImplicitProject(args []string) []string {
+	if !implicitProject || len(args) == 0 || args[0] != "add" {
+		return args
+	}
+	for _, a := range args[1:] {
+		if a == "-p" || a == "--project" || strings.HasPrefix(a, "-p=") || strings.HasPrefix(a, "--project=") || strings.HasPrefix(a, "project::") {
+			return args
+		}
+	}
+	return append(append([]string{}, args...), "-p", inboxProject)
 }
 
 // localEnv selects a fresh temp data directory.
@@ -72,9 +90,6 @@ func localEnv(t *testing.T) string {
 	t.Helper()
 	t.Setenv("KB_USER", "")
 	t.Setenv("KB_SECRET", "test-secret")
-	// Projects are mandatory: give the seeded tasks one so tests that are
-	// about something else do not have to spell it out.
-	t.Setenv("KB_PROJECT", inboxProject)
 	return t.TempDir()
 }
 
