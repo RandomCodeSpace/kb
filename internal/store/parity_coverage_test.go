@@ -210,6 +210,29 @@ func TestCommentStoreReportsDatabaseFailures(t *testing.T) {
 		}
 	})
 
+	// The row loads fine and only the write fails: a trigger refuses the change.
+	t.Run("update write", func(t *testing.T) {
+		s := seed(t)
+		if _, err := s.AddComment("u", "1", "u", "note"); err != nil {
+			t.Fatal(err)
+		}
+		mustExecCoverage(t, s, `CREATE TRIGGER refuse_update BEFORE UPDATE ON comments BEGIN SELECT RAISE(ABORT, 'refused'); END`)
+		if _, err := s.UpdateComment("u", 1, "edited"); err == nil || !strings.Contains(err.Error(), "update comment") {
+			t.Fatalf("UpdateComment past a refusing trigger = %v", err)
+		}
+	})
+
+	t.Run("delete write", func(t *testing.T) {
+		s := seed(t)
+		if _, err := s.AddComment("u", "1", "u", "note"); err != nil {
+			t.Fatal(err)
+		}
+		mustExecCoverage(t, s, `CREATE TRIGGER refuse_delete BEFORE DELETE ON comments BEGIN SELECT RAISE(ABORT, 'refused'); END`)
+		if _, err := s.DeleteComment("u", 1); err == nil || !strings.Contains(err.Error(), "delete comment") {
+			t.Fatalf("DeleteComment past a refusing trigger = %v", err)
+		}
+	})
+
 	t.Run("orphaned comment still updates", func(t *testing.T) {
 		s := seed(t)
 		mustExecCoverage(t, s, `INSERT INTO comments(scope, id, task_id, author, body, created_at) VALUES ('u', 8, 'ghost', 'u', 'orphan', '2026-01-01T00:00:00Z')`)
