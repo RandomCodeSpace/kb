@@ -285,7 +285,8 @@ func classify(repo, base, head, modulePath string, changes []change, packages []
 					ownerSet[pkg] = true
 				}
 			}
-			if strings.HasPrefix(path, "internal/webui/static/") {
+			if strings.HasPrefix(path, "internal/webui/static/") ||
+				strings.HasPrefix(path, "internal/webui/tailwind/") || path == "scripts/build-web-css.sh" {
 				if pkg := dirToPackage["internal/webui"]; pkg != "" {
 					ownerSet[pkg] = true
 				}
@@ -358,6 +359,10 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 		// are served by their package, so its tests own them.
 		mark("focused_quality", &result.Checks.FocusedQuality)
 		mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
+	case strings.HasPrefix(path, "internal/webui/tailwind/") || path == "scripts/build-web-css.sh":
+		// Stylesheet source and its build script only matter through the
+		// committed static/app.css, which the webui package tests serve.
+		mark("focused_quality", &result.Checks.FocusedQuality)
 	case path == "scripts/check-go-coverage.sh" || path == "scripts/check-go-format.sh" ||
 		path == "scripts/check-go-checkers.test.sh" || path == "scripts/check-docs.sh":
 		mark("ci_contract", &result.Checks.CIContract)
