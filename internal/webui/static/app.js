@@ -256,6 +256,7 @@ function enhanceSelect(sel) {
     const items = [...sel.options].map((o) => el('button', { type: 'button', role: 'option', class: 'menu-item', disabled: o.disabled, 'aria-selected': o.selected ? 'true' : 'false', onclick: () => pick(o.value), onmousemove: (e) => e.currentTarget.focus() },
       el('span', { class: 'flex-1 truncate' }, o.textContent), o.selected ? icon('check', 14) : null));
     pop.replaceChildren(...items);
+    pop.classList.toggle('pop-sm', trigger.offsetHeight < 32);
     showPop(pop, trigger);
     trigger.setAttribute('aria-expanded', 'true');
     off = popDismiss(pop, trigger, close);

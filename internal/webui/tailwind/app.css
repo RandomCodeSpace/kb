@@ -218,6 +218,9 @@
   .select-trigger[aria-expanded="true"] { border-color: var(--t-focus); }
   .select-trigger:disabled { opacity: 0.5; cursor: default; }
   .select-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* property grid: the pickers match the 28px segments beside them, and their lists follow */
+  .props .select-trigger { height: 28px; font-size: 12px; padding: 0 6px 0 8px; gap: 6px; }
+  .pop-sm .menu-item { height: 28px; font-size: 12px; }
   .select-value.is-empty { color: var(--t-fg-3); }
   .select > .pop:not([popover]) { top: calc(100% + 4px); left: 0; }
   .pop[popover] { position: fixed; inset: auto; margin: 0; }
