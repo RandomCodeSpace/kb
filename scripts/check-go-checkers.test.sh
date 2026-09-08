@@ -375,7 +375,7 @@ assert_contains 'base=$(git merge-base "$PR_BASE_SHA" "$head")' \
 assert_contains 'base=$(git rev-parse "$PUSH_BEFORE_SHA^{commit}")' \
   "$quality_workflow" "main-push before impact"
 assert_contains '--format github' "$quality_workflow" "GitHub impact output"
-assert_contains 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' \
+assert_contains 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
   "$quality_workflow" "pinned performance evidence upload"
 assert_contains 'if-no-files-found: error' "$quality_workflow" \
   "required performance evidence"
