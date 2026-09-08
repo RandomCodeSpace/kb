@@ -1617,6 +1617,11 @@ function clearSelection() {
   state.selected.clear();
   renderBoard();
 }
+// The bar is centred on a whole pixel: a translate(-50%) of an odd width lands on a half.
+function centreBulkBar() {
+  if (dom.bulkbar.hidden) return;
+  dom.bulkbar.style.left = Math.round((window.innerWidth - dom.bulkbar.offsetWidth) / 2) + 'px';
+}
 function renderBulkBar() {
   const n = state.selected.size;
   const was = !dom.bulkbar.hidden;
@@ -1635,7 +1640,8 @@ function renderBulkBar() {
     el('button', { type: 'button', class: 'btn', onclick: () => bulkCancel(ids()) }, 'Cancel tasks'),
     el('button', { type: 'button', class: 'btn btn-ghost btn-icon', 'aria-label': 'Clear selection', title: 'Clear selection (Esc)', onclick: clearSelection }, icon('x')),
   );
-  if (!was) animate(dom.bulkbar, [{ opacity: 0, transform: 'translate(-50%, 8px)' }, { opacity: 1, transform: 'translate(-50%, 0)' }], 160);
+  centreBulkBar();
+  if (!was) animate(dom.bulkbar, [{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }], 160);
 }
 async function bulkPatch(ids, patchFor, label) {
   let n = 0;
@@ -2080,7 +2086,7 @@ function renderDetail(data) {
     linkDir, linkNumber, el('button', { type: 'submit', class: 'btn' }, icon('link', 14), 'Link'));
   // The two link lists share the property grid, so their labels sit in the same
   // 96px column as every other label in the modal.
-  const linkItems = (items) => (items.length ? items.map((t) => el('span', { class: 'flex items-center gap-1' }, taskLink(t),
+  const linkItems = (items) => (items.length ? items.map((t) => el('span', { class: 'link-item' }, taskLink(t),
     el('button', { type: 'button', class: 'btn btn-ghost btn-xs btn-icon', 'aria-label': `Unlink #${t.seq}`, title: 'Unlink', onclick: () => removeLink(task, t) }, icon('x', 12)))) : [el('span', { class: 'text-12 text-fg-3' }, 'None')]);
   const blockSection = sectionEl('Blockers', null,
     el('dl', { class: 'props' }, el('dt', {}, 'Blocked by'), el('dd', {}, ...linkItems(links.blockedBy || [])), el('dt', {}, 'Blocks'), el('dd', {}, ...linkItems(links.blocks || []))),
@@ -2291,7 +2297,7 @@ function openEdit(task, preset = {}) {
   editDescEditor = mdEditor({ value: task ? task.desc || '' : '', label: 'Description', placeholder: 'Describe the task in markdown…', rows: 5 });
   dom.editDesc.replaceChildren(editDescEditor.root);
   editLabelEditor = labelEditor(dom.editLabels, { tags: task ? userTags(task) : [] });
-  dom.editLabels.firstElementChild.classList.add('input', 'h-auto', 'min-h-8', 'py-0.5');
+  dom.editLabels.firstElementChild.classList.add('input', 'h-auto', 'min-h-8', 'py-0');
   dom.editTitle.textContent = task ? `Edit #${task.seq}` : 'New task';
   state.editSnapshot = JSON.stringify(readForm());
   showDialog(dom.editDialog);
@@ -3626,6 +3632,7 @@ function bind() {
     if (!dom.projectMenu.hidden && !dom.projectMenu.contains(e.target) && !e.target.closest('#project-btn')) toggleProjectMenu(false);
   });
   document.addEventListener('keydown', onKeydown);
+  window.addEventListener('resize', centreBulkBar);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     startLive();
