@@ -498,7 +498,9 @@ function tasksURL(unfiltered) {
   return '/api/tasks' + (qs ? '?' + qs : '');
 }
 const serverFiltered = () => !!(state.q || state.tags.size);
-const interacting = () => !!(state.dragging || state.touch || state.lifted);
+// pendingMoves counts move requests in flight: a refresh that lands between the
+// optimistic render and the server's answer would show the old order for a beat.
+const interacting = () => !!(state.dragging || state.touch || state.lifted || state.pendingMoves);
 
 async function refreshTasks() {
   if (interacting()) return false; // never clobber a card the user is holding
@@ -1125,11 +1127,15 @@ function dropOn(col) {
   const status = col.dataset.status;
   const index = col.classList.contains('is-collapsed') ? undefined : slotIndex(cols[status].body);
   const ids = state.dragging.ids;
-  cleanupDrag();
+  cleanupDrag(true);
   moveMany(ids, status, index);
 }
-function cleanupDrag() {
-  const was = !!state.dragging;
+// dropped is true when a move follows: moveMany renders the new order itself and
+// refreshes once the server has it, so a refresh here would only fetch the old
+// order and animate the card back before the move lands. A cancelled drag still
+// refreshes, because renders were held while the card was in hand.
+function cleanupDrag(dropped) {
+  const was = !!state.dragging && dropped !== true;
   state.dragging = null;
   state.dragPos = null;
   document.body.classList.remove('select-none');
@@ -1230,22 +1236,28 @@ async function moveMany(ids, status, index) {
   localMove(ids, status, index);
   renderBoard();
   let moved = 0;
-  for (let i = 0; i < ids.length; i++) {
-    try {
-      const out = await withForce((force) => api('POST', taskPath(ids[i]) + '/move', moveBody(status, index === undefined ? undefined : index + i, force)), findTask(ids[i]));
-      if (out === undefined) break;
-      moved++;
-    } catch (err) { toast(err.message, 'error'); break; }
-  }
+  state.pendingMoves = (state.pendingMoves || 0) + 1;
+  try {
+    for (let i = 0; i < ids.length; i++) {
+      try {
+        const out = await withForce((force) => api('POST', taskPath(ids[i]) + '/move', moveBody(status, index === undefined ? undefined : index + i, force)), findTask(ids[i]));
+        if (out === undefined) break;
+        moved++;
+      } catch (err) { toast(err.message, 'error'); break; }
+    }
+  } finally { state.pendingMoves--; }
   invalidate();
   if (!moved) return;
   if (status === 'done') celebrateShip();
   const label = moved === 1 ? `#${findTask(ids[0]).seq}` : plural(moved, 'task');
   announce(`Moved ${label} to ${STATUS_LABEL[status]}`);
   const undo = async () => {
-    for (const p of prev.slice(0, moved).sort((a, b) => a.index - b.index)) {
-      try { await withForce((force) => api('POST', taskPath(p.id) + '/move', moveBody(p.status, p.index, force))); } catch (err) { toast(err.message, 'error'); break; }
-    }
+    state.pendingMoves = (state.pendingMoves || 0) + 1;
+    try {
+      for (const p of prev.slice(0, moved).sort((a, b) => a.index - b.index)) {
+        try { await withForce((force) => api('POST', taskPath(p.id) + '/move', moveBody(p.status, p.index, force))); } catch (err) { toast(err.message, 'error'); break; }
+      }
+    } finally { state.pendingMoves--; }
     invalidate();
   };
   toast(`Moved ${label} to ${STATUS_LABEL[status]}`, 'ok', { action: { label: 'Undo', run: undo }, life: 6000 });
