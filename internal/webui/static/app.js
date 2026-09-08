@@ -596,13 +596,14 @@ function defaultSettings() {
   return {
     theme: 'system', density: 'comfortable',
     show: { seq: true, emoji: true, desc: true, tags: true, due: true, effort: true, checks: true, comments: true },
-    hideEmpty: false, showCancelled: true, wip: {}, sort: 'position', collapsed: {}, 
+    hideEmpty: false, showCancelled: false, wip: {}, sort: 'position', collapsed: {}, v: 2,
   };
 }
 function loadSettings() {
   const base = defaultSettings();
   try {
     const raw = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+    if ((raw.v || 1) < 2) delete raw.showCancelled; // v2: the cancelled column starts hidden
     for (const k of Object.keys(base)) {
       if (raw[k] === undefined) continue;
       if (typeof base[k] === 'object' && base[k] !== null) Object.assign(base[k], raw[k] || {});
@@ -1181,7 +1182,7 @@ function cardEl(t) {
   const card = el('article', {
     class: 'card' + (selected ? ' is-selected' : '') + (state.focusId === t.id ? ' is-focused' : '') + (state.lifted === t.id ? ' is-lifted' : ''),
     draggable: 'true', tabindex: state.focusId === t.id ? '0' : '-1', role: 'option', 'aria-selected': selected ? 'true' : 'false',
-    'data-id': t.id, 'data-seq': t.seq, 'data-status': t.status, 'aria-label': `#${t.seq} ${t.title}`,
+    'data-id': t.id, 'data-seq': t.seq, 'data-status': t.status, 'data-prio': String(t.prio || 3), 'aria-label': `#${t.seq} ${t.title}`,
     onclick: (e) => onCardClick(e, t),
     onfocus: () => { if (state.focusId !== t.id) setFocus(t.id, { focus: false }); },
     ondragstart: onDragStart, ondragend: cleanupDrag, onpointerdown: onCardPointerDown,
@@ -2389,8 +2390,9 @@ function parseQuickAdd(text) {
 }
 function renderComposer(status, open = false) {
   const { composer } = cols[status];
+  composer.hidden = !open && status !== 'todo';
   if (!open) {
-    composer.replaceChildren(el('button', { type: 'button', class: 'btn btn-ghost w-full justify-start px-2 text-fg-3', onclick: () => openComposer(status) }, icon('plus', 14), 'Add task'));
+    composer.replaceChildren(status === 'todo' ? el('button', { type: 'button', class: 'btn btn-ghost w-full justify-start px-2 text-fg-3', onclick: () => openComposer(status) }, icon('plus', 14), 'Add task') : null);
     return;
   }
   const input = el('input', { type: 'text', class: 'input', placeholder: 'Title  !high #label #type::bug @fri ~M', 'aria-label': `New task in ${STATUS_LABEL[status]}`, autocomplete: 'off', spellcheck: 'false', enterkeyhint: 'done' });
@@ -2420,7 +2422,7 @@ function renderComposer(status, open = false) {
   input.addEventListener('input', refresh);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); submit(); }
-    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); renderComposer(status); cols[status].composer.querySelector('button').focus(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); renderComposer(status); (cols[status].composer.querySelector('button') || cols[status].col.querySelector('.col-tools button')).focus(); }
   });
   const form = el('form', { class: 'composer-open', onsubmit: (e) => { e.preventDefault(); submit(); } }, input, preview,
     el('div', { class: 'flex items-center gap-2' }, el('span', { class: 'text-11 text-fg-3' }, el('kbd', { class: 'kbd' }, 'Enter'), ' adds · ', el('kbd', { class: 'kbd' }, 'Esc'), ' closes'), el('span', { class: 'flex-1' }),
