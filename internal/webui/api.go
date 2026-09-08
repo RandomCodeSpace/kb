@@ -69,6 +69,7 @@ func (s *server) routes(mux *http.ServeMux) {
 		{"POST", "/api/tasks/{ref}/restore", s.restoreTask},
 		{"GET", "/api/tasks/{ref}/comments", s.listComments},
 		{"POST", "/api/tasks/{ref}/comments", s.addComment},
+		{"PUT", "/api/comments/{id}", s.updateComment},
 		{"DELETE", "/api/comments/{id}", s.deleteComment},
 		{"POST", "/api/links", s.link},
 		{"DELETE", "/api/links", s.unlink},
@@ -736,10 +737,45 @@ func (s *server) addComment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toCommentJSON(c))
 }
 
-func (s *server) deleteComment(w http.ResponseWriter, r *http.Request) {
-	raw := r.PathValue("id")
+// commentID parses a comment path id ("c3" or "3"); zero means invalid.
+func commentID(raw string) int {
 	id, err := strconv.Atoi(strings.TrimPrefix(raw, "c"))
 	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
+}
+
+func (s *server) updateComment(w http.ResponseWriter, r *http.Request) {
+	raw := r.PathValue("id")
+	id := commentID(raw)
+	if id == 0 {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid comment id %q", raw))
+		return
+	}
+	var in struct {
+		Body string `json:"body"`
+	}
+	if err := decode(r, &in); err != nil {
+		badBody(w, err)
+		return
+	}
+	c, err := s.st.UpdateComment(s.user, id, in.Body)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("no comment matches id %q", raw))
+		return
+	}
+	if err != nil {
+		fail(w, err, raw)
+		return
+	}
+	writeJSON(w, http.StatusOK, toCommentJSON(c))
+}
+
+func (s *server) deleteComment(w http.ResponseWriter, r *http.Request) {
+	raw := r.PathValue("id")
+	id := commentID(raw)
+	if id == 0 {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid comment id %q", raw))
 		return
 	}

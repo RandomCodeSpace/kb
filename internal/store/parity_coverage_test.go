@@ -193,6 +193,30 @@ func TestCommentStoreReportsDatabaseFailures(t *testing.T) {
 		if _, err := s.DeleteComment("u", 7); err == nil || !strings.Contains(err.Error(), "created_at") {
 			t.Fatalf("DeleteComment accepted a corrupt timestamp: %v", err)
 		}
+		mustExecCoverage(t, s, `UPDATE comments SET created_at = 'garbage' WHERE id = 7`)
+		if _, err := s.UpdateComment("u", 7, "note"); err == nil || !strings.Contains(err.Error(), "created_at") {
+			t.Fatalf("UpdateComment accepted a corrupt timestamp: %v", err)
+		}
+	})
+
+	t.Run("update query", func(t *testing.T) {
+		s := seed(t)
+		if _, err := s.AddComment("u", "1", "u", "note"); err != nil {
+			t.Fatal(err)
+		}
+		mustExecCoverage(t, s, `DROP TABLE comments`)
+		if _, err := s.UpdateComment("u", 1, "edited"); err == nil {
+			t.Fatal("UpdateComment survived a missing comments table")
+		}
+	})
+
+	t.Run("orphaned comment still updates", func(t *testing.T) {
+		s := seed(t)
+		mustExecCoverage(t, s, `INSERT INTO comments(scope, id, task_id, author, body, created_at) VALUES ('u', 8, 'ghost', 'u', 'orphan', '2026-01-01T00:00:00Z')`)
+		c, err := s.UpdateComment("u", 8, "orphan, edited")
+		if err != nil || c.TaskSeq != 0 || c.Body != "orphan, edited" {
+			t.Fatalf("UpdateComment(orphan) = %+v, %v", c, err)
+		}
 	})
 
 	t.Run("orphaned comment still deletes", func(t *testing.T) {

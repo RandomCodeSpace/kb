@@ -87,6 +87,7 @@ booleans except `title`, `status`, `prio`, `project`, `position`, timestamps.
 | DELETE | `/api/tasks/{ref}`            |                                                                                                         | `task` (permanent; only allowed when cancelled → use `store.DeleteCancelledTask`) |
 | GET    | `/api/tasks/{ref}/comments`   |                                                                                                         | `{"comments": [comment…]}`                      |
 | POST   | `/api/tasks/{ref}/comments`   | `{body}`                                                                                                | 201 `comment`                                   |
+| PUT    | `/api/comments/{id}`          | `{body}`                                                                                                | `comment` (body replaced; id, author, createdAt kept) |
 | DELETE | `/api/comments/{id}`          |                                                                                                         | `comment`                                       |
 | POST   | `/api/links`                  | `{blocker, blocked}` (refs)                                                                             | 201 `{"blocker": task, "blocked": task}`        |
 | DELETE | `/api/links`                  | `{a, b}` (refs)                                                                                         | 204                                             |

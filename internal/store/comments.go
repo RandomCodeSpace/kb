@@ -162,6 +162,46 @@ func (s *Store) DeleteComment(user string, id int) (Comment, error) {
 	return out, nil
 }
 
+// UpdateComment replaces the body of comment id. The id, author and creation
+// time stay as they were; the body is trimmed and must not be empty.
+func (s *Store) UpdateComment(user string, id int, body string) (Comment, error) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return Comment{}, errors.New("store: comment body must not be empty")
+	}
+	var out Comment
+	err := s.withTx(func(tx *sql.Tx) error {
+		var created string
+		err := tx.QueryRow(`SELECT id, task_id, author, created_at FROM comments
+			WHERE scope = ? AND id = ?`, user, id).
+			Scan(&out.ID, &out.TaskID, &out.Author, &created)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("store: load comment: %w", err)
+		}
+		if out.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+			return fmt.Errorf("store: comment c%d created_at: %w", id, err)
+		}
+		var t board.Task
+		if t, err = getTask(tx, user, out.TaskID); err == nil {
+			out.TaskSeq = t.Seq
+		} else if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE comments SET body = ? WHERE scope = ? AND id = ?`, body, user, id); err != nil {
+			return fmt.Errorf("store: update comment: %w", err)
+		}
+		out.Body = body
+		return nil
+	})
+	if err != nil {
+		return Comment{}, err
+	}
+	return out, nil
+}
+
 // reconcileCommentsTx drops comments whose task no longer exists — the
 // ReplaceBoard companion to reconcileBoardTombstonesTx.
 func reconcileCommentsTx(tx *sql.Tx, user string) error {

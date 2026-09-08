@@ -509,8 +509,11 @@
   .task-link .t.done, .task-link .t.cancelled { color: var(--t-fg-3); }
 
   .comment { padding: 10px 12px; border-radius: var(--radius-lg); background: var(--t-card); border: 1px solid var(--t-line); }
-  .comment .rm { opacity: 0; }
-  .comment:hover .rm, .comment:focus-within .rm { opacity: 1; }
+  .comment-head { display: flex; align-items: center; gap: 8px; height: 24px; margin-bottom: 4px; }
+  .comment .act { opacity: 0; }
+  .comment:hover .act, .comment:focus-within .act { opacity: 1; }
+  .comment-add { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; margin: 0 -8px; border-radius: var(--radius-md); color: var(--t-fg-2); font-size: 13px; }
+  .comment-add:hover { background: var(--t-raised); color: var(--t-fg); }
 
   .pick { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 50; max-height: 240px; overflow: auto; padding: 4px; border-radius: var(--radius-lg); background: var(--t-overlay); border: 1px solid var(--t-line); box-shadow: var(--t-shadow-md); }
 

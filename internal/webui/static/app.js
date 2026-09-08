@@ -1659,7 +1659,7 @@ function openDetail(ref, opts = {}) {
   }
   mountDetail();
   if (!opts.route && location.hash !== '#/t/' + key) location.hash = '#/t/' + key;
-  loadDetail(key).then(() => { if (opts.focusComment) { const ta = dom.detailBody.querySelector('.comment-editor textarea'); if (ta) ta.focus(); } });
+  loadDetail(key).then(() => { if (opts.focusComment) focusComposer(); });
 }
 function closeDetail(opts = {}) {
   if (!state.detail) return;
@@ -1853,19 +1853,53 @@ function renderDetail(data) {
     el('dl', { class: 'props' }, el('dt', {}, 'Blocked by'), el('dd', {}, ...linkItems(links.blockedBy || [])), el('dt', {}, 'Blocks'), el('dd', {}, ...linkItems(links.blocks || []))),
     linkForm);
 
-  // comments
-  const commentNodes = comments.map((c) => el('article', { class: 'comment' },
-    el('div', { class: 'mb-1 flex h-6 items-center gap-2' }, el('span', { class: 'text-12 font-medium' }, c.author || 'default'), el('time', { class: 'num text-11 text-fg-3', datetime: c.createdAt, title: fmtDate(c.createdAt) }, relTime(c.createdAt)),
-      el('button', { type: 'button', class: 'btn btn-ghost btn-xs btn-icon rm ml-auto', 'aria-label': 'Delete comment', title: 'Delete comment', onclick: () => deleteComment(task, c) }, icon('trash', 12))),
-    renderMarkdown(c.body)));
-  const commentEd = mdEditor({ value: draftText, label: 'New comment', placeholder: 'Write a comment…', rows: 3, saveLabel: 'Comment', onSave: (v, ed) => addComment(task, v, ed) });
-  commentEd.root.classList.add('comment-editor');
+  // comments: each one reads as text with Edit and Delete revealed on hover;
+  // Edit swaps the body for an inline editor. The composer stays collapsed
+  // behind an "Add a comment" row until asked for.
+  const commentNode = (c) => {
+    const body = el('div', {}, renderMarkdown(c.body));
+    const acts = el('span', { class: 'act ml-auto flex items-center' },
+      el('button', { type: 'button', class: 'btn btn-ghost btn-xs btn-icon', 'aria-label': 'Edit comment', title: 'Edit comment', onclick: () => editComment() }, icon('pencil', 12)),
+      el('button', { type: 'button', class: 'btn btn-ghost btn-xs btn-icon', 'aria-label': 'Delete comment', title: 'Delete comment', onclick: () => deleteComment(task, c) }, icon('trash', 12)));
+    const node = el('article', { class: 'comment' },
+      el('div', { class: 'comment-head' }, el('span', { class: 'text-12 font-medium' }, c.author || 'default'), el('time', { class: 'num text-11 text-fg-3', datetime: c.createdAt, title: fmtDate(c.createdAt) }, relTime(c.createdAt)), acts), body);
+    function editComment() {
+      acts.hidden = true;
+      const close = () => { body.replaceChildren(renderMarkdown(c.body)); acts.hidden = false; detailIdle(); };
+      const ed = mdEditor({ value: c.body, label: 'Edit comment', rows: 3,
+        onSave: async (v) => {
+          if (v.trim() === c.body) { close(); return; }
+          const out = await updateComment(c, v);
+          if (!out) return;
+          c.body = out.body;
+          close();
+          loadDetail(state.detail, true);
+        },
+        onCancel: close });
+      ed.root.dataset.busy = '';
+      body.replaceChildren(ed.root);
+      ed.focus();
+    }
+    return node;
+  };
+  const composer = el('div', {});
+  const showAdd = () => composer.replaceChildren(el('button', { type: 'button', class: 'comment-add', onclick: () => openComposer('', true) },
+    el('span', { class: 'grid size-4 place-items-center' }, icon('plus', 12)), 'Add a comment'));
+  const openComposer = (text, focus) => {
+    const ed = mdEditor({ value: text, label: 'New comment', placeholder: 'Write a comment…', rows: 3, saveLabel: 'Comment',
+      onSave: async (v, e) => { if (!(await addComment(task, v, e))) return; showAdd(); detailIdle(); loadDetail(state.detail, true); },
+      onCancel: () => { showAdd(); detailIdle(); } });
+    ed.root.classList.add('comment-editor');
+    ed.root.dataset.busy = '';
+    composer.replaceChildren(ed.root);
+    if (focus) ed.focus();
+  };
+  if (draftText) openComposer(draftText, hadFocus); else showAdd();
   const commentSection = sectionEl('Comments', comments.length ? el('span', { class: 'num text-11 text-fg-3' }, comments.length) : null,
-    el('div', { class: 'mb-3 flex flex-col gap-2' }, ...commentNodes), commentEd.root);
+    comments.length ? el('div', { class: 'mb-2 flex flex-col gap-2' }, ...comments.map(commentNode)) : null, composer);
 
   dom.detailBody.replaceChildren(...clean([props, descSection, checkSection, blockSection, provenance.length ? provenanceSection(provenance, siblings) : null, commentSection]));
   dom.detailBody.scrollTop = scrollTop;
-  if (hadFocus) commentEd.focus();
 
   const cancelled = task.status === 'cancelled';
   dom.detailActions.replaceChildren(
@@ -1878,16 +1912,33 @@ function renderDetail(data) {
       isOpen(task) ? el('button', { type: 'button', class: 'btn btn-primary', onclick: () => shipTask(task) }, icon('ship', 14), 'Ship') : null,
     ]));
 }
+// Opens the comment composer in the detail view and focuses it.
+function focusComposer() {
+  const add = dom.detailBody.querySelector('.comment-add');
+  if (add) { add.click(); return; }
+  const ta = dom.detailBody.querySelector('.comment-editor textarea');
+  if (ta) ta.focus();
+}
+// Posts a comment; resolves true when it landed so the caller can close the composer.
 async function addComment(task, body, ed) {
   const text = body.trim();
-  if (!text) return;
+  if (!text) return false;
   ed.ta.disabled = true;
   try {
     await api('POST', taskPath(task.id) + '/comments', { body: text });
-    ed.set('');
-    await loadDetail(state.detail, true);
     announce('Comment added');
-  } catch (err) { toast(err.message, 'error'); } finally { ed.ta.disabled = false; }
+    return true;
+  } catch (err) { toast(err.message, 'error'); return false; } finally { ed.ta.disabled = false; }
+}
+// Replaces a comment's body; resolves with the saved comment, or null on failure.
+async function updateComment(c, body) {
+  const text = body.trim();
+  if (!text) { toast('A comment needs some text', 'error'); return null; }
+  try {
+    const out = await api('PUT', `/api/comments/${encodeURIComponent(c.id)}`, { body: text });
+    announce('Comment saved');
+    return out;
+  } catch (err) { toast(err.message, 'error'); return null; }
 }
 async function deleteComment(task, c) {
   try {
