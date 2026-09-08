@@ -130,6 +130,34 @@ func (s *Store) Comments(user, taskRef string) ([]Comment, error) {
 // DeleteComment removes comment id ("7" or "c7" accepted by callers, parsed
 // to the integer here) and returns it. ErrNotFound when no such comment.
 func (s *Store) DeleteComment(user string, id int) (Comment, error) {
+	return s.editComment(user, id, func(tx *sql.Tx, c *Comment) error {
+		if _, err := tx.Exec(`DELETE FROM comments WHERE scope = ? AND id = ?`, user, id); err != nil {
+			return fmt.Errorf("store: delete comment: %w", err)
+		}
+		return nil
+	})
+}
+
+// UpdateComment replaces the body of comment id. The id, author and creation
+// time stay as they were; the body is trimmed and must not be empty.
+func (s *Store) UpdateComment(user string, id int, body string) (Comment, error) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return Comment{}, errors.New("store: comment body must not be empty")
+	}
+	return s.editComment(user, id, func(tx *sql.Tx, c *Comment) error {
+		if _, err := tx.Exec(`UPDATE comments SET body = ? WHERE scope = ? AND id = ?`, body, user, id); err != nil {
+			return fmt.Errorf("store: update comment: %w", err)
+		}
+		c.Body = body
+		return nil
+	})
+}
+
+// editComment loads comment id inside a transaction, applies change, and
+// returns the comment as it stands afterwards. A comment whose task is gone
+// still loads, with TaskSeq zero.
+func (s *Store) editComment(user string, id int, change func(tx *sql.Tx, c *Comment) error) (Comment, error) {
 	var out Comment
 	err := s.withTx(func(tx *sql.Tx) error {
 		var created string
@@ -151,50 +179,7 @@ func (s *Store) DeleteComment(user string, id int) (Comment, error) {
 		} else if !errors.Is(err, ErrNotFound) {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM comments WHERE scope = ? AND id = ?`, user, id); err != nil {
-			return fmt.Errorf("store: delete comment: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
-		return Comment{}, err
-	}
-	return out, nil
-}
-
-// UpdateComment replaces the body of comment id. The id, author and creation
-// time stay as they were; the body is trimmed and must not be empty.
-func (s *Store) UpdateComment(user string, id int, body string) (Comment, error) {
-	body = strings.TrimSpace(body)
-	if body == "" {
-		return Comment{}, errors.New("store: comment body must not be empty")
-	}
-	var out Comment
-	err := s.withTx(func(tx *sql.Tx) error {
-		var created string
-		err := tx.QueryRow(`SELECT id, task_id, author, created_at FROM comments
-			WHERE scope = ? AND id = ?`, user, id).
-			Scan(&out.ID, &out.TaskID, &out.Author, &created)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("store: load comment: %w", err)
-		}
-		if out.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
-			return fmt.Errorf("store: comment c%d created_at: %w", id, err)
-		}
-		var t board.Task
-		if t, err = getTask(tx, user, out.TaskID); err == nil {
-			out.TaskSeq = t.Seq
-		} else if !errors.Is(err, ErrNotFound) {
-			return err
-		}
-		if _, err := tx.Exec(`UPDATE comments SET body = ? WHERE scope = ? AND id = ?`, body, user, id); err != nil {
-			return fmt.Errorf("store: update comment: %w", err)
-		}
-		out.Body = body
-		return nil
+		return change(tx, &out)
 	})
 	if err != nil {
 		return Comment{}, err
