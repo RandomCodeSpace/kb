@@ -621,6 +621,7 @@ function applySettings(rerender = true) {
   const root = document.documentElement;
   if (settings.theme === 'light' || settings.theme === 'dark') root.dataset.theme = settings.theme; else delete root.dataset.theme;
   if (settings.density === 'compact') root.dataset.density = 'compact'; else delete root.dataset.density;
+  state.cardEpoch = (state.cardEpoch || 0) + 1;
   saveSettings();
   if (rerender && state.loaded) render();
 }
@@ -720,6 +721,18 @@ async function withForce(run, task) {
 }
 const moveBody = (status, index, force) => Object.assign({ status }, index === undefined ? {} : { index }, force ? { force: true } : {});
 const patchTask = (id, patch) => withForce((force) => api('PATCH', taskPath(id), force ? Object.assign({ force: true }, patch) : patch), findTask(id));
+// Flips the detail panel's Blocked switch in place so its 160ms transition plays, and holds
+// re-renders (loadDetail parks them while the panel is busy) until it has; reverts on failure.
+async function setBlocked(task, on) {
+  const sw = dom.detailBody.querySelector('.switch[aria-label="Blocked"]');
+  if (sw) {
+    sw.setAttribute('aria-checked', String(on));
+    sw.dataset.animating = '';
+    setTimeout(() => { delete sw.dataset.animating; detailIdle(); }, 200);
+  }
+  try { const out = await patchTask(task.id, { blocked: on }); task.blocked = on; return out; }
+  catch (err) { if (sw) sw.setAttribute('aria-checked', String(!on)); throw err; }
+}
 
 function tasksURL(unfiltered) {
   const params = new URLSearchParams();
@@ -1170,6 +1183,17 @@ function dueChipEl(due, long) {
   return el('span', { class: 'chip chip-tone chip-mono', style: d.tone ? `--tone:${TONE[d.tone]}` : null, title: 'Due ' + due }, icon('calendar', 11), el('span', {}, long ? `${due} · ${d.label}` : d.label));
 }
 
+// Everything a card's markup depends on. A node whose signature still matches
+// is kept as is, so a refresh only rebuilds the cards that changed.
+const cardSig = (t) => JSON.stringify(t) + '|' + [state.selected.has(t.id) ? 1 : 0, state.focusId === t.id ? 1 : 0, state.lifted === t.id ? 1 : 0, state.commentCounts[t.id] ?? '', state.cardEpoch || 0, [...state.tags].sort().join(' ')].join(',');
+function cardNodeFor(t, existing) {
+  const sig = cardSig(t);
+  const old = existing.get(t.id);
+  if (old && old.dataset.sig === sig && !old.classList.contains('leaving')) return old;
+  const node = cardEl(t);
+  node.dataset.sig = sig;
+  return node;
+}
 function cardEl(t) {
   const show = settings.show;
   const checks = t.checks || [];
@@ -1237,13 +1261,16 @@ function renderBoard() {
   if (state.focusId && !state.tasks.some((t) => t.id === state.focusId)) state.focusId = null;
   for (const id of state.selected) if (!state.tasks.some((t) => t.id === id)) state.selected.delete(id);
   const template = [];
+  const existing = new Map($$('.card[data-id]', dom.board).map((c) => [c.dataset.id, c]));
+  const keepAll = new Set();
+  for (const status of STATUSES) for (const t of groups[status]) keepAll.add(t.id);
   for (const status of STATUSES) {
     const { col, body, count } = cols[status];
     const tasks = sortTasks(groups[status]);
-    const keep = new Set(tasks.map((t) => t.id));
-    // A card in a hidden column has an empty rect; a ghost of it would fade at the page's top-left corner.
-    for (const c of $$('.card[data-id]', body)) if (!keep.has(c.dataset.id) && !(state.dropped && state.dropped.has(c.dataset.id)) && first.get(c.dataset.id).rect.width) leaveCard(c, first.get(c.dataset.id).rect);
-    body.replaceChildren(...(tasks.length ? tasks.map(cardEl) : [emptyEl(status)]));
+    // Only a card that leaves the board gets a ghost; one that changes column
+    // slides there. A card in a hidden column has an empty rect and gets nothing.
+    for (const c of $$('.card[data-id]', body)) if (!keepAll.has(c.dataset.id) && !(state.dropped && state.dropped.has(c.dataset.id)) && first.get(c.dataset.id).rect.width) leaveCard(c, first.get(c.dataset.id).rect);
+    body.replaceChildren(...(tasks.length ? tasks.map((t) => cardNodeFor(t, existing)) : [emptyEl(status)]));
     const limit = Number(settings.wip[status]) || 0;
     const over = limit > 0 && tasks.length > limit;
     col.classList.toggle('is-over', over);
@@ -1933,7 +1960,7 @@ async function closeDetail(opts = {}) {
   if (back) setFocus(t.id); else dom.board.focus({ preventScroll: true });
 }
 // busy: an inline editor is open (do not repaint under it). dirty: it holds unsaved changes (confirm before closing).
-const panelBusy = () => !!dom.detail.querySelector('[data-busy]');
+const panelBusy = () => !!dom.detail.querySelector('[data-busy], [data-animating]');
 const panelDirty = () => !!dom.detail.querySelector('[data-busy]:not(.editor), .editor[data-busy].is-dirty');
 // The card plus what only other endpoints know: why it was killed, and where it was imported from.
 async function detailExtras(ref, task) {
@@ -2020,7 +2047,7 @@ function renderDetail(data) {
   }, label)));
   const labelsBox = el('div', { class: 'w-full' });
   labelEditor(labelsBox, { tags: userTags(task), onChange: (tags) => save({ tags }, `Labels saved on #${task.seq}`) });
-  const blockedSwitch = el('button', { type: 'button', role: 'switch', class: 'switch', 'aria-checked': task.blocked ? 'true' : 'false', 'aria-label': 'Blocked', onclick: () => save({ blocked: !task.blocked }, task.blocked ? `#${task.seq} unblocked` : `#${task.seq} marked blocked`) });
+  const blockedSwitch = el('button', { type: 'button', role: 'switch', class: 'switch', 'aria-checked': task.blocked ? 'true' : 'false', 'aria-label': 'Blocked', onclick: () => mutate(() => setBlocked(task, !task.blocked), task.blocked ? `#${task.seq} unblocked` : `#${task.seq} marked blocked`).then((out) => { if (out) loadDetail(state.detail, true); }) });
   const projectSel = el('select', { class: 'input w-auto', 'aria-label': 'Project', onchange: (e) => save({ project: e.target.value }, `#${task.seq} moved to ${e.target.value}`) },
     ...projectList(task.project).map((p) => el('option', { value: p, selected: p === task.project }, p)));
   const props = el('dl', { class: 'props' },
@@ -2211,7 +2238,7 @@ async function addLink(task, direction, number) {
   try {
     await api('POST', '/api/links', body);
     // A new blocker flips the card's blocked flag, so the toggle and the chip follow the link.
-    if (direction === 'blockedBy' && !task.blocked) { await patchTask(task.id, { blocked: true }); task.blocked = true; }
+    if (direction === 'blockedBy' && !task.blocked) await setBlocked(task, true);
     toast(`Linked #${task.seq} and #${other}`, 'ok');
     loadDetail(state.detail, true);
     invalidate();
@@ -2223,7 +2250,7 @@ async function removeLink(task, other) {
     await api('DELETE', '/api/links', { a: task.id, b: other.id });
     // The last blocker gone clears the flag it set.
     const left = (state.detailData && state.detailData.links && state.detailData.links.blockedBy || []).filter((t) => t.id !== other.id);
-    if (!blocks && task.blocked && !left.length) { await patchTask(task.id, { blocked: false }); task.blocked = false; }
+    if (!blocks && task.blocked && !left.length) await setBlocked(task, false);
     loadDetail(state.detail, true);
     invalidate();
     const relink = blocks ? { blocker: task.id, blocked: other.id } : { blocker: other.id, blocked: task.id };
@@ -2271,9 +2298,11 @@ async function deleteTask(task) {
 }
 
 /* ============================== dialogs: generic, edit ============================== */
+let dialogSeq = 0;
 function showDialog(d) {
   if (d.open) return;
   d.showModal();
+  d.dataset.layer = String(++dialogSeq);
   animate(d, [{ opacity: 0, transform: 'translateY(6px) scale(0.99)' }, { opacity: 1, transform: 'none' }], 160);
 }
 async function closeDialog(d) {
@@ -2284,6 +2313,7 @@ async function closeDialog(d) {
     d.style.pointerEvents = '';
   }
   d.close();
+  if (d.contains(dom.toasts)) hostToasts();
 }
 function parseChecks(text) {
   return text.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => (/^x\s+/i.test(l) ? { text: l.replace(/^x\s+/i, ''), done: true } : { text: l, done: false }));
@@ -3415,20 +3445,29 @@ function renderHelp() {
 }
 
 /* ============================== toasts / announcements ============================== */
+// A modal dialog makes everything outside it inert, top layer included, so the
+// toast stack lives inside the newest open dialog while one is up.
+function hostToasts() {
+  const open = $$('dialog[open]').sort((a, b) => Number(b.dataset.layer || 0) - Number(a.dataset.layer || 0));
+  const host = open[0] || document.body;
+  if (dom.toasts.parentElement !== host) host.append(dom.toasts); // moving a popover hides it
+  if (POPOVER && dom.toasts.children.length && !dom.toasts.matches(':popover-open')) dom.toasts.showPopover();
+}
 function toast(message, kind = 'error', opts = {}) {
   const life = opts.life || (kind === 'error' ? 6000 : 3000);
   let gone = false;
   const dismiss = () => {
     if (gone) return;
     gone = true;
-    const a = animate(node, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(8px)' }], 150);
-    a.onfinish = a.oncancel = () => node.remove();
+    const a = animate(node, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-8px)' }], 150);
+    a.onfinish = a.oncancel = () => { node.remove(); if (POPOVER && !dom.toasts.children.length && dom.toasts.matches(':popover-open')) dom.toasts.hidePopover(); };
   };
   const node = el('div', { class: 'toast ' + kind }, el('span', { class: 'min-w-0 flex-1 truncate' }, mdInline(message)),
     opts.action ? el('button', { type: 'button', class: 'btn', onclick: () => { dismiss(); opts.action.run(); } }, opts.action.label) : null,
     el('button', { type: 'button', class: 'btn btn-icon', 'aria-label': 'Dismiss', onclick: dismiss }, icon('x', 12)));
   dom.toasts.append(node);
-  animate(node, [{ opacity: 0, transform: 'translateY(12px) scale(0.98)' }, { opacity: 1, transform: 'none' }], 180);
+  hostToasts();
+  animate(node, [{ opacity: 0, transform: 'translateY(-8px) scale(0.98)' }, { opacity: 1, transform: 'none' }], 180);
   setTimeout(dismiss, life);
   while (dom.toasts.children.length > 4) dom.toasts.firstElementChild.remove();
 }
