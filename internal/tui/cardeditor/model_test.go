@@ -860,15 +860,25 @@ func TestKeyboardRoutesEveryFieldAndAction(t *testing.T) {
 	model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	typeText("x done")
 	model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if model.focus != "source-preview" {
+		t.Fatalf("focus after fields = %q, want source-preview", model.focus)
+	}
+	model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if model.focus != "terminal-select" {
+		t.Fatalf("focus after preview = %q, want terminal-select", model.focus)
+	}
+	model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	if model.focus != "cancel" {
-		t.Fatalf("focus after fields = %q", model.focus)
+		t.Fatalf("focus after terminal select = %q, want cancel", model.focus)
 	}
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !model.guardClose {
 		t.Fatal("cancel action bypassed dirty guard")
 	}
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyTab, Mod: tea.ModShift}))
+	for range 3 {
+		model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyTab, Mod: tea.ModShift}))
+	}
 	if model.focus != "checks" {
 		t.Fatalf("reverse focus = %q", model.focus)
 	}

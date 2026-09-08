@@ -106,7 +106,7 @@ func TestLabelColorUsesWebHash(t *testing.T) {
 		tag  string
 		want string
 	}{
-		{"type::feature", " type:feature "},
+		{"type::feature", " type feature "},
 		{"backend", " #backend "},
 		{"broken::", " #broken:: "},
 	} {
@@ -262,7 +262,7 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 		// The blocked alarm sits beside the sequence number now (issue #232),
 		// and the meta row is the digit on its fill, the bare elapsed count,
 		// the due text and the effort letter on its fill.
-		"🚀 Ship terminal board", "⛔ #7", " 1  new today  M ", " #backend ", " type:feature ",
+		"🚀 Ship terminal board", "⛔ #7", " 1  new today  M ", " #backend ", " type feature ",
 		"3h", "shipped", "1d", "c cancelled:on",
 	} {
 		if !strings.Contains(text, want) {
@@ -280,7 +280,7 @@ func TestBoardRenderResponsiveFullCardsAndMouse(t *testing.T) {
 	// the effort marker each gave back a cell or two under issue #232, and the
 	// blocked alarm moved to the title row, so the flat row reaches two labels
 	// at a width that used to hold one.
-	for _, want := range []string{"1 new today M #backend feature", "2 3h tomorrow"} {
+	for _, want := range []string{"1 new today M", "#backend feature", "2 3h tomorrow"} {
 		if !strings.Contains(compact, want) {
 			t.Errorf("compact render missing %q:\n%s", want, compact)
 		}

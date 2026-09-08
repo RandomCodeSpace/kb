@@ -53,7 +53,7 @@ func TestCardRowsFollowItsContentUnderTheCeiling(t *testing.T) {
 		// title(1) + description + meta(1) + labels(1).
 		{"one description row", DensityNormal, 1, 4},
 		{"two description rows", DensityNormal, 2, 5},
-		{"compact", DensityCompact, 2, 2},
+		{"compact", DensityCompact, 2, 3},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -230,7 +230,7 @@ func TestCardTitleRowWithoutASequence(t *testing.T) {
 	}
 }
 
-func TestCardSelectionThickensTheRailAndKeepsThePriorityHue(t *testing.T) {
+func TestCardSelectionThickensTheRailAndUsesTheFocusAccent(t *testing.T) {
 	styles := theme.New(true)
 	resting := Card(styles, cardFixture(styles, DensityNormal, 1))
 	opts := cardFixture(styles, DensityNormal, 1)
@@ -242,27 +242,30 @@ func TestCardSelectionThickensTheRailAndKeepsThePriorityHue(t *testing.T) {
 	if !strings.HasPrefix(ansi.Strip(resting[0]), "▌") {
 		t.Errorf("resting rail = %q, want the half block", ansi.Strip(resting[0]))
 	}
-	hue := "38;2;255;90;72"
+	hue := "38;2;135;175;215"
 	if !strings.Contains(selected[0], hue) {
-		t.Error("the selected rail must keep the P1 hue")
+		t.Error("the selected rail must use the focus accent")
 	}
 }
 
-func TestCardCompactMergesLabelsOntoTheChipRow(t *testing.T) {
+func TestCardCompactKeepsLabelsOnTheirOwnRow(t *testing.T) {
 	styles := theme.New(true)
 	rows := Card(styles, cardFixture(styles, DensityCompact, 0))
-	merged := ansi.Strip(rows[1])
-	if !strings.Contains(merged, "1") || !strings.Contains(merged, "feature") {
-		t.Errorf("compact chip row = %q, want the meta chips and the labels merged", merged)
+	meta, labels := ansi.Strip(rows[1]), ansi.Strip(rows[2])
+	if !strings.Contains(meta, "1") || strings.Contains(meta, "feature") {
+		t.Errorf("compact metadata row = %q", meta)
+	}
+	if !strings.Contains(labels, "feature") {
+		t.Errorf("compact label row = %q", labels)
 	}
 	// Spec section 2.6 step 7: the compact chip is flat colored bold text, so it
 	// drops the padding cell the normal-density pill spends at each end (issue
 	// #227 replaced the end caps with that padding and left the drop step alone).
-	if !strings.Contains(rows[1], Label(styles, "type::feature", theme.Card, true, false)) {
-		t.Errorf("compact chip row = %q, want the flat label run", merged)
+	if !strings.Contains(rows[2], Label(styles, "type::feature", theme.Card, true, false)) {
+		t.Errorf("compact label row = %q, want the flat label run", labels)
 	}
-	if strings.Contains(rows[1], Label(styles, "type::feature", theme.Card, false, false)) {
-		t.Errorf("compact chip row = %q, the pill padding is dropped", merged)
+	if strings.Contains(rows[2], Label(styles, "type::feature", theme.Card, false, false)) {
+		t.Errorf("compact label row = %q, the pill padding is dropped", labels)
 	}
 }
 
@@ -461,8 +464,11 @@ func TestCardLabelsWrapOntoTheSecondRow(t *testing.T) {
 	if first == second {
 		t.Fatalf("every label landed on row %d; the row cannot have held them all", first)
 	}
-	if second != first+1 {
-		t.Errorf("label rows = %d and %d, want consecutive rows", first, second)
+	if second != first+2 {
+		t.Errorf("label rows = %d and %d, want one blank row between groups", first, second)
+	}
+	if got := strings.TrimSpace(ansi.Cut(ansi.Strip(rows[first+1]), styles.Metrics.CardRail, opts.Width)); got != "" {
+		t.Errorf("label-row gap = %q, want blank card surface", got)
 	}
 	for index, row := range rows {
 		if got := ansi.StringWidth(row); got != opts.Width {
@@ -493,27 +499,47 @@ func TestCardLabelGutterIsOneCellEverywhere(t *testing.T) {
 	}
 }
 
-// TestCardLabelsDropWhatTheAllotmentCannotHold pins the other end of the wrap:
-// the order is the caller's survival order, and a pill still unplaced when the
-// rows run out is dropped rather than truncated into an unreadable stub. So is
-// a pill too wide for a row of its own.
-func TestCardLabelsDropWhatTheAllotmentCannotHold(t *testing.T) {
+// TestCardLabelsWrapPastTheFormerAllotment pins complete label display. A
+// label wider than the card may occupy several rows, and every fragment keeps
+// the raw tag identity used by filtering and pointer activation.
+func TestCardLabelsWrapPastTheFormerAllotment(t *testing.T) {
 	styles := theme.New(true)
 	opts := cardFixture(styles, DensityNormal, 1)
 	opts.Width = 18
 	opts.LabelRows = 1
 	opts.Labels = []string{"keep", "alsokeptmaybe", "dropped"}
 	_, spans := CardWithSpans(styles, opts)
-	if len(spans) == 0 || spans[0].Index != 0 {
-		t.Fatalf("the first label did not survive: %+v", spans)
-	}
-	if len(spans) == len(opts.Labels) {
-		t.Fatalf("every label fit a %d-cell card; the case asserts nothing", opts.Width)
-	}
+	seen := make(map[string]bool)
 	for _, span := range spans {
-		if span.Row != spans[0].Row {
-			t.Errorf("span %+v landed past the single allotted label row", span)
+		seen[span.Tag] = true
+	}
+	for _, tag := range opts.Labels {
+		if !seen[tag] {
+			t.Errorf("label %q was omitted; spans=%+v", tag, spans)
 		}
+	}
+	if spans[len(spans)-1].Row == spans[0].Row {
+		t.Fatalf("labels did not wrap past the former one-row allotment: %+v", spans)
+	}
+}
+
+func TestWrapLabelsSeparatesRowsButKeepsOneLongLabelTogether(t *testing.T) {
+	styles := theme.New(true)
+	style := styles.On(theme.FgBase, theme.Card)
+	rows, starts := wrapLabels(style, []string{"aaaa", "bbbb", "cccc"}, 9)
+	if len(rows) != 3 || ansi.Strip(rows[1]) != "" {
+		t.Fatalf("packed label rows = %q, want one blank row between groups", rows)
+	}
+	if got := []int{starts[0].row, starts[1].row, starts[2].row}; got[0] != 0 || got[1] != 0 || got[2] != 2 {
+		t.Fatalf("packed label span rows = %v, want [0 0 2]", got)
+	}
+
+	rows, starts = wrapLabels(style, []string{"abcdefghij", "zz"}, 4)
+	if len(rows) != 5 || ansi.Strip(rows[3]) != "" {
+		t.Fatalf("long label rows = %q, want contiguous fragments then one group gap", rows)
+	}
+	if got := []int{starts[0].row, starts[1].row, starts[2].row, starts[3].row}; got[0] != 0 || got[1] != 1 || got[2] != 2 || got[3] != 4 {
+		t.Fatalf("long label span rows = %v, want [0 1 2 4]", got)
 	}
 }
 
@@ -726,15 +752,15 @@ func rowBackgrounds(row string) string {
 }
 
 // TestCardCompactCarriesNoInteriorPadding is the other half of issue #240:
-// compact exists to be dense (section 2.6), so it ignores the rhythm outright
-// even when a caller hands it one. Two rows, edge to edge, as before.
+// compact exists to be dense, so it ignores optional blank rhythm even when a
+// caller hands it one. Complete labels still occupy their own rows.
 func TestCardCompactCarriesNoInteriorPadding(t *testing.T) {
 	styles := theme.New(true)
 	opts := cardFixture(styles, DensityCompact, 0)
 	opts.PadRows = 2
 	rows := Card(styles, opts)
-	if got := len(rows); got != 2 {
-		t.Fatalf("compact card rendered %d rows, want 2", got)
+	if got := len(rows); got != 3 {
+		t.Fatalf("compact card rendered %d rows, want 3", got)
 	}
 	for index, row := range rows {
 		if plain := strings.TrimSpace(ansi.Strip(row)); plain == "▌" || plain == "" {
@@ -836,24 +862,6 @@ func TestCardHeightMatchesTheRowsItDraws(t *testing.T) {
 		if measured != drawn {
 			t.Fatalf("width %d, density %v, title %q, desc %q, labels %v: measured %d rows, drew %d",
 				opts.Width, opts.Density, opts.Title, opts.Desc, opts.Labels, measured, drawn)
-		}
-	}
-}
-
-// TestCardNeverExceedsItsCeiling is the other half: the section 2.6 ladder is a
-// ceiling rather than an allotment, so a card takes less than it than it used to
-// and never more. The sum here is theme.Metrics.CardRows written out in the
-// caller's terms - every section at its cap, plus the two interior separators.
-func TestCardNeverExceedsItsCeiling(t *testing.T) {
-	styles := theme.New(true)
-	for _, opts := range cardShapes(styles) {
-		ceiling := opts.TitleLines + opts.DescLines + opts.PadRows + 1 + opts.LabelRows
-		if opts.Density.Compact() {
-			ceiling = 2
-		}
-		if got := CardHeight(styles, opts); got > ceiling {
-			t.Fatalf("width %d, density %v, title %q, desc %q: card is %d rows, ceiling is %d",
-				opts.Width, opts.Density, opts.Title, opts.Desc, got, ceiling)
 		}
 	}
 }

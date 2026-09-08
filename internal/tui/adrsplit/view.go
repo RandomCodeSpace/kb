@@ -227,7 +227,7 @@ func (m *Model) inputRows(width int) []splitRow {
 		m.choiceRow("source", "Source", sourceChoices(), int(m.source), "", width),
 	}
 	if m.source == sourcePaste {
-		rows = append(rows, m.areaBlock("adr", "ADR markdown", m.adr, width, 8)...)
+		rows = append(rows, m.areaBlock("adr", "ADR markdown", &m.adr, width, 8)...)
 		rows = append(rows, splitRow{
 			text: fmt.Sprintf("  UTF-8 bytes: %d / %d", len([]byte(m.adr.Value())), maxADRBytes),
 			kind: rowHint,
@@ -386,7 +386,7 @@ func (m *Model) actionRow(target, label string, variant theme.ButtonVariant) spl
 	}
 }
 
-func (m *Model) areaBlock(target, label string, area textarea.Model, width, rows int) []splitRow {
+func (m *Model) areaBlock(target, label string, area *textarea.Model, width, rows int) []splitRow {
 	out := []splitRow{{
 		text:   m.controlPrefix(target) + label + ":",
 		target: target,
@@ -589,7 +589,7 @@ func inputDisplay(input textinput.Model, focused bool, width int) string {
 	return formview.Input(input, focused, width, sanitize, cursorViewport)
 }
 
-func areaDisplay(area textarea.Model, focused bool, width, rows int) []string {
+func areaDisplay(area *textarea.Model, focused bool, width, rows int) []string {
 	return formview.Area(area, focused, width, rows, sanitize, cursorViewport)
 }
 

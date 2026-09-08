@@ -532,9 +532,12 @@ func build(table paletteRGB, isDark bool, timing Timing, fidelity Fidelity) *Sty
 		Seq:      on(FgMuted, Card),
 	}
 	for priority := 1; priority < len(built.Rail); priority++ {
-		hue := PrioritySlot(priority)
+		hue := FgMuted
+		if priority == 1 {
+			hue = StatusDanger
+		}
 		built.Rail[priority] = on(hue, Card)
-		built.RailSel[priority] = on(hue, Raised)
+		built.RailSel[priority] = on(Brand, Raised)
 	}
 	built.Chip = built.ChipRuns(Brand, Card)
 	for index := range built.Label {
@@ -549,12 +552,12 @@ func build(table paletteRGB, isDark bool, timing Timing, fidelity Fidelity) *Sty
 	}
 	built.Overlay = OverlayStyles{
 		Surf:            on(FgBase, OverlaySurf),
-		HeaderBand:      onBold(FgOnAccent, Brand),
+		HeaderBand:      onBold(Brand, OverlayBand),
 		HeaderBandArmed: onBold(FgBase, StatusAlarm),
 		SectionBand:     onBold(FgSubtle, OverlayBand),
 		FooterBand:      on(FgSubtle, OverlayBand),
 		Shadow:          on(Shadow, Shadow),
-		FieldLabel:      on(FgMuted, OverlaySurf),
+		FieldLabel:      on(FgSubtle, OverlaySurf),
 		FieldValue:      on(FgBase, OverlaySurf),
 	}
 	built.bandOn = [numBands]string{
@@ -620,8 +623,28 @@ type styleFunc func(foreground, background Slot) lipgloss.Style
 // the cap used to.
 func (s *Styles) ChipRuns(fill, surface Slot) ChipStyles {
 	body := s.On(FgOnAccent, fill)
-	key := s.On(FgSubtle, Surface)
+	key := s.On(Surface, fill)
 	flat := s.OnBold(fill, surface)
+	return ChipStyles{
+		Pad:            body,
+		ScopedPad:      key,
+		Body:           body,
+		BodyHover:      body.Underline(true),
+		BodyFocus:      body.Bold(true),
+		BodyFocusHover: body.Bold(true).Underline(true),
+		ScopedKey:      key,
+		Flat:           flat,
+		FlatHover:      flat.Underline(true),
+	}
+}
+
+// NeutralChipRuns draws ordinary labels as text on one quiet depth tier. The
+// scope uses secondary text and the value uses primary text, so scoped labels
+// retain their grammar without a split fill or category color.
+func (s *Styles) NeutralChipRuns(surface Slot) ChipStyles {
+	body := s.On(FgBase, Raised)
+	key := s.On(FgSubtle, Raised)
+	flat := s.OnBold(FgSubtle, surface)
 	return ChipStyles{
 		Pad:            body,
 		ScopedPad:      key,

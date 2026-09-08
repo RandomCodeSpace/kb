@@ -21,6 +21,7 @@ import (
 	adktool "google.golang.org/adk/v2/tool"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
+	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
 type fakeToolCall struct {
@@ -448,6 +449,62 @@ func assertAIError(t *testing.T, err error, code int, message string) {
 
 func osWriteFile(path string, data []byte) error {
 	return os.WriteFile(path, data, 0o600)
+}
+
+// TestEndpointKeepsCallerAPIVersion pins the four base-URL rules. Appending
+// /v1 to a path that already names a version broke every provider whose
+// version is not v1, Gemini's /v1beta/openai first among them.
+func TestEndpointKeepsCallerAPIVersion(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		base string
+		want string
+	}{
+		{"empty path", "https://api.openai.com", "https://api.openai.com/v1/"},
+		{"empty path trailing slash", "https://api.openai.com/", "https://api.openai.com/v1/"},
+		{"ollama host and port", "http://localhost:11434", "http://localhost:11434/v1/"},
+		{"openrouter version suffix", "https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/"},
+		{"vllm version suffix trailing slash", "http://host:8000/v1/", "http://host:8000/v1/"},
+		{"uppercase version suffix", "https://api.example.com/V1", "https://api.example.com/V1/"},
+		{"gemini version inside path", "https://generativelanguage.googleapis.com/v1beta/openai", "https://generativelanguage.googleapis.com/v1beta/openai/"},
+		{"gemini trailing slash", "https://generativelanguage.googleapis.com/v1beta/openai/", "https://generativelanguage.googleapis.com/v1beta/openai/"},
+		{"dated version inside path", "https://api.example.com/v1beta1/chat", "https://api.example.com/v1beta1/chat/"},
+		{"versionless path", "https://api.groq.com/openai", "https://api.groq.com/openai/v1/"},
+		{"versionless path trailing slash", "https://api.groq.com/openai/", "https://api.groq.com/openai/v1/"},
+		{"version-shaped but not a segment", "https://api.example.com/gateway", "https://api.example.com/gateway/v1/"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := endpoint(test.base)
+			if err != nil || got != test.want {
+				t.Fatalf("endpoint(%q) = %q, %v, want %q", test.base, got, err, test.want)
+			}
+		})
+	}
+	for _, test := range []struct {
+		base string
+		want string
+	}{
+		{"not-a-url", "invalid AI base URL"},
+		{"ftp://api.example.com/v1beta/openai", "AI base URL scheme must be http or https"},
+		{"https://api.example.com/v1beta/openai?key=x", "AI base URL must not contain query or fragment"},
+		{"https://api.example.com/v1beta/openai#frag", "AI base URL must not contain query or fragment"},
+		{"https://user:pass@api.example.com/v1beta/openai", "AI base URL must not contain a username or password \u2014 put the key in the API key field"},
+	} {
+		if _, err := endpoint(test.base); err == nil || err.Error() != test.want {
+			t.Errorf("endpoint(%q) error = %v, want %q", test.base, err, test.want)
+		}
+	}
+	// The stored-key rule compares origins, so a kept path does not move a key.
+	const gemini = "https://generativelanguage.googleapis.com/v1beta/openai"
+	if !store.SameAIOrigin(gemini, "https://generativelanguage.googleapis.com/v1") {
+		t.Error("SameAIOrigin split one host across paths")
+	}
+	if store.SameAIOrigin(gemini, "https://evil.example/v1beta/openai") {
+		t.Error("SameAIOrigin matched a different host")
+	}
+	if err := ValidateBaseURL(gemini); err != nil {
+		t.Errorf("ValidateBaseURL(%q) = %v", gemini, err)
+	}
 }
 
 func TestRunnerHelpers(t *testing.T) {

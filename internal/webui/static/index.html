@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f3ef">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f110f">
+<title>kb</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..700&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/app.css">
+<script>
+try {
+  var s = JSON.parse(localStorage.getItem('kb-web-settings') || '{}');
+  if (s.theme === 'light' || s.theme === 'dark') document.documentElement.dataset.theme = s.theme;
+  if (s.density === 'compact') document.documentElement.dataset.density = 'compact';
+} catch (e) {}
+</script>
+</head>
+<body class="flex h-full flex-col">
+<a class="skip" href="#board">Skip to board</a>
+
+<header class="flex h-12 flex-none items-center gap-1 border-b border-line bg-surface px-2 md:px-3" style="padding-top: env(safe-area-inset-top); height: calc(49px + env(safe-area-inset-top))">
+  <a href="#/" class="mr-1 flex h-8 items-center gap-2 rounded-md px-1" aria-label="kb board">
+    <span class="grid size-5 place-items-center rounded-md bg-accent font-mono text-11 font-semibold text-on-accent" aria-hidden="true">kb</span>
+  </a>
+  <div class="relative min-w-0">
+    <button type="button" id="project-btn" class="btn btn-ghost max-w-[220px] pl-2 pr-1.5" aria-haspopup="listbox" aria-expanded="false" aria-controls="project-menu" data-tip="Project (p / P)">
+      <span id="project-name" class="truncate font-semibold text-fg">…</span>
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" class="text-fg-3"><path d="M5 6.5 8 9.5l3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div id="project-menu" class="pop left-0 top-full mt-1" role="listbox" aria-label="Projects" hidden></div>
+  </div>
+  <div id="stats" class="ml-2 hidden items-center gap-1 text-12 text-fg-2 lg:flex" aria-label="Board stats"></div>
+  <div class="min-w-0 flex-1"></div>
+  <button type="button" id="search-btn" class="btn btn-ghost btn-icon relative" data-tip="Search  /" aria-label="Search tasks" aria-haspopup="dialog" aria-controls="search-dialog">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    <span id="search-dot" class="absolute right-1 top-1 size-1.5 rounded-full bg-accent" hidden aria-hidden="true"></span>
+  </button>
+  <button type="button" id="filters-toggle" class="btn btn-ghost btn-icon phone-only relative" aria-label="Search and filters" aria-expanded="false" aria-controls="filters">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M4 8h8M6 12h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>
+    <span id="filter-count" class="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 font-mono text-[10px] font-semibold text-on-accent" hidden></span>
+  </button>
+  <button type="button" id="palette-btn" class="btn btn-ghost btn-icon" data-tip="Commands  Ctrl K" aria-label="Command palette" aria-haspopup="dialog">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5.5 6 8l-3 2.5M8 11h5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+  <button type="button" id="new-task" class="btn btn-primary ml-1" data-tip="New task (n)">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    <span class="phone-hide">New task</span>
+  </button>
+  <span class="mx-1 hidden h-4 w-px bg-line md:block" aria-hidden="true"></span>
+  <button type="button" id="display-btn" class="btn btn-ghost btn-icon" aria-label="Display options" data-tip="Display  d" aria-haspopup="dialog" aria-expanded="false" aria-controls="display">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h5M10.5 4.5h3M2.5 8h9M13.5 8h0M2.5 11.5h2M7.5 11.5h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8.5" cy="4.5" r="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/><circle cx="12.5" cy="8" r="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/><circle cx="5.5" cy="11.5" r="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+  </button>
+  <button type="button" id="settings-btn" class="btn btn-ghost btn-icon phone-hide" aria-label="Settings" data-tip="Settings  s" aria-haspopup="dialog">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6l1 1.7 1.9-.4.6 1.9 1.9.6-.4 1.9 1.2 1.5-1.2 1.5.4 1.9-1.9.6-.6 1.9-1.9-.4-1 1.7-1-1.7-1.9.4-.6-1.9-1.9-.6.4-1.9L1.8 8 3 6.5l-.4-1.9 1.9-.6.6-1.9 1.9.4z"/></svg>
+  </button>
+  <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon phone-hide" aria-label="Toggle theme" data-tip="Theme">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 2.5v11A5.5 5.5 0 0 0 8 2.5z" fill="currentColor"/></svg>
+  </button>
+  <button type="button" id="help-btn" class="btn btn-ghost btn-icon phone-hide tip-left" data-tip="Keyboard  ?" aria-label="Keyboard help">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M6.2 6.4a1.9 1.9 0 1 1 2.6 1.8c-.5.2-.8.5-.8 1v.3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/><circle cx="8" cy="11.3" r=".8" fill="currentColor"/></svg>
+  </button>
+  <span id="conn" class="ml-1 hidden items-center gap-1.5 pl-1 font-mono text-11 text-fg-3 md:flex" data-tip="Connected"><span id="conn-dot" class="size-1.5 rounded-full bg-ok" aria-hidden="true"></span><span id="version"></span></span>
+</header>
+
+<section id="filters" class="filters flex flex-none items-center gap-2 overflow-hidden border-b border-line bg-canvas px-3" aria-label="Search and filters">
+  <div id="quick" class="seg seg-sm flex-none" role="group" aria-label="Quick filters"></div>
+  <span class="mx-1 h-4 w-px flex-none bg-line phone-hide" aria-hidden="true"></span>
+  <div id="labels" class="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-1 pr-6 [scrollbar-width:none] [mask-image:linear-gradient(90deg,#000_calc(100%-24px),transparent)] phone:flex-wrap phone:overflow-visible phone:[mask-image:none]" role="group" aria-label="Label filter"></div>
+  <div id="active" class="flex flex-none items-center gap-1.5 empty:hidden phone:flex-wrap" aria-label="Active filters"></div>
+  <button type="button" id="clear-filters" class="btn btn-ghost btn-sm flex-none" data-tip="Clear filters (X)" hidden>Clear</button>
+  <span id="result-count" class="num ml-auto flex-none text-12 text-fg-3"></span>
+  <button type="button" id="filters-done" class="btn btn-primary phone-only">Done</button>
+</section>
+<div id="filters-scrim" class="scrim" hidden></div>
+
+<div id="segments" class="seg seg-grow phone-only m-2 mb-0 flex-none" role="tablist" aria-label="Column">
+  <button type="button" role="tab" class="seg-btn" data-status="todo" data-hue aria-selected="true">Todo <span class="num seg-count text-fg-3"></span></button>
+  <button type="button" role="tab" class="seg-btn" data-status="doing" data-hue aria-selected="false">Doing <span class="num seg-count text-fg-3"></span></button>
+  <button type="button" role="tab" class="seg-btn" data-status="done" data-hue aria-selected="false">Done <span class="num seg-count text-fg-3"></span></button>
+  <button type="button" role="tab" class="seg-btn" data-status="cancelled" data-hue aria-selected="false">Cancelled <span class="num seg-count text-fg-3"></span></button>
+</div>
+
+<div id="banner" class="banner flex-none" role="status" hidden>Connection lost. Retrying…</div>
+
+<div class="flex min-h-0 flex-1">
+  <main id="board" class="board" aria-label="Board" tabindex="-1"></main>
+</div>
+
+<dialog id="detail-dialog" class="dialog dialog-detail sheet" aria-label="Task details">
+<section id="detail" class="sheet-col flex min-h-0 flex-1 flex-col" aria-labelledby="detail-title" hidden>
+  <div id="detail-head" class="flex flex-none items-start gap-2 border-b border-line px-5 pt-4 pb-4">
+    <div class="min-w-0 flex-1">
+      <div id="detail-seq" class="seq mb-1 flex h-5 items-center gap-2"></div>
+      <h2 id="detail-title" class="min-w-0 text-18 font-semibold tracking-[-0.01em]"></h2>
+    </div>
+    <button type="button" class="btn btn-ghost btn-icon -mr-2 -mt-1.5" id="detail-close" aria-label="Close details" data-tip="Close  Esc" >
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <div id="detail-body" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-5 pt-1 outline-none" tabindex="-1"></div>
+  <footer class="flex h-[61px] flex-none items-center gap-2 border-t border-line px-5" id="detail-actions" style="padding-bottom: env(safe-area-inset-bottom)"></footer>
+</section>
+</dialog>
+
+<div id="bulkbar" class="bulkbar" role="toolbar" aria-label="Selection actions" hidden></div>
+<div id="display" class="pop right-2 top-12 w-[342px] max-w-[calc(100vw-16px)] p-3" role="dialog" aria-label="Display options" hidden></div>
+<div id="toasts" class="pointer-events-none fixed inset-x-0 bottom-4 z-40 flex flex-col items-center gap-2 px-4" style="bottom: calc(16px + env(safe-area-inset-bottom))" role="status" aria-live="polite"></div>
+<div id="live" class="sr-only" aria-live="polite"></div>
+
+<dialog id="search-dialog" class="dialog search-dialog mt-[12vh]" aria-label="Search tasks">
+  <form id="search-form" novalidate>
+    <div class="search-box">
+      <svg class="text-fg-3" width="20" height="20" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <label class="sr-only" for="search">Search tasks. Supports tag:, scope:, prio:, due:, is:blocked, has:checklist, effort:, #number</label>
+      <input id="search" name="q" type="text" inputmode="search" placeholder="Search tasks…" autocomplete="off" spellcheck="false" enterkeyhint="search">
+      <button type="button" id="search-clear" class="btn btn-ghost btn-xs btn-icon" aria-label="Clear search" hidden>
+        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+      <kbd class="kbd phone-hide">Esc</kbd>
+    </div>
+    <div class="search-hints">
+      <span class="text-11 text-fg-3 phone-hide">Try</span>
+      <div id="search-syntax" class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto pr-6 [scrollbar-width:none] [mask-image:linear-gradient(90deg,#000_calc(100%-24px),transparent)]"></div>
+      <span id="search-count" class="num flex-none text-12 text-fg-3"></span>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="palette" class="dialog mt-[12vh]" aria-label="Command palette">
+  <div class="flex h-12 items-center gap-2 border-b border-line px-3">
+    <svg class="text-fg-3" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5.5 6 8l-3 2.5M8 11h5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <input id="palette-search" type="text" class="h-8 min-w-0 flex-1 bg-transparent text-14 outline-none placeholder:text-fg-3" placeholder="Type a command, #number, project or label…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list" aria-label="Command palette">
+    <kbd class="kbd">Esc</kbd>
+  </div>
+  <ul id="palette-list" class="max-h-[360px] overflow-y-auto overscroll-contain p-1" role="listbox" aria-label="Commands"></ul>
+</dialog>
+
+<dialog id="edit-dialog" class="dialog dialog-wide sheet" aria-labelledby="edit-title">
+  <form id="edit-form" method="dialog" novalidate autocomplete="off">
+    <header class="dialog-head">
+      <h2 id="edit-title">New task</h2>
+      <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <div class="dialog-body grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      <div class="sm:col-span-2 flex gap-2">
+        <label class="w-14 flex-none">
+          <span class="label-11 mb-1 block">Emoji</span>
+          <input name="emoji" class="input px-2 text-center" autocomplete="off" maxlength="8" placeholder="🚀">
+        </label>
+        <label class="min-w-0 flex-1">
+          <span class="label-11 mb-1 block">Title</span>
+          <input name="title" class="input" required autocomplete="off" placeholder="What needs doing?" enterkeyhint="done">
+        </label>
+      </div>
+      <div class="sm:col-span-2" id="edit-similar" hidden></div>
+      <div class="sm:col-span-2" id="edit-ai" hidden></div>
+      <div class="sm:col-span-2">
+        <span class="label-11 mb-1 block" id="edit-desc-label">Description</span>
+        <div id="edit-desc" aria-labelledby="edit-desc-label"></div>
+      </div>
+      <label>
+        <span class="label-11 mb-1 block">Status</span>
+        <select name="status" class="input">
+          <option value="todo">Todo</option>
+          <option value="doing">Doing</option>
+          <option value="done">Done</option>
+          <option value="cancelled">Cancelled</option>
+        </select>
+      </label>
+      <label>
+        <span class="label-11 mb-1 block">Priority</span>
+        <select name="prio" class="input">
+          <option value="1">High</option>
+          <option value="2">Medium</option>
+          <option value="3" selected>Low</option>
+        </select>
+      </label>
+      <label>
+        <span class="label-11 mb-1 block">Due</span>
+        <input name="due" type="date" class="input num">
+      </label>
+      <div>
+        <span class="label-11 mb-1 block" id="edit-effort-label">Effort</span>
+        <div id="edit-effort" class="seg seg-grow" role="radiogroup" aria-labelledby="edit-effort-label"></div>
+      </div>
+      <label>
+        <span class="label-11 mb-1 block">Project</span>
+        <select name="project" class="input"></select>
+      </label>
+      <div class="flex items-end">
+        <label class="flex h-8 cursor-pointer items-center gap-2 text-13">
+          <input name="blocked" type="checkbox" class="cb"> Blocked
+        </label>
+      </div>
+      <div class="sm:col-span-2">
+        <span class="label-11 mb-1 block" id="edit-labels-label">Labels</span>
+        <div id="edit-labels" aria-labelledby="edit-labels-label"></div>
+      </div>
+      <label class="sm:col-span-2">
+        <span class="label-11 mb-1 block">Checklist <span class="font-normal normal-case tracking-normal text-fg-3">one per line, prefix <code>x </code> when done</span></span>
+        <textarea name="checks" class="input font-mono text-12" rows="3" placeholder="x reproduce locally&#10;write regression test"></textarea>
+      </label>
+    </div>
+    <footer class="dialog-foot">
+      <span class="phone-hide text-12 text-fg-3"><kbd class="kbd">Ctrl</kbd> <kbd class="kbd">Enter</kbd> saves</span>
+      <span class="flex-1"></span>
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="submit" class="btn btn-primary" id="edit-save">Save</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="help-dialog" class="dialog dialog-wide" aria-labelledby="help-title">
+  <div class="dialog-head">
+    <h2 id="help-title">Keyboard shortcuts</h2>
+    <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <div class="dialog-body grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2" id="help-body"></div>
+</dialog>
+
+<dialog id="settings-dialog" class="dialog dialog-wide sheet" aria-labelledby="settings-dialog-title">
+  <div class="sheet-col">
+    <header class="dialog-head">
+      <h2 id="settings-dialog-title">Settings</h2>
+      <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <div class="dialog-body" id="settings-dialog-body"></div>
+    <footer class="dialog-foot">
+      <span class="phone-hide text-12 text-fg-3"><kbd class="kbd" id="settings-mod">Ctrl</kbd> <kbd class="kbd">S</kbd> saves the section you are in</span>
+      <span class="flex-1"></span>
+      <button type="button" class="btn" data-close>Close</button>
+    </footer>
+  </div>
+</dialog>
+
+<dialog id="split-dialog" class="dialog dialog-wide sheet" aria-labelledby="split-dialog-title">
+  <div class="sheet-col">
+    <header class="dialog-head">
+      <h2 id="split-dialog-title">Split ADR into stories</h2>
+      <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <div class="dialog-body" id="split-dialog-body"></div>
+    <footer class="dialog-foot" id="split-dialog-foot"></footer>
+  </div>
+</dialog>
+
+<dialog id="import-dialog" class="dialog dialog-wide sheet" aria-labelledby="import-dialog-title">
+  <div class="sheet-col">
+    <header class="dialog-head">
+      <h2 id="import-dialog-title">Forge issue import</h2>
+      <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <div class="dialog-body" id="import-dialog-body"></div>
+    <footer class="dialog-foot" id="import-dialog-foot"></footer>
+  </div>
+</dialog>
+
+<dialog id="ask-dialog" class="dialog" aria-labelledby="ask-title" aria-describedby="ask-body">
+  <form id="ask-form" novalidate>
+    <header class="dialog-head">
+      <h2 id="ask-title"></h2>
+      <button type="button" class="btn btn-ghost btn-icon" data-close aria-label="Close">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <div class="dialog-body" id="ask-body"></div>
+    <footer class="dialog-foot" id="ask-foot"></footer>
+  </form>
+</dialog>
+
+<script src="/marked.min.js"></script>
+<script src="/purify.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

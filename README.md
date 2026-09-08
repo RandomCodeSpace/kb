@@ -17,16 +17,18 @@
   <img src="docs/assets/kb-tui.svg" width="100%" alt="Illustrated preview of the kb terminal board with Todo, Doing, and Done columns">
 </p>
 
-`kb` is one executable with no web UI, JavaScript bundle, hosted account, or
-remote mode. Your board lives in local SQLite—no signup and no service to keep
-running. Open it full-screen, automate it from the command line, or connect a
-local MCP client over stdio. `kb` never listens on a TCP port.
+`kb` is one executable with no hosted account, remote mode, or build step. Your
+board lives in local SQLite—no signup and no service to keep running. Open it
+full-screen, automate it from the command line, connect a local MCP client over
+stdio, or view it in a browser. Only `kb web` opens a TCP listener; it
+binds to 127.0.0.1 by default, and no other command listens on a port.
 
 ## Why kb
 
 - **Terminal-native:** keyboard and mouse controls, responsive columns, forms,
   filters, Markdown, comments, checklists, and blocker links.
-- **Local-only:** TUI, CLI, and MCP all use the same SQLite database.
+- **Local-only:** TUI, CLI, MCP, and the web UI all use the same SQLite
+  database.
 - **Scriptable:** stable task numbers, JSON output on supported commands, and a
   focused task CLI.
 - **Agent-ready:** 12 MCP tools plus optional AI-assisted drafting and imports.
@@ -156,6 +158,31 @@ kb update 12 -p api         # move task #12 to api
 Resolution order is `-p/--project`, `KB_PROJECT`, then the saved default. Tasks
 from older kb versions without a project are placed in `inbox` when a local
 mode opens the store.
+
+## Use the web UI
+
+The web UI is an optional browser view of the same board. It starts only when
+you ask for it:
+
+```sh
+kb web                                  # pick a free loopback port, open the browser
+kb web --no-open --addr 127.0.0.1:8321  # fixed port, print the URL only
+```
+
+| Flag | Purpose |
+| --- | --- |
+| `--data DIR` | Data directory (default `$KB_DATA` or `~/.local/share/kb`) |
+| `--addr HOST:PORT` | Listen address; default `127.0.0.1:0` |
+| `--no-open` | Do not launch a browser |
+| `--unsafe-listen` | Allow a non-loopback `--addr` |
+
+The web UI has no authentication. A non-loopback `--addr` is refused unless
+`--unsafe-listen` is also given, and with it anyone who can reach the address
+can read and change your board. Keep the default loopback bind unless you have
+a firewall or tunnel in front of it.
+
+TUI, CLI, MCP, and the web UI share one SQLite database; changes made in any
+of them appear in the others without a restart.
 
 ## Use AI and agents
 
@@ -299,7 +326,7 @@ exercises the local task flow on Linux, macOS, and Windows.
 Use conventional commit subjects and target pull requests at `main`.
 
 Current release notes are in
-[`docs/releases/v1.7.1.md`](docs/releases/v1.7.1.md).
+[`docs/releases/v1.7.2.md`](docs/releases/v1.7.2.md).
 
 ## License
 

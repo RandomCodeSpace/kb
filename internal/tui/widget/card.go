@@ -1,6 +1,8 @@
 package widget
 
 import (
+	"strings"
+
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -88,7 +90,7 @@ type CardSpan struct {
 type cardPlan struct {
 	inner        int
 	blank        bool     // inner below CardMinInner: rail and surface only
-	compact      bool     // two fixed rows, labels merged onto the meta row
+	compact      bool     // dense identity/meta rows with complete labels below
 	title        []string // wrapped title text, unstyled, one entry per row
 	trailer      string
 	trailerWidth int
@@ -121,14 +123,15 @@ func planCard(styles *theme.Styles, opts CardOpts) cardPlan {
 	plan.inner = metrics.CardInner(opts.Width, opts.Density)
 	plan.blank = plan.inner < metrics.CardMinInner
 	if plan.compact {
-		// Compact is unchanged by issue #243 and stays two fixed rows: it exists
-		// to be dense, and a card that gave a row back there would be trading a
-		// row of content for nothing (section 2.6).
+		// Compact still drops prose and padding, but labels are data. They wrap
+		// below the two dense identity/meta rows instead of being discarded.
 		plan.rows = 2
 		if !plan.blank {
 			plan.trailer, plan.trailerWidth = cardTrailer(styles, opts, surface)
 			plan.title = cardTitleText(styles, opts, plan.inner, plan.trailerWidth, 1)
 			plan.pills = cardPills(styles, opts, surface, true)
+			plan.labelRows, plan.labelStarts = wrapLabels(styles.On(theme.FgBase, surface), plan.pills, plan.inner)
+			plan.rows += len(plan.labelRows)
 		}
 		return plan
 	}
@@ -144,8 +147,7 @@ func planCard(styles *theme.Styles, opts CardOpts) cardPlan {
 	plan.title = cardTitleText(styles, opts, plan.inner, plan.trailerWidth, max(opts.TitleLines, 1))
 	plan.desc, plan.descMore = layoutWords(descWords(styles, opts.Desc, surface), plan.inner, max(opts.DescLines, 0))
 	plan.pills = cardPills(styles, opts, surface, false)
-	plan.labelRows, plan.labelStarts = wrapLabels(styles.On(theme.FgBase, surface),
-		plan.pills, plan.inner, max(opts.LabelRows, 0))
+	plan.labelRows, plan.labelStarts = wrapLabels(styles.On(theme.FgBase, surface), plan.pills, plan.inner)
 
 	padRows := max(opts.PadRows, 0)
 	if padRows >= 1 {
@@ -209,9 +211,7 @@ func CardWithSpans(styles *theme.Styles, opts CardOpts) ([]string, []CardSpan) {
 		for range plan.metaSep {
 			content = append(content, "")
 		}
-		if !plan.compact {
-			base = len(content)
-		}
+		base = len(content)
 		spans = offsetSpans(chipSpans, base, metrics.CardRail+metrics.CardPad(opts.Density), inner)
 		content = append(content, labels...)
 	}
@@ -394,8 +394,8 @@ func cardPills(styles *theme.Styles, opts CardOpts, surface theme.Slot, flat boo
 }
 
 // cardChips is the meta chip row of spec section 3.4 and the label rows of
-// section 3.5. Compact merges the labels onto the meta row and flattens the
-// pills, which is step 5 of the section 2.6 drop order.
+// section 3.5. Compact keeps the short flat treatment, while complete labels
+// wrap below the dense identity and metadata rows.
 //
 // The pills and their wrap come off the plan: they are what decided the card's
 // height, and rendering a second set could disagree with the height the column
@@ -407,22 +407,10 @@ func cardPills(styles *theme.Styles, opts CardOpts, surface theme.Slot, flat boo
 // how many rows of it there are.
 func cardChips(styles *theme.Styles, opts CardOpts, surfaceStyle lipgloss.Style, inner int, plan cardPlan) (string, []string, []CardSpan) {
 	if plan.compact {
-		entries := append(append([]string{}, opts.Meta...), plan.pills...)
-		line, starts := joinAt(surfaceStyle, entries, inner)
-		return line, nil, labelSpans(opts.Labels, plan.pills, starts[len(opts.Meta):], 0)
+		line, _ := joinAt(surfaceStyle, opts.Meta, inner)
+		return line, plan.labelRows, cardLabelSpans(opts.Labels, plan.labelStarts)
 	}
-	spans := make([]CardSpan, 0, len(plan.pills))
-	for index, start := range plan.labelStarts {
-		if start.column < 0 {
-			continue
-		}
-		spans = append(spans, CardSpan{
-			Row: start.row, X0: start.column,
-			X1:    start.column + ansi.StringWidth(plan.pills[index]),
-			Index: index,
-			Tag:   opts.Labels[index],
-		})
-	}
+	spans := cardLabelSpans(opts.Labels, plan.labelStarts)
 	return join(surfaceStyle, opts.Meta, inner), plan.labelRows, spans
 }
 
@@ -432,6 +420,8 @@ func cardChips(styles *theme.Styles, opts CardOpts, surfaceStyle lipgloss.Style,
 type labelStart struct {
 	row    int
 	column int
+	width  int
+	index  int
 }
 
 // wrapLabels lays the label pills out across the card's label rows. Spec
@@ -445,47 +435,61 @@ type labelStart struct {
 // column on two cards and every gap would move whenever any pill changed width
 // - a reflow section 10.4.4 spends real effort avoiding elsewhere.
 //
-// The wrap is greedy in the order the caller supplied, which is the survival
-// order of section 3.5: a pill that does not fit the rest of the current row
-// starts the next one, and a pill too wide for a row of its own is skipped
-// rather than truncated into an unreadable stub. Pills still unplaced when the
-// allotment runs out are dropped, the same rule section 3.4 applies to a chip
-// that does not fit.
+// The wrap is greedy in caller order. A pill that does not fit the current
+// row starts the next one. A pill wider than a row is broken at terminal cell
+// boundaries, and every fragment keeps the raw tag identity in its span.
 //
 // Issue #243 made the return the rows the pills actually filled rather than the
 // whole allotment: a card with one row of labels is one row shorter than a card
 // with two, and a card with no labels at all draws no label row and loses the
 // separator above it.
-func wrapLabels(style lipgloss.Style, labels []string, inner, rows int) ([]string, []labelStart) {
-	starts := make([]labelStart, len(labels))
-	for index := range starts {
-		starts[index] = labelStart{column: -1}
+func wrapLabels(style lipgloss.Style, labels []string, inner int) ([]string, []labelStart) {
+	if inner <= 0 {
+		return nil, nil
 	}
-	if rows <= 0 || inner <= 0 {
-		return nil, starts
-	}
-	out := make([]string, 0, rows)
-	line, used, row := "", 0, 0
+	var starts []labelStart
+	var out []string
+	line, used := "", 0
+	gapBeforeNextGroup := false
 	for index, label := range labels {
 		width := ansi.StringWidth(label)
-		if label == "" || width > inner {
+		if label == "" || width == 0 {
 			continue
+		}
+		if gapBeforeNextGroup {
+			out = append(out, "")
+			gapBeforeNextGroup = false
 		}
 		separator := 0
 		if used > 0 {
 			separator = 1
 		}
 		if used+separator+width > inner {
-			if row+1 >= rows {
-				break
+			if used > 0 {
+				out = append(out, line, "")
 			}
-			out = append(out, line)
-			line, used, separator, row = "", 0, 0, row+1
+			line, used, separator = "", 0, 0
+		}
+		if width > inner {
+			for _, wrapped := range strings.Split(ansi.Hardwrap(label, inner, true), "\n") {
+				// Hardwrap owns grapheme boundaries. Repaint each fragment because
+				// a style opened on a prior row cannot cross the card's row fill.
+				fragment := style.Render(ansi.Strip(wrapped))
+				cells := ansi.StringWidth(fragment)
+				if cells == 0 {
+					continue
+				}
+				starts = append(starts, labelStart{row: len(out), column: 0, width: cells, index: index})
+				out = append(out, fragment)
+			}
+			line, used = "", 0
+			gapBeforeNextGroup = true
+			continue
 		}
 		if separator == 1 {
 			line += pad(style, 1)
 		}
-		starts[index] = labelStart{row: row, column: used + separator}
+		starts = append(starts, labelStart{row: len(out), column: used + separator, width: width, index: index})
 		line += label
 		used += separator + width
 	}
@@ -493,6 +497,20 @@ func wrapLabels(style lipgloss.Style, labels []string, inner, rows int) ([]strin
 		out = append(out, line)
 	}
 	return out, starts
+}
+
+func cardLabelSpans(tags []string, starts []labelStart) []CardSpan {
+	spans := make([]CardSpan, 0, len(starts))
+	for _, start := range starts {
+		if start.index < 0 || start.index >= len(tags) || start.width <= 0 {
+			continue
+		}
+		spans = append(spans, CardSpan{
+			Row: start.row, X0: start.column, X1: start.column + start.width,
+			Index: start.index, Tag: tags[start.index],
+		})
+	}
+	return spans
 }
 
 // labelSpans pairs the emitted label pills with the tags they carry.

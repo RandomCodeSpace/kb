@@ -108,6 +108,7 @@ type pointerClickMsg struct {
 
 type pointerWheelMsg struct {
 	session   uint64
+	preview   bool
 	current   int
 	target    int
 	maxScroll int
@@ -197,15 +198,24 @@ type Model struct {
 	// section 10.8.5: an errored operation does not grow a Retry button, the
 	// error row names the control that started it, and a failure with no
 	// retryable trigger leaves this empty.
-	statusTail   string
-	scroll       int
-	manualScroll bool
-	pointerState pointer.State
-	styles       *theme.Styles
-	spin         spinner.Model
-	brand        spin.Engine
-	draftStarted time.Time
-	frontMost    bool
+	statusTail        string
+	scroll            int
+	previewScroll     int
+	manualScroll      bool
+	preview           bool
+	previewFocus      string
+	terminalSelection bool
+	terminalSnapshot  string
+	terminalOffset    int
+	pointerSession    uint64
+	width             int
+	height            int
+	pointerState      pointer.State
+	styles            *theme.Styles
+	spin              spinner.Model
+	brand             spin.Engine
+	draftStarted      time.Time
+	frontMost         bool
 }
 
 // New creates a closed editor. A nil store keeps the feature unavailable in
@@ -430,7 +440,9 @@ func (m *Model) openForm(nextMode mode, task board.Task) {
 	m.similarLoading, m.similarQuery, m.similarExclusions = false, "", ""
 	m.similarCache = make(map[string][]store.SimilarHit)
 	m.statusMessage, m.statusIsError, m.statusTail = "", false, ""
-	m.scroll, m.manualScroll = 0, false
+	m.scroll, m.previewScroll, m.manualScroll = 0, 0, false
+	m.preview, m.terminalSelection, m.terminalSnapshot, m.terminalOffset = false, false, "", 0
+	m.pointerSession++
 	m.pointerState = pointer.State{}
 	m.draftGen++
 	m.resetInputs()
@@ -529,6 +541,18 @@ func (m *Model) Refresh(task board.Task, found bool) tea.Cmd {
 
 // Update handles form input, store results, and stale-result generations.
 func (m *Model) Update(message tea.Msg) tea.Cmd {
+	if m.open && m.terminalSelection {
+		switch msg := message.(type) {
+		case tea.KeyPressMsg:
+			m.updateTerminalSelection(msg.String())
+			return nil
+		case pointerClickMsg, pointerWheelMsg:
+			return nil
+		}
+		if pointer.IsMessage(message) {
+			return nil
+		}
+	}
 	state, command, handled := m.pointerState.Update(message)
 	if handled {
 		m.pointerState = state
@@ -612,11 +636,15 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 	case pointerClickMsg:
 		return m.updatePointer(msg)
 	case pointerWheelMsg:
-		if msg.session != m.session || m.saving || m.guardClose {
+		if msg.session != m.pointerSession || msg.preview != m.preview || m.saving || m.guardClose {
 			return nil
 		}
 		m.manualScroll = true
-		m.scroll = min(max(msg.target, 0), msg.maxScroll)
+		if m.preview {
+			m.previewScroll = min(max(msg.target, 0), msg.maxScroll)
+		} else {
+			m.scroll = min(max(msg.target, 0), msg.maxScroll)
+		}
 		return nil
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
@@ -625,7 +653,7 @@ func (m *Model) Update(message tea.Msg) tea.Cmd {
 }
 
 func (m *Model) updatePointer(message pointerClickMsg) tea.Cmd {
-	if m.saving || message.target == "" || message.session != m.session {
+	if m.saving || message.target == "" || message.session != m.pointerSession {
 		return nil
 	}
 	if m.guardClose {
@@ -651,6 +679,18 @@ func (m *Model) updatePointer(message pointerClickMsg) tea.Cmd {
 		m.label.SetValue(strings.TrimPrefix(message.target, "label:"))
 		cmd, _ := m.updateLabels("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
 		return cmd
+	}
+	if message.target == "source-preview" || message.target == "terminal-select" {
+		if message.target == "source-preview" {
+			if m.preview {
+				m.leavePreview()
+			} else {
+				m.enterPreview()
+			}
+		} else {
+			m.enterTerminalSelection()
+		}
+		return nil
 	}
 	m.focus = message.target
 	m.applyFocus()
@@ -688,6 +728,33 @@ func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.guardClose = false
 			m.statusMessage, m.statusIsError = "close cancelled", false
 		}
+		return nil
+	}
+	if key == "f3" {
+		m.enterTerminalSelection()
+		return nil
+	}
+	if m.preview {
+		switch key {
+		case "f2", "esc":
+			m.leavePreview()
+		case "up", "k":
+			m.previewScroll--
+		case "down", "j":
+			m.previewScroll++
+		case "pgup":
+			m.previewScroll -= 8
+		case "pgdown":
+			m.previewScroll += 8
+		case "home", "g":
+			m.previewScroll = 0
+		case "end", "G":
+			m.previewScroll = int(^uint(0) >> 1)
+		}
+		return nil
+	}
+	if key == "f2" {
+		m.enterPreview()
 		return nil
 	}
 	// The focused field's mark runs ahead of every editor key, Escape included:
@@ -752,6 +819,16 @@ func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "save":
 		if key == "enter" || key == " " {
 			return m.startSave()
+		}
+		return nil
+	case "source-preview":
+		if key == "enter" || key == " " {
+			m.enterPreview()
+		}
+		return nil
+	case "terminal-select":
+		if key == "enter" || key == " " {
+			m.enterTerminalSelection()
 		}
 		return nil
 	}
@@ -1080,7 +1157,7 @@ func (m Model) focusTargets() []string {
 			targets = append(targets, "similar:all")
 		}
 	}
-	return append(targets, "cancel", "save")
+	return append(targets, "source-preview", "terminal-select", "cancel", "save")
 }
 
 func (m *Model) applyFocus() tea.Cmd {

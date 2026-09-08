@@ -194,9 +194,14 @@ func wrapRuns(style lipgloss.Style, runs []string, width int) []string {
 	}
 	var rows []string
 	line, used := "", 0
+	gapBeforeNextGroup := false
 	for _, run := range runs {
 		if run == "" {
 			continue
+		}
+		if gapBeforeNextGroup {
+			rows = append(rows, "")
+			gapBeforeNextGroup = false
 		}
 		cost := ansi.StringWidth(run)
 		separator := 0
@@ -205,11 +210,17 @@ func wrapRuns(style lipgloss.Style, runs []string, width int) []string {
 		}
 		if used+separator+cost > width {
 			if used > 0 {
-				rows = append(rows, line)
+				rows = append(rows, line, "")
 				line, used, separator = "", 0, 0
 			}
 			if cost > width {
-				rows = append(rows, ansi.Truncate(run, width, ""))
+				for _, fragment := range strings.Split(ansi.Hardwrap(run, width, true), "\n") {
+					if ansi.StringWidth(fragment) == 0 {
+						continue
+					}
+					rows = append(rows, style.Render(ansi.Strip(fragment)))
+				}
+				gapBeforeNextGroup = true
 				continue
 			}
 		}

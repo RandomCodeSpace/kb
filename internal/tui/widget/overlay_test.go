@@ -88,6 +88,43 @@ func TestOverlayClipsBodyRowsAndPadsShortOnes(t *testing.T) {
 	}
 }
 
+func TestFieldWrapBreaksAnOverwideLabelWithoutOmission(t *testing.T) {
+	styles := theme.New(true)
+	const tag = "supercalifragilistic-🙂-label"
+	rows := FieldWrap(styles, "labels", []string{Label(styles, tag, theme.OverlaySurf, false, false)}, 20)
+	valueColumn := styles.Metrics.OverlayInsetX + styles.Metrics.OverlayLabelW
+	var joined string
+	for _, row := range rows {
+		plain := ansi.Strip(row)
+		joined += strings.TrimSpace(ansi.Cut(plain, valueColumn, ansi.StringWidth(plain)))
+		if ansi.StringWidth(row) != 20 {
+			t.Fatalf("label row is %d cells, want 20", ansi.StringWidth(row))
+		}
+	}
+	if joined != styles.Glyph.MarkTag+tag {
+		t.Fatalf("wrapped label = %q, want %q", joined, styles.Glyph.MarkTag+tag)
+	}
+}
+
+func TestFieldWrapSeparatesLabelGroupsButKeepsLongLabelFragmentsTogether(t *testing.T) {
+	styles := theme.New(true)
+	pills := []string{
+		styles.On(theme.FgBase, theme.OverlaySurf).Render("aaaa"),
+		styles.On(theme.FgBase, theme.OverlaySurf).Render("bbbb"),
+		styles.On(theme.FgBase, theme.OverlaySurf).Render("cccc"),
+	}
+	rows := FieldWrap(styles, "labels", pills, 25)
+	if len(rows) != 3 || strings.TrimSpace(ansi.Strip(rows[1])) != "" {
+		t.Fatalf("detail label rows = %q, want one blank row between groups", rows)
+	}
+
+	long := styles.On(theme.FgBase, theme.OverlaySurf).Render("abcdefghijkl")
+	rows = FieldWrap(styles, "labels", []string{long, pills[0]}, 20)
+	if len(rows) != 5 || strings.TrimSpace(ansi.Strip(rows[3])) != "" {
+		t.Fatalf("detail long-label rows = %q, want contiguous fragments then one group gap", rows)
+	}
+}
+
 func TestOverlayKeepsTheSingleRowHeader(t *testing.T) {
 	styles := theme.New(true)
 	rows := strings.Split(Overlay(styles, OverlayOpts{Title: "T", Width: 10, Height: 1}), "\n")
@@ -197,14 +234,17 @@ func TestFieldWrapKeepsTheGutterAndBreaksBetweenPills(t *testing.T) {
 		Label(styles, "area::terminal", theme.OverlaySurf, false, false),
 	}
 	rows := FieldWrap(styles, "labels", pills, 44)
-	if len(rows) != 2 {
+	if len(rows) != 3 {
 		t.Fatalf("three pills in a 44-cell panel wrapped to %d rows", len(rows))
 	}
-	first, second := ansi.Strip(rows[0]), ansi.Strip(rows[1])
+	first, gap, second := ansi.Strip(rows[0]), ansi.Strip(rows[1]), ansi.Strip(rows[2])
 	if !strings.HasPrefix(first, "  labels       #backend ") {
 		t.Errorf("first row = %q", first)
 	}
-	if !strings.HasPrefix(second, "               area:terminal ") {
+	if strings.TrimSpace(gap) != "" {
+		t.Errorf("wrapped label-row gap = %q, want blank overlay surface", gap)
+	}
+	if !strings.HasPrefix(second, "               area terminal ") {
 		t.Errorf("continuation row did not repeat the gutter: %q", second)
 	}
 	for index, row := range rows {
@@ -216,7 +256,7 @@ func TestFieldWrapKeepsTheGutterAndBreaksBetweenPills(t *testing.T) {
 	// the no-straddle assertion is that every pill survives whole in exactly one
 	// row.
 	for _, pill := range pills {
-		if strings.Count(rows[0], pill)+strings.Count(rows[1], pill) != 1 {
+		if strings.Count(rows[0], pill)+strings.Count(rows[1], pill)+strings.Count(rows[2], pill) != 1 {
 			t.Errorf("pill %q was split across the break", ansi.Strip(pill))
 		}
 	}
@@ -226,11 +266,20 @@ func TestFieldWrapDegradesWithoutRoom(t *testing.T) {
 	styles := theme.New(true)
 	pill := Label(styles, "a-label-longer-than-the-field", theme.OverlaySurf, false, false)
 	rows := FieldWrap(styles, "labels", []string{"", pill}, 30)
-	if len(rows) != 1 {
-		t.Fatalf("an oversized pill produced %d rows, want 1", len(rows))
+	if len(rows) < 2 {
+		t.Fatalf("an oversized pill produced %d rows, want complete wrapped content", len(rows))
 	}
-	if got := ansi.StringWidth(rows[0]); got != 30 {
-		t.Errorf("truncated row is %d cells, want 30", got)
+	valueColumn := styles.Metrics.OverlayInsetX + styles.Metrics.OverlayLabelW
+	var joined string
+	for index, row := range rows {
+		if got := ansi.StringWidth(row); got != 30 {
+			t.Errorf("wrapped row %d is %d cells, want 30", index, got)
+		}
+		plain := ansi.Strip(row)
+		joined += strings.TrimSpace(ansi.Cut(plain, valueColumn, ansi.StringWidth(plain)))
+	}
+	if want := styles.Glyph.MarkTag + "a-label-longer-than-the-field"; joined != want {
+		t.Errorf("wrapped label = %q, want %q", joined, want)
 	}
 	if rows := FieldWrap(styles, "labels", []string{pill}, 8); rows != nil {
 		t.Errorf("a panel with no value field rendered %d rows", len(rows))

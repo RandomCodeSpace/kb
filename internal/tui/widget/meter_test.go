@@ -153,7 +153,7 @@ func TestMeterCarriesItsGroundEdgeToEdge(t *testing.T) {
 	if !strings.HasPrefix(rendered, styles.SurfaceRun(theme.OverlaySurf, "")[:len(styles.SurfaceRun(theme.OverlaySurf, ""))-len(ansi.ResetStyle)]) {
 		t.Errorf("meter = %q, want it opened on its ground", rendered)
 	}
-	if Meter(styles, MeterOpts{Done: 1, Total: 4, Cells: 8, Ground: theme.Card}) == rendered {
+	if Meter(styles, MeterOpts{Done: 1, Total: 4, Cells: 8, Ground: theme.Raised}) == rendered {
 		t.Error("the ground must reach the render")
 	}
 }

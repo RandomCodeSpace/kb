@@ -9,7 +9,6 @@ package theme
 
 import (
 	"image/color"
-	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -64,11 +63,11 @@ const (
 	TintDanger  // #ffa7a0 x256 217
 
 	// Label pill wheel (section 1.6), selected by the labelColor hash.
-	Label1 // #ff7b54 x256 209
-	Label2 // #4f8ef7 x256  69
-	Label3 // #3f9d58 x256  71
-	Label4 // #b98af7 x256 141
-	Label5 // #ffb020 x256 214
+	Label1 // #7089a0 muted blue
+	Label2 // #689c9c muted teal
+	Label3 // #947f9f muted plum
+	Label4 // #98825e muted ochre
+	Label5 // #789d68 muted sage
 
 	numSlots
 )
@@ -133,21 +132,11 @@ func WheelIndex(tag string) int {
 // the same arbitrary hue and call it identity.
 const unnamedBoard = "board"
 
-// AccentSlot is the per-project accent hue of spec section 10.7.2: a
-// deterministic recognition cue for the board the user named, and nothing else.
-// No state, count, severity or affordance may ever be encoded in it.
-//
-// The accent derives from the section 1.6 label wheel rather than from free
-// HSL, so it is total over {Brand, Label1..Label5} and can emit no hex the
-// section 1.7 audit has not already cleared. The default and empty titles
-// resolve to Brand: a board that declared no name looks exactly like kb looks
-// without one.
+// AccentSlot keeps every project on the shared restrained focus accent. The
+// project name remains visible identity without turning ordinary hierarchy
+// into a set of unrelated color bands.
 func AccentSlot(title string) Slot {
-	name := strings.ToLower(strings.TrimSpace(title))
-	if name == "" || name == unnamedBoard {
-		return Brand
-	}
-	return LabelSlot(WheelIndex(name))
+	return Brand
 }
 
 // Palette resolves every slot to a terminal color.
@@ -167,19 +156,19 @@ type paletteRGB [numSlots]rgb
 // darkPalette is the reference design: truecolor on a dark background. It is
 // the only column that is reviewed, audited or goldened.
 var darkPalette = paletteRGB{
-	Shadow:       {0x05, 0x07, 0x0a},
-	Canvas:       {0x0b, 0x0e, 0x14},
-	Surface:      {0x17, 0x1d, 0x27},
-	Zebra:        {0x1e, 0x26, 0x32},
-	Card:         {0x25, 0x2f, 0x3d},
-	Raised:       {0x35, 0x40, 0x4f},
-	OverlaySurf:  {0x3c, 0x49, 0x5c},
-	OverlayBand:  {0x4a, 0x59, 0x70},
-	FgBase:       {0xe3, 0xe9, 0xf2},
-	FgSubtle:     {0x9a, 0xa5, 0xb6},
-	FgMuted:      {0x6b, 0x76, 0x86},
-	FgOnAccent:   {0x0b, 0x0e, 0x14},
-	Brand:        {0x4f, 0x8e, 0xf7},
+	Shadow:       {0x08, 0x08, 0x08},
+	Canvas:       {0x12, 0x12, 0x12},
+	Surface:      {0x1c, 0x1c, 0x1c},
+	Zebra:        {0x26, 0x26, 0x26},
+	Card:         {0x30, 0x30, 0x30},
+	Raised:       {0x3a, 0x3a, 0x3a},
+	OverlaySurf:  {0x30, 0x30, 0x30},
+	OverlayBand:  {0x3a, 0x3a, 0x3a},
+	FgBase:       {0xee, 0xee, 0xee},
+	FgSubtle:     {0xbc, 0xbc, 0xbc},
+	FgMuted:      {0x8a, 0x8a, 0x8a},
+	FgOnAccent:   {0x12, 0x12, 0x12},
+	Brand:        {0x87, 0xaf, 0xd7},
 	HueTodo:      {0x7a, 0xa2, 0xf7},
 	HueDoing:     {0xf2, 0xa3, 0x3c},
 	HueDone:      {0x3f, 0xbf, 0x7f},
@@ -195,11 +184,11 @@ var darkPalette = paletteRGB{
 	TintPrimary:  {0xa8, 0xb6, 0xff},
 	TintSuccess:  {0x7f, 0xe0, 0xb0},
 	TintDanger:   {0xff, 0xa7, 0xa0},
-	Label1:       {0xff, 0x7b, 0x54},
-	Label2:       {0x4f, 0x8e, 0xf7},
-	Label3:       {0x3f, 0x9d, 0x58},
-	Label4:       {0xb9, 0x8a, 0xf7},
-	Label5:       {0xff, 0xb0, 0x20},
+	Label1:       {0x70, 0x89, 0xa0},
+	Label2:       {0x68, 0x9c, 0x9c},
+	Label3:       {0x94, 0x7f, 0x9f},
+	Label4:       {0x98, 0x82, 0x5e},
+	Label5:       {0x78, 0x9d, 0x68},
 }
 
 // lightPalette is the light-background column of the LightDark seam. Map #136

@@ -18,10 +18,12 @@ fail() {
 [ -f "$readme" ] || fail 'README.md is missing'
 
 grep -Fi 'local-only' "$readme" >/dev/null || fail 'README must state that kb is local-only'
-grep -F 'no web UI, JavaScript bundle, hosted account, or' "$readme" >/dev/null || \
+grep -F 'no hosted account, remote mode, or' "$readme" >/dev/null || \
   fail 'README must state that hosted and remote modes are absent'
-grep -F 'never listens on a TCP port' "$readme" >/dev/null || \
-  fail 'README must state that kb opens no inbound network listener'
+grep -F 'Only `kb web` opens a TCP listener' "$readme" >/dev/null || \
+  fail 'README must state that only kb web opens an inbound network listener'
+grep -F 'binds to 127.0.0.1 by default' "$readme" >/dev/null || \
+  fail 'README must state that kb web binds to loopback by default'
 
 badge_count="$(grep -c 'img.shields.io' "$readme" || true)"
 [ "$badge_count" -gt 0 ] || fail 'README has no badges'
