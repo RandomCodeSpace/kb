@@ -64,6 +64,7 @@ func newTestModel() (*Model, *fakeStore, *fakeRunner) {
 	st := &fakeStore{errs: make(map[string]error)}
 	runner := &fakeRunner{run: ai.RunResult{Cards: []ai.Draft{testDraft("one"), testDraft("two")}}}
 	m := New(st, runner, "alice", context.Background())
+	m.SetProject(testProject)
 	m.Open()
 	return &m, st, runner
 }

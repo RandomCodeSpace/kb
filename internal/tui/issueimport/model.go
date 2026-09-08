@@ -78,7 +78,7 @@ type Model struct {
 	store   Store
 	backend Backend
 	user    string
-	dataDir string
+	project string
 	ctx     context.Context
 
 	open       bool
@@ -119,10 +119,10 @@ type Model struct {
 // and again on tea.BackgroundColorMsg (spec section 6.3).
 var fallbackStyles = sync.OnceValue(func() *theme.Styles { return theme.New(true) })
 
-// SetDataDir names the directory the active project is resolved from — the
-// one holding the board and its state.json. Empty falls back to $KB_DATA and
-// the default data directory, the same as every other surface.
-func (m *Model) SetDataDir(dir string) { m.dataDir = dir }
+// SetProject names the project every imported card is filed under — the one
+// the board is scoped to. Empty means no project, and every row then fails
+// rather than landing a card without one.
+func (m *Model) SetProject(name string) { m.project = name }
 
 // SetStyles hands the overlay the resolved design system. Spec section 6.2:
 // styles are built once by the root and threaded down, never constructed here.
@@ -604,13 +604,13 @@ func (m *Model) nextWrite() tea.Cmd {
 	session, generation := m.session, m.generation
 	source := draft.SourceName
 	item := forge.LinkInput{ExternalKey: draft.ExternalKey, Link: draft.Link, URL: draft.URL, Title: draft.Title, Baseline: draft.Baseline}
-	dataDir := m.dataDir
+	project := m.project
 	return func() tea.Msg {
 		// An imported card is a card: it carries the one project every task
 		// carries. The import flow is what picks it — the forge service
-		// writes the card it is handed — and it resolves per card, so a kb
-		// project use during a long import is picked up by the rest of it.
-		tags, err := cliapp.ProjectTags(task.Tags, "", dataDir, "")
+		// writes the card it is handed — from the project the board handed
+		// the overlay, and a board under "all" fails the row.
+		tags, err := cliapp.ProjectTags(task.Tags, project, "")
 		if err != nil {
 			// safeError hides anything that is not a categorized forge
 			// error, because upstream text is not ours to render. This

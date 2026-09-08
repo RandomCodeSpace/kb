@@ -16,11 +16,10 @@ import (
 
 var (
 	openTUIStore  = cliapp.OpenLocalStore
-	runTUIProgram = func(st *store.Store, databasePath, user, activeProject, version string, options ...tea.ProgramOption) error {
-		return tui.Run(st, databasePath, user, activeProject, version, options...)
+	runTUIProgram = func(st *store.Store, databasePath, user, version string, options ...tea.ProgramOption) error {
+		return tui.Run(st, databasePath, user, version, options...)
 	}
-	activeTUIProject           = cliapp.ActiveProject
-	tuiStderr        io.Writer = os.Stderr
+	tuiStderr io.Writer = os.Stderr
 )
 
 // runTUI opens the same local store as the task CLI: kb tui [--data DIR]. The
@@ -48,15 +47,8 @@ func runTUI(args []string) error {
 		return err
 	}
 	defer st.Close()
-	// The board opens on the project the task CLI would use. A board with no
-	// active project simply opens unscoped: the TUI cannot set one, and the
-	// editor asks for a project when a card is saved.
-	activeProject, _, err := activeTUIProject(resolvedData)
-	if err != nil {
-		return err
-	}
 	// The launch screen's meta row prints the same build identifier kb version
 	// reads, so both answer a bug report with one string (spec section 10.6.5).
 	version, _, _ := versionParts(readBuildInfo())
-	return runTUIProgram(st, filepath.Join(resolvedData, "kb.db"), defaultBoardUser, activeProject, version)
+	return runTUIProgram(st, filepath.Join(resolvedData, "kb.db"), defaultBoardUser, version)
 }

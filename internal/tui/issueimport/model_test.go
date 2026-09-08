@@ -111,6 +111,7 @@ func openModel(t *testing.T, backend *fakeBackend, st *fakeStore) Model {
 	t.Helper()
 	backend.store = st
 	m := New(st, backend, "alice", context.Background())
+	m.SetProject(testProject)
 	command := m.Open()
 	if command == nil {
 		t.Fatal("Open returned nil")

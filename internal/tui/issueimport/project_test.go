@@ -1,8 +1,6 @@
 package issueimport
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,15 +9,10 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
-// testProject is the active project the package's tests run under. Every
-// imported card carries a project now, and these tests are about the overlay,
-// not about resolution, so one env-level default keeps them readable.
+// testProject is the project the package's tests open the overlay under.
+// Every imported card carries a project, and these tests are about the
+// overlay, not about resolution, so one default keeps them readable.
 const testProject = "import"
-
-func TestMain(m *testing.M) {
-	os.Setenv("KB_PROJECT", testProject)
-	os.Exit(m.Run())
-}
 
 func projectsOf(tags []string) []string {
 	var found []string
@@ -51,8 +44,8 @@ func importReady(t *testing.T) (Model, *fakeStore) {
 	return m, st
 }
 
-// TestImportStampsExactlyOneProject pins the import write path: the flow picks
-// the active project and every created card carries it, keeping its own labels.
+// TestImportStampsExactlyOneProject pins the import write path: the flow files
+// every created card under the board's project, keeping its own labels.
 func TestImportStampsExactlyOneProject(t *testing.T) {
 	m, st := importReady(t)
 	m.Update(runCmd(m.startCreate()))
@@ -68,37 +61,30 @@ func TestImportStampsExactlyOneProject(t *testing.T) {
 	}
 }
 
-// TestImportRefusesWithoutAProject pins that a board with no project resolved
-// fails the row instead of importing a card without one.
+// TestImportRefusesWithoutAProject pins that a board under "all" fails the row
+// instead of importing a card without a project.
 func TestImportRefusesWithoutAProject(t *testing.T) {
-	t.Setenv("KB_PROJECT", "")
 	m, st := importReady(t)
-	// An empty data directory has no state.json, so nothing resolves.
-	m.SetDataDir(t.TempDir())
+	m.SetProject("")
 	m.Update(runCmd(m.startCreate()))
 	if len(st.added) != 0 {
 		t.Fatalf("imported %d cards without a project", len(st.added))
 	}
-	if !strings.Contains(m.rows[0].err, "kb project use") {
+	if !strings.Contains(m.rows[0].err, "no project given") {
 		t.Fatalf("row err = %q, want the project refusal", m.rows[0].err)
 	}
 }
 
-// TestImportUsesTheStoredActiveProject pins that the overlay resolves the
-// project from the data directory the board lives in.
-func TestImportUsesTheStoredActiveProject(t *testing.T) {
-	t.Setenv("KB_PROJECT", "")
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"active_project":"stored"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+// TestImportFollowsTheProjectItWasHanded pins that the project set on the
+// overlay is the one an imported card lands under.
+func TestImportFollowsTheProjectItWasHanded(t *testing.T) {
 	m, st := importReady(t)
-	m.SetDataDir(dir)
+	m.SetProject("handed")
 	m.Update(runCmd(m.startCreate()))
 	if len(st.added) != 1 {
 		t.Fatalf("created %d cards (row err %q)", len(st.added), m.rows[0].err)
 	}
-	if got := projectsOf(st.added[0].Tags); len(got) != 1 || got[0] != "stored" {
-		t.Fatalf("project = %v, want the stored one", got)
+	if got := projectsOf(st.added[0].Tags); len(got) != 1 || got[0] != "handed" {
+		t.Fatalf("project = %v, want the handed one", got)
 	}
 }
