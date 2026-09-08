@@ -113,6 +113,19 @@ func (r *Runner) Probe(ctx context.Context, user string, supplied Config) error 
 	return probeError(err, recorder)
 }
 
+// endpoint validates one OpenAI-compatible base URL and returns the URL the
+// provider is pointed at. The API version is the caller's when they named one,
+// because OpenAI-compatible providers do not agree on it:
+//
+//  1. Empty path: append "/v1/" (OpenAI, Ollama, vLLM).
+//  2. Path ending in a version segment: keep it, normalize the trailing slash
+//     (OpenRouter's /api/v1).
+//  3. Path containing a version segment anywhere: keep the path as given,
+//     normalize the trailing slash (Gemini's /v1beta/openai).
+//  4. Any other path: append "/v1/" (Groq's /openai becomes /openai/v1/).
+//
+// A version segment is a path element matching ^v[0-9]+[a-z0-9]*$, compared
+// case-insensitively.
 func endpoint(base string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(base))
 	if err != nil || u.Host == "" {
@@ -128,13 +141,26 @@ func endpoint(base string) (string, error) {
 		return "", errors.New("AI base URL must not contain a username or password — put the key in the API key field")
 	}
 	p := strings.TrimRight(u.Path, "/")
-	if !strings.HasSuffix(p, "/v1") {
+	if !hasVersionSegment(p) {
 		p += "/v1"
 	}
 	u.Path = p + "/"
 	u.RawQuery, u.Fragment = "", ""
 	return u.String(), nil
 }
+
+// hasVersionSegment reports whether any element of a cleaned path names an API
+// version, which is what tells endpoint that the caller already chose one.
+func hasVersionSegment(path string) bool {
+	for _, segment := range strings.Split(path, "/") {
+		if versionSegmentRe.MatchString(segment) {
+			return true
+		}
+	}
+	return false
+}
+
+var versionSegmentRe = regexp.MustCompile(`(?i)^v[0-9]+[a-z0-9]*$`)
 
 // ValidateBaseURL applies the same endpoint validation used by model runs
 // without constructing a client or reading a credential.

@@ -1,7 +1,7 @@
 /* kb web frontend. Plain ES2022, no modules, no bundler. Talks to /api/* (docs/web-api.md).
    Markdown: marked + DOMPurify (vendored, see VENDOR.md). Styling: Tailwind classes compiled by
    scripts/build-web-css.sh, plus the component classes in internal/webui/tailwind/app.css.
-   Sections: utilities · labels · markdown · settings · state · api/polling · filters
+   Sections: utilities · labels · markdown · settings · state · api/live updates · filters
    · render (header, filters, board, cards) · drag and drop · keyboard, lift, selection, bulk
    · markdown editor · label editor · detail panel · edit dialog · composer · palette
    · display options · ask dialog · settings dialog · AI in the editor · split ADR
@@ -397,7 +397,8 @@ const state = {
   dragging: null, touch: null, dragPos: null, autoScrollRAF: 0,
   focusId: null, lifted: null, liftOrigin: null, selected: new Set(), anchorId: null,
   detail: null, detailJSON: '', detailData: null, detailPending: null, commentCounts: {},
-  editing: null, editSnapshot: '', pollTimer: 0, paletteIndex: 0, paletteItems: [],
+  editing: null, editSnapshot: '', paletteIndex: 0, paletteItems: [],
+  mode: 'stream', stream: null, streamFails: 0, helloSeen: false, refreshTimer: 0, pollTimer: 0,
   actions: [], projects: [], activeProject: '', shipped: null, ai: null, drift: {},
 };
 const ALL_PROJECTS = '::all'; // client-side pseudo-project, like the TUI's "all" scope
@@ -420,7 +421,7 @@ const dom = {
 const cols = {}; // status -> {col, body, count, composer}
 const dropSlot = el('div', { class: 'drop-slot', 'aria-hidden': 'true' });
 
-/* ============================== api / polling ============================== */
+/* ============================== api / live updates ============================== */
 async function api(method, path, body, opts = {}) {
   const init = { method, headers: { Accept: 'application/json' } };
   if (method !== 'GET') init.headers['Content-Type'] = 'application/json';
@@ -577,12 +578,65 @@ function invalidate() {
   state.etag = null;
   return refreshTasks();
 }
+/* Live updates. The board follows /api/events: the server pushes one `change` per board
+   revision (its own writes included) and a `: ping` every 15s. Polling is the fallback for a
+   browser without EventSource, or a stream that never opens. See docs/web-api.md. */
+const LIVE = { debounce: 150, poll: 5000, open: 5000 };
+// One refresh per burst: a drag that moves three cards is still one GET.
+function scheduleRefresh() {
+  if (state.refreshTimer) return;
+  state.refreshTimer = setTimeout(() => {
+    state.refreshTimer = 0;
+    refreshTasks();
+  }, LIVE.debounce);
+}
+function openStream() {
+  if (state.mode === 'poll' || state.stream) return;
+  if (typeof EventSource === 'undefined') { fallBackToPolling(); return; }
+  const es = new EventSource('/api/events');
+  state.stream = es;
+  es.addEventListener('hello', () => {
+    state.streamFails = 0;
+    state.helloSeen = true;
+    setOnline(true);
+    scheduleRefresh();
+  });
+  es.addEventListener('change', scheduleRefresh);
+  // EventSource reconnects by itself; one failure is a hiccup, two in a row is an outage.
+  es.onerror = () => { if (++state.streamFails >= 2) setOnline(false); };
+  // A stream the server refuses (no 2xx) never says hello, and EventSource gives up silently.
+  if (!state.helloSeen) setTimeout(() => { if (!state.helloSeen) fallBackToPolling(); }, LIVE.open);
+}
+function closeStream() {
+  if (!state.stream) return;
+  state.stream.close();
+  state.stream = null;
+}
+function fallBackToPolling() {
+  if (state.mode === 'poll') return;
+  state.mode = 'poll';
+  closeStream();
+  renderHeader(); // the version tooltip names the mode
+  schedulePoll();
+}
 function schedulePoll() {
   clearTimeout(state.pollTimer);
+  if (state.mode !== 'poll') return;
   state.pollTimer = setTimeout(async () => {
     if (document.visibilityState === 'visible') await refreshTasks();
     schedulePoll();
-  }, 2000);
+  }, LIVE.poll);
+}
+// Opens (or reopens) whichever channel this page is on. Safe to call repeatedly.
+function startLive() {
+  if (state.mode === 'poll') { schedulePoll(); return; }
+  openStream();
+}
+// Mobile browsers keep a backgrounded page alive; nothing holds a socket open for it.
+function stopLive() {
+  closeStream();
+  clearTimeout(state.pollTimer);
+  state.pollTimer = 0;
 }
 function setOnline(online) {
   if (state.online === online) return;
@@ -703,6 +757,7 @@ function clearFilters() {
 function renderHeader() {
   const { meta } = state;
   dom.version.textContent = meta.version ? 'v' + String(meta.version).replace(/^v/, '') : '';
+  dom.version.title = state.mode === 'stream' ? 'Live updates: server push' : 'Live updates: polling every 5 seconds';
   dom.projectName.textContent = state.project === ALL_PROJECTS ? 'All projects' : state.project || 'No project';
   if (!dom.projectMenu.hidden) renderProjectMenu();
   if (!dom.editDialog.open) {
@@ -3253,7 +3308,13 @@ function bind() {
     if (!dom.projectMenu.hidden && !dom.projectMenu.contains(e.target) && !e.target.closest('#project-btn')) toggleProjectMenu(false);
   });
   document.addEventListener('keydown', onKeydown);
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshTasks(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    startLive();
+    refreshTasks();
+  });
+  window.addEventListener('pagehide', stopLive);
+  window.addEventListener('pageshow', startLive);
   window.addEventListener('online', () => refreshTasks());
   window.addEventListener('hashchange', applyRoute);
   window.addEventListener('beforeunload', (e) => { if ((dom.editDialog.open && editDirty()) || panelDirty()) e.preventDefault(); });
@@ -3277,7 +3338,7 @@ async function init() {
   await refreshTasks();
   if (!state.loaded) for (const status of STATUSES) cols[status].body.replaceChildren(el('div', { class: 'col-empty' }, 'Waiting for the server…'));
   applyRoute();
-  schedulePoll();
+  startLive();
   refreshActions();
   refreshAIStatus();
   refreshShipped();
