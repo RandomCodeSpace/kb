@@ -16,7 +16,6 @@ try {
   var s = JSON.parse(localStorage.getItem('kb-web-settings') || '{}');
   if (s.theme === 'light' || s.theme === 'dark') document.documentElement.dataset.theme = s.theme;
   if (s.density === 'compact') document.documentElement.dataset.density = 'compact';
-  if (s.panelWidth) document.documentElement.style.setProperty('--panel-w', Math.round(s.panelWidth) + 'px');
 } catch (e) {}
 </script>
 </head>
@@ -92,12 +91,9 @@ try {
 
 <div class="flex min-h-0 flex-1">
   <main id="board" class="board" aria-label="Board" tabindex="-1"></main>
-  <aside id="panel" class="panel" hidden aria-label="Task details">
-    <div id="panel-handle" class="panel-handle" role="separator" aria-orientation="vertical" aria-label="Resize panel" tabindex="0" aria-valuemin="360" aria-valuemax="720"></div>
-  </aside>
 </div>
 
-<!-- The detail subtree is mounted into #panel on wide screens and into #detail-dialog otherwise. -->
+<dialog id="detail-dialog" class="dialog dialog-detail sheet" aria-label="Task details">
 <section id="detail" class="sheet-col flex min-h-0 flex-1 flex-col" aria-labelledby="detail-title" hidden>
   <div id="detail-head" class="flex flex-none items-start gap-2 border-b border-line px-4 pt-3 pb-3">
     <div class="min-w-0 flex-1">
@@ -111,7 +107,7 @@ try {
   <div id="detail-body" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 outline-none" tabindex="-1"></div>
   <footer class="flex h-14 flex-none items-center gap-2 border-t border-line px-4" id="detail-actions" style="padding-bottom: env(safe-area-inset-bottom)"></footer>
 </section>
-<dialog id="detail-dialog" class="dialog dialog-wide sheet" aria-label="Task details"></dialog>
+</dialog>
 
 <div id="bulkbar" class="bulkbar" role="toolbar" aria-label="Selection actions" hidden></div>
 <div id="display" class="pop right-2 top-12 w-[340px] max-w-[calc(100vw-16px)] p-3" role="dialog" aria-label="Display options" hidden></div>

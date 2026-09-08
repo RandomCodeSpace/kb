@@ -363,7 +363,7 @@ function defaultSettings() {
   return {
     theme: 'system', density: 'comfortable',
     show: { seq: true, emoji: true, desc: true, tags: true, due: true, effort: true, checks: true, comments: true },
-    hideEmpty: false, showCancelled: true, wip: {}, sort: 'position', collapsed: {}, panelWidth: 420,
+    hideEmpty: false, showCancelled: true, wip: {}, sort: 'position', collapsed: {}, 
   };
 }
 function loadSettings() {
@@ -386,7 +386,6 @@ function applySettings(rerender = true) {
   const root = document.documentElement;
   if (settings.theme === 'light' || settings.theme === 'dark') root.dataset.theme = settings.theme; else delete root.dataset.theme;
   if (settings.density === 'compact') root.dataset.density = 'compact'; else delete root.dataset.density;
-  root.style.setProperty('--panel-w', Math.round(settings.panelWidth) + 'px');
   saveSettings();
   if (rerender && state.loaded) render();
 }
@@ -406,7 +405,7 @@ const state = {
 };
 const ALL_PROJECTS = '::all'; // client-side pseudo-project, like the TUI's "all" scope
 const dom = {
-  board: $('#board'), panel: $('#panel'), panelHandle: $('#panel-handle'), detail: $('#detail'),
+  board: $('#board'), detail: $('#detail'),
   labels: $('#labels'), quick: $('#quick'), active: $('#active'), resultCount: $('#result-count'), stats: $('#stats'),
   search: $('#search'), searchWrap: $('#search-wrap'), searchSlot: $('#search-slot'), projectBtn: $('#project-btn'), projectName: $('#project-name'), projectMenu: $('#project-menu'),
   clear: $('#clear-filters'), banner: $('#banner'), conn: $('#conn'), connDot: $('#conn-dot'), version: $('#version'),
@@ -1632,21 +1631,13 @@ function labelEditor(container, opts = {}) {
 }
 
 /* ============================== detail panel ============================== */
+// The detail is a modal at every width: a centred dialog on wide screens, a
+// full-height sheet on phones (the sheet class takes over below 768px).
 function mountDetail() {
-  const wide = wideMQ.matches;
   const open = !!state.detail;
-  if (wide) {
-    if (dom.detail.parentNode !== dom.panel) dom.panel.append(dom.detail);
-    if (dom.detailDialog.open) dom.detailDialog.close();
-    dom.panel.hidden = !open;
-    dom.detail.hidden = !open;
-  } else {
-    if (dom.detail.parentNode !== dom.detailDialog) dom.detailDialog.append(dom.detail);
-    dom.panel.hidden = true;
-    dom.detail.hidden = !open;
-    if (open && !dom.detailDialog.open) { showDialog(dom.detailDialog); dom.detailBody.focus({ preventScroll: true }); }
-    if (!open && dom.detailDialog.open) closeDialog(dom.detailDialog);
-  }
+  dom.detail.hidden = !open;
+  if (open && !dom.detailDialog.open) { showDialog(dom.detailDialog); dom.detailBody.focus({ preventScroll: true }); }
+  if (!open && dom.detailDialog.open) closeDialog(dom.detailDialog);
 }
 function openDetail(ref, opts = {}) {
   const key = String(ref);
@@ -1661,9 +1652,7 @@ function openDetail(ref, opts = {}) {
     dom.detailBody.replaceChildren(el('div', { class: 'skeleton h-8 w-full' }), el('div', { class: 'skeleton mt-2 h-8 w-4/5' }), el('div', { class: 'skeleton mt-6 h-24 w-full' }));
     dom.detailActions.replaceChildren();
   }
-  const wasHidden = dom.detail.hidden;
   mountDetail();
-  if (wasHidden && wideMQ.matches) animate(dom.panel, [{ opacity: 0, transform: 'translateX(12px)' }, { opacity: 1, transform: 'none' }], 180);
   if (!opts.route && location.hash !== '#/t/' + key) location.hash = '#/t/' + key;
   loadDetail(key).then(() => { if (opts.focusComment) { const ta = dom.detailBody.querySelector('.comment-editor textarea'); if (ta) ta.focus(); } });
 }
@@ -3295,29 +3284,6 @@ function trackActiveSegment() {
     });
   }, { passive: true });
 }
-const clampPanel = (w) => Math.max(360, Math.min(Math.min(720, window.innerWidth * 0.6), w));
-function bindPanelResize() {
-  const handle = dom.panelHandle;
-  const apply = () => { document.documentElement.style.setProperty('--panel-w', Math.round(settings.panelWidth) + 'px'); handle.setAttribute('aria-valuenow', String(Math.round(settings.panelWidth))); };
-  handle.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
-    handle.setPointerCapture(e.pointerId);
-    dom.panel.classList.add('is-resizing');
-    const move = (ev) => { settings.panelWidth = clampPanel(window.innerWidth - ev.clientX); apply(); };
-    const up = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); dom.panel.classList.remove('is-resizing'); saveSettings(); };
-    handle.addEventListener('pointermove', move);
-    handle.addEventListener('pointerup', up);
-  });
-  handle.addEventListener('keydown', (e) => {
-    const step = e.key === 'ArrowLeft' ? 24 : e.key === 'ArrowRight' ? -24 : 0;
-    if (!step) return;
-    e.preventDefault();
-    settings.panelWidth = clampPanel(settings.panelWidth + step);
-    apply();
-    saveSettings();
-  });
-  apply();
-}
 function bind() {
   dom.search.addEventListener('input', () => {
     clearTimeout(dom.search._t);
@@ -3359,7 +3325,7 @@ function bind() {
     d.addEventListener('click', (e) => { if (e.target === d) close(); });
     if (d !== dom.editDialog) d.addEventListener('cancel', (e) => { e.preventDefault(); close(); });
   }
-  dom.detailDialog.addEventListener('close', () => { if (state.detail && !wideMQ.matches) closeDetail(); });
+  dom.detailDialog.addEventListener('close', () => { if (state.detail) closeDetail(); });
   document.addEventListener('pointerdown', (e) => {
     if (!dom.display.hidden && !dom.display.contains(e.target) && !e.target.closest('#display-btn')) toggleDisplay(false);
     if (!dom.projectMenu.hidden && !dom.projectMenu.contains(e.target) && !e.target.closest('#project-btn')) toggleProjectMenu(false);
@@ -3375,11 +3341,10 @@ function bind() {
   window.addEventListener('online', () => refreshTasks());
   window.addEventListener('hashchange', applyRoute);
   window.addEventListener('beforeunload', (e) => { if ((dom.editDialog.open && editDirty()) || panelDirty()) e.preventDefault(); });
-  wideMQ.addEventListener('change', () => { mountDetail(); renderBoard(); });
+  wideMQ.addEventListener('change', () => { renderBoard(); });
   phoneMQ.addEventListener('change', () => { mountSearch(); renderBoard(); });
   trackActiveSegment();
-  bindPanelResize();
-}
+  }
 
 /* ============================== init ============================== */
 async function init() {

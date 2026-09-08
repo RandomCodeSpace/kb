@@ -47,7 +47,6 @@
   --t-shadow-lg: light-dark(0 20px 48px rgb(24 25 29 / 0.16), 0 24px 56px rgb(0 0 0 / 0.6));
   /* label hues: --h (degrees) is set per chip; the solid and tint are derived per theme */
   --t-hue-fg: #ffffff;
-  --panel-w: 420px;
   --control: 32px;
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Text", "SF Pro Text", Roboto, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -275,6 +274,10 @@
   .dialog-body { padding: 18px; max-height: calc(100dvh - 200px); overflow: auto; overscroll-behavior: contain; }
   .dialog-foot { display: flex; align-items: center; gap: 8px; height: 60px; padding: 0 18px; border-top: 1px solid var(--t-line); flex: none; }
   .dialog-wide { max-width: min(760px, calc(100vw - 32px)); }
+  /* the task detail: a tall centred modal whose body scrolls, so the header and
+     the action bar stay put however long the card runs */
+  .dialog-detail { max-width: min(840px, calc(100vw - 32px)); height: min(880px, calc(100dvh - 64px)); }
+  .dialog-detail > section { height: 100%; }
   @media (max-width: 767px) {
     .sheet { max-width: none; width: 100%; max-height: 100dvh; height: 100dvh; margin: 0; border-radius: 0; border: 0; }
     .sheet .dialog-body { max-height: none; flex: 1; }
@@ -351,14 +354,6 @@
     .board .col.is-collapsed .col-body { display: flex; }
     .board .col.is-collapsed .composer { display: block; }
   }
-
-  /* side panel */
-  .panel { position: relative; width: var(--panel-w); flex: none; min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--t-line); background: var(--t-surface); }
-  .panel-handle { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 3; }
-  .panel-handle::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background-color 160ms var(--ease-out); }
-  .panel-handle:hover::after, .panel.is-resizing .panel-handle::after, .panel-handle:focus-visible::after { background: var(--t-accent); }
-  .panel-handle:focus-visible { outline: none; }
-  .panel.is-resizing { user-select: none; }
 
   /* property grid: 96px labels */
   .props { display: grid; grid-template-columns: 96px minmax(0, 1fr); column-gap: 12px; row-gap: 2px; align-items: start; }
