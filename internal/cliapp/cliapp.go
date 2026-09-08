@@ -42,8 +42,6 @@ commands:
   restore <id>           move a cancelled task back to todo
   rm <id>                hard delete: erase a task for good, no undo
                          (requires --yes)
-  project use <name>     set the active project for later commands
-  project current        print the project commands default to
   project list           list every project with its task count
   users                  list board owners and their task counts (local
                          database only; --json for machine output)
