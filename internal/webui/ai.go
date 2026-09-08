@@ -23,8 +23,10 @@ func init() { featureRoutes = append(featureRoutes, (*server).aiRoutes) }
 const (
 	aiDraftMaxTokens = 4096
 	aiSplitMaxTokens = 8192
-	maxADRBytes      = 64 << 10
-	aiUnconfigured   = "AI is not configured — set the base URL and model in settings"
+	// maxSplitStories mirrors the ai package's story cap (ai.NormalizeStoryCount).
+	maxSplitStories = 20
+	maxADRBytes     = 64 << 10
+	aiUnconfigured  = "AI is not configured — set the base URL and model in settings"
 )
 
 // aiRunner is the slice of *ai.Runner the web API uses. Every run is
@@ -226,7 +228,13 @@ func (s *server) aiSplit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusRequestEntityTooLarge, "document exceeds 64 KiB")
 		return
 	}
-	run, ok := s.runSkill(w, r, "adr-split", in.Text, ai.NormalizeStoryCount(in.Max), aiSplitMaxTokens)
+	// Bound the count here with plain comparisons so the request value never
+	// reaches the runner's allocation unchecked; the runner clamps again.
+	stories := ai.NormalizeStoryCount(0)
+	if in.Max >= 1 && in.Max <= maxSplitStories {
+		stories = in.Max
+	}
+	run, ok := s.runSkill(w, r, "adr-split", in.Text, stories, aiSplitMaxTokens)
 	if !ok {
 		return
 	}
