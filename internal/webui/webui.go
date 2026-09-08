@@ -83,7 +83,13 @@ func run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			fmt.Fprintf(stderr, "kb web: open browser: %v\n", err)
 		}
 	}
-	srv := &http.Server{Handler: NewHandler(st, user, opts.DataDir, opts.Version), ReadHeaderTimeout: 10 * time.Second}
+	handler, events := newHandler(st, user, opts.DataDir, opts.Version)
+	// Event streams are long-lived requests: Shutdown would wait out its whole
+	// timeout on them, so cancellation ends them first.
+	stopEvents := context.AfterFunc(ctx, events.Close)
+	defer stopEvents()
+	defer events.Close()
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	return serve(ctx, srv, ln)
 }
 
@@ -196,14 +202,23 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // NewHandler is the testable core: JSON API under /api/ and the embedded
-// static UI at /.
+// static UI at /. The event hub it opens stops with its last subscriber, so a
+// caller that never shuts down (a test) leaks nothing.
 func NewHandler(st *store.Store, user, dataDir, version string) http.Handler {
+	h, _ := newHandler(st, user, dataDir, version)
+	return h
+}
+
+// newHandler also returns the event hub, so the server that owns the process
+// can end live streams on shutdown instead of waiting out Shutdown's timeout.
+func newHandler(st *store.Store, user, dataDir, version string) (http.Handler, *eventHub) {
 	s := &server{st: st, user: user, dataDir: dataDir, version: version}
+	s.events = newEventHub(st, user, dataDir)
 	mux := http.NewServeMux()
 	s.routes(mux)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "no such endpoint")
 	})
 	mux.Handle("/", newStaticHandler())
-	return secure(mux)
+	return secure(s.notifyChanges(mux)), s.events
 }

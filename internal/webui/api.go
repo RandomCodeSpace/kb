@@ -37,13 +37,15 @@ const (
 // feature owns its own file and the core route table stays put.
 var featureRoutes []func(s *server) []route
 
-// server holds the per-process API state: one store, one fixed user, and the
-// data directory the active project is resolved from.
+// server holds the per-process API state: one store, one fixed user, the data
+// directory the active project is resolved from, and the hub that pushes board
+// changes to /api/events.
 type server struct {
 	st      *store.Store
 	user    string
 	dataDir string
 	version string
+	events  *eventHub
 }
 
 // route is one method+path registration; routes sharing a path also get a

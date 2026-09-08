@@ -127,6 +127,42 @@ Google Fonts, with a system font fallback when offline. Served at `/` with
 
 ## Change detection
 
-`GET /api/tasks` sets an `ETag` computed from the SHA-256 of the response body.
-Clients poll with `If-None-Match` and receive 304 when nothing changed. The UI
-polls every 2 seconds while the tab is visible.
+`GET /api/events` is a `text/event-stream` the server pushes board changes down
+(`Cache-Control: no-store`, `X-Accel-Buffering: no`, flushed after every event).
+It opens with `retry: 2000` and one `hello`, then sends a `change` per board
+revision and a `: ping` comment every 15 seconds so a proxy keeps the
+connection open:
+
+```
+retry: 2000
+
+id: 41
+event: hello
+data: {"revision":41,"version":"1.7.2"}
+
+id: 42
+event: change
+data: {"revision":42}
+
+: ping
+```
+
+The event id is the board revision. A reconnecting browser replays it in
+`Last-Event-ID`; anything older than the current revision earns one immediate
+`change`, so a client that was away does not miss a write. Concurrent streams
+are capped at 64; past that the endpoint answers 503. A stream ends when the
+client disconnects or `kb web` shuts down.
+
+Changes are detected the way the TUI detects them: a sampler reads SQLite's
+`PRAGMA data_version` on its own pinned connection (`internal/tui`'s
+`DataVersionWatcher`, so a write by *any* process moves it) roughly four times
+a second while at least one browser is connected, and reads the board revision
+from `board_revisions` only when it moves. Mutating API requests nudge the
+sampler directly, so a browser sees its own write without waiting for a tick.
+
+`GET /api/tasks` still sets an `ETag` computed from the SHA-256 of the response
+body, and clients send `If-None-Match` and receive 304 when nothing changed: an
+event says *that* the board moved, the conditional GET says what to. Polling
+remains the fallback — the UI polls every 5 seconds instead when `EventSource`
+is missing or the stream never opens — so a client that cannot hold a stream
+still converges.

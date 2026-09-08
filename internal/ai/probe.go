@@ -94,7 +94,11 @@ func probeStatusMessage(status int) string {
 	case status >= 500:
 		return fmt.Sprintf("the AI endpoint returned a server error (HTTP %d)", status)
 	case status >= 400:
-		return fmt.Sprintf("the AI endpoint rejected the request (HTTP %d) - check the model name", status)
+		// The key is named too because not every provider answers a bad
+		// credential with 401: Gemini's OpenAI-compatible endpoint rejects one
+		// with 400, and the response body that says so is redacted before kb
+		// sees it.
+		return fmt.Sprintf("the AI endpoint rejected the request (HTTP %d) - check the model name and the API key", status)
 	}
 	return fmt.Sprintf("the AI endpoint returned HTTP %d", status)
 }
