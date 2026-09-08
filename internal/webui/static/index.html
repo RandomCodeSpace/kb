@@ -7,6 +7,8 @@
 <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f3ef">
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f110f">
 <title>kb</title>
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/logo-180.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..700&family=JetBrains+Mono:wght@400;500&display=swap">
@@ -24,7 +26,8 @@ try {
 
 <header class="flex h-12 flex-none items-center gap-1 border-b border-line bg-surface px-2 md:px-3" style="padding-top: env(safe-area-inset-top); height: calc(49px + env(safe-area-inset-top))">
   <a href="#/" class="mr-1 flex h-8 items-center gap-2 rounded-md px-1" aria-label="kb board">
-    <span class="grid size-5 place-items-center rounded-md bg-accent font-mono text-11 font-semibold text-on-accent" aria-hidden="true">kb</span>
+    <img src="/logo.svg" class="size-5" width="20" height="20" alt="">
+    <span class="text-13 font-semibold leading-none" aria-hidden="true">kb</span>
   </a>
   <div class="relative min-w-0">
     <button type="button" id="project-btn" class="btn btn-ghost max-w-[220px] pl-2 pr-1.5" aria-haspopup="listbox" aria-expanded="false" aria-controls="project-menu" data-tip="Project (p / P)">
