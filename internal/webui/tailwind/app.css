@@ -341,12 +341,14 @@
     background: var(--t-card); border: 1px solid var(--t-line); box-shadow: var(--t-shadow-sm); cursor: grab; user-select: none;
     transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out), opacity 160ms var(--ease-out);
   }
-  /* a light wash of the priority hue; low priority stays neutral so the tint reads as urgency */
+  /* a light wash of the priority hue on every card: red, amber, blue */
   .card[data-prio="1"] { background: color-mix(in srgb, var(--t-prio1) 3.5%, var(--t-card)); border-color: color-mix(in srgb, var(--t-prio1) 16%, var(--t-line)); }
   .card[data-prio="2"] { background: color-mix(in srgb, var(--t-prio2) 3.5%, var(--t-card)); border-color: color-mix(in srgb, var(--t-prio2) 16%, var(--t-line)); }
+  .card[data-prio="3"] { background: color-mix(in srgb, var(--t-prio3) 3.5%, var(--t-card)); border-color: color-mix(in srgb, var(--t-prio3) 16%, var(--t-line)); }
   .card:hover { border-color: var(--t-line-2); box-shadow: var(--t-shadow-md); }
   .card[data-prio="1"]:hover { border-color: color-mix(in srgb, var(--t-prio1) 30%, var(--t-line-2)); }
   .card[data-prio="2"]:hover { border-color: color-mix(in srgb, var(--t-prio2) 30%, var(--t-line-2)); }
+  .card[data-prio="3"]:hover { border-color: color-mix(in srgb, var(--t-prio3) 30%, var(--t-line-2)); }
   .card.is-focused, .card:focus-visible { outline: none; border-color: var(--t-focus); box-shadow: 0 0 0 1px var(--t-focus), var(--t-shadow-sm); }
   .card.is-selected { background: var(--t-accent-soft); border-color: var(--t-accent); }
   .card.is-lifted { box-shadow: var(--t-shadow-lg); border-color: var(--t-accent); transform: scale(1.02); z-index: 2; }
