@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -182,21 +183,24 @@ type taskJSON struct {
 	Effort  string   `json:"effort,omitempty"`
 	Tags    []string `json:"tags,omitempty"`
 	Checks  []check  `json:"checks,omitempty"`
+	// UpdatedAt is RFC3339 UTC, the same rendering as the web API's updatedAt.
+	UpdatedAt string `json:"updatedAt" jsonschema:"RFC3339 time of the last change to the task"`
 }
 
 func toTaskJSON(t board.Task) taskJSON {
 	out := taskJSON{
-		ID:      t.ID,
-		Seq:     t.Seq,
-		Emoji:   t.Emoji,
-		Title:   t.Title,
-		Desc:    t.Desc,
-		Status:  string(t.Status),
-		Blocked: t.Blocked,
-		Prio:    t.Prio,
-		Due:     t.Due,
-		Effort:  t.Effort,
-		Tags:    t.Tags,
+		ID:        t.ID,
+		Seq:       t.Seq,
+		Emoji:     t.Emoji,
+		Title:     t.Title,
+		Desc:      t.Desc,
+		Status:    string(t.Status),
+		Blocked:   t.Blocked,
+		Prio:      t.Prio,
+		Due:       t.Due,
+		Effort:    t.Effort,
+		Tags:      t.Tags,
+		UpdatedAt: t.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 	for _, c := range t.Checks {
 		out.Checks = append(out.Checks, check{Text: c.Text, Done: c.Done})

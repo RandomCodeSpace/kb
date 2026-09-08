@@ -144,6 +144,12 @@ func TestUpdateClearsScalarFieldsWithoutChangingIdentity(t *testing.T) {
 	want.Board.Tasks[0].Effort = ""
 	want.Board.Tasks[0].Emoji = ""
 	want.Revision++
+	// UpdatedAt is a modification stamp, not identity: it must advance while
+	// ID, CreatedAt, and MovedAt stay put.
+	if len(after.Board.Tasks) != 1 || !after.Board.Tasks[0].UpdatedAt.After(before.Board.Tasks[0].UpdatedAt) {
+		t.Fatalf("cleared snapshot did not advance UpdatedAt: before=%+v after=%+v", before, after)
+	}
+	want.Board.Tasks[0].UpdatedAt = after.Board.Tasks[0].UpdatedAt
 	if !reflect.DeepEqual(after, want) {
 		t.Fatalf("cleared snapshot = %+v, want %+v", after, want)
 	}

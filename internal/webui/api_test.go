@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RandomCodeSpace/kb/internal/cliapp"
 	"github.com/RandomCodeSpace/kb/internal/store"
@@ -172,9 +173,14 @@ func TestListTasks(t *testing.T) {
 
 	body := wantStatus(t, call(t, h, "GET", "/api/tasks?status=doing", nil), http.StatusOK)
 	task := body["tasks"].([]any)[0].(map[string]any)
-	for _, key := range []string{"id", "seq", "title", "status", "prio", "project", "position", "createdAt", "movedAt", "tags"} {
+	for _, key := range []string{"id", "seq", "title", "status", "prio", "project", "position", "createdAt", "movedAt", "updatedAt", "tags"} {
 		if _, ok := task[key]; !ok {
 			t.Fatalf("task missing %q: %v", key, task)
+		}
+	}
+	for _, key := range []string{"createdAt", "movedAt", "updatedAt"} {
+		if _, err := time.Parse(time.RFC3339, task[key].(string)); err != nil {
+			t.Fatalf("task %s = %v, want RFC3339: %v", key, task[key], err)
 		}
 	}
 	if task["project"] != "work" || task["status"] != "doing" {

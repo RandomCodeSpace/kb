@@ -91,6 +91,9 @@ func writeTaskView(w io.Writer, it item, comments []store.Comment, links store.T
 	if !t.CreatedAt.IsZero() {
 		fmt.Fprintf(w, "created: %s   moved: %s\n",
 			t.CreatedAt.UTC().Format(time.RFC3339), t.MovedAt.UTC().Format(time.RFC3339))
+		if !t.UpdatedAt.IsZero() {
+			fmt.Fprintf(w, "updated: %s\n", t.UpdatedAt.UTC().Format(time.RFC3339))
+		}
 	}
 	if strings.TrimSpace(t.Desc) != "" {
 		fmt.Fprintf(w, "\n%s\n", t.Desc)

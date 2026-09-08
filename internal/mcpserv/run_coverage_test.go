@@ -141,7 +141,7 @@ func TestFindTaskResolution(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
 	secondID := prefix + "0000-4000-8000-000000000001"
-	if _, err := db.Exec(`INSERT INTO tasks (id, user, title, status, created_at, moved_at) VALUES (?, 'tester', 'candidate', 'todo', ?, ?)`, secondID, stamp, stamp); err != nil {
+	if _, err := db.Exec(`INSERT INTO tasks (id, user, title, status, created_at, moved_at, updated_at) VALUES (?, 'tester', 'candidate', 'todo', ?, ?, ?)`, secondID, stamp, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := k.findTask(prefix); err == nil || !strings.Contains(err.Error(), "ambiguous") {

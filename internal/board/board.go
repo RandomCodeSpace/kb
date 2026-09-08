@@ -90,8 +90,9 @@ type Check struct {
 // Blocked marks a task as blocked and rides the wire as the "%blocked"
 // title-line token (written only when true). Tags are plain ("backend") or
 // scoped ("type::bug"). Position is the 0-based ordinal within the task's
-// column and, like ID, Seq, CreatedAt, and MovedAt, is metadata not carried
-// by the wire format. Seq is the task's stable per-board sequence number
+// column and, like ID, Seq, CreatedAt, MovedAt, and UpdatedAt, is metadata
+// not carried by the wire format. UpdatedAt is the last time any stored field
+// of the task changed, including position; MovedAt only tracks its column. Seq is the task's stable per-board sequence number
 // (#n): assigned once on creation, never reused, 0 when unknown, such as a
 // task parsed from legacy Markdown.
 type Task struct {
@@ -110,6 +111,7 @@ type Task struct {
 	Position  int
 	CreatedAt time.Time
 	MovedAt   time.Time
+	UpdatedAt time.Time
 }
 
 // Board is a titled collection of tasks.

@@ -174,6 +174,7 @@ type taskJSON struct {
 	Position  int         `json:"position"`
 	CreatedAt string      `json:"createdAt"`
 	MovedAt   string      `json:"movedAt"`
+	UpdatedAt string      `json:"updatedAt"`
 }
 
 func toTaskJSON(t board.Task) taskJSON {
@@ -193,6 +194,7 @@ func toTaskJSON(t board.Task) taskJSON {
 		Position:  t.Position,
 		CreatedAt: t.CreatedAt.UTC().Format(time.RFC3339),
 		MovedAt:   t.MovedAt.UTC().Format(time.RFC3339),
+		UpdatedAt: t.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 	for _, c := range t.Checks {
 		out.Checks = append(out.Checks, checkJSON{Text: c.Text, Done: c.Done})
