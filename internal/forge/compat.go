@@ -82,6 +82,8 @@ func truncateImportText(text string, limit int) string {
 func skillBudget(value int64) int64 { return ai.SkillBudget(value) }
 
 func logSafe(value string) string {
+	value = strings.ReplaceAll(value, "\n", "")
+	value = strings.ReplaceAll(value, "\r", "")
 	return strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return -1

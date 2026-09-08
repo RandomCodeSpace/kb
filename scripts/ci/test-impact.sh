@@ -209,10 +209,31 @@ run_impact "$migrate" "$monitor" || fail 'ci monitor impact failed'
 assert_contains '"ci_contract": true' 'ci monitor classification'
 assert_contains '"focused_quality": false' 'ci monitor Go exclusion'
 
+mkdir -p -- "$fixture/internal/webui/static"
+printf 'package webui\n\nfunc Value() int { return 1 }\n' >"$fixture/internal/webui/webui.go"
+printf '<p>fixture</p>\n' >"$fixture/internal/webui/static/index.html"
+webui="$(commit_all webui)"
+printf '<p>fixture changed</p>\n' >"$fixture/internal/webui/static/index.html"
+asset="$(commit_all asset)"
+run_impact "$webui" "$asset" || fail 'web asset impact failed'
+assert_contains 'example.test/impact/internal/webui' 'web asset owner'
+assert_contains '"focused_quality": true' 'web asset classification'
+assert_contains '"binary_release_contract": true' 'web asset release classification'
+assert_contains '"unclassified": []' 'web asset classified'
+
+mkdir -p -- "$fixture/internal/webui/tailwind"
+printf '@import "tailwindcss";\n' >"$fixture/internal/webui/tailwind/app.css"
+printf '#!/usr/bin/env sh\nexit 0\n' >"$fixture/scripts/build-web-css.sh"
+stylesheet="$(commit_all stylesheet)"
+run_impact "$asset" "$stylesheet" || fail 'stylesheet source impact failed'
+assert_contains 'example.test/impact/internal/webui' 'stylesheet source owner'
+assert_contains '"focused_quality": true' 'stylesheet source classification'
+assert_contains '"unclassified": []' 'stylesheet source classified'
+
 printf 'unknown\n' >"$fixture/mystery.bin"
 unknown="$(commit_all unknown)"
 status=0
-run_impact "$monitor" "$unknown" 2>/dev/null || status=$?
+run_impact "$stylesheet" "$unknown" 2>/dev/null || status=$?
 [ "$status" -ne 0 ] || fail 'unclassified path unexpectedly passed'
 assert_contains 'mystery.bin' 'unclassified path manifest'
 
