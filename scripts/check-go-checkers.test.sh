@@ -383,7 +383,7 @@ assert_contains 'runs-on: ${{ matrix.os }}' "$quality_workflow" \
   "native platform runner matrix"
 assert_contains 'go build -buildvcs=false -trimpath' "$quality_workflow" \
   "native platform build"
-assert_contains 'project use platform-smoke' "$quality_workflow" \
+assert_contains "add 'Platform smoke' -p platform-smoke" "$quality_workflow" \
   "native platform local task flow"
 assert_contains '--format plan' "$release_script" "release impact plan"
 assert_contains 'bash scripts/verify-release-artifacts.sh' "$release_script" \
