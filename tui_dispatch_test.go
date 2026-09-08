@@ -90,7 +90,7 @@ func TestRunTUIPropagatesProgramFailureAndDefaultsBlankUser(t *testing.T) {
 	data := t.TempDir()
 	t.Setenv("KB_DATA", data)
 	want := errors.New("program failed")
-	runTUIProgram = func(_ *store.Store, _ string, user string, _, _ string, _ ...tea.ProgramOption) error {
+	runTUIProgram = func(_ *store.Store, _ string, user string, _ string, _ ...tea.ProgramOption) error {
 		if user != "default" {
 			t.Fatalf("user = %q, want default", user)
 		}
@@ -113,7 +113,7 @@ func TestRunTUIProgramDefaultStartsTheBoard(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := runTUIProgram(st, path, "default", "kb", "1.2.0",
+	if err := runTUIProgram(st, path, "default", "1.2.0",
 		tea.WithInput(strings.NewReader("q")),
 		tea.WithOutput(io.Discard),
 		tea.WithoutSignals(),
