@@ -93,6 +93,16 @@ booleans except `title`, `status`, `prio`, `project`, `position`, timestamps.
 | GET    | `/api/similar`                | `?q=&limit=`                                                                                            | `{"items": [{id,title,status,via,link}…]}`      |
 | GET    | `/api/labels`                 |                                                                                                         | `{"labels": [..]}`                              |
 
+Feature endpoints that mirror the rest of the TUI are documented beside this
+file, each with a TUI-parity table:
+
+- [`web-api-settings.md`](web-api-settings.md): AI and forge source settings.
+- [`web-api-ai.md`](web-api-ai.md): AI status, skills, draft, and ADR split.
+- [`web-api-forge.md`](web-api-forge.md): issue import preview, import,
+  provenance, and drift.
+- [`web-api-board.md`](web-api-board.md): palette actions, projects,
+  tombstones, link lookup, and shipped-today.
+
 `{ref}` accepts what the CLI accepts: `12`, `#12`, a UUID, or a unique UUID
 prefix (the store's `resolveID`). `index` on move/patch is the 0-based target
 position inside the destination column (`UpdateAndMoveTask` index argument).

@@ -36,3 +36,7 @@
 
 # Web UI API contract.
 !/docs/web-api.md
+!/docs/web-api-ai.md
+!/docs/web-api-board.md
+!/docs/web-api-forge.md
+!/docs/web-api-settings.md

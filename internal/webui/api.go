@@ -32,6 +32,11 @@ const (
 	jsonContentType = "application/json"
 )
 
+// featureRoutes collects the endpoints that feature files (settings, AI,
+// forge, board operations) contribute from their init functions, so each
+// feature owns its own file and the core route table stays put.
+var featureRoutes []func(s *server) []route
+
 // server holds the per-process API state: one store, one fixed user, and the
 // data directory the active project is resolved from.
 type server struct {
@@ -67,6 +72,9 @@ func (s *server) routes(mux *http.ServeMux) {
 		{"DELETE", "/api/links", s.unlink},
 		{"GET", "/api/similar", s.similar},
 		{"GET", "/api/labels", s.labels},
+	}
+	for _, feature := range featureRoutes {
+		rs = append(rs, feature(s)...)
 	}
 	allowed := map[string][]string{}
 	for _, r := range rs {
