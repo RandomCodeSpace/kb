@@ -72,15 +72,14 @@ Make sure `$HOME/.local/bin` is on your `PATH`.
 ### Create your first board
 
 ```sh
-kb project use personal
-kb add "Write launch notes" --prio high --tag docs
+kb add "Write launch notes" -p personal --prio high --tag docs
 kb list
 kb
 ```
 
-That is the whole setup. A fresh task needs a project, so the first command
-saves `personal` as your default. A bare `kb` opens the TUI when run in an
-interactive terminal.
+That is the whole setup. Every task belongs to a project, named with `-p` on
+the command that creates it; there is no stored default. A bare `kb` opens the
+TUI when run in an interactive terminal.
 
 Data is stored in `$KB_DATA` or `~/.local/share/kb`. To use another location:
 
@@ -118,7 +117,7 @@ A normal task lifecycle stays pleasantly boring:
 
 ```sh
 kb add "Ship the docs" -p web --prio high --tag release
-kb list --tag project::web
+kb list -p web
 # kb add prints the new task number; #12 is an example
 kb view 12
 kb move 12 doing
@@ -144,20 +143,24 @@ reversible; `rm ID --yes` is permanent.
 
 ### Work with projects
 
-Projects are simple views inside one board:
+Projects are simple views inside one board. Every task carries exactly one,
+stored as the scoped label `project::<name>`:
 
 ```sh
-kb project use web          # save the default project
-kb project current
-kb project list
-kb add "Ship the docs"      # goes to web
-kb add "Fix auth" -p api    # one-command override
-kb update 12 -p api         # move task #12 to api
+kb add "Ship the docs" -p web      # -p, --project, or --tag project::web
+kb add "Fix auth" -p api
+kb list -p api                     # one project; without -p, every project
+kb project list                    # every project with task counts
+kb update 12 -p api                # move task #12 to api
 ```
 
-Resolution order is `-p/--project`, `KB_PROJECT`, then the saved default. Tasks
-from older kb versions without a project are placed in `inbox` when a local
-mode opens the store.
+`kb add` refuses a task without a project: "no project given: pass -p <name>
+or --tag project::<name>". There is no stored default and no environment
+override, so two shells or agents sharing one data directory cannot file tasks
+into each other's project. Commands addressed by task number (`update`,
+`done`, `move`, `cancel`, `rm`, `comment`, `link`) need no project. Tasks from
+older kb versions without a project are placed in `inbox` when a local mode
+opens the store.
 
 ## Use the web UI
 
@@ -213,7 +216,8 @@ args = ["mcp"]
 The MCP process exposes task listing, creation, updates, moves, reversible
 cancellation, explicit permanent deletion, similarity and duplicate checks,
 task details, comments, and blocker links. It registers 12 tools and no MCP
-resources.
+resources. `add_task` requires a `project` argument, as `kb add` requires
+`-p`.
 
 <details>
 <summary>Exact MCP tool names</summary>
@@ -235,7 +239,6 @@ Important files in the data directory:
 | `kb.db` | Tasks and settings |
 | `kb.db-wal`, `kb.db-shm` | Active SQLite sidecars |
 | `secret` | Generated key when `KB_SECRET` is unset |
-| `state.json` | CLI project preference |
 | `.kb-tui/` | TUI preferences |
 | `skills/` | Optional custom AI skills |
 
@@ -285,7 +288,6 @@ local modes. Source Markdown files are not deleted.
 | --- | --- |
 | `KB_DATA` | Data directory |
 | `KB_SECRET` | Encryption secret override |
-| `KB_PROJECT` | Active project override |
 | `KB_AI_ALLOW_PRIVATE` | Allow private AI endpoints; defaults to `1`, set `0` to block them |
 | `KB_FORGE_ALLOW_PRIVATE` | Bypass the forge guard for named hosts or all hosts |
 | `KB_LINK_ALLOW_PRIVATE` | Bypass the skill-link guard for named hosts or all hosts |
