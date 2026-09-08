@@ -256,6 +256,7 @@ function enhanceSelect(sel) {
     const items = [...sel.options].map((o) => el('button', { type: 'button', role: 'option', class: 'menu-item', disabled: o.disabled, 'aria-selected': o.selected ? 'true' : 'false', onclick: () => pick(o.value), onmousemove: (e) => e.currentTarget.focus() },
       el('span', { class: 'flex-1 truncate' }, o.textContent), o.selected ? icon('check', 14) : null));
     pop.replaceChildren(...items);
+    pop.classList.toggle('pop-sm', trigger.offsetHeight < 32);
     showPop(pop, trigger);
     trigger.setAttribute('aria-expanded', 'true');
     off = popDismiss(pop, trigger, close);
@@ -595,13 +596,14 @@ function defaultSettings() {
   return {
     theme: 'system', density: 'comfortable',
     show: { seq: true, emoji: true, desc: true, tags: true, due: true, effort: true, checks: true, comments: true },
-    hideEmpty: false, showCancelled: true, wip: {}, sort: 'position', collapsed: {}, 
+    hideEmpty: false, showCancelled: false, wip: {}, sort: 'position', collapsed: {}, v: 2,
   };
 }
 function loadSettings() {
   const base = defaultSettings();
   try {
     const raw = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+    if ((raw.v || 1) < 2) delete raw.showCancelled; // v2: the cancelled column starts hidden
     for (const k of Object.keys(base)) {
       if (raw[k] === undefined) continue;
       if (typeof base[k] === 'object' && base[k] !== null) Object.assign(base[k], raw[k] || {});
@@ -639,7 +641,7 @@ const ALL_PROJECTS = '::all'; // client-side pseudo-project, like the TUI's "all
 const dom = {
   board: $('#board'), detail: $('#detail'),
   labels: $('#labels'), quick: $('#quick'), active: $('#active'), resultCount: $('#result-count'), stats: $('#stats'),
-  search: $('#search'), searchWrap: $('#search-wrap'), searchSlot: $('#search-slot'), projectBtn: $('#project-btn'), projectName: $('#project-name'), projectMenu: $('#project-menu'),
+  search: $('#search'), searchBtn: $('#search-btn'), searchDot: $('#search-dot'), searchDialog: $('#search-dialog'), searchClear: $('#search-clear'), searchSyntax: $('#search-syntax'), searchCount: $('#search-count'), projectBtn: $('#project-btn'), projectName: $('#project-name'), projectMenu: $('#project-menu'),
   clear: $('#clear-filters'), banner: $('#banner'), conn: $('#conn'), connDot: $('#conn-dot'), version: $('#version'),
   toasts: $('#toasts'), live: $('#live'), segments: $('#segments'), filters: $('#filters'), scrim: $('#filters-scrim'), filterCount: $('#filter-count'),
   bulkbar: $('#bulkbar'), display: $('#display'),
@@ -1078,6 +1080,10 @@ function renderResultCount() {
   const shown = visibleTasks().length;
   const total = serverFiltered() && state.all.length ? state.all.length : (serverFiltered() ? null : state.tasks.length);
   dom.resultCount.textContent = anyFilter() ? (total === null ? `${shown} shown` : `${shown} of ${total}`) : plural(shown, 'task');
+  dom.searchCount.textContent = dom.resultCount.textContent;
+  const q = !!dom.search.value.trim();
+  dom.searchDot.hidden = !q;
+  dom.searchClear.hidden = !q;
 }
 // The label pool is scoped like the board: with one project active it holds
 // only the labels that project's cards carry, so another project's vocabulary
@@ -1180,7 +1186,7 @@ function cardEl(t) {
   const card = el('article', {
     class: 'card' + (selected ? ' is-selected' : '') + (state.focusId === t.id ? ' is-focused' : '') + (state.lifted === t.id ? ' is-lifted' : ''),
     draggable: 'true', tabindex: state.focusId === t.id ? '0' : '-1', role: 'option', 'aria-selected': selected ? 'true' : 'false',
-    'data-id': t.id, 'data-seq': t.seq, 'data-status': t.status, 'aria-label': `#${t.seq} ${t.title}`,
+    'data-id': t.id, 'data-seq': t.seq, 'data-status': t.status, 'data-prio': String(t.prio || 3), 'aria-label': `#${t.seq} ${t.title}`,
     onclick: (e) => onCardClick(e, t),
     onfocus: () => { if (state.focusId !== t.id) setFocus(t.id, { focus: false }); },
     ondragstart: onDragStart, ondragend: cleanupDrag, onpointerdown: onCardPointerDown,
@@ -1239,6 +1245,8 @@ function renderBoard() {
     if (seg) tickCounter(seg, String(tasks.length));
     const hidden = (status === 'cancelled' && !settings.showCancelled) || (settings.hideEmpty && tasks.length === 0 && !anyFilter());
     col.hidden = hidden;
+    const tab = dom.segments.querySelector(`[data-status="${status}"]`);
+    if (tab) tab.hidden = hidden; // the phone tab bar follows the column
     const collapsed = !!settings.collapsed[status] && !phoneMQ.matches;
     col.classList.toggle('is-collapsed', collapsed);
     const cbtn = col.querySelector('.collapse-btn');
@@ -1617,6 +1625,11 @@ function clearSelection() {
   state.selected.clear();
   renderBoard();
 }
+// The bar is centred on a whole pixel: a translate(-50%) of an odd width lands on a half.
+function centreBulkBar() {
+  if (dom.bulkbar.hidden) return;
+  dom.bulkbar.style.left = Math.round((window.innerWidth - dom.bulkbar.offsetWidth) / 2) + 'px';
+}
 function renderBulkBar() {
   const n = state.selected.size;
   const was = !dom.bulkbar.hidden;
@@ -1635,7 +1648,8 @@ function renderBulkBar() {
     el('button', { type: 'button', class: 'btn', onclick: () => bulkCancel(ids()) }, 'Cancel tasks'),
     el('button', { type: 'button', class: 'btn btn-ghost btn-icon', 'aria-label': 'Clear selection', title: 'Clear selection (Esc)', onclick: clearSelection }, icon('x')),
   );
-  if (!was) animate(dom.bulkbar, [{ opacity: 0, transform: 'translate(-50%, 8px)' }, { opacity: 1, transform: 'translate(-50%, 0)' }], 160);
+  centreBulkBar();
+  if (!was) animate(dom.bulkbar, [{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }], 160);
 }
 async function bulkPatch(ids, patchFor, label) {
   let n = 0;
@@ -2080,7 +2094,7 @@ function renderDetail(data) {
     linkDir, linkNumber, el('button', { type: 'submit', class: 'btn' }, icon('link', 14), 'Link'));
   // The two link lists share the property grid, so their labels sit in the same
   // 96px column as every other label in the modal.
-  const linkItems = (items) => (items.length ? items.map((t) => el('span', { class: 'flex items-center gap-1' }, taskLink(t),
+  const linkItems = (items) => (items.length ? items.map((t) => el('span', { class: 'link-item' }, taskLink(t),
     el('button', { type: 'button', class: 'btn btn-ghost btn-xs btn-icon', 'aria-label': `Unlink #${t.seq}`, title: 'Unlink', onclick: () => removeLink(task, t) }, icon('x', 12)))) : [el('span', { class: 'text-12 text-fg-3' }, 'None')]);
   const blockSection = sectionEl('Blockers', null,
     el('dl', { class: 'props' }, el('dt', {}, 'Blocked by'), el('dd', {}, ...linkItems(links.blockedBy || [])), el('dt', {}, 'Blocks'), el('dd', {}, ...linkItems(links.blocks || []))),
@@ -2291,7 +2305,7 @@ function openEdit(task, preset = {}) {
   editDescEditor = mdEditor({ value: task ? task.desc || '' : '', label: 'Description', placeholder: 'Describe the task in markdown…', rows: 5 });
   dom.editDesc.replaceChildren(editDescEditor.root);
   editLabelEditor = labelEditor(dom.editLabels, { tags: task ? userTags(task) : [] });
-  dom.editLabels.firstElementChild.classList.add('input', 'h-auto', 'min-h-8', 'py-0.5');
+  dom.editLabels.firstElementChild.classList.add('input', 'h-auto', 'min-h-8', 'py-0');
   dom.editTitle.textContent = task ? `Edit #${task.seq}` : 'New task';
   state.editSnapshot = JSON.stringify(readForm());
   showDialog(dom.editDialog);
@@ -2382,10 +2396,9 @@ function parseQuickAdd(text) {
 }
 function renderComposer(status, open = false) {
   const { composer } = cols[status];
-  if (!open) {
-    composer.replaceChildren(el('button', { type: 'button', class: 'btn btn-ghost w-full justify-start px-2 text-fg-3', onclick: () => openComposer(status) }, icon('plus', 14), 'Add task'));
-    return;
-  }
+  // No footer row: the header's New task button and each column's + open the composer.
+  composer.hidden = !open;
+  if (!open) { composer.replaceChildren(); return; }
   const input = el('input', { type: 'text', class: 'input', placeholder: 'Title  !high #label #type::bug @fri ~M', 'aria-label': `New task in ${STATUS_LABEL[status]}`, autocomplete: 'off', spellcheck: 'false', enterkeyhint: 'done' });
   const preview = el('div', { class: 'flex flex-wrap gap-1 empty:hidden', 'aria-live': 'polite' });
   const refresh = () => preview.replaceChildren(...parseQuickAdd(input.value).chips);
@@ -2413,7 +2426,7 @@ function renderComposer(status, open = false) {
   input.addEventListener('input', refresh);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); submit(); }
-    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); renderComposer(status); cols[status].composer.querySelector('button').focus(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); renderComposer(status); cols[status].col.querySelector('.col-tools button').focus(); }
   });
   const form = el('form', { class: 'composer-open', onsubmit: (e) => { e.preventDefault(); submit(); } }, input, preview,
     el('div', { class: 'flex items-center gap-2' }, el('span', { class: 'text-11 text-fg-3' }, el('kbd', { class: 'kbd' }, 'Enter'), ' adds · ', el('kbd', { class: 'kbd' }, 'Esc'), ' closes'), el('span', { class: 'flex-1' }),
@@ -3440,12 +3453,28 @@ function cycleProject(dir) {
   const i = list.indexOf(state.project);
   setProject(list[(i + dir + list.length) % list.length]);
 }
+// The search field lives in a centred dialog (Spotlight-style) on every device.
+// Typing filters the board behind it live; Enter or Escape closes and the
+// query stays applied, marked by a dot on the header icon.
+const SEARCH_SYNTAX = [['tag:web', 'Label'], ['prio:high', 'Priority'], ['due:week', 'Due'], ['is:blocked', 'Blocked'], ['has:checklist', 'Checklist'], ['effort:S', 'Effort'], ['#12', 'Number']];
 function mountSearch() {
-  const phone = phoneMQ.matches;
-  const target = phone ? dom.searchSlot : null;
-  if (phone && dom.searchWrap.parentNode !== dom.searchSlot) { dom.searchSlot.append(dom.searchWrap); dom.searchWrap.className = 'relative w-full'; }
-  if (!phone && dom.searchWrap.parentNode === dom.searchSlot) { $('header').insertBefore(dom.searchWrap, $('#filters-toggle')); dom.searchWrap.className = 'relative hidden w-[260px] md:block xl:w-[320px]'; }
-  void target;
+  dom.searchSyntax.replaceChildren(...SEARCH_SYNTAX.map(([token, label]) => el('button', { type: 'button', class: 'chip chip-mono', title: `${label} filter`, onmousedown: (e) => e.preventDefault(), onclick: () => insertSearchToken(token) }, token)));
+  dom.searchClear.addEventListener('click', () => { dom.search.value = ''; applySearchText('', false); dom.search.focus(); });
+  dom.searchBtn.addEventListener('click', () => (dom.searchDialog.open ? closeDialog(dom.searchDialog) : openSearch()));
+  $('#search-form').addEventListener('submit', (e) => { e.preventDefault(); clearTimeout(dom.search._t); applySearchText(dom.search.value.trim(), false); closeDialog(dom.searchDialog); });
+}
+function insertSearchToken(token) {
+  const cur = dom.search.value.trim();
+  if (cur.split(/\s+/).includes(token)) return;
+  dom.search.value = (cur ? cur + ' ' : '') + token + ' ';
+  applySearchText(dom.search.value.trim(), false);
+  dom.search.focus();
+}
+function openSearch() {
+  if (dom.searchDialog.open) { dom.search.focus(); dom.search.select(); return; }
+  showDialog(dom.searchDialog);
+  dom.search.focus();
+  dom.search.select();
 }
 function setFiltersOpen(open) {
   dom.filters.classList.toggle('open', open);
@@ -3453,17 +3482,12 @@ function setFiltersOpen(open) {
   if (open) {
     dom.scrim.hidden = false;
     requestAnimationFrame(() => dom.scrim.classList.add('show'));
-    setTimeout(() => dom.search.focus(), dur(160) + 20); // the sheet is visibility:hidden until its transition ends
   } else {
     dom.scrim.classList.remove('show');
     setTimeout(() => { dom.scrim.hidden = true; }, dur(160));
   }
 }
-function focusSearch() {
-  if (phoneMQ.matches) { setFiltersOpen(true); return; }
-  dom.search.focus();
-  dom.search.select();
-}
+function focusSearch() { openSearch(); }
 function focusLabels() {
   if (phoneMQ.matches) { setFiltersOpen(true); return; }
   const first = dom.labels.querySelector('button');
@@ -3584,7 +3608,10 @@ function bind() {
     clearTimeout(dom.search._t);
     dom.search._t = setTimeout(() => applySearchText(dom.search.value.trim(), false), 200);
   });
-  dom.search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(dom.search._t); applySearchText(dom.search.value.trim(), false); } });
+  dom.search.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(dom.search._t); applySearchText(dom.search.value.trim(), false); closeDialog(dom.searchDialog); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeDialog(dom.searchDialog); } // keep the query; a search-type input would clear it
+  });
   dom.projectBtn.addEventListener('click', () => toggleProjectMenu());
   dom.clear.addEventListener('click', clearFilters);
   $('#new-task').addEventListener('click', () => openEdit(null));
@@ -3614,7 +3641,7 @@ function bind() {
 
   const closers = new Map([[dom.editDialog, requestCloseEdit], [dom.detailDialog, () => closeDetail()],
     [dom.settingsDialog, closeSettings], [dom.splitDialog, closeSplit], [dom.importDialog, closeImport]]);
-  for (const d of [dom.editDialog, dom.detailDialog, dom.helpDialog, dom.palette, dom.settingsDialog, dom.splitDialog, dom.importDialog, dom.askDialog]) {
+  for (const d of [dom.editDialog, dom.detailDialog, dom.helpDialog, dom.palette, dom.searchDialog, dom.settingsDialog, dom.splitDialog, dom.importDialog, dom.askDialog]) {
     const close = closers.get(d) || (() => closeDialog(d));
     for (const btn of $$('[data-close]', d)) btn.addEventListener('click', close);
     d.addEventListener('click', (e) => { if (e.target === d) close(); });
@@ -3626,6 +3653,7 @@ function bind() {
     if (!dom.projectMenu.hidden && !dom.projectMenu.contains(e.target) && !e.target.closest('#project-btn')) toggleProjectMenu(false);
   });
   document.addEventListener('keydown', onKeydown);
+  window.addEventListener('resize', centreBulkBar);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     startLive();
@@ -3637,7 +3665,7 @@ function bind() {
   window.addEventListener('hashchange', applyRoute);
   window.addEventListener('beforeunload', (e) => { if ((dom.editDialog.open && editDirty()) || panelDirty()) e.preventDefault(); });
   wideMQ.addEventListener('change', () => { renderBoard(); });
-  phoneMQ.addEventListener('change', () => { mountSearch(); renderBoard(); });
+  phoneMQ.addEventListener('change', () => { renderBoard(); });
   trackActiveSegment();
   }
 
