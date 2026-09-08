@@ -2390,11 +2390,9 @@ function parseQuickAdd(text) {
 }
 function renderComposer(status, open = false) {
   const { composer } = cols[status];
-  composer.hidden = !open && status !== 'todo';
-  if (!open) {
-    composer.replaceChildren(status === 'todo' ? el('button', { type: 'button', class: 'btn btn-ghost w-full justify-start px-2 text-fg-3', onclick: () => openComposer(status) }, icon('plus', 14), 'Add task') : null);
-    return;
-  }
+  // No footer row: the header's New task button and each column's + open the composer.
+  composer.hidden = !open;
+  if (!open) { composer.replaceChildren(); return; }
   const input = el('input', { type: 'text', class: 'input', placeholder: 'Title  !high #label #type::bug @fri ~M', 'aria-label': `New task in ${STATUS_LABEL[status]}`, autocomplete: 'off', spellcheck: 'false', enterkeyhint: 'done' });
   const preview = el('div', { class: 'flex flex-wrap gap-1 empty:hidden', 'aria-live': 'polite' });
   const refresh = () => preview.replaceChildren(...parseQuickAdd(input.value).chips);
@@ -2422,7 +2420,7 @@ function renderComposer(status, open = false) {
   input.addEventListener('input', refresh);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); submit(); }
-    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); renderComposer(status); (cols[status].composer.querySelector('button') || cols[status].col.querySelector('.col-tools button')).focus(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); renderComposer(status); cols[status].col.querySelector('.col-tools button').focus(); }
   });
   const form = el('form', { class: 'composer-open', onsubmit: (e) => { e.preventDefault(); submit(); } }, input, preview,
     el('div', { class: 'flex items-center gap-2' }, el('span', { class: 'text-11 text-fg-3' }, el('kbd', { class: 'kbd' }, 'Enter'), ' adds · ', el('kbd', { class: 'kbd' }, 'Esc'), ' closes'), el('span', { class: 'flex-1' }),
