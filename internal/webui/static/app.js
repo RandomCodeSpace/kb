@@ -996,7 +996,7 @@ function renderBoard() {
     const { col, body, count } = cols[status];
     const tasks = sortTasks(groups[status]);
     const keep = new Set(tasks.map((t) => t.id));
-    for (const c of $$('.card[data-id]', body)) if (!keep.has(c.dataset.id)) leaveCard(c, first.get(c.dataset.id).rect);
+    for (const c of $$('.card[data-id]', body)) if (!keep.has(c.dataset.id) && !(state.dropped && state.dropped.has(c.dataset.id))) leaveCard(c, first.get(c.dataset.id).rect);
     body.replaceChildren(...(tasks.length ? tasks.map(cardEl) : [emptyEl(status)]));
     const limit = Number(settings.wip[status]) || 0;
     const over = limit > 0 && tasks.length > limit;
@@ -1019,7 +1019,8 @@ function renderBoard() {
   let i = 0;
   for (const c of $$('.card[data-id]', dom.board)) {
     const prev = first.get(c.dataset.id);
-    if (prev) {
+    if (state.dropped && state.dropped.has(c.dataset.id)) animate(c, [{ transform: 'scale(0.98)', opacity: 0.6 }, { transform: 'none', opacity: 1 }], 140);
+    else if (prev) {
       const r = c.getBoundingClientRect();
       const dx = prev.rect.left - r.left, dy = prev.rect.top - r.top;
       if (dx || dy) animate(c, [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], 180);
@@ -1233,7 +1234,11 @@ async function moveMany(ids, status, index) {
   if (!prev.length) return;
   if (prev.length === 1 && prev[0].status === status && (index === undefined || prev[0].index === index)) return;
   localMove(ids, status, index);
+  // The user just put these cards down at the target: they must appear there,
+  // not slide over from where they were picked up.
+  state.dropped = new Set(ids);
   renderBoard();
+  state.dropped = null;
   let moved = 0;
   state.pendingMoves = (state.pendingMoves || 0) + 1;
   try {
@@ -1710,8 +1715,8 @@ function taskLink(t) {
   return el('button', { type: 'button', class: 'task-link', style: `--hue: var(--t-${t.status})`, title: `#${t.seq} ${t.title}`, onclick: () => openDetail(t.seq) },
     el('i', { class: 'status-dot' }), el('span', { class: 'seq' }, '#' + t.seq), el('span', { class: 't ' + t.status }, mdInline(t.title)));
 }
-const sectionEl = (title, extra, ...children) => el('section', { class: 'mt-5' },
-  el('div', { class: 'mb-2 flex h-6 items-center gap-2' }, el('h3', { class: 'label-11' }, title), ...clean([extra].flat())), ...children);
+const sectionEl = (title, extra, ...children) => el('section', { class: 'section' },
+  el('div', { class: 'section-head' }, el('h3', { class: 'section-title' }, title), ...clean([extra].flat())), ...children);
 
 function renderDetail(data) {
   const { task, comments = [], links = {}, tombstone = null, provenance = [], siblings = [] } = data;
@@ -1778,13 +1783,16 @@ function renderDetail(data) {
 
   // description: rendered markdown, click to edit
   const descBox = el('div', {});
+  const descEdit = el('button', { type: 'button', class: 'btn btn-ghost btn-xs btn-icon ml-auto', 'aria-label': 'Edit description', 'data-tip': 'Edit description', onclick: () => editDesc() }, icon('pencil', 12));
   const showDesc = () => {
+    descEdit.hidden = false;
     const view = renderMarkdown(task.desc, { empty: 'No description. Click to add one.' });
     view.classList.add('cursor-text', 'rounded-md', '-mx-2', 'px-2', 'py-1', 'hover:bg-raised');
     view.addEventListener('click', (e) => { if (!e.target.closest('a, button')) editDesc(); });
     descBox.replaceChildren(view);
   };
   const editDesc = () => {
+    descEdit.hidden = true;
     const ed = mdEditor({ value: task.desc || '', label: 'Description', placeholder: 'Describe the task in markdown…', rows: 6,
       onSave: async (v) => { if (v !== (task.desc || '')) { const out = await save({ desc: v }, `Saved #${task.seq}`); if (out === undefined) return; task.desc = v; } showDesc(); detailIdle(); },
       onCancel: () => { showDesc(); detailIdle(); } });
@@ -1793,7 +1801,7 @@ function renderDetail(data) {
     ed.focus();
   };
   showDesc();
-  const descSection = sectionEl('Description', el('button', { type: 'button', class: 'btn btn-ghost btn-xs ml-auto', onclick: editDesc }, icon('pencil', 12), 'Edit'), descBox);
+  const descSection = sectionEl('Description', descEdit, descBox);
 
   // checklist
   const checks = task.checks || [];
@@ -1815,7 +1823,7 @@ function renderDetail(data) {
     }
     return row;
   };
-  const addInput = el('input', { type: 'text', class: 'input input-ghost h-7 flex-1 px-1.5', placeholder: 'Add an item…', 'aria-label': 'New checklist item', autocomplete: 'off' });
+  const addInput = el('input', { type: 'text', class: 'input input-ghost h-8 flex-1 px-0', placeholder: 'Add an item…', 'aria-label': 'New checklist item', autocomplete: 'off' });
   const addItem = async () => {
     const v = addInput.value.trim();
     if (!v) return;
@@ -1830,17 +1838,20 @@ function renderDetail(data) {
   const checkSection = sectionEl('Checklist', [checks.length ? el('span', { class: 'num text-11 text-fg-3' }, `${doneCount}/${checks.length}`) : null],
     checks.length ? el('div', { class: 'check-progress mb-2' }, el('i', { style: `width:${Math.round((doneCount / checks.length) * 100)}%` })) : null,
     el('ul', { class: 'flex flex-col' }, ...checks.map(checkRow)),
-    el('div', { class: 'check-add flex items-center gap-2 px-1' }, el('span', { class: 'grid size-4 place-items-center text-fg-3' }, icon('plus', 12)), addInput));
+    el('div', { class: 'check-add' }, el('span', { class: 'grid size-4 place-items-center text-fg-3' }, icon('plus', 12)), addInput));
 
   // blockers
   const linkNumber = el('input', { type: 'text', inputmode: 'numeric', class: 'input w-20 num', placeholder: '#12', 'aria-label': 'Task number', required: true, pattern: '#?\\d+', autocomplete: 'off' });
   const linkDir = el('select', { class: 'input w-auto', 'aria-label': 'Link direction' }, el('option', { value: 'blockedBy' }, 'Blocked by'), el('option', { value: 'blocks' }, 'Blocks'));
-  const linkForm = el('form', { class: 'mt-2 flex items-center gap-2', onsubmit: (e) => { e.preventDefault(); addLink(task, linkDir.value, linkNumber.value); } },
+  const linkForm = el('form', { class: 'mt-3 flex items-center gap-2', onsubmit: (e) => { e.preventDefault(); addLink(task, linkDir.value, linkNumber.value); } },
     linkDir, linkNumber, el('button', { type: 'submit', class: 'btn' }, icon('link', 14), 'Link'));
-  const linkList = (items, label) => el('div', { class: 'mb-2' }, el('div', { class: 'mb-1 text-12 text-fg-3' }, label),
-    el('ul', { class: 'flex flex-col gap-0.5' }, ...(items.length ? items.map((t) => el('li', { class: 'flex items-center gap-1' }, taskLink(t),
-      el('button', { type: 'button', class: 'btn btn-ghost btn-xs btn-icon', 'aria-label': `Unlink #${t.seq}`, title: 'Unlink', onclick: () => removeLink(task, t) }, icon('x', 12)))) : [el('li', { class: 'px-2 text-12 text-fg-3' }, 'None')])));
-  const blockSection = sectionEl('Blockers', null, linkList(links.blockedBy || [], 'Blocked by'), linkList(links.blocks || [], 'Blocks'), linkForm);
+  // The two link lists share the property grid, so their labels sit in the same
+  // 96px column as every other label in the modal.
+  const linkItems = (items) => (items.length ? items.map((t) => el('span', { class: 'flex items-center gap-1' }, taskLink(t),
+    el('button', { type: 'button', class: 'btn btn-ghost btn-xs btn-icon', 'aria-label': `Unlink #${t.seq}`, title: 'Unlink', onclick: () => removeLink(task, t) }, icon('x', 12)))) : [el('span', { class: 'text-12 text-fg-3' }, 'None')]);
+  const blockSection = sectionEl('Blockers', null,
+    el('dl', { class: 'props' }, el('dt', {}, 'Blocked by'), el('dd', {}, ...linkItems(links.blockedBy || [])), el('dt', {}, 'Blocks'), el('dd', {}, ...linkItems(links.blocks || []))),
+    linkForm);
 
   // comments
   const commentNodes = comments.map((c) => el('article', { class: 'comment' },

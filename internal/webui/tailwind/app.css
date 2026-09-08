@@ -96,6 +96,7 @@
   --text-13: 13px; --text-13--line-height: 20px;
   --text-14: 14px; --text-14--line-height: 20px;
   --text-16: 16px; --text-16--line-height: 24px;
+  --text-18: 18px; --text-18--line-height: 24px;
   --text-20: 20px; --text-20--line-height: 28px;
   --radius-*: initial;
   --radius-sm: 6px;
@@ -225,13 +226,19 @@
   .chip-dot::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: 9999px; background: var(--dot, var(--t-fg-3)); }
   [style*="--h:"] { --hue: light-dark(hsl(var(--h) 48% 42%), hsl(var(--h) 55% 68%)); --hue-tint: light-dark(hsl(var(--h) 48% 42% / 0.12), hsl(var(--h) 55% 68% / 0.16)); --dot: var(--hue); }
   .chip-scoped { gap: 0; padding: 0; border: 0; overflow: hidden; background: transparent; }
-  .chip-scoped .k { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; background: var(--hue); color: var(--t-hue-fg); font-weight: 600; }
+  /* label chips (data-tag) are filled with their hue's tint so a plain label and a
+     scoped label read as the same object; the scoped one just carries a solid key */
+  .chip[data-tag].chip-dot { background: var(--hue-tint); border-color: transparent; color: var(--t-fg); }
+  .chip-scoped .k { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; background: var(--hue); color: var(--t-hue-fg); font-weight: 500; }
   .chip-scoped .v { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; background: var(--hue-tint); color: var(--t-fg); overflow: hidden; text-overflow: ellipsis; }
   .chip-scoped .v:empty { display: none; }
   button.chip { cursor: pointer; transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), color 160ms var(--ease-out), box-shadow 160ms var(--ease-out); }
   button.chip:hover { border-color: var(--t-line-2); color: var(--t-fg); }
   button.chip-scoped:hover { box-shadow: 0 0 0 1px var(--hue); }
   button.chip[aria-pressed="true"] { background: var(--t-accent-soft); border-color: transparent; color: var(--t-fg); }
+  button.chip[data-tag].chip-dot[aria-pressed="true"] { background: var(--hue); color: var(--t-hue-fg); }
+  button.chip[data-tag].chip-dot[aria-pressed="true"]::before { background: var(--t-hue-fg); }
+  button.chip[data-tag].chip-dot:hover { border-color: transparent; box-shadow: 0 0 0 1px var(--hue); }
   button.chip-scoped[aria-pressed="true"] { background: transparent; box-shadow: 0 0 0 2px var(--hue); }
   .chip-tone { --tone: var(--t-fg-2); color: var(--tone); border-color: color-mix(in srgb, var(--tone), transparent 70%); background: color-mix(in srgb, var(--tone), transparent 90%); }
   /* "mono" chips (dates, effort, source kinds) keep the sans face at chip size:
@@ -367,7 +374,11 @@
   .label-row > .input-ghost { height: 32px; }
   /* in the property grid the ghost input has no visible box: pull its text flush with the chips */
   .props .label-row > .input-ghost { margin-left: -7px; }
-  .title-edit { width: 100%; padding: 2px 6px; margin: 0 -6px; border-radius: var(--radius-sm); font-size: 16px; line-height: 24px; font-weight: 600; background: transparent; border: 1px solid transparent; }
+  .title-edit { width: 100%; padding: 2px 6px; margin: 0 -6px; border-radius: var(--radius-sm); font-size: 18px; line-height: 24px; font-weight: 600; letter-spacing: -0.01em; background: transparent; border: 1px solid transparent; }
+  /* detail sections: a 24px heading row (title left, count or action right), 8px to the content, 20px between sections */
+  .section { padding-top: 20px; }
+  .section-head { display: flex; align-items: center; gap: 8px; height: 24px; margin-bottom: 8px; }
+  .section-title { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--t-fg-2); }
   .title-edit:hover { background: var(--t-raised); }
   .title-edit:focus-visible { outline: none; border-color: var(--t-focus); background: var(--t-surface); box-shadow: 0 0 0 3px var(--t-accent-soft); }
 
@@ -445,10 +456,11 @@
   .ai-mark { display: inline-flex; align-items: center; height: 16px; padding: 0 5px; border-radius: 9999px; background: var(--t-accent); color: var(--t-on-accent); font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 0.06em; line-height: 16px; }
 
   /* checklist */
-  .check-row { display: flex; align-items: flex-start; gap: 8px; min-height: 28px; padding: 2px 4px; border-radius: var(--radius-sm); }
+  .check-row { display: flex; align-items: flex-start; gap: 8px; min-height: 32px; padding: 0 8px; margin: 0 -8px; border-radius: var(--radius-md); }
   .check-row:hover { background: var(--t-raised); }
-  .check-row .cb { margin-top: 4px; }
-  .check-row .text { flex: 1; min-width: 0; padding: 2px 0; font-size: 13px; line-height: 20px; }
+  .check-row .cb { margin-top: 8px; }
+  .check-row .text { flex: 1; min-width: 0; padding: 6px 0; font-size: 13px; line-height: 20px; }
+  .check-add { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 8px; margin: 0 -8px; }
   .check-row.done .text { color: var(--t-fg-2); text-decoration: line-through; text-decoration-color: var(--t-fg-3); }
   .check-row .rm { opacity: 0; }
   .check-row:hover .rm, .check-row:focus-within .rm { opacity: 1; }
