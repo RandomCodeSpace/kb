@@ -3,35 +3,14 @@ package webui
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/RandomCodeSpace/kb/internal/cliapp"
-	"github.com/RandomCodeSpace/kb/internal/store"
 	"github.com/RandomCodeSpace/kb/internal/tui/action"
 )
-
-// newBoardHandler is newTestHandler without the ambient KB_PROJECT, and it
-// hands back the data directory: the active-project endpoints resolve through
-// the CLI's state file, which KB_PROJECT would otherwise shadow.
-func newBoardHandler(t *testing.T) (http.Handler, *store.Store, string) {
-	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("KB_PROJECT", "")
-	st, err := cliapp.OpenLocalStore(dir, io.Discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-	return NewHandler(st, "default", dir, "v-test"), st, dir
-}
 
 // ref is the task reference the API path wants, taken from a created task.
 func ref(task map[string]any) string {
@@ -116,8 +95,8 @@ func TestListProjects(t *testing.T) {
 	wantStatus(t, call(t, h, "POST", "/api/tasks/"+ref(killed)+"/cancel", nil), http.StatusOK)
 
 	body := wantStatus(t, call(t, h, "GET", "/api/projects", nil), http.StatusOK)
-	if body["active"] != "work" {
-		t.Fatalf("active = %v", body["active"])
+	if _, reported := body["active"]; reported {
+		t.Fatalf("no ambient project, yet active = %v", body["active"])
 	}
 	wantProjects(t, body,
 		projectJSON{Name: "alpha", Counts: statusCountsJSON{Todo: 1, Done: 1}},
@@ -127,58 +106,16 @@ func TestListProjects(t *testing.T) {
 	wantError(t, call(t, h, "DELETE", "/api/projects", nil), http.StatusMethodNotAllowed, "not allowed")
 }
 
-// A project with no cards exists only as the active selection, which is what
-// the TUI's switcher shows on a board whose first card is not written yet.
-func TestListProjectsCarriesEmptyActiveProject(t *testing.T) {
-	h, _ := newTestHandler(t)
+// A project exists only through the cards that carry its label: with no
+// ambient project there is nothing to list on an empty board, and the web
+// switcher is the only place a selection lives.
+func TestListProjectsEmptyBoard(t *testing.T) {
+	h, st := newTestHandler(t)
 	body := wantStatus(t, call(t, h, "GET", "/api/projects", nil), http.StatusOK)
-	wantProjects(t, body, projectJSON{Name: "work"})
-}
-
-func TestActiveProjectRoundTrip(t *testing.T) {
-	h, _, dir := newBoardHandler(t)
-	body := wantStatus(t, call(t, h, "PUT", "/api/projects/active", map[string]any{"name": " web "}), http.StatusOK)
-	if body["active"] != "web" {
-		t.Fatalf("active = %v", body["active"])
-	}
-	// The CLI reads what the web wrote: same file, same resolution.
-	name, ok, err := cliapp.ActiveProject(dir)
-	if err != nil || !ok || name != "web" {
-		t.Fatalf("cliapp.ActiveProject = %q, %v, %v", name, ok, err)
-	}
-	state, err := os.ReadFile(filepath.Join(dir, "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(state), `"active_project":"web"`) {
-		t.Fatalf("state.json = %s", state)
-	}
-	listed := wantStatus(t, call(t, h, "GET", "/api/projects", nil), http.StatusOK)
-	if listed["active"] != "web" {
-		t.Fatalf("listed active = %v", listed["active"])
-	}
-	wantProjects(t, listed, projectJSON{Name: "web"})
-}
-
-func TestActiveProjectErrors(t *testing.T) {
-	h, st, dir := newBoardHandler(t)
-	wantError(t, call(t, h, "PUT", "/api/projects/active", map[string]any{"name": "two words"}),
-		http.StatusBadRequest, "whitespace")
-	wantError(t, call(t, h, "PUT", "/api/projects/active", map[string]any{"name": ""}),
-		http.StatusBadRequest, "must not be empty")
-	wantError(t, call(t, h, "PUT", "/api/projects/active", "{"), http.StatusBadRequest, "malformed JSON")
-	wantError(t, call(t, h, "PUT", "/api/projects/active", nil), http.StatusBadRequest, "JSON object")
-	wantError(t, call(t, h, "GET", "/api/projects/active", nil), http.StatusMethodNotAllowed, "not allowed")
-
-	// A data directory that is a file fails both halves of the state file.
-	file := filepath.Join(dir, "not-a-directory")
-	if err := os.WriteFile(file, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	broken := NewHandler(st, "default", file, "v-test")
-	wantError(t, call(t, broken, "PUT", "/api/projects/active", map[string]any{"name": "web"}),
-		http.StatusInternalServerError, "cli state")
-	wantError(t, call(t, broken, "GET", "/api/projects", nil), http.StatusInternalServerError, "cli state")
+	wantProjects(t, body)
+	wantError(t, call(t, h, "PUT", "/api/projects/active", map[string]any{"name": "web"}), http.StatusNotFound, "no such endpoint")
+	st.Close()
+	wantStatus(t, call(t, h, "GET", "/api/projects", nil), http.StatusInternalServerError)
 }
 
 func TestTombstone(t *testing.T) {

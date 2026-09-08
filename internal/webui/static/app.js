@@ -596,7 +596,7 @@ function defaultSettings() {
   return {
     theme: 'system', density: 'comfortable',
     show: { seq: true, emoji: true, desc: true, tags: true, due: true, effort: true, checks: true, comments: true },
-    hideEmpty: false, showCancelled: false, wip: {}, sort: 'updated', collapsed: {}, v: 3,
+    hideEmpty: false, showCancelled: false, wip: {}, sort: 'updated', collapsed: {}, project: '', v: 3,
   };
 }
 function loadSettings() {
@@ -629,7 +629,7 @@ const currentTheme = () => (settings.theme === 'system' ? (matchMedia('(prefers-
 
 /* ============================== state ============================== */
 const state = {
-  meta: { version: '', activeProject: '', projects: [], labels: [] },
+  meta: { version: '', projects: [], labels: [] },
   project: '', q: '', tokens: [], tags: new Set(), scopes: new Set(), quick: new Set(),
   tasks: [], all: [], loaded: false, etag: null, etagURL: '', online: true, firstPaint: true,
   dragging: null, touch: null, dragPos: null, autoScrollRAF: 0,
@@ -637,8 +637,10 @@ const state = {
   detail: null, detailJSON: '', detailData: null, detailPending: null, commentCounts: {},
   editing: null, editSnapshot: '', paletteIndex: 0, paletteItems: [],
   mode: 'stream', stream: null, streamFails: 0, helloSeen: false, refreshTimer: 0, pollTimer: 0,
-  actions: [], projects: [], activeProject: '', shipped: null, ai: null, drift: {},
+  actions: [], projects: [], shipped: null, ai: null, drift: {},
 };
+// The selected project is this browser's alone: the server keeps no active
+// project, so every card created here names state.project in the request.
 const ALL_PROJECTS = '::all'; // client-side pseudo-project, like the TUI's "all" scope
 const dom = {
   board: $('#board'), detail: $('#detail'),
@@ -787,8 +789,6 @@ async function refreshMeta() {
   try {
     const meta = await api('GET', '/api/meta');
     state.meta = Object.assign({ projects: [], labels: [] }, meta);
-    if (!state.project && meta.activeProject) state.project = meta.activeProject;
-    if (!state.project && meta.projects && meta.projects.length) state.project = meta.projects[0];
     renderHeader();
     renderLabels();
   } catch (err) { /* polling reports connectivity */ }
@@ -798,8 +798,6 @@ async function refreshProjects() {
   try {
     const out = await api('GET', '/api/projects');
     state.projects = out.projects || [];
-    state.activeProject = out.active || '';
-    if (!state.project) state.project = state.activeProject;
     renderHeader();
   } catch (err) { /* the header falls back to /api/meta */ }
 }
@@ -1018,12 +1016,13 @@ function renderHeader() {
   }
   renderStats();
 }
-// Every project on the board plus the active one, as /api/projects reports it; ALL is client-side.
+// Every project on the board, as /api/projects reports it; ALL is client-side.
 const projectNames = () => (state.projects.length ? state.projects.map((p) => p.name) : (state.meta.projects || []));
 const projectList = (extra) => Array.from(new Set([...projectNames(), state.project, extra].filter((p) => p && p !== ALL_PROJECTS)));
-// Where a new card lands. In the "all" scope the server stamps the CLI's active project,
-// so name that rather than the scope the board is showing.
-const writeProject = () => (state.project && state.project !== ALL_PROJECTS ? state.project : state.activeProject || 'inbox');
+// Where a new card lands: the selected project, or — in the "all" scope, which
+// is a view rather than a project — the first project on the board, inbox on
+// an empty one. The server has no default of its own, so every create names one.
+const writeProject = () => (state.project && state.project !== ALL_PROJECTS ? state.project : projectNames()[0] || 'inbox');
 const projectCount = (name) => {
   const p = state.projects.find((x) => x.name === name);
   if (!p) return null;
@@ -1037,7 +1036,7 @@ function renderProjectMenu() {
     const count = all ? total : projectCount(p);
     return el('button', {
       type: 'button', role: 'option', class: 'menu-item', id: 'proj-' + i, 'aria-selected': p === state.project ? 'true' : 'false', 'aria-current': p === state.project ? 'true' : null,
-      title: all ? 'Every project on the board' : p === state.activeProject ? `${p} — also the project the CLI writes to` : p,
+      title: all ? 'Every project on the board' : p,
       onclick: () => { setProject(p); toggleProjectMenu(false); },
     }, el('span', { class: 'grid size-4 place-items-center text-fg' }, p === state.project ? icon('check', 12) : null),
       el('span', { class: 'truncate' }, all ? 'All projects' : p),
@@ -2450,7 +2449,7 @@ function renderComposer(status, open = false) {
   const submit = async () => {
     const p = parseQuickAdd(input.value);
     if (!p.title) { input.focus(); return; }
-    const body = { title: p.title, status, project: state.project, tags: p.tags };
+    const body = { title: p.title, status, project: writeProject(), tags: p.tags };
     if (p.prio) body.prio = p.prio;
     if (p.due) body.due = p.due;
     if (p.effort) body.effort = p.effort;
@@ -3129,8 +3128,7 @@ async function createSplitCards(btn) {
     bar.style.width = Math.round((i / queue.length) * 100) + '%';
     track.setAttribute('aria-valuenow', String(i));
     try {
-      const body = { title: card.title.trim(), status: splitState.status, prio: card.prio || 3, tags: normalizeTags(card.tags || []), checks: card.checks || [] };
-      if (state.project && state.project !== ALL_PROJECTS) body.project = state.project;
+      const body = { title: card.title.trim(), status: splitState.status, prio: card.prio || 3, tags: normalizeTags(card.tags || []), checks: card.checks || [], project: writeProject() };
       for (const k of ['emoji', 'desc', 'due']) if (card[k]) body[k] = card[k];
       if (card.effort) body.effort = card.effort;
       card.created = await api('POST', '/api/tasks', body);
@@ -3288,10 +3286,9 @@ async function runImport(btn) {
     line.textContent = `writing ${i + 1}/${queue.length}`;
     bar.style.width = Math.round((i / queue.length) * 100) + '%';
     track.setAttribute('aria-valuenow', String(i));
-    const task = { title: d.title.trim(), prio: d.prio || 3, tags: d.tags || [], checks: d.checks || [] };
+    const task = { title: d.title.trim(), prio: d.prio || 3, tags: d.tags || [], checks: d.checks || [], project: writeProject() };
     for (const k of ['emoji', 'desc', 'due']) if (d[k]) task[k] = d[k];
     if (d.effort) task.effort = d.effort;
-    if (state.project && state.project !== ALL_PROJECTS) task.project = state.project;
     try {
       d.created = await api('POST', '/api/forge/import', { source: d.source || importState.source, task, link: { externalKey: d.externalKey, link: d.link, url: d.url, title: d.title, baseline: d.baseline } }, { timeout: 120000 });
       d.error = '';
@@ -3486,20 +3483,18 @@ function applyRoute() {
 }
 
 /* ============================== handlers ============================== */
-// Switching also writes the CLI's active project, so kb, kb tui and this board agree.
-// The "all" scope is a client-side view and leaves that stored value alone.
-async function setProject(name) {
+// Switching is this browser's business alone: the selection is remembered with
+// the other display settings and never told to the server, which keeps no
+// active project. The "all" scope is a client-side view.
+function setProject(name) {
   if (!name || name === state.project) return;
   state.project = name;
+  settings.project = name;
+  saveSettings();
   state.selected.clear();
   renderHeader();
   invalidate();
   announce(name === ALL_PROJECTS ? 'All projects' : `Project ${name}`);
-  if (name === ALL_PROJECTS) return;
-  try {
-    await api('PUT', '/api/projects/active', { name });
-    refreshProjects();
-  } catch (err) { toast(err.message, 'error'); }
 }
 function cycleProject(dir) {
   const list = [ALL_PROJECTS, ...projectList()];
@@ -3734,8 +3729,11 @@ async function init() {
   bind();
   mountDetail();
   await Promise.all([refreshMeta(), refreshProjects()]);
+  // The route names the project, else the one this browser last chose, else
+  // the first on the board — inbox when there is none yet.
   const m = /^#\/p\/(.+)$/.exec(decodeURIComponent(location.hash || ''));
-  if (m) state.project = m[1];
+  state.project = m ? m[1] : settings.project || writeProject();
+  renderHeader();
   await refreshTasks();
   if (!state.loaded) for (const status of STATUSES) cols[status].body.replaceChildren(el('div', { class: 'col-empty' }, 'Waiting for the server…'));
   applyRoute();

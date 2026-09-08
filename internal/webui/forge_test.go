@@ -169,7 +169,7 @@ func importBody(draft map[string]any) map[string]any {
 	return map[string]any{
 		"source": "primary",
 		"task": map[string]any{
-			"title": draft["title"], "desc": draft["desc"], "prio": draft["prio"], "tags": draft["tags"],
+			"title": draft["title"], "desc": draft["desc"], "prio": draft["prio"], "tags": draft["tags"], "project": "work",
 		},
 		"link": map[string]any{
 			"externalKey": draft["externalKey"], "link": draft["link"],
@@ -346,7 +346,7 @@ func TestForgeImportRejectsBadCards(t *testing.T) {
 // link the configured source cannot own, and a card with no baseline.
 func TestForgeImportRejectsBadProvenance(t *testing.T) {
 	h, _, fake := newForgeTestHandler(t)
-	task := map[string]any{"title": "Imported card"}
+	task := map[string]any{"title": "Imported card", "project": "work"}
 	baseline := map[string]any{"title": "Fuzzy candidate title", "hash": "abc", "excerpt": "body 94", "at": "2026-01-01T00:00:00Z"}
 	foreign := map[string]any{
 		"externalKey": forgeKey(fake, 94), "link": "github#94",

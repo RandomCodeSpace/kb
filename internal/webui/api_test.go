@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,12 +15,11 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
-// newTestHandler opens a fresh store in a temp data dir with "work" as the
-// active project and returns the handler over it.
+// newTestHandler opens a fresh store in a temp data dir and returns the
+// handler over it.
 func newTestHandler(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("KB_PROJECT", "work")
 	st, err := cliapp.OpenLocalStore(dir, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -88,9 +88,20 @@ func wantError(t *testing.T, rec *httptest.ResponseRecorder, code int, contains 
 	return body
 }
 
+// addTask creates a card in "work" unless the request names its project, as a
+// field or as a project:: tag: the API has no ambient project, so every
+// create spells one.
 func addTask(t *testing.T, h http.Handler, in map[string]any) map[string]any {
 	t.Helper()
+	if _, named := in["project"]; !named && !hasProjectTag(in) {
+		in["project"] = "work"
+	}
 	return wantStatus(t, call(t, h, "POST", "/api/tasks", in), http.StatusCreated)
+}
+
+func hasProjectTag(in map[string]any) bool {
+	tags, _ := in["tags"].([]string)
+	return slices.ContainsFunc(tags, func(tag string) bool { return strings.HasPrefix(tag, "project::") })
 }
 
 func TestMeta(t *testing.T) {
@@ -100,7 +111,7 @@ func TestMeta(t *testing.T) {
 	addTask(t, h, map[string]any{"title": "c", "project": "alpha"})
 
 	body := wantStatus(t, call(t, h, "GET", "/api/meta", nil), http.StatusOK)
-	if body["version"] != "v-test" || body["activeProject"] != "work" {
+	if body["version"] != "v-test" {
 		t.Fatalf("meta = %v", body)
 	}
 	if got, _ := json.Marshal(body["projects"]); string(got) != `["alpha","work","inbox"]` {
@@ -124,18 +135,14 @@ func TestMeta(t *testing.T) {
 
 func TestMetaEmptyBoard(t *testing.T) {
 	h, _ := newTestHandler(t)
-	t.Setenv("KB_PROJECT", "")
 	rec := call(t, h, "GET", "/api/meta", nil)
-	if got := rec.Body.String(); got != `{"version":"v-test","activeProject":"","projects":[],"labels":[],"statuses":["todo","doing","done","cancelled"]}` {
+	if got := rec.Body.String(); got != `{"version":"v-test","projects":[],"labels":[],"statuses":["todo","doing","done","cancelled"]}` {
 		t.Fatalf("meta = %s", got)
 	}
 }
 
 func TestMetaErrors(t *testing.T) {
 	h, st := newTestHandler(t)
-	t.Setenv("KB_PROJECT", "bad name")
-	wantError(t, call(t, h, "GET", "/api/meta", nil), http.StatusInternalServerError, "whitespace")
-	t.Setenv("KB_PROJECT", "work")
 	st.Close()
 	wantStatus(t, call(t, h, "GET", "/api/meta", nil), http.StatusInternalServerError)
 	wantStatus(t, call(t, h, "GET", "/api/labels", nil), http.StatusInternalServerError)
@@ -217,7 +224,7 @@ func TestListTasksETag(t *testing.T) {
 func TestAddTask(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := call(t, h, "POST", "/api/tasks", map[string]any{
-		"title": "full", "desc": "d", "status": "doing", "blocked": true, "prio": 1,
+		"title": "full", "desc": "d", "status": "doing", "blocked": true, "prio": 1, "project": "work",
 		"due": "2030-01-02", "effort": "M", "tags": []string{"x"}, "emoji": "🐛",
 		"checks": []map[string]any{{"text": "one"}, {"text": "two", "done": true}},
 	})
@@ -249,12 +256,12 @@ func TestAddTaskErrors(t *testing.T) {
 	wantError(t, call(t, h, "POST", "/api/tasks", map[string]any{"title": "  "}), http.StatusBadRequest, "title")
 	wantError(t, call(t, h, "POST", "/api/tasks", map[string]any{"title": "x", "prio": 9}), http.StatusBadRequest, "invalid prio")
 	wantError(t, call(t, h, "POST", "/api/tasks", map[string]any{"title": "x", "status": "nope"}), http.StatusBadRequest, "invalid status")
-	wantError(t, call(t, h, "POST", "/api/tasks", map[string]any{"title": "x", "due": "tomorrow"}), http.StatusBadRequest, "invalid due date")
+	wantError(t, call(t, h, "POST", "/api/tasks", map[string]any{"title": "x", "project": "work", "due": "tomorrow"}), http.StatusBadRequest, "invalid due date")
 	wantError(t, call(t, h, "POST", "/api/tasks", map[string]any{"title": "x", "project": "bad name"}), http.StatusBadRequest, "whitespace")
 	big := `{"title":"x","desc":"` + strings.Repeat("a", maxBodyBytes) + `"}`
 	wantError(t, call(t, h, "POST", "/api/tasks", big), http.StatusRequestEntityTooLarge, "1 MiB")
-	t.Setenv("KB_PROJECT", "")
-	wantError(t, call(t, h, "POST", "/api/tasks", map[string]any{"title": "x"}), http.StatusBadRequest, "no project set")
+	wantError(t, call(t, h, "POST", "/api/tasks", map[string]any{"title": "x"}), http.StatusBadRequest, "no project given")
+	wantError(t, call(t, h, "POST", "/api/tasks", map[string]any{"title": "x", "tags": []string{"a"}}), http.StatusBadRequest, "no project given")
 }
 
 func TestGetTask(t *testing.T) {
@@ -515,7 +522,7 @@ func TestLinks(t *testing.T) {
 }
 
 func TestSimilar(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, st := newTestHandler(t)
 	addTask(t, h, map[string]any{"title": "fix login bug"})
 	body := wantStatus(t, call(t, h, "GET", "/api/similar?q=fix+login+bug", nil), http.StatusOK)
 	items := body["items"].([]any)
@@ -532,6 +539,8 @@ func TestSimilar(t *testing.T) {
 	}
 	wantError(t, call(t, h, "GET", "/api/similar?q=x&limit=abc", nil), http.StatusBadRequest, "invalid limit")
 	wantError(t, call(t, h, "GET", "/api/similar?q=x&limit=0", nil), http.StatusBadRequest, "invalid limit")
+	st.Close()
+	wantStatus(t, call(t, h, "GET", "/api/similar?q=x", nil), http.StatusBadRequest)
 }
 
 func TestLabels(t *testing.T) {
@@ -551,7 +560,7 @@ func TestLabels(t *testing.T) {
 func TestRequestSafety(t *testing.T) {
 	h, _ := newTestHandler(t)
 	addTask(t, h, map[string]any{"title": "a"})
-	in := map[string]any{"title": "b"}
+	in := map[string]any{"title": "b", "project": "work"}
 
 	wantStatus(t, call(t, h, "POST", "/api/tasks", in, "Origin", "http://example.com"), http.StatusCreated)
 	wantStatus(t, call(t, h, "POST", "/api/tasks", in, "Origin", "http://EXAMPLE.com"), http.StatusCreated)
