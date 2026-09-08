@@ -19,8 +19,7 @@ type tuiPreferences struct {
 	Filter        boardFilter   `json:"filter,omitempty"`
 	Shipped       shippedRecord `json:"shipped,omitempty"`
 	// Project is the switcher's scope. Both fields empty means nothing was
-	// stored, which restores as the active project rather than as "all": a
-	// board that has never been switched opens where the CLI points.
+	// stored, and the board opens on "all".
 	Project    string `json:"project,omitempty"`
 	ProjectAll bool   `json:"project_all,omitempty"`
 }
@@ -145,14 +144,13 @@ func (m *Model) restorePreferences(path string) {
 	m.adoptPreferences(preferences)
 }
 
-// adoptPreferences applies a loaded snapshot. The project scope resolves last
-// against the active project, so a board that has never been switched opens
-// where the CLI points.
+// adoptPreferences applies a loaded snapshot. A board that has never been
+// switched opens on "all".
 func (m *Model) adoptPreferences(preferences tuiPreferences) {
 	m.boardView.showCancelled = preferences.ShowCancelled
 	m.filter.restore(preferences.Filter)
-	m.projects.restore(projectSwitcher{name: preferences.Project, all: preferences.ProjectAll}, m.activeProject)
-	m.editor.SetProjectDefault(m.projectDefault())
+	m.projects.restore(projectSwitcher{name: preferences.Project, all: preferences.ProjectAll})
+	m.syncProjectDefault()
 	m.adoptShippedAt(preferences.Shipped, m.now())
 }
 

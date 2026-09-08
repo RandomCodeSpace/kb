@@ -102,7 +102,7 @@ type Model struct {
 	store   Store
 	runner  Runner
 	user    string
-	dataDir string
+	project string
 	ctx     context.Context
 
 	open       bool
@@ -147,10 +147,10 @@ type Model struct {
 	now          func() time.Time
 }
 
-// SetDataDir names the directory the active project is resolved from — the
-// one holding the board and its state.json. Empty falls back to $KB_DATA and
-// the default data directory, the same as every other surface.
-func (m *Model) SetDataDir(dir string) { m.dataDir = dir }
+// SetProject names the project every split card is filed under — the one the
+// board is scoped to. Empty means no project, and every row then fails rather
+// than landing a card without one.
+func (m *Model) SetProject(name string) { m.project = name }
 
 // SetStyles hands the overlay the resolved design system. Spec section 6.2:
 // styles are built once by the root and threaded down, never constructed here.
@@ -737,14 +737,13 @@ func (m *Model) startAdd() tea.Cmd {
 func (m *Model) addNext() tea.Cmd {
 	rowIndex := m.addQueue[m.addPosition]
 	task := taskFromRow(m.rows[rowIndex], m.dest)
-	dataDir := m.dataDir
+	project := m.project
 	session, generation := m.session, m.addGeneration
 	return func() tea.Msg {
 		// A split card is a card: it carries the one project every task
-		// carries, resolved now so the batch follows the active project
-		// rather than whatever it was when the overlay opened. A board with
-		// no project resolved fails the row instead of writing without one.
-		tags, err := cliapp.ProjectTags(task.Tags, "", dataDir, "")
+		// carries, the one the board handed the overlay. A board under "all"
+		// fails the row instead of writing a card without one.
+		tags, err := cliapp.ProjectTags(task.Tags, project, "")
 		if err != nil {
 			return cardAddedMsg{session: session, generation: generation, row: rowIndex, err: err}
 		}

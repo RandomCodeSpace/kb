@@ -1511,7 +1511,7 @@ func TestRootRoutesCreateEditorAndRefreshesAcknowledgedSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := newTestRootModel(st, nil, "alice")
-	m.SetActiveProject("kb")
+	m.adoptPreferences(tuiPreferences{Project: "kb"})
 	completeBoardLoad(t, &m, m.Init())
 	loadLabels := updateTestModel(t, &m, tea.KeyPressMsg{Code: 'n'})
 	if !m.editor.IsOpen() || loadLabels == nil {
