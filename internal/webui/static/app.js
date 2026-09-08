@@ -790,7 +790,7 @@ function renderProjectMenu() {
       type: 'button', role: 'option', class: 'menu-item', id: 'proj-' + i, 'aria-selected': p === state.project ? 'true' : 'false', 'aria-current': p === state.project ? 'true' : null,
       title: all ? 'Every project on the board' : p === state.activeProject ? `${p} — also the project the CLI writes to` : p,
       onclick: () => { setProject(p); toggleProjectMenu(false); },
-    }, el('span', { class: 'grid size-4 place-items-center text-accent' }, p === state.project ? icon('check', 12) : null),
+    }, el('span', { class: 'grid size-4 place-items-center text-fg' }, p === state.project ? icon('check', 12) : null),
       el('span', { class: 'truncate' }, all ? 'All projects' : p),
       el('span', { class: 'num ml-auto text-11 text-fg-3' }, count === null ? '' : String(count)));
   }));
