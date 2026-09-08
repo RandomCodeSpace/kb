@@ -258,7 +258,9 @@ func TestGetTask(t *testing.T) {
 	wantStatus(t, call(t, h, "POST", "/api/tasks/1/comments", map[string]any{"body": "hi"}), http.StatusCreated)
 	wantStatus(t, call(t, h, "POST", "/api/links", map[string]any{"blocker": "1", "blocked": "2"}), http.StatusCreated)
 
-	for _, ref := range []string{"1", "#1", a["id"].(string), a["id"].(string)[:8]} {
+	// The prefix keeps the first dash so an all-digit hex run can never be
+	// read as a sequence number.
+	for _, ref := range []string{"1", "#1", a["id"].(string), a["id"].(string)[:9]} {
 		body := wantStatus(t, call(t, h, "GET", "/api/tasks/"+ref, nil), http.StatusOK)
 		task := body["task"].(map[string]any)
 		if task["id"] != a["id"] {
