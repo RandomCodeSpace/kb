@@ -48,6 +48,21 @@ func TestCommentLifecycle(t *testing.T) {
 		t.Fatalf("comment on missing task = %v", err)
 	}
 
+	// Edit keeps the id, author and timestamp and trims the new body.
+	edited, err := s.UpdateComment("u", 1, "  first finding, revised  ")
+	if err != nil || edited.ID != 1 || edited.Author != "alice" || edited.TaskSeq != 1 || edited.Body != "first finding, revised" || !edited.CreatedAt.Equal(c1.CreatedAt) {
+		t.Fatalf("update = %+v, %v", edited, err)
+	}
+	if again, err := s.Comments("u", "1"); err != nil || again[0].Body != "first finding, revised" {
+		t.Fatalf("comments after update = %+v, %v", again, err)
+	}
+	if _, err := s.UpdateComment("u", 1, " "); err == nil {
+		t.Fatal("empty comment body accepted on update")
+	}
+	if _, err := s.UpdateComment("u", 42, "text"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("update of missing comment = %v", err)
+	}
+
 	// Delete retires the id for good: the next comment is c3, not c2.
 	deleted, err := s.DeleteComment("u", 2)
 	if err != nil || deleted.ID != 2 || deleted.Body != "second finding" {

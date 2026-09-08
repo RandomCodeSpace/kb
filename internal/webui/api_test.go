@@ -463,10 +463,19 @@ func TestComments(t *testing.T) {
 	}
 	wantError(t, call(t, h, "GET", "/api/tasks/7/comments", nil), http.StatusNotFound, "no task matches")
 
+	edited := wantStatus(t, call(t, h, "PUT", "/api/comments/c1", map[string]any{"body": " first, revised "}), http.StatusOK)
+	if edited["id"] != 1.0 || edited["body"] != "first, revised" || edited["createdAt"] != c["createdAt"] {
+		t.Fatalf("edited = %v", edited)
+	}
+	wantError(t, call(t, h, "PUT", "/api/comments/1", map[string]any{"body": " "}), http.StatusBadRequest, "must not be empty")
+	wantError(t, call(t, h, "PUT", "/api/comments/1", "{"), http.StatusBadRequest, "malformed")
+	wantError(t, call(t, h, "PUT", "/api/comments/abc", map[string]any{"body": "x"}), http.StatusBadRequest, "invalid comment id")
+	wantError(t, call(t, h, "PUT", "/api/comments/9", map[string]any{"body": "x"}), http.StatusNotFound, "no comment matches")
+
 	wantError(t, call(t, h, "DELETE", "/api/comments/abc", nil), http.StatusBadRequest, "invalid comment id")
 	wantError(t, call(t, h, "DELETE", "/api/comments/0", nil), http.StatusBadRequest, "invalid comment id")
 	deleted := wantStatus(t, call(t, h, "DELETE", "/api/comments/c1", nil), http.StatusOK)
-	if deleted["body"] != "first" {
+	if deleted["body"] != "first, revised" {
 		t.Fatalf("deleted = %v", deleted)
 	}
 	wantError(t, call(t, h, "DELETE", "/api/comments/1", nil), http.StatusNotFound, "no comment matches")

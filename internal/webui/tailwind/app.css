@@ -96,6 +96,7 @@
   --text-13: 13px; --text-13--line-height: 20px;
   --text-14: 14px; --text-14--line-height: 20px;
   --text-16: 16px; --text-16--line-height: 24px;
+  --text-18: 18px; --text-18--line-height: 24px;
   --text-20: 20px; --text-20--line-height: 28px;
   --radius-*: initial;
   --radius-sm: 6px;
@@ -190,12 +191,52 @@
   .input::placeholder { color: var(--t-fg-3); }
   .input:hover { border-color: color-mix(in srgb, var(--t-line-2), var(--t-fg) 12%); }
   .input:focus-visible { outline: none; border-color: var(--t-focus); box-shadow: 0 0 0 3px var(--t-accent-soft); }
-  textarea.input { height: auto; min-height: 64px; padding: 6px 10px; resize: vertical; }
-  select.input { appearance: none; padding-right: 28px; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%238a94a6' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M4 6l4 4 4-4'/></svg>"); background-repeat: no-repeat; background-position: right 8px center; }
-  select.input option { background: var(--t-surface); color: var(--t-fg); }
+  textarea.input { height: auto; min-height: 64px; max-height: 320px; padding: 6px 10px; resize: none; field-sizing: content; }
   .input-ghost { background: transparent; border-color: transparent; }
   .input-ghost:hover { border-color: var(--t-line); }
-  .cb { width: 16px; height: 16px; margin: 0; flex: none; accent-color: var(--t-accent); cursor: pointer; }
+  /* browser chrome the board draws itself instead */
+  input[type="search"] { appearance: none; -webkit-appearance: none; }
+  input[type="search"]::-webkit-search-decoration, input[type="search"]::-webkit-search-cancel-button, input[type="search"]::-webkit-search-results-button { -webkit-appearance: none; display: none; }
+  input::-ms-reveal, input::-ms-clear { display: none; }
+  input[type="text"]::-webkit-outer-spin-button, input[type="text"]::-webkit-inner-spin-button { -webkit-appearance: none; }
+  /* checkbox: 16px box, lime fill, ink tick */
+  .cb { appearance: none; -webkit-appearance: none; display: inline-grid; place-items: center; width: 16px; height: 16px; margin: 0; flex: none; border: 1px solid var(--t-line-2); border-radius: 4px; background: var(--t-surface); cursor: pointer; transition: background-color 120ms var(--ease-out), border-color 120ms var(--ease-out); }
+  .cb::before { content: ""; width: 10px; height: 10px; background: var(--t-on-accent); mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3 8.5 6.5 12 13 4.5' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/></svg>") center / contain no-repeat; transform: scale(0); transition: transform 120ms var(--ease-out); }
+  .cb:hover { border-color: var(--t-fg-3); }
+  .cb:focus-visible { outline: none; border-color: var(--t-focus); box-shadow: 0 0 0 3px var(--t-accent-soft); }
+  .cb:checked, .cb:indeterminate { background: var(--t-accent); border-color: var(--t-accent); }
+  .cb:checked::before { transform: scale(1); }
+  .cb:indeterminate::before { mask: none; width: 8px; height: 2px; border-radius: 1px; transform: scale(1); }
+  .cb:disabled { opacity: 0.5; cursor: default; }
+  /* select and date: a hidden native for the form, a trigger and a pop for the eye */
+  .select { position: relative; display: block; }
+  .select.w-auto { display: inline-block; width: auto; max-width: 100%; }
+  .select-native { position: absolute; width: 0; height: 0; margin: 0; padding: 0; border: 0; opacity: 0; overflow: hidden; pointer-events: none; }
+  .select-trigger { display: flex; align-items: center; gap: 8px; text-align: left; padding-right: 8px; cursor: pointer; font-variant-numeric: tabular-nums; }
+  .select-trigger.w-auto { display: inline-flex; width: auto; }
+  .select-trigger > svg { flex: none; color: var(--t-fg-3); }
+  .select-trigger[aria-expanded="true"] { border-color: var(--t-focus); }
+  .select-trigger:disabled { opacity: 0.5; cursor: default; }
+  .select-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .select-value.is-empty { color: var(--t-fg-3); }
+  .select > .pop:not([popover]) { top: calc(100% + 4px); left: 0; }
+  .pop[popover] { position: fixed; inset: auto; margin: 0; }
+  .select-pop { max-height: 320px; overflow-y: auto; }
+  .select-pop .menu-item:focus { outline: none; background: var(--t-raised); }
+  .select-pop .menu-item[aria-selected="true"] { font-weight: 500; }
+  .select-pop .menu-item > svg { flex: none; color: var(--t-fg-2); }
+  .select-pop .menu-item:disabled { color: var(--t-fg-3); cursor: default; background: none; }
+  .cal-pop { width: 252px; padding: 8px; }
+  .cal-head { display: flex; align-items: center; gap: 4px; height: 28px; margin-bottom: 4px; }
+  .cal-title { flex: 1; text-align: center; font-size: 12px; font-weight: 600; }
+  .cal-grid { display: grid; grid-template-columns: repeat(7, 32px); grid-auto-rows: 32px; }
+  .cal-grid .dow { display: grid; place-items: center; font-size: 11px; font-weight: 500; color: var(--t-fg-3); }
+  .cal-grid .day { display: grid; place-items: center; height: 28px; margin: 2px; border-radius: var(--radius-sm); font-size: 12px; color: var(--t-fg); }
+  .cal-grid .day.is-other { color: var(--t-fg-3); }
+  .cal-grid .day:hover, .cal-grid .day:focus { outline: none; background: var(--t-raised); }
+  .cal-grid .day.is-today { box-shadow: inset 0 0 0 1px var(--t-line-2); }
+  .cal-grid .day[aria-pressed="true"] { background: var(--t-accent); color: var(--t-on-accent); font-weight: 600; box-shadow: none; }
+  .cal-foot { display: flex; align-items: center; gap: 4px; height: 28px; margin-top: 4px; }
 
   /* segmented control */
   .seg { display: inline-flex; align-items: stretch; height: var(--control); padding: 2px; gap: 2px; border-radius: var(--radius-md); background: var(--t-surface); border: 1px solid var(--t-line); max-width: 100%; }
@@ -225,13 +266,19 @@
   .chip-dot::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: 9999px; background: var(--dot, var(--t-fg-3)); }
   [style*="--h:"] { --hue: light-dark(hsl(var(--h) 48% 42%), hsl(var(--h) 55% 68%)); --hue-tint: light-dark(hsl(var(--h) 48% 42% / 0.12), hsl(var(--h) 55% 68% / 0.16)); --dot: var(--hue); }
   .chip-scoped { gap: 0; padding: 0; border: 0; overflow: hidden; background: transparent; }
-  .chip-scoped .k { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; background: var(--hue); color: var(--t-hue-fg); font-weight: 600; }
+  /* label chips (data-tag) are filled with their hue's tint so a plain label and a
+     scoped label read as the same object; the scoped one just carries a solid key */
+  .chip[data-tag].chip-dot { background: var(--hue-tint); border-color: transparent; color: var(--t-fg); }
+  .chip-scoped .k { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; background: var(--hue); color: var(--t-hue-fg); font-weight: 500; }
   .chip-scoped .v { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; background: var(--hue-tint); color: var(--t-fg); overflow: hidden; text-overflow: ellipsis; }
   .chip-scoped .v:empty { display: none; }
   button.chip { cursor: pointer; transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), color 160ms var(--ease-out), box-shadow 160ms var(--ease-out); }
   button.chip:hover { border-color: var(--t-line-2); color: var(--t-fg); }
   button.chip-scoped:hover { box-shadow: 0 0 0 1px var(--hue); }
   button.chip[aria-pressed="true"] { background: var(--t-accent-soft); border-color: transparent; color: var(--t-fg); }
+  button.chip[data-tag].chip-dot[aria-pressed="true"] { background: var(--hue); color: var(--t-hue-fg); }
+  button.chip[data-tag].chip-dot[aria-pressed="true"]::before { background: var(--t-hue-fg); }
+  button.chip[data-tag].chip-dot:hover { border-color: transparent; box-shadow: 0 0 0 1px var(--hue); }
   button.chip-scoped[aria-pressed="true"] { background: transparent; box-shadow: 0 0 0 2px var(--hue); }
   .chip-tone { --tone: var(--t-fg-2); color: var(--tone); border-color: color-mix(in srgb, var(--tone), transparent 70%); background: color-mix(in srgb, var(--tone), transparent 90%); }
   /* "mono" chips (dates, effort, source kinds) keep the sans face at chip size:
@@ -254,13 +301,8 @@
   .seq { font-family: var(--font-mono); font-feature-settings: normal; font-size: 12px; color: var(--t-fg-3); letter-spacing: -0.01em; }
   .num { font-family: var(--font-mono); font-feature-settings: normal; font-variant-numeric: tabular-nums; }
 
-  /* tooltip via data-tip; the aria-label carries the same text */
-  [data-tip] { position: relative; }
-  [data-tip]::after { content: attr(data-tip); position: absolute; left: 50%; top: calc(100% + 6px); transform: translate(-50%, -2px); z-index: 60; padding: 3px 8px; border-radius: 4px; background: var(--t-fg); color: var(--t-canvas); font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; pointer-events: none; opacity: 0; transition: opacity 120ms var(--ease-out), transform 120ms var(--ease-out); }
-  [data-tip]:hover::after, [data-tip]:focus-visible::after { opacity: 1; transform: translate(-50%, 0); transition-delay: 300ms; }
-  [data-tip].tip-left::after { left: auto; right: 0; transform: translate(0, -2px); }
-  [data-tip].tip-left:hover::after, [data-tip].tip-left:focus-visible::after { transform: none; }
-  @media (pointer: coarse) { [data-tip]::after { display: none; } }
+  /* tooltip: one floating node, filled from data-tip by the script */
+  .tip { position: fixed; inset: auto; z-index: 100; margin: 0; border: 0; padding: 3px 8px; border-radius: 4px; background: var(--t-fg); color: var(--t-canvas); font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; pointer-events: none; }
 
   /* popovers, dialogs */
   .pop { position: absolute; z-index: 50; min-width: 200px; padding: 4px; border-radius: var(--radius-lg); background: var(--t-overlay); border: 1px solid var(--t-line); box-shadow: var(--t-shadow-md); }
@@ -367,7 +409,11 @@
   .label-row > .input-ghost { height: 32px; }
   /* in the property grid the ghost input has no visible box: pull its text flush with the chips */
   .props .label-row > .input-ghost { margin-left: -7px; }
-  .title-edit { width: 100%; padding: 2px 6px; margin: 0 -6px; border-radius: var(--radius-sm); font-size: 16px; line-height: 24px; font-weight: 600; background: transparent; border: 1px solid transparent; }
+  .title-edit { width: 100%; padding: 2px 6px; margin: 0 -6px; border-radius: var(--radius-sm); font-size: 18px; line-height: 24px; font-weight: 600; letter-spacing: -0.01em; background: transparent; border: 1px solid transparent; }
+  /* detail sections: a 24px heading row (title left, count or action right), 8px to the content, 20px between sections */
+  .section { padding-top: 20px; }
+  .section-head { display: flex; align-items: center; gap: 8px; height: 24px; margin-bottom: 8px; }
+  .section-title { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--t-fg-2); }
   .title-edit:hover { background: var(--t-raised); }
   .title-edit:focus-visible { outline: none; border-color: var(--t-focus); background: var(--t-surface); box-shadow: 0 0 0 3px var(--t-accent-soft); }
 
@@ -445,10 +491,11 @@
   .ai-mark { display: inline-flex; align-items: center; height: 16px; padding: 0 5px; border-radius: 9999px; background: var(--t-accent); color: var(--t-on-accent); font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 0.06em; line-height: 16px; }
 
   /* checklist */
-  .check-row { display: flex; align-items: flex-start; gap: 8px; min-height: 28px; padding: 2px 4px; border-radius: var(--radius-sm); }
+  .check-row { display: flex; align-items: flex-start; gap: 8px; min-height: 32px; padding: 0 8px; margin: 0 -8px; border-radius: var(--radius-md); }
   .check-row:hover { background: var(--t-raised); }
-  .check-row .cb { margin-top: 4px; }
-  .check-row .text { flex: 1; min-width: 0; padding: 2px 0; font-size: 13px; line-height: 20px; }
+  .check-row .cb { margin-top: 8px; }
+  .check-row .text { flex: 1; min-width: 0; padding: 6px 0; font-size: 13px; line-height: 20px; }
+  .check-add { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 8px; margin: 0 -8px; }
   .check-row.done .text { color: var(--t-fg-2); text-decoration: line-through; text-decoration-color: var(--t-fg-3); }
   .check-row .rm { opacity: 0; }
   .check-row:hover .rm, .check-row:focus-within .rm { opacity: 1; }
@@ -497,8 +544,11 @@
   .task-link .t.done, .task-link .t.cancelled { color: var(--t-fg-3); }
 
   .comment { padding: 10px 12px; border-radius: var(--radius-lg); background: var(--t-card); border: 1px solid var(--t-line); }
-  .comment .rm { opacity: 0; }
-  .comment:hover .rm, .comment:focus-within .rm { opacity: 1; }
+  .comment-head { display: flex; align-items: center; gap: 8px; height: 24px; margin-bottom: 4px; }
+  .comment .act { opacity: 0; }
+  .comment:hover .act, .comment:focus-within .act { opacity: 1; }
+  .comment-add { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; margin: 0 -8px; border-radius: var(--radius-md); color: var(--t-fg-2); font-size: 13px; }
+  .comment-add:hover { background: var(--t-raised); color: var(--t-fg); }
 
   .pick { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 50; max-height: 240px; overflow: auto; padding: 4px; border-radius: var(--radius-lg); background: var(--t-overlay); border: 1px solid var(--t-line); box-shadow: var(--t-shadow-md); }
 
