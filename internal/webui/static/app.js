@@ -790,7 +790,7 @@ function renderProjectMenu() {
       type: 'button', role: 'option', class: 'menu-item', id: 'proj-' + i, 'aria-selected': p === state.project ? 'true' : 'false', 'aria-current': p === state.project ? 'true' : null,
       title: all ? 'Every project on the board' : p === state.activeProject ? `${p} — also the project the CLI writes to` : p,
       onclick: () => { setProject(p); toggleProjectMenu(false); },
-    }, el('span', { class: 'grid size-4 place-items-center text-accent' }, p === state.project ? icon('check', 12) : null),
+    }, el('span', { class: 'grid size-4 place-items-center text-fg' }, p === state.project ? icon('check', 12) : null),
       el('span', { class: 'truncate' }, all ? 'All projects' : p),
       el('span', { class: 'num ml-auto text-11 text-fg-3' }, count === null ? '' : String(count)));
   }));
@@ -1547,8 +1547,8 @@ function mdEditor(opts = {}) {
 // grouped picker fed by /api/meta labels. One value per scope: picking type::bug replaces type::feature.
 function labelEditor(container, opts = {}) {
   let tags = normalizeTags(opts.tags || []);
-  const row = el('div', { class: 'flex min-h-8 flex-wrap items-center gap-1' });
-  const input = el('input', { type: 'text', class: 'input input-ghost h-7 min-w-[120px] flex-1 px-1.5', placeholder: opts.placeholder || 'Add label…', 'aria-label': opts.placeholder || 'Add label', autocomplete: 'off', spellcheck: 'false', role: 'combobox', 'aria-expanded': 'false', 'aria-autocomplete': 'list' });
+  const row = el('div', { class: 'label-row' });
+  const input = el('input', { type: 'text', class: 'input input-ghost min-w-[120px] flex-1 px-1.5', placeholder: opts.placeholder || 'Add label…', 'aria-label': opts.placeholder || 'Add label', autocomplete: 'off', spellcheck: 'false', role: 'combobox', 'aria-expanded': 'false', 'aria-autocomplete': 'list' });
   const pick = el('div', { class: 'pick', role: 'listbox', hidden: true, 'aria-label': 'Labels' });
   const box = el('div', { class: 'relative' }, row, pick);
   container.replaceChildren(box);
