@@ -78,7 +78,7 @@ const ICONS = {
   eye: ['M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z', 'M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z'], pencil: ['M11.5 2.5l2 2-8 8H3.5v-2z'],
   sun: ['M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1'],
   grip: ['M6 4h.01M10 4h.01M6 8h.01M10 8h.01M6 12h.01M10 12h.01'],
-  minus: 'M3.5 8h9',
+  minus: 'M3.5 8h9', lock: ['M3.5 7.5h9v6h-9z', 'M5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5'],
   sparkle: ['M6.5 2.5 7.6 5.4 10.5 6.5 7.6 7.6 6.5 10.5 5.4 7.6 2.5 6.5 5.4 5.4z', 'M11.5 9.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z'],
   gear: ['M8 5.9a2.1 2.1 0 1 0 0 4.2 2.1 2.1 0 0 0 0-4.2z', 'M8 1.7l.9 1.6 1.8-.4.6 1.8 1.8.6-.4 1.8L13.9 8l-1.2 1.4.4 1.8-1.8.6-.6 1.8-1.8-.4L8 14.3l-.9-1.6-1.8.4-.6-1.8-1.8-.6.4-1.8L2.1 8l1.2-1.4-.4-1.8 1.8-.6.6-1.8 1.8.4z'],
   upload: ['M8 11V3', 'M5 6l3-3 3 3', 'M2.5 11v2h11v-2'],
@@ -164,8 +164,11 @@ function fieldGroup(label, control, opts = {}) {
   const msg = el('p', { class: 'field-msg' + (opts.tone ? ' is-' + opts.tone : ''), id: msgID });
   if (opts.message) msg.textContent = opts.message;
   if (opts.tone === 'error') control.setAttribute('aria-invalid', 'true');
+  const head = el('label', { class: 'label-11', for: control.id }, label, opts.hint ? el('span', { class: 'ml-1.5 font-normal tracking-normal text-fg-3' }, opts.hint) : null);
   return el('div', { class: 'field' + (opts.class ? ' ' + opts.class : '') },
-    el('label', { class: 'label-11', for: control.id }, label, opts.hint ? el('span', { class: 'ml-1.5 font-normal tracking-normal text-fg-3' }, opts.hint) : null),
+    // An optional action (clear the saved key) sits on the label line, so the
+    // control below keeps the full column width and lines up with its neighbours.
+    opts.action ? el('div', { class: 'field-head' }, head, opts.action) : head,
     control, msg);
 }
 function setMsg(group, text, tone) {
@@ -195,9 +198,9 @@ function segGroup(label, options, current, onPick, cls = 'seg seg-sm') {
   }, text)));
 }
 const utf8Bytes = (s) => new TextEncoder().encode(s).length;
-const openLink = (href, text) => el('a', { class: 'text-accent underline decoration-line-2 underline-offset-2 hover:decoration-current', href, target: '_blank', rel: 'noopener noreferrer' }, text || href, icon('open', 11));
+const openLink = (href, text) => el('a', { class: 'text-link underline decoration-line-2 underline-offset-2 hover:decoration-current', href, target: '_blank', rel: 'noopener noreferrer' }, text || href, icon('open', 11));
 // An inline "go to settings" button that reads as prose, not as a control.
-const settingsLink = (text, section) => el('button', { type: 'button', class: 'text-accent underline decoration-line-2 underline-offset-2 hover:decoration-current', onclick: () => openSettings(section) }, text);
+const settingsLink = (text, section) => el('button', { type: 'button', class: 'text-link underline decoration-line-2 underline-offset-2 hover:decoration-current', onclick: () => openSettings(section) }, text);
 // Subsequence fuzzy match: returns {score, positions} or null.
 function fuzzy(query, text) {
   const q = query.toLowerCase(), t = text.toLowerCase();
@@ -843,10 +846,15 @@ function renderResultCount() {
   const total = serverFiltered() && state.all.length ? state.all.length : (serverFiltered() ? null : state.tasks.length);
   dom.resultCount.textContent = anyFilter() ? (total === null ? `${shown} shown` : `${shown} of ${total}`) : plural(shown, 'task');
 }
+// The label pool is scoped like the board: with one project active it holds
+// only the labels that project's cards carry, so another project's vocabulary
+// never leaks into the filter row or the picker. All projects use the store's
+// full list.
 function allLabels() {
-  const labels = (state.meta.labels || []).filter((l) => !isProjectTag(l) && !isProvenanceTag(l));
+  const labels = state.project === ALL_PROJECTS ? (state.meta.labels || []).filter((l) => !isProjectTag(l) && !isProvenanceTag(l)) : [];
   for (const tag of state.tags) if (!labels.includes(tag)) labels.push(tag);
-  for (const t of state.tasks) for (const tag of shownTags(t)) if (!labels.includes(tag)) labels.push(tag);
+  const pool = state.project === ALL_PROJECTS || !state.all.length ? state.tasks : state.all;
+  for (const t of pool) for (const tag of shownTags(t)) if (!labels.includes(tag)) labels.push(tag);
   return labels.sort((a, b) => a.localeCompare(b));
 }
 // Label filter row: scoped labels grouped under a scope header (click = any scope::*), plain labels after.
@@ -1459,13 +1467,14 @@ function mdEditor(opts = {}) {
     ol: () => { const all = lineRange().text.split('\n').every((l) => /^\s*\d+[.)]\s/.test(l)); mapLines((l, i) => (all ? l.replace(/^\s*\d+[.)]\s/, '') : /^\s*\d+[.)]\s/.test(l) ? l : `${i + 1}. ${l}`)); },
   };
   const tool = (name, label, kbd) => el('button', { type: 'button', class: 'btn btn-ghost btn-xs btn-icon', 'aria-label': label + (kbd ? ` (${kbd})` : ''), title: label + (kbd ? `  ${kbd}` : ''), tabindex: '-1', onmousedown: (e) => e.preventDefault(), onclick: () => tools[name]() }, icon(name === 'heading' ? 'h' : name, 14));
-  // Below 640px the panes stack: one toggle switches between writing and the preview.
+  // One pane at a time: the toggle swaps the textarea for the rendered preview
+  // and back. The formatting tools stay visible but inert while previewing.
   const tabs = el('button', { type: 'button', class: 'editor-tabs btn btn-ghost btn-xs', 'aria-pressed': 'false', 'aria-label': 'Preview', title: 'Preview', onmousedown: (e) => e.preventDefault(), onclick: () => {
     const preview = root.dataset.view !== 'preview';
     root.dataset.view = preview ? 'preview' : 'write';
     tabs.setAttribute('aria-pressed', String(preview));
     tabs.replaceChildren(icon(preview ? 'pencil' : 'eye', 14), preview ? 'Write' : 'Preview');
-    if (!preview) ta.focus();
+    if (preview) refresh(); else ta.focus();
   } }, icon('eye', 14), 'Preview');
   const sep = () => el('span', { class: 'sep', 'aria-hidden': 'true' });
   const bar = el('div', { class: 'editor-bar', role: 'toolbar', 'aria-label': 'Formatting' },
@@ -2317,7 +2326,7 @@ async function openSettings(section) {
     dom.settingsBody.replaceChildren(el('div', { class: 'flex items-center gap-2 py-8 text-13 text-fg-2' }, el('span', { class: 'spinner' }), 'Loading settings…'));
     try {
       const [ai, forge] = await Promise.all([api('GET', '/api/settings/ai'), api('GET', '/api/settings/forge')]);
-      sset.ai = { baseURL: ai.ai.baseURL || '', model: ai.ai.model || '', key: '', hasKey: !!ai.ai.hasKey, clearKey: false, msg: '', tone: '' };
+      sset.ai = { baseURL: ai.ai.baseURL || '', model: ai.ai.model || '', key: '', hasKey: !!ai.ai.hasKey, clearKey: false, editKey: false, msg: '', tone: '' };
       sset.rows = (forge.sources || []).map(forgeRowOf);
       sset.draft = null;
       sset.loaded = true;
@@ -2334,7 +2343,7 @@ async function openSettings(section) {
   const first = dom.settingsBody.querySelector(section === 'forge' ? '[data-k^="forge"]' : '[data-k="ai-base"]') || dom.settingsBody.querySelector('input');
   if (first) first.focus();
 }
-const forgeRowOf = (s) => ({ name: s.name, kind: s.kind, baseURL: s.baseURL || '', project: '', token: '', hasToken: !!s.hasToken, createdAt: s.createdAt, clearToken: false, msg: '', tone: '', armed: false });
+const forgeRowOf = (s) => ({ name: s.name, kind: s.kind, baseURL: s.baseURL || '', project: '', token: '', hasToken: !!s.hasToken, createdAt: s.createdAt, clearToken: false, editToken: false, msg: '', tone: '', armed: false });
 function closeSettings() {
   if (ssetState() !== sset.snapshot && !confirm('Discard unsaved settings?')) return;
   sset.loaded = false;
@@ -2362,9 +2371,25 @@ function renderSettingsDialog() {
   again.focus();
   if (caret !== null && again.setSelectionRange) { try { again.setSelectionRange(caret, caret); } catch (e) { /* not a text input */ } }
 }
-const sectionBlock = (title, note, ...children) => el('section', { class: 'mb-6 last:mb-0' },
-  el('h3', { class: 'label-11 mb-1' }, title), note ? el('p', { class: 'mb-3 text-12 text-fg-2' }, note) : null,
+const sectionBlock = (title, note, ...children) => el('section', { class: 'settings-section' },
+  el('div', { class: 'settings-head' }, el('h3', { class: 'text-14 font-semibold' }, title), note ? el('p', { class: 'text-12 text-fg-2' }, note) : null),
   ...children);
+
+// A saved secret never comes back from the server, so the field shows its
+// state (Saved) with Replace and Remove, and only opens an input once one of
+// them is chosen. noun names the thing in messages: key, token.
+function secretField(label, noun, input, s) {
+  const xs = (text, key, onclick) => el('button', { type: 'button', class: 'btn btn-ghost btn-xs', 'data-k': key, onclick }, text);
+  if (s.saved && !s.editing && !s.clearing) {
+    const row = el('div', { class: 'secret' }, icon('lock', 14), el('span', {}, 'Saved'), el('span', { class: 'dots', 'aria-hidden': 'true' }, '••••••••'),
+      xs('Replace', s.k + '-edit', s.onEdit), xs('Remove', s.k + '-clear', s.onClear));
+    return el('div', { class: 'field' + (s.class ? ' ' + s.class : '') }, el('div', { class: 'field-head' }, el('span', { class: 'label-11' }, label)), row, el('p', { class: 'field-msg' }));
+  }
+  const back = s.saved ? xs(s.clearing ? `Keep the saved ${noun}` : 'Cancel', s.k + '-back', s.onBack) : null;
+  const field = fieldGroup(label, input, { action: back, class: s.class });
+  if (s.clearing) setMsg(field, `Removed when you save. Paste a ${noun} to keep one.`, 'warn');
+  return field;
+}
 
 function aiSection() {
   const ai = sset.ai;
@@ -2373,7 +2398,7 @@ function aiSection() {
   base.dataset.k = 'ai-base';
   const model = text('ai-model', { value: ai.model, placeholder: 'gpt-4o' });
   const keyInput = el('input', { type: 'password', class: 'input', name: 'ai-key', autocomplete: 'new-password', spellcheck: 'false', 'data-k': 'ai-key', id: uid('ai'), value: ai.key,
-    placeholder: ai.hasKey ? 'blank keeps the saved key' : 'sk-…', oninput: (e) => { ai.key = e.target.value; } });
+    placeholder: ai.hasKey ? 'paste the new key' : 'sk-…', oninput: (e) => { ai.key = e.target.value; } });
   const status = el('p', { class: 'field-msg' + (ai.tone ? ' is-' + ai.tone : ''), role: 'status' }, ai.msg || '');
   const say = (msg, tone) => { ai.msg = msg; ai.tone = tone; status.className = 'field-msg' + (tone ? ' is-' + tone : ''); status.replaceChildren(msg); };
   const test = el('button', { type: 'button', class: 'btn', 'data-k': 'ai-test', onclick: async () => {
@@ -2386,16 +2411,24 @@ function aiSection() {
   } }, icon('sync', 14), 'Test connection');
   const save = el('button', { type: 'submit', class: 'btn btn-primary', 'data-k': 'ai-save' }, 'Save AI settings');
   sset.savers.ai = () => saveAI(save, say);
-  const keyRow = el('div', { class: 'flex flex-wrap items-end gap-2' },
-    fieldGroup(ai.hasKey ? 'API key (saved)' : 'API key', keyInput, { class: 'min-w-[180px] flex-1' }),
-    ai.hasKey && !ai.clearKey ? el('button', { type: 'button', class: 'btn mb-[18px]', 'data-k': 'ai-clear', onclick: () => { ai.clearKey = true; ai.key = ''; say('The saved key is removed when you save.', 'warn'); renderSettingsDialog(); } }, 'Clear key') : null);
-  if (ai.clearKey) setMsg(keyRow.firstElementChild, 'Cleared on save. Type a new key to keep one.', 'warn');
-  return sectionBlock('AI settings', 'An OpenAI-compatible endpoint. The key is stored sealed and is never sent back to this page.',
-    el('form', { class: 'grid gap-3 sm:grid-cols-2', 'data-save': 'ai', novalidate: true, onsubmit: (e) => { e.preventDefault(); saveAI(save, say); } },
+  const keyField = secretField('API key', 'key', keyInput, {
+    saved: ai.hasKey, editing: ai.editKey, clearing: ai.clearKey, k: 'ai-key',
+    onEdit: () => { ai.editKey = true; busyFocusKey = 'ai-key'; renderSettingsDialog(); },
+    onClear: () => { ai.clearKey = true; ai.key = ''; say('The saved key is removed when you save.', 'warn'); renderSettingsDialog(); },
+    onBack: () => { ai.editKey = false; ai.clearKey = false; ai.key = ''; say('', ''); renderSettingsDialog(); },
+  });
+  const on = !!(state.ai && state.ai.configured);
+  let host = '';
+  try { host = new URL(state.ai && state.ai.baseURL).host; } catch (e) { host = (state.ai && state.ai.baseURL) || ''; }
+  const stateRow = el('div', { class: 'ai-state' + (on ? ' is-on' : ''), role: 'status' }, el('span', { class: 'status-dot', 'aria-hidden': 'true' }),
+    on ? [el('span', { class: 'k' }, state.ai.model || 'no model'), el('span', { class: 'num' }, host), el('span', { class: 'ml-auto text-fg-3' }, 'saved')] : el('span', {}, 'No AI endpoint yet. Drafting, splitting and duplicate checks stay off until one is saved.'));
+  return sectionBlock('AI', 'An OpenAI-compatible endpoint. The model must support function calling. The key is stored sealed and is never sent back to this page.',
+    stateRow,
+    el('form', { class: 'grid gap-4 sm:grid-cols-2', 'data-save': 'ai', novalidate: true, onsubmit: (e) => { e.preventDefault(); saveAI(save, say); } },
       fieldGroup('Base URL', base, { class: 'sm:col-span-2' }),
       fieldGroup('Model', model),
-      el('div', {}, keyRow),
-      el('div', { class: 'flex flex-wrap items-center gap-2 sm:col-span-2' }, test, save, status)));
+      keyField,
+      el('div', { class: 'settings-actions sm:col-span-2' }, test, save, status)));
 }
 async function saveAI(btn, say) {
   const ai = sset.ai;
@@ -2410,6 +2443,7 @@ async function saveAI(btn, say) {
     ai.hasKey = !!out.ai.hasKey;
     ai.key = '';
     ai.clearKey = false;
+    ai.editKey = false;
     ai.msg = out.keyCleared ? 'saved; endpoint changed, re-enter the API key' : 'AI settings saved';
     ai.tone = out.keyCleared ? 'warn' : 'ok';
     sset.snapshot = ssetState();
@@ -2421,10 +2455,10 @@ async function saveAI(btn, say) {
 function forgeSection() {
   const rows = sset.rows.map(forgeRow);
   const draft = sset.draft ? forgeRow(sset.draft) : null;
-  const add = el('button', { type: 'button', class: 'btn mt-3', 'data-k': 'forge-add', onclick: () => { disarmForge(); sset.draft = newForgeDraft(); renderSettingsDialog(); const f = dom.settingsBody.querySelector('[data-k="forge-new-name"]'); if (f) f.focus(); } }, icon('plus', 14), 'Add integration');
-  return sectionBlock('Forge integrations', 'GitLab and GitHub sources the issue import reads from. Tokens are write-only and never leave the server.',
+  const add = el('button', { type: 'button', class: 'btn', 'data-k': 'forge-add', onclick: () => { disarmForge(); sset.draft = newForgeDraft(); renderSettingsDialog(); const f = dom.settingsBody.querySelector('[data-k="forge-new-name"]'); if (f) f.focus(); } }, icon('plus', 14), 'Add integration');
+  return sectionBlock('Integrations', 'GitLab and GitHub sources the issue import reads from. Tokens are write-only and never leave the server.',
     rows.length || draft ? el('div', { class: 'rows' }, ...rows, draft) : el('p', { class: 'rounded-md border border-dashed border-line-2 px-3 py-6 text-center text-13 text-fg-3' }, 'No integrations yet.'),
-    add);
+    el('div', { class: 'settings-actions' }, add));
 }
 function forgeRow(row) {
   const isDraft = !!row.draft;
@@ -2434,18 +2468,24 @@ function forgeRow(row) {
   const status = el('p', { class: 'field-msg' + (row.tone ? ' is-' + row.tone : ''), role: 'status' }, row.msg || '');
   const say = (msg, tone) => { row.msg = msg; row.tone = tone; status.className = 'field-msg' + (tone ? ' is-' + tone : ''); status.replaceChildren(msg); };
   const head = isDraft
-    ? el('div', { class: 'flex flex-wrap items-end gap-3' },
-      fieldGroup('Name', text('name', { value: row.name, placeholder: 'work-gitlab' }), { class: 'min-w-[180px] flex-1' }),
+    ? el('div', { class: 'grid gap-4 sm:grid-cols-2' },
+      fieldGroup('Name', text('name', { value: row.name, placeholder: 'work-gitlab' })),
       el('div', { class: 'field' }, el('span', { class: 'label-11' }, 'Kind'),
-        segGroup('Kind', FORGE_KINDS, row.kind, (v) => { row.kind = v; renderSettingsDialog(); }, 'seg'), el('p', { class: 'field-msg' })))
-    : el('div', { class: 'flex flex-wrap items-center gap-2' },
+        segGroup('Kind', FORGE_KINDS, row.kind, (v) => { row.kind = v; renderSettingsDialog(); }, 'seg seg-grow'), el('p', { class: 'field-msg' })))
+    : el('div', { class: 'row-head' },
       el('span', { class: 'chip chip-mono' }, el('span', {}, row.kind)),
       el('span', { class: 'text-13 font-semibold' }, row.name),
-      el('span', { class: 'text-11 text-fg-3' }, 'name and kind are locked'),
+      el('span', { class: 'text-11 text-fg-3', title: 'The name and kind of a saved source cannot change' }, 'locked'),
       row.createdAt ? el('span', { class: 'num ml-auto text-11 text-fg-3', title: fmtDate(row.createdAt) }, 'added ', relTime(row.createdAt)) : null);
   const tokenInput = el('input', { type: 'password', class: 'input', name: k('token'), autocomplete: 'new-password', spellcheck: 'false', 'data-k': k('token'), id: uid('fg'), value: row.token,
-    placeholder: row.hasToken ? 'blank keeps the saved token' : 'personal access token', oninput: (e) => { row.token = e.target.value; if (disarmForge()) renderSettingsDialog(); } });
-  const test = el('button', { type: 'button', class: 'btn btn-sm', 'data-k': k('test'), onclick: async () => {
+    placeholder: row.hasToken ? 'paste the new token' : 'personal access token', oninput: (e) => { row.token = e.target.value; if (disarmForge()) renderSettingsDialog(); } });
+  const tokenField = secretField('Token', 'token', tokenInput, {
+    saved: row.hasToken, editing: row.editToken, clearing: row.clearToken, k: k('token'), class: 'sm:col-span-2',
+    onEdit: () => { disarmForge(); row.editToken = true; busyFocusKey = k('token'); renderSettingsDialog(); },
+    onClear: () => { disarmForge(); row.clearToken = true; row.token = ''; say('The saved token is removed when you save.', 'warn'); renderSettingsDialog(); },
+    onBack: () => { row.editToken = false; row.clearToken = false; row.token = ''; say('', ''); renderSettingsDialog(); },
+  });
+  const test = el('button', { type: 'button', class: 'btn', 'data-k': k('test'), onclick: async () => {
     const stop = busy(test, 'Testing…');
     say('', '');
     try {
@@ -2454,16 +2494,16 @@ function forgeRow(row) {
       say('connection ok', 'ok');
     } catch (err) { say(err.message, 'error'); } finally { stop(); }
   } }, 'Test');
-  const save = el('button', { type: 'submit', class: 'btn btn-sm btn-primary', 'data-k': k('save') }, 'Save');
+  const save = el('button', { type: 'submit', class: 'btn btn-primary', 'data-k': k('save') }, 'Save');
   sset.savers[isDraft ? 'forge:new' : 'forge:' + row.name] = () => saveForge(row, save, say);
-  const remove = el('button', { type: 'button', class: 'btn btn-sm' + (row.armed ? ' btn-danger' : ''), 'data-k': k('remove'), onclick: () => removeForge(row, say) }, row.armed ? 'Confirm remove' : 'Remove');
-  return el('div', { class: 'row' },
+  const remove = el('button', { type: 'button', class: 'btn' + (row.armed ? ' btn-danger' : ' btn-ghost'), 'data-k': k('remove'), onclick: () => removeForge(row, say) }, row.armed ? 'Confirm remove' : 'Remove');
+  return el('div', { class: 'row row-form' },
     el('form', { class: 'row-main', 'data-save': isDraft ? 'forge:new' : 'forge:' + row.name, novalidate: true, onsubmit: (e) => { e.preventDefault(); saveForge(row, save, say); } }, head,
-      el('div', { class: 'grid gap-3 sm:grid-cols-2' },
+      el('div', { class: 'grid gap-4 sm:grid-cols-2' },
         fieldGroup('Base URL', text('baseURL', { value: row.baseURL, placeholder: row.kind === 'github' ? 'github.com' : 'gitlab.example.com' })),
         fieldGroup('Project', text('project', { value: row.project, placeholder: 'owner/project (optional)' }), { hint: 'test only' }),
-        fieldGroup(row.hasToken ? 'Token (saved)' : 'Token', tokenInput, { class: 'sm:col-span-2' })),
-      el('div', { class: 'flex flex-wrap items-center gap-2' }, test, save, remove, status)));
+        tokenField),
+      el('div', { class: 'settings-actions' }, test, save, remove, status)));
 }
 async function saveForge(row, btn, say) {
   const focusField = (n) => { const node = dom.settingsBody.querySelector(`[data-k="${CSS.escape((row.draft ? 'forge-new-' : `forge-${row.name}-`) + n)}"]`); if (node) node.focus(); };
@@ -2510,13 +2550,18 @@ function mountEditAI() {
     box.replaceChildren(el('p', { class: 'text-12 text-fg-3' }, 'Drafting with AI is off. ', settingsLink('Add an AI endpoint', 'ai'), ' to write a card from a one-line prompt.'));
     return;
   }
-  const ta = el('textarea', { class: 'input font-normal', rows: '2', id: uid('ai-prompt'), placeholder: 'Rate-limit the search endpoint and cover it with a test', autocomplete: 'off' });
+  const ta = el('textarea', { rows: '1', id: uid('ai-prompt'), placeholder: 'Describe the card in one line', autocomplete: 'off', 'aria-label': 'AI draft prompt' });
   const status = el('p', { class: 'field-msg', role: 'status' });
   const commentary = el('div', { class: 'mt-2 text-12 text-fg-2 empty:hidden' });
-  const run = el('button', { type: 'button', class: 'btn', 'data-ai-draft': '', onclick: () => runAIDraft(ta, run, status, commentary) }, icon('sparkle', 14), 'Draft');
+  const run = el('button', { type: 'button', class: 'btn btn-primary', 'data-ai-draft': '', onclick: () => runAIDraft(ta, run, status, commentary) }, icon('sparkle', 14), 'Draft');
+  // The prompt grows with its text up to a few lines; the action stays pinned to the pill's edge.
+  const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; };
+  ta.addEventListener('input', grow);
   const group = el('div', { class: 'field' },
-    el('label', { class: 'label-11', for: ta.id }, 'AI draft', el('span', { class: 'ml-1.5 font-normal tracking-normal text-fg-3' }, `${MOD} ⇧ Enter`)),
-    el('div', { class: 'flex items-start gap-2' }, ta, run), status, commentary);
+    el('div', { class: 'field-head' },
+      el('label', { class: 'label-11 flex items-center gap-1.5', for: ta.id }, el('span', { class: 'ai-mark', 'aria-hidden': 'true' }, 'AI'), 'Draft'),
+      el('span', { class: 'text-11 text-fg-3' }, el('kbd', { class: 'kbd' }, MOD), ' ', el('kbd', { class: 'kbd' }, '⇧'), ' ', el('kbd', { class: 'kbd' }, 'Enter'))),
+    el('div', { class: 'ai-composer' }, icon('sparkle', 16), ta, run), status, commentary);
   ta.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); runAIDraft(ta, run, status, commentary); } });
   box.replaceChildren(group);
 }
@@ -2930,7 +2975,7 @@ function provenanceRow(link, siblings) {
     link.url ? el('p', { class: 'text-12' }, openLink(link.url)) : null,
     siblings && siblings.length ? el('p', { class: 'text-12 text-fg-2' }, `Also imported onto ${plural(siblings.length, 'other card')}: `,
       ...siblings.flatMap((s, i) => clean([i ? ', ' : null,
-        el('button', { type: 'button', class: 'text-accent underline decoration-line-2 underline-offset-2 hover:decoration-current', onclick: () => openDetail(s.id) }, s.title)]))) : null,
+        el('button', { type: 'button', class: 'text-link underline decoration-line-2 underline-offset-2 hover:decoration-current', onclick: () => openDetail(s.id) }, s.title)]))) : null,
     driftBlock(link, drift));
   return el('div', { class: 'row' }, body);
 }
