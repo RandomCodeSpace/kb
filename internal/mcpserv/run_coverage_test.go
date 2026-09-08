@@ -150,13 +150,11 @@ func TestFindTaskResolution(t *testing.T) {
 }
 
 func TestHandlerValidationAndStoreFailures(t *testing.T) {
-	dataDir := t.TempDir()
-	t.Setenv("KB_PROJECT", testProject)
-	st, err := store.Open(filepath.Join(dataDir, "kb.db"), []byte("test-secret"))
+	st, err := store.Open(filepath.Join(t.TempDir(), "kb.db"), []byte("test-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	k := &kb{st: st, user: "tester", dataDir: dataDir}
+	k := &kb{st: st, user: "tester"}
 	ctx := context.Background()
 
 	if _, _, err := k.listTasks(ctx, nil, listTasksInput{Status: "bogus"}); err == nil {
@@ -211,7 +209,7 @@ func TestHandlerValidationAndStoreFailures(t *testing.T) {
 	if _, _, err := k.duplicateCheck(ctx, nil, duplicateCheckInput{Title: "x"}); err == nil {
 		t.Fatal("duplicateCheck search hid a closed-store error")
 	}
-	if _, _, err := k.addTask(ctx, nil, addTaskInput{Title: "x"}); err == nil {
+	if _, _, err := k.addTask(ctx, nil, addTaskInput{Title: "x", Project: testProject}); err == nil {
 		t.Fatal("addTask hid a closed-store error")
 	}
 	if _, _, err := k.deleteTask(ctx, nil, deleteTaskInput{ID: "x"}); err == nil {

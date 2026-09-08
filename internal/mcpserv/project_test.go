@@ -3,7 +3,6 @@ package mcpserv
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,28 +15,16 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
-// projectEnv builds the tool state the way Run does — a store beside a
-// state.json in the same data directory — with no project resolving until a
-// test says so.
-func projectEnv(t *testing.T) (*kb, string) {
+// projectEnv builds the tool state the way Run does: one store, one user,
+// and nothing that could name a project on a call's behalf.
+func projectEnv(t *testing.T) *kb {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("KB_PROJECT", "")
-	st, err := store.Open(filepath.Join(dir, "kb.db"), []byte("test-secret"))
+	st, err := store.Open(filepath.Join(t.TempDir(), "kb.db"), []byte("test-secret"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return &kb{st: st, user: "tester", dataDir: dir}, dir
-}
-
-// storeActiveProject writes the state.json kb project use writes.
-func storeActiveProject(t *testing.T, dir, name string) {
-	t.Helper()
-	body := []byte(`{"active_project":"` + name + `"}` + "\n")
-	if err := os.WriteFile(filepath.Join(dir, "state.json"), body, 0o600); err != nil {
-		t.Fatalf("write state: %v", err)
-	}
+	return &kb{st: st, user: "tester"}
 }
 
 func projectOf(t *testing.T, tags []string) string {
@@ -54,40 +41,41 @@ func projectOf(t *testing.T, tags []string) string {
 	return found[0]
 }
 
+// TestAddTaskResolvesProject pins that add_task takes its project from the
+// call and nowhere else: the project argument or a single project:: label
+// spelled in tags, with no environment or stored default behind them.
 func TestAddTaskResolvesProject(t *testing.T) {
 	ctx := context.Background()
 	for _, tt := range []struct {
 		name    string
-		stored  string
-		env     string
 		input   addTaskInput
 		want    string
 		wantErr string
 	}{
 		{
-			name:  "stored active project is the default",
-			input: addTaskInput{Title: "stored"},
-			want:  "kbwork", stored: "kbwork",
-		},
-		{
-			name:  "KB_PROJECT beats the stored project",
-			input: addTaskInput{Title: "env"},
-			want:  "envproj", stored: "kbwork", env: "envproj",
-		},
-		{
-			name:  "the project argument beats both",
+			name:  "the project argument names the project",
 			input: addTaskInput{Title: "arg", Project: "explicit"},
-			want:  "explicit", stored: "kbwork", env: "envproj",
+			want:  "explicit",
 		},
 		{
-			name:  "a project label spelled in tags is honoured",
+			name:  "a project label spelled in tags is enough on its own",
 			input: addTaskInput{Title: "tagged", Tags: []string{"docs", "project::spelled"}},
-			want:  "spelled", stored: "kbwork",
+			want:  "spelled",
 		},
 		{
-			name:    "nothing resolves is a refusal naming both fixes",
+			name:  "the argument and a matching label agree",
+			input: addTaskInput{Title: "agreed", Project: "same", Tags: []string{"project::same"}},
+			want:  "same",
+		},
+		{
+			name:    "no project is a refusal naming both fixes",
 			input:   addTaskInput{Title: "orphan"},
-			wantErr: `kb project use`,
+			wantErr: cliapp.ErrNoProject.Error(),
+		},
+		{
+			name:    "a blank project argument is no project",
+			input:   addTaskInput{Title: "blank", Project: "  ", Tags: []string{"docs"}},
+			wantErr: cliapp.ErrNoProject.Error(),
 		},
 		{
 			name:    "the project argument is validated",
@@ -106,13 +94,7 @@ func TestAddTaskResolvesProject(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			k, dir := projectEnv(t)
-			if tt.stored != "" {
-				storeActiveProject(t, dir, tt.stored)
-			}
-			if tt.env != "" {
-				t.Setenv("KB_PROJECT", tt.env)
-			}
+			k := projectEnv(t)
 			_, created, err := k.addTask(ctx, nil, tt.input)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
@@ -188,7 +170,7 @@ func TestUpdateTaskHoldsTheProjectInvariant(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			k, _ := projectEnv(t)
+			k := projectEnv(t)
 			seeded, err := k.st.AddTask(k.user, board.Task{Title: "seeded", Tags: []string{"docs", "project::seeded"}})
 			if err != nil {
 				t.Fatal(err)
@@ -220,8 +202,7 @@ func TestUpdateTaskHoldsTheProjectInvariant(t *testing.T) {
 // resolves the same id the update does: a bad id fails as an id error rather
 // than as a project one.
 func TestUpdateTaskRejectsUnknownIDBeforeWriting(t *testing.T) {
-	k, dir := projectEnv(t)
-	storeActiveProject(t, dir, "kbwork")
+	k := projectEnv(t)
 	_, _, err := k.updateTask(context.Background(), nil, updateTaskInput{ID: "nope", Project: "kbwork"})
 	if err == nil || !strings.Contains(err.Error(), "no task matches") {
 		t.Fatalf("updateTask error = %v, want an id refusal", err)
@@ -232,7 +213,7 @@ func TestUpdateTaskRejectsUnknownIDBeforeWriting(t *testing.T) {
 // cannot drop the project because they never rewrite the tag list.
 func TestMoveAndDeleteKeepTheProject(t *testing.T) {
 	ctx := context.Background()
-	k, _ := projectEnv(t)
+	k := projectEnv(t)
 	seeded, err := k.st.AddTask(k.user, board.Task{Title: "seeded", Tags: []string{"project::seeded"}})
 	if err != nil {
 		t.Fatal(err)
@@ -254,9 +235,17 @@ func TestMoveAndDeleteKeepTheProject(t *testing.T) {
 }
 
 // TestAddTaskProjectOverTheWire pins that the project argument is part of the
-// tool's declared input, not just the Go handler's.
+// tool's declared input, not just the Go handler's, and that a call leaving
+// it out is refused by the schema, naming project, before the handler runs.
 func TestAddTaskProjectOverTheWire(t *testing.T) {
 	cs, st := connectWithStore(t)
+	msg := callErr(t, cs, "add_task", map[string]any{"title": "orphan"})
+	if !strings.Contains(msg, "required") || !strings.Contains(msg, `"project"`) {
+		t.Fatalf("add_task without project = %q, want a required-property refusal naming project", msg)
+	}
+	if tasks, err := st.ListTasks("tester", ""); err != nil || len(tasks) != 0 {
+		t.Fatalf("refused add wrote %d tasks (err %v)", len(tasks), err)
+	}
 	var created taskJSON
 	callOK(t, cs, "add_task", map[string]any{"title": "wired", "project": "wire"}, &created)
 	if got := projectOf(t, created.Tags); got != "wire" {

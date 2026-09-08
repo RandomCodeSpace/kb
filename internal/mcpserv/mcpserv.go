@@ -62,7 +62,7 @@ func Run(dataDir, user, version string) error {
 	if _, err := backfillProjects(st, user); err != nil {
 		return err
 	}
-	err = serveMCP(newServer(st, user, dataDir, version))
+	err = serveMCP(newServer(st, user, version))
 	if isClientDisconnect(err) {
 		return nil
 	}
@@ -97,26 +97,24 @@ func isClientDisconnect(err error) bool {
 	return errors.As(err, &wire) && wire.Code == -32004
 }
 
-// kb holds the per-process tool state: one store, one fixed user, and the
-// data directory the active project is resolved from.
+// kb holds the per-process tool state: one store and one fixed user.
 type kb struct {
 	st              *store.Store
 	user            string
-	dataDir         string
 	beforeDoneGuard func()
 }
 
 // newServer builds the MCP server with all twelve board tools registered.
-func newServer(st *store.Store, user, dataDir, version string) *mcp.Server {
+func newServer(st *store.Store, user, version string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "kb", Title: "kb local kanban board", Version: version}, nil)
-	k := &kb{st: st, user: user, dataDir: dataDir}
+	k := &kb{st: st, user: user}
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_tasks",
 		Description: "List kanban tasks on the board, ordered by column (todo, doing, done, cancelled) then position. Optional filters: a single column (status), free text over title/description/tags (search), and exact labels that must all be present (tags). Cancelled tasks are soft-deleted ones; they are included unless a status filter excludes them. Returns each task's id, title, status, blocked, prio, due, effort, tags, checks, and desc.",
 	}, k.listTasks)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "add_task",
-		Description: "Add a new task to the kanban board. Only title is required; status defaults to \"todo\", prio to 3 (low), and blocked to false. Every task belongs to exactly one project: pass project to choose it, or omit it to use the active project (kb project use / KB_PROJECT); the call fails when neither names one. Returns the created task including its id.",
+		Description: "Add a new task to the kanban board. title and project are required; status defaults to \"todo\", prio to 3 (low), and blocked to false. Every task belongs to exactly one project and there is no default, so the call fails without project; a project::<name> label in tags must agree with it. Returns the created task including its id.",
 	}, k.addTask)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "update_task",
@@ -249,7 +247,7 @@ type addTaskInput struct {
 	Tags    []string `json:"tags,omitempty" jsonschema:"labels, plain (backend) or scoped (type::bug)"`
 	Checks  []check  `json:"checks,omitempty" jsonschema:"checklist items"`
 	Emoji   string   `json:"emoji,omitempty" jsonschema:"single emoji shown on the card"`
-	Project string   `json:"project,omitempty" jsonschema:"project this task belongs to; defaults to the active project set by kb project use or KB_PROJECT"`
+	Project string   `json:"project" jsonschema:"project this task belongs to (required)"`
 }
 
 type updateTaskInput struct {
@@ -423,10 +421,10 @@ func (k *kb) addTask(_ context.Context, _ *mcp.CallToolRequest, in addTaskInput)
 		return nil, taskJSON{}, fmt.Errorf("invalid prio %d: must be 1 high, 2 medium, or 3 low", in.Prio)
 	}
 	// Every task carries exactly one project:: label, resolved the way the
-	// CLI resolves it: the project argument beats KB_PROJECT, which beats the
-	// project stored by kb project use. Nothing is written when none of them
+	// CLI resolves -p: the project argument or a label spelled in tags names
+	// it, and there is no ambient default. Nothing is written when neither
 	// names a project.
-	tags, err := cliapp.ProjectTags(t.Tags, in.Project, k.dataDir, "")
+	tags, err := cliapp.ProjectTags(t.Tags, in.Project, "")
 	if err != nil {
 		return nil, taskJSON{}, err
 	}
@@ -535,9 +533,8 @@ func (k *kb) deleteTask(_ context.Context, _ *mcp.CallToolRequest, in deleteTask
 // applyProjectPatch holds the one-project invariant across an update. It reads
 // the task only when the call actually rewrites labels — tags replaced the
 // whole list, or project moves the task — so an update that touches neither
-// leaves the project alone instead of dragging the task into whatever happens
-// to be active. move_task and delete_task write no labels at all, which is
-// why they need nothing here.
+// leaves the project alone. move_task and delete_task write no labels at
+// all, which is why they need nothing here.
 func (k *kb) applyProjectPatch(id string, patch *store.TaskPatch, project string) error {
 	if patch.Tags == nil && strings.TrimSpace(project) == "" {
 		return nil
@@ -552,7 +549,7 @@ func (k *kb) applyProjectPatch(id string, patch *store.TaskPatch, project string
 	} else {
 		_, base = cliapp.SplitProjectTags(t.Tags)
 	}
-	tags, err := cliapp.ProjectTags(base, project, k.dataDir, cliapp.CurrentProjectOf(t))
+	tags, err := cliapp.ProjectTags(base, project, cliapp.CurrentProjectOf(t))
 	if err != nil {
 		return err
 	}
