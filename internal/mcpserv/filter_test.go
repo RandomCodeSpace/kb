@@ -10,13 +10,13 @@ func TestListTasksSearchAndTagFilters(t *testing.T) {
 
 	var created taskJSON
 	callOK(t, cs, "add_task", map[string]any{
-		"title": "Fix login timeout", "desc": "auth token expires",
+		"title": "Fix login timeout", "project": testProject, "desc": "auth token expires",
 		"tags": []string{"bug", "auth"},
 	}, &created)
 	callOK(t, cs, "add_task", map[string]any{
-		"title": "Rotate auth keys", "tags": []string{"auth", "env::prod"},
+		"title": "Rotate auth keys", "project": testProject, "tags": []string{"auth", "env::prod"},
 	}, &created)
-	callOK(t, cs, "add_task", map[string]any{"title": "Design landing page", "tags": []string{"ui"}}, &created)
+	callOK(t, cs, "add_task", map[string]any{"title": "Design landing page", "project": testProject, "tags": []string{"ui"}}, &created)
 	if _, err := time.Parse(time.RFC3339, created.UpdatedAt); err != nil {
 		t.Fatalf("add_task updatedAt = %q, want RFC3339: %v", created.UpdatedAt, err)
 	}

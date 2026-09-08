@@ -19,8 +19,10 @@ explicitly started listener: nothing else in `kb` opens a port.
 - Default bind address is `127.0.0.1:0` (random loopback port). A non-loopback
   `--addr` is refused unless `--unsafe-listen` is also given.
 - Board owner is always `"default"` (see `defaultBoardUser` in dispatch.go).
-- Project resolution reuses `cliapp.ActiveProject(dataDir)`; `project.Of(tags)`
-  derives a task's project; `project.Ensure(tags, name)` stamps one.
+- There is no active project: every create names its project (`project`, or a
+  `project::` tag) and `cliapp.ProjectTags` stamps it, refusing a task without
+  one (400 `no project given: pass -p <name> or --tag project::<name>`);
+  `project.Of(tags)` derives a task's project.
 - Done guard reuses `store.CompletionWarning` + `store.NewCompletionBlockedError`
   exactly as `internal/cliapp/local.go` does (`UpdateAndMoveTask` with a guard
   closure). A refused move returns HTTP 409.
@@ -76,7 +78,7 @@ booleans except `title`, `status`, `prio`, `project`, `position`, timestamps.
 
 | Method | Path                          | Body / query                                                                                            | Response                                        |
 | ------ | ----------------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| GET    | `/api/meta`                   |                                                                                                         | `{"version", "activeProject", "projects": [..], "labels": [..], "statuses": [..]}` |
+| GET    | `/api/meta`                   |                                                                                                         | `{"version", "projects": [..], "labels": [..], "statuses": [..]}` |
 | GET    | `/api/tasks`                  | `?status=&q=&tag=a&tag=b&project=`                                                                      | `{"tasks": [task…]}` in board order             |
 | POST   | `/api/tasks`                  | `{title, desc?, status?, blocked?, prio?, due?, effort?, tags?, checks?, emoji?, project?}`             | 201 `task`                                      |
 | GET    | `/api/tasks/{ref}`            |                                                                                                         | `{"task", "comments": [..], "links": {..}}`     |
@@ -109,7 +111,7 @@ prefix (the store's `resolveID`). `index` on move/patch is the 0-based target
 position inside the destination column (`UpdateAndMoveTask` index argument).
 
 `projects` in `/api/meta` are the distinct `project::` label values present on
-the board plus the active project, sorted, `inbox` last.
+the board, sorted, `inbox` last.
 
 Restore semantics: `POST /restore` is `UpdateAndMoveTask(user, ref, {}, &todo, nil, nil)`,
 matching `kb restore`. Cancel semantics: `store.CancelTask(user, ref, reason)`.

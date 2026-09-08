@@ -33,7 +33,6 @@ type eventFixture struct {
 func newEventFixture(t *testing.T, tune func(*eventHub)) *eventFixture {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("KB_PROJECT", "work")
 	st, err := cliapp.OpenLocalStore(dir, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +199,7 @@ func TestEventStreamAnnouncesItselfAndPushesChanges(t *testing.T) {
 	}
 	hello := id
 
-	if got := f.post(t, "/api/tasks", map[string]any{"title": "pushed"}).StatusCode; got != http.StatusCreated {
+	if got := f.post(t, "/api/tasks", map[string]any{"title": "pushed", "project": "work"}).StatusCode; got != http.StatusCreated {
 		t.Fatalf("POST /api/tasks = %d, want 201", got)
 	}
 	if revision := wantEvent(t, frames, "change"); revision <= hello {

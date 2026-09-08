@@ -179,7 +179,6 @@ func waitForURL(t *testing.T, stdout *syncBuffer) string {
 
 func TestRunServesUntilCancelled(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("KB_PROJECT", "work")
 	opened := make(chan string, 1)
 	launchBrowser = func(url string) error {
 		opened <- url
@@ -225,7 +224,6 @@ func TestRunServesUntilCancelled(t *testing.T) {
 }
 
 func TestRunErrors(t *testing.T) {
-	t.Setenv("KB_PROJECT", "work")
 	blocked := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -239,7 +237,6 @@ func TestRunErrors(t *testing.T) {
 }
 
 func TestRunStopsOnSignal(t *testing.T) {
-	t.Setenv("KB_PROJECT", "work")
 	stdout := &syncBuffer{}
 	done := make(chan error, 1)
 	go func() {

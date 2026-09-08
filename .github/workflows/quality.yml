@@ -460,8 +460,7 @@ jobs:
             echo 'platform-smoke: root help advertises removed hosting' >&2
             exit 1
           fi
-          "$binary" project use platform-smoke --data "$smoke/data" >/dev/null
-          "$binary" add 'Platform smoke' --data "$smoke/data" >/dev/null
+          "$binary" add 'Platform smoke' -p platform-smoke --data "$smoke/data" >/dev/null
           "$binary" list --data "$smoke/data" --json >"$smoke/list.json"
           grep -F 'Platform smoke' "$smoke/list.json" >/dev/null
           grep -F 'project::platform-smoke' "$smoke/list.json" >/dev/null

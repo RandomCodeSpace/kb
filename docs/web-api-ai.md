@@ -69,8 +69,8 @@ draft is not a task until the UI posts it:
 
 Empty strings, empty lists and `false` are omitted except `title` and `prio`.
 `source` appears only for skills that number their inputs. The fields map
-1:1 onto a `POST /api/tasks` body, so an accepted draft is posted as-is (add
-`project` there if the UI offers a project picker).
+1:1 onto a `POST /api/tasks` body, so an accepted draft is posted as-is plus
+`project`, which every create names.
 
 ## Errors
 

@@ -142,16 +142,14 @@ run_native_smokes() {
   grep -F '  add "title"' "$smoke/cli-help.txt" >/dev/null || \
     die 'CLI help smoke omitted kb add'
 
-  "$native" project use release-smoke --data "$smoke/cli-data" \
-    >"$smoke/project-use.txt"
-  "$native" add 'Release smoke' --data "$smoke/cli-data" \
+  "$native" add 'Release smoke' -p release-smoke --data "$smoke/cli-data" \
     >"$smoke/add.txt"
   "$native" list --data "$smoke/cli-data" --json \
     >"$smoke/list.json"
   grep -F 'Release smoke' "$smoke/list.json" >/dev/null || \
     die 'local CLI smoke did not round-trip its task'
   grep -F 'project::release-smoke' "$smoke/list.json" >/dev/null || \
-    die 'local CLI smoke did not stamp the active project'
+    die 'local CLI smoke did not stamp the named project'
 
   printf -v tui_command '%q tui --data %q' \
     "$native" "$smoke/tui-data"

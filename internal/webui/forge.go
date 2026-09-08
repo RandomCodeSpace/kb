@@ -312,8 +312,8 @@ func (f *forgeAPI) importCard(w http.ResponseWriter, r *http.Request) {
 }
 
 // forgeTask turns a reviewed draft into the card the service writes. Like the
-// overlay, it stamps the one project every task carries at write time, so a
-// `kb project use` between preview and import is picked up.
+// overlay, it stamps the one project every task carries at write time, from
+// the project the request names.
 func (s *server) forgeTask(in addTaskInput) (board.Task, error) {
 	if strings.TrimSpace(in.Title) == "" {
 		return board.Task{}, errors.New("title must not be empty")
@@ -339,7 +339,7 @@ func (s *server) forgeTask(in addTaskInput) (board.Task, error) {
 		}
 		t.Status = status
 	}
-	tags, err := cliapp.ProjectTags(in.Tags, in.Project, s.dataDir, "")
+	tags, err := cliapp.ProjectTags(in.Tags, in.Project, "")
 	if err != nil {
 		return board.Task{}, err
 	}

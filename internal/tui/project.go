@@ -52,16 +52,13 @@ func (s projectSwitcher) scope(current board.Board) board.Board {
 	return scoped
 }
 
-// restore adopts the stored selection, falling back to the project the CLI
-// would default to and finally to all.
-func (s *projectSwitcher) restore(stored projectSwitcher, active string) {
+// restore adopts the stored selection, falling back to all.
+func (s *projectSwitcher) restore(stored projectSwitcher) {
 	switch {
 	case stored.all:
 		*s = projectSwitcher{all: true}
 	case stored.name != "":
 		*s = projectSwitcher{name: stored.name}
-	case active != "":
-		*s = projectSwitcher{name: active}
 	default:
 		*s = projectSwitcher{all: true}
 	}
@@ -85,8 +82,8 @@ func (s *projectSwitcher) cycle(names []string, delta int) {
 }
 
 // boardProjects lists every project the whole board carries, plus the selected
-// one and the active one when the board has no card under them yet, so the
-// switcher can always cycle back to where it is.
+// one when the board has no card under it yet, so the switcher can always
+// cycle back to where it is.
 func (m Model) boardProjects() []string {
 	seen := make(map[string]struct{})
 	for _, task := range m.board.Tasks {
@@ -94,10 +91,8 @@ func (m Model) boardProjects() []string {
 			seen[name] = struct{}{}
 		}
 	}
-	for _, name := range []string{m.projects.name, m.activeProject} {
-		if name != "" {
-			seen[name] = struct{}{}
-		}
+	if m.projects.name != "" {
+		seen[m.projects.name] = struct{}{}
 	}
 	names := make([]string, 0, len(seen))
 	for name := range seen {
@@ -119,14 +114,13 @@ func projectNames(task board.Task) []string {
 func (m Model) projectBoard() board.Board { return m.projects.scope(m.board) }
 
 // projectDefault is the project a card created from this board belongs to: the
-// switcher's selection while it names one, else the active project. Under
-// "all" with no active project it is empty, and the editor refuses to save
-// until one is typed.
+// switcher's selection while it names one. Under "all" it is empty, and the
+// editor refuses to save until one is typed.
 func (m Model) projectDefault() string {
 	if !m.projects.all && m.projects.name != "" {
 		return m.projects.name
 	}
-	return m.activeProject
+	return ""
 }
 
 // cycleProject moves the switcher and re-projects the board, keeping the
@@ -143,6 +137,6 @@ func (m *Model) cycleProject(delta int) tea.Cmd {
 		return nil
 	}
 	m.boardView.adoptBoard(previous, m.filteredBoard())
-	m.editor.SetProjectDefault(m.projectDefault())
+	m.syncProjectDefault()
 	return m.queuePreferences()
 }

@@ -107,17 +107,15 @@ func TestProjectSwitcherRestoreOrder(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		stored projectSwitcher
-		active string
 		want   projectSwitcher
 	}{
-		{"stored project wins", projectSwitcher{name: "web"}, "kb", projectSwitcher{name: "web"}},
-		{"stored all wins", projectSwitcher{all: true}, "kb", projectSwitcher{all: true}},
-		{"nothing stored falls back to active", projectSwitcher{}, "kb", projectSwitcher{name: "kb"}},
-		{"nothing at all is all", projectSwitcher{}, "", projectSwitcher{all: true}},
+		{"stored project", projectSwitcher{name: "web"}, projectSwitcher{name: "web"}},
+		{"stored all", projectSwitcher{all: true}, projectSwitcher{all: true}},
+		{"nothing stored is all", projectSwitcher{}, projectSwitcher{all: true}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var switcher projectSwitcher
-			switcher.restore(test.stored, test.active)
+			switcher.restore(test.stored)
 			if switcher != test.want {
 				t.Fatalf("restore = %+v, want %+v", switcher, test.want)
 			}
@@ -187,25 +185,25 @@ func TestProjectCycleKeepsTheSelectedCardAndPersists(t *testing.T) {
 // contract applied to the scope: what the board wrote is what it reopens with.
 func TestProjectSwitcherSurvivesAPreferenceRoundTrip(t *testing.T) {
 	m := projectModel()
-	m.SetActiveProject("web")
-	if m.projects.label() != "web" {
-		t.Fatalf("active project did not open the board: %+v", m.projects)
-	}
 	m.projects = projectSwitcher{name: "kb"}
 	preferences := m.preferences()
 
 	reopened := projectModel()
-	reopened.activeProject = "web"
 	reopened.adoptPreferences(preferences)
 	if reopened.projects.label() != "kb" {
-		t.Fatalf("stored scope lost to the active project: %+v", reopened.projects)
+		t.Fatalf("stored scope was not restored: %+v", reopened.projects)
 	}
 
 	unscoped := projectModel()
-	unscoped.activeProject = "web"
 	unscoped.adoptPreferences(tuiPreferences{ProjectAll: true})
 	if !unscoped.projects.all {
-		t.Fatalf("stored all lost to the active project: %+v", unscoped.projects)
+		t.Fatalf("stored all was not restored: %+v", unscoped.projects)
+	}
+
+	fresh := projectModel()
+	fresh.adoptPreferences(tuiPreferences{})
+	if !fresh.projects.all {
+		t.Fatalf("nothing stored did not open on all: %+v", fresh.projects)
 	}
 }
 
@@ -314,16 +312,16 @@ func TestProjectSegmentClickRoutesThroughTheBoardMouseHandler(t *testing.T) {
 	}
 }
 
-// TestProjectSwitcherReachesTheActiveProjectWithNoCards keeps a brand-new
-// project cyclable before it has a single card.
-func TestProjectSwitcherReachesTheActiveProjectWithNoCards(t *testing.T) {
+// TestProjectSwitcherReachesTheSelectedProjectWithNoCards keeps a stored
+// scope cyclable before it has a single card.
+func TestProjectSwitcherReachesTheSelectedProjectWithNoCards(t *testing.T) {
 	m := projectModel()
-	m.SetActiveProject("fresh")
+	m.adoptPreferences(tuiPreferences{Project: "fresh"})
 	if got := m.boardProjects(); !reflect.DeepEqual(got, []string{"fresh", "kb", "web"}) {
 		t.Fatalf("board projects = %v", got)
 	}
 	if m.projects.label() != "fresh" || len(m.filteredBoard().Tasks) != 0 {
-		t.Fatalf("empty active project = %+v with %d cards", m.projects, len(m.filteredBoard().Tasks))
+		t.Fatalf("empty selected project = %+v with %d cards", m.projects, len(m.filteredBoard().Tasks))
 	}
 }
 
@@ -354,7 +352,7 @@ func TestProjectPillLeadsTheLabelRow(t *testing.T) {
 func TestProjectScopedBoardGolden(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	m := projectModel()
-	m.SetActiveProject("kb")
+	m.adoptPreferences(tuiPreferences{Project: "kb"})
 	m.now = func() time.Time { return now }
 	m.renderedAt = now
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -385,24 +383,20 @@ func TestProjectScopedBoardGolden(t *testing.T) {
 }
 
 // TestProjectDefaultFollowsTheSwitcher is the editor handoff: a card created
-// while the board is scoped belongs to that project, and under "all" it falls
-// back to the active one.
+// while the board is scoped belongs to that project, and under "all" there is
+// no default, so the editor asks for one.
 func TestProjectDefaultFollowsTheSwitcher(t *testing.T) {
 	m := projectModel()
-	m.SetActiveProject("web")
-	if got := m.projectDefault(); got != "web" {
-		t.Fatalf("default from the active project = %q", got)
-	}
 	m.projects = projectSwitcher{name: "kb"}
 	if got := m.projectDefault(); got != "kb" {
 		t.Fatalf("default from the switcher = %q", got)
 	}
 	m.projects = projectSwitcher{all: true}
-	if got := m.projectDefault(); got != "web" {
+	if got := m.projectDefault(); got != "" {
 		t.Fatalf("default under all = %q", got)
 	}
-	m.activeProject = ""
+	m.projects = projectSwitcher{}
 	if got := m.projectDefault(); got != "" {
-		t.Fatalf("default with nothing resolved = %q", got)
+		t.Fatalf("default with nothing chosen = %q", got)
 	}
 }

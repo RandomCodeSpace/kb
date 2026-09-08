@@ -69,13 +69,11 @@ type Model struct {
 	actionStore                 taskActionStore
 	watcher                     dataVersionReader
 	user                        string
-	dataDir                     string
 	board                       board.Board
 	styles                      *theme.Styles
 	boardView                   boardViewState
 	filter                      boardFilterState
 	projects                    projectSwitcher
-	activeProject               string
 	detail                      carddetail.Model
 	editor                      cardeditor.Model
 	adr                         adrsplit.Model
@@ -184,15 +182,14 @@ func (m *Model) applyStyles(styles *theme.Styles) {
 	m.settleBrand(styles)
 }
 
-// SetActiveProject hands the board the project local commands default to
-// (KB_PROJECT, else the project stored by kb project use). It is the switcher's
-// opening scope and the editor's default for a new card; stored preferences
-// override the scope, never the default.
-func (m *Model) SetActiveProject(name string) {
-	m.activeProject = name
-	m.projects.restore(projectSwitcher{}, name)
-	m.editor.SetProjectDefault(m.projectDefault())
-	m.rebuildRenderPlan(renderImpactAll)
+// syncProjectDefault hands every card-creating overlay the project the
+// switcher currently scopes the board to, so a card created from the editor,
+// an ADR split or an issue import lands where the board is looking.
+func (m *Model) syncProjectDefault() {
+	project := m.projectDefault()
+	m.editor.SetProjectDefault(project)
+	m.adr.SetProject(project)
+	m.issueImport.SetProject(project)
 }
 
 func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
@@ -202,18 +199,16 @@ func (m *Model) configureAI(runner *ai.Runner, ctx context.Context) {
 	m.editor.SetAIRunner(runner, ctx)
 	adrStore, _ := m.store.(adrsplit.Store)
 	m.adr = adrsplit.New(adrStore, runner, m.user, ctx)
-	// Both overlays create cards, so both need the project every card must
-	// carry; they resolve it from the data directory at write time, which is
-	// what makes a kb project use mid-session take effect on the next batch.
-	m.adr.SetDataDir(m.dataDir)
 	m.adr.SetStyles(m.styles)
 	if direct, ok := m.store.(*store.Store); ok {
 		backend := forge.New(direct, runner, nil)
 		m.issueImport = issueimport.New(direct, backend, m.user, ctx)
-		m.issueImport.SetDataDir(m.dataDir)
 		m.issueImport.SetStyles(m.styles)
 		m.detail.SetDriftBackend(backend, ctx)
 	}
+	// Both overlays create cards, so both need the project every card must
+	// carry: the one the switcher scopes the board to.
+	m.syncProjectDefault()
 }
 
 // NewModel creates the root model for one local board owner.
@@ -901,10 +896,12 @@ func (m Model) route(message tea.Msg) (Model, tea.Cmd) {
 			}
 		case "a":
 			if m.adr.Enabled() && !m.move.saving {
+				m.syncProjectDefault()
 				return m, m.adr.Open()
 			}
 		case "i":
 			if m.issueImport.Enabled() && !m.writeBusy() {
+				m.syncProjectDefault()
 				return m, m.issueImport.Open()
 			}
 		case "enter":
@@ -1631,10 +1628,12 @@ func (m *Model) handleBoardFooterClick(key string) tea.Cmd {
 		}
 	case "a":
 		if m.adr.Enabled() && !m.move.saving {
+			m.syncProjectDefault()
 			return m.adr.Open()
 		}
 	case "i":
 		if m.issueImport.Enabled() && !m.writeBusy() {
+			m.syncProjectDefault()
 			return m.issueImport.Open()
 		}
 	case "n":

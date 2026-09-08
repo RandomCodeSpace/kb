@@ -1,23 +1,16 @@
 package adrsplit
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 )
 
-// testProject is the active project the package's tests run under. Every card
-// the overlay creates carries a project now, and these tests are about the
-// overlay, not about resolution, so one env-level default keeps them readable.
+// testProject is the project the package's tests open the overlay under.
+// Every card the overlay creates carries a project, and these tests are about
+// the overlay, not about resolution, so one default keeps them readable.
 const testProject = "adr"
-
-func TestMain(m *testing.M) {
-	os.Setenv("KB_PROJECT", testProject)
-	os.Exit(m.Run())
-}
 
 func projectsOf(tags []string) []string {
 	var found []string
@@ -30,7 +23,7 @@ func projectsOf(tags []string) []string {
 }
 
 // TestBatchAddStampsExactlyOneProject pins the ADR-split write path: every
-// card in the batch lands with the active project, keeping its own labels.
+// card in the batch lands under the board's project, keeping its own labels.
 func TestBatchAddStampsExactlyOneProject(t *testing.T) {
 	m, st, _ := newTestModel()
 	m.rows = rowsFromDrafts([]ai.Draft{testDraft("one"), testDraft("two")})
@@ -57,13 +50,11 @@ func TestBatchAddStampsExactlyOneProject(t *testing.T) {
 	}
 }
 
-// TestBatchAddRefusesWithoutAProject pins that a board with no project
-// resolved fails the row instead of writing a card without one.
+// TestBatchAddRefusesWithoutAProject pins that a board under "all" fails the
+// row instead of writing a card without a project.
 func TestBatchAddRefusesWithoutAProject(t *testing.T) {
-	t.Setenv("KB_PROJECT", "")
 	m, st, _ := newTestModel()
-	// An empty data directory has no state.json, so nothing resolves.
-	m.SetDataDir(t.TempDir())
+	m.SetProject("")
 	m.rows = rowsFromDrafts([]ai.Draft{testDraft("one")})
 	m.stage = stageReview
 	message := commandMsg(t, m.startAdd())
@@ -75,21 +66,16 @@ func TestBatchAddRefusesWithoutAProject(t *testing.T) {
 	if len(st.calls) != 0 {
 		t.Fatalf("wrote %d cards without a project", len(st.calls))
 	}
-	if m.failedCount != 1 || !strings.Contains(m.rows[0].err, "kb project use") {
+	if m.failedCount != 1 || !strings.Contains(m.rows[0].err, "no project given") {
 		t.Fatalf("failed=%d row err=%q", m.failedCount, m.rows[0].err)
 	}
 }
 
-// TestSetDataDirNamesTheStateDirectory pins that the overlay resolves the
-// project from the directory the board lives in.
-func TestSetDataDirNamesTheStateDirectory(t *testing.T) {
-	t.Setenv("KB_PROJECT", "")
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"active_project":"stored"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+// TestSetProjectNamesTheBatchProject pins that the project set on the overlay
+// is the one every split card lands under.
+func TestSetProjectNamesTheBatchProject(t *testing.T) {
 	m, st, _ := newTestModel()
-	m.SetDataDir(dir)
+	m.SetProject("handed")
 	m.rows = rowsFromDrafts([]ai.Draft{testDraft("one")})
 	m.stage = stageReview
 	added, ok := commandMsg(t, m.startAdd()).(cardAddedMsg)
@@ -100,7 +86,7 @@ func TestSetDataDirNamesTheStateDirectory(t *testing.T) {
 	if len(st.calls) != 1 {
 		t.Fatalf("added %d cards (row err %q)", len(st.calls), m.rows[0].err)
 	}
-	if got := projectsOf(st.calls[0].Tags); len(got) != 1 || got[0] != "stored" {
-		t.Fatalf("project = %v, want the stored one", got)
+	if got := projectsOf(st.calls[0].Tags); len(got) != 1 || got[0] != "handed" {
+		t.Fatalf("project = %v, want the handed one", got)
 	}
 }

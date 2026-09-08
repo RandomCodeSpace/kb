@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -41,8 +42,6 @@ commands:
   restore <id>           move a cancelled task back to todo
   rm <id>                hard delete: erase a task for good, no undo
                          (requires --yes)
-  project use <name>     set the active project for later commands
-  project current        print the project commands default to
   project list           list every project with its task count
   users                  list board owners and their task counts (local
                          database only; --json for machine output)
@@ -72,13 +71,14 @@ common flags (every command):
 
 projects:
   Every task carries exactly one project, stored as the scoped label
-  project::<name>. kb add refuses to invent one: pick the project with
-  -p <name> (or --project), with KB_PROJECT, or once with kb project use
-  <name> — in that order of precedence. update -p moves a task to another
-  project, and editing labels with --tag never drops or duplicates the
-  project label. Tasks that predate projects are given project::inbox the
-  first time kb opens the local database. Filter by project the way you
-  filter by any label: kb list --tag project::<name>.
+  project::<name>. kb add refuses to invent one: name the project with
+  -p <name> (or --project) on every add. There is no stored default and
+  no environment override, so parallel shells and agents on one data
+  directory cannot file into each other's project. update -p moves a task
+  to another project, and editing labels with --tag never drops or
+  duplicates the project label. Tasks that predate projects are given
+  project::inbox the first time kb opens the local database. kb list -p
+  <name> keeps one project; without it every project is listed.
 
 card flags (add and update):
   -p, --project  project for this task (see "projects" above)
@@ -459,7 +459,7 @@ func (a *app) cmdAdd(args []string) int {
 	}
 	// A new task has no project yet, so the resolution order alone decides:
 	// no project anywhere means the add is refused rather than filed blind.
-	if t.Tags, err = ProjectTags(t.Tags, *projectF, *data, ""); err != nil {
+	if t.Tags, err = ProjectTags(t.Tags, *projectF, ""); err != nil {
 		return a.usageErr(err)
 	}
 	return a.withLocal(*data, func(be *localBackend) error {
@@ -547,6 +547,7 @@ func (a *app) cmdList(args []string) int {
 	searchF := fs.String("search", "", "free text over title, description, and tags")
 	var tagsF stringList
 	fs.Var(&tagsF, "tag", "keep tasks carrying this label; repeatable, all must match")
+	projectF := registerProjectFlag(fs)
 	allF := fs.Bool("all", false, "include cancelled tasks")
 	jsonF := fs.Bool("json", false, "print full tasks as JSON")
 	pos, err := parseInterleaved(fs, args)
@@ -557,6 +558,15 @@ func (a *app) cmdList(args []string) int {
 		return a.usageErr(fmt.Errorf("list takes no arguments, got %q", pos[0]))
 	}
 	filter := store.TaskFilter{Search: strings.TrimSpace(*searchF), Tags: tagsF}
+	// -p is the project label spelled the short way: one project, every
+	// project when absent.
+	if strings.TrimSpace(*projectF) != "" {
+		name, err := ValidateProjectName(*projectF)
+		if err != nil {
+			return a.usageErr(err)
+		}
+		filter.Tags = append(slices.Clone(filter.Tags), projectLabel(name))
+	}
 	if *statusF != "" {
 		s, err := parseStatus(*statusF)
 		if err != nil {
@@ -678,7 +688,7 @@ func (a *app) cmdUpdate(args []string) int {
 		return a.usageErr(err)
 	}
 	return a.withLocal(*data, func(be *localBackend) error {
-		if err := applyProjectPatch(be, pos[0], &p, *projectF, *data, hasProject); err != nil {
+		if err := applyProjectPatch(be, pos[0], &p, *projectF, hasProject); err != nil {
 			return err
 		}
 		it, err := be.update(pos[0], p, moveTo, *force)

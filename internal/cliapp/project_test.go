@@ -39,13 +39,43 @@ func assertOneProject(t *testing.T, tasks []jsonTask, want ...string) {
 	}
 }
 
-// noProjectEnv is localEnv without the ambient KB_PROJECT: the state a user
-// upgrading into mandatory projects starts from.
+// noProjectEnv is localEnv without the implicit -p the harness adds to add:
+// the commands run exactly as typed.
 func noProjectEnv(t *testing.T) string {
 	t.Helper()
 	dir := localEnv(t)
-	t.Setenv("KB_PROJECT", "")
+	implicitProject = false
+	t.Cleanup(func() { implicitProject = true })
 	return dir
+}
+
+// TestProjectFlagIsTheOnlySource pins the rule: nothing but the command
+// names a project. An environment variable and a leftover state.json from an
+// older kb are both ignored, so parallel shells cannot file into each
+// other's project.
+func TestProjectFlagIsTheOnlySource(t *testing.T) {
+	dir := noProjectEnv(t)
+	t.Setenv("KB_PROJECT", "fromenv")
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"active_project":"stored"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+	if _, stderr, code := runCmd(t, "add", "Orphan", "--data", dir); code != 2 || !strings.Contains(stderr, "no project given") {
+		t.Fatalf("add with env and stored project: code=%d stderr=%q", code, stderr)
+	}
+	if _, stderr, code := runCmd(t, "add", "Short", "--data", dir, "-p", "web"); code != 0 {
+		t.Fatalf("add -p: code=%d stderr=%q", code, stderr)
+	}
+	if _, stderr, code := runCmd(t, "add", "Long", "--data", dir, "--project", "api"); code != 0 {
+		t.Fatalf("add --project: code=%d stderr=%q", code, stderr)
+	}
+	assertOneProject(t, listJSON(t, "--data", dir), "web", "api")
+	// list -p keeps one project; without it every project is listed.
+	if tasks := listJSON(t, "--data", dir, "-p", "api"); len(tasks) != 1 || tasks[0].Title != "Long" {
+		t.Fatalf("list -p api = %+v", tasks)
+	}
+	if _, stderr, code := runCmd(t, "list", "--data", dir, "-p", "bad name"); code != 2 || !strings.Contains(stderr, "whitespace") {
+		t.Fatalf("list -p bad name: code=%d stderr=%q", code, stderr)
+	}
 }
 
 func TestProjectAddRefusesWithoutAProject(t *testing.T) {
@@ -54,85 +84,13 @@ func TestProjectAddRefusesWithoutAProject(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("add without a project: code=%d stderr=%q", code, stderr)
 	}
-	for _, want := range []string{"no project set", `kb project use <name>`, "-p <name>", "KB_PROJECT"} {
+	for _, want := range []string{"no project given", "-p <name>", "project::<name>"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("refusal %q does not name %q", stderr, want)
 		}
 	}
 	if tasks := listJSON(t, "--data", dir); len(tasks) != 0 {
 		t.Fatalf("refused add still wrote %+v", tasks)
-	}
-}
-
-func TestProjectResolutionOrder(t *testing.T) {
-	dir := noProjectEnv(t)
-	if out, stderr, code := runCmd(t, "project", "use", "stored", "--data", dir); code != 0 || out != "active project: stored\n" {
-		t.Fatalf("project use: code=%d out=%q stderr=%q", code, out, stderr)
-	}
-
-	// Stored only.
-	assertCurrent(t, dir, "stored", "stored")
-	if _, stderr, code := runCmd(t, "add", "From store", "--data", dir); code != 0 {
-		t.Fatalf("add: code=%d stderr=%q", code, stderr)
-	}
-
-	// KB_PROJECT beats the stored active project.
-	t.Setenv("KB_PROJECT", "fromenv")
-	assertCurrent(t, dir, "fromenv", "env")
-	if _, stderr, code := runCmd(t, "add", "From env", "--data", dir); code != 0 {
-		t.Fatalf("add: code=%d stderr=%q", code, stderr)
-	}
-
-	// -p beats both, and --project is the same flag.
-	assertCurrent(t, dir, "fromflag", "flag", "-p", "fromflag")
-	assertCurrent(t, dir, "fromflag", "flag", "--project", "fromflag")
-	if _, stderr, code := runCmd(t, "add", "From flag", "--data", dir, "-p", "fromflag"); code != 0 {
-		t.Fatalf("add: code=%d stderr=%q", code, stderr)
-	}
-	assertOneProject(t, listJSON(t, "--data", dir), "stored", "fromenv", "fromflag")
-}
-
-func TestProjectUseJSON(t *testing.T) {
-	dir := noProjectEnv(t)
-	out, stderr, code := runCmd(t, "project", "use", "stored", "--json", "--data", dir)
-	if code != 0 || stderr != "" {
-		t.Fatalf("project use --json: code=%d stdout=%q stderr=%q", code, out, stderr)
-	}
-	var got map[string]string
-	if err := json.Unmarshal([]byte(out), &got); err != nil {
-		t.Fatalf("project use --json: %v\n%s", err, out)
-	}
-	if len(got) != 2 || got["project"] != "stored" || got["source"] != "stored" {
-		t.Fatalf("project use --json = %#v", got)
-	}
-	assertCurrent(t, dir, "stored", "stored")
-}
-
-// assertCurrent checks what kb project current resolves to and where from.
-func assertCurrent(t *testing.T, dir, wantProject, wantSource string, extra ...string) {
-	t.Helper()
-	args := append([]string{"project", "current", "--json", "--data", dir}, extra...)
-	out, stderr, code := runCmd(t, args...)
-	if code != 0 {
-		t.Fatalf("project current: code=%d stderr=%q", code, stderr)
-	}
-	var got projectCurrentJSON
-	if err := json.Unmarshal([]byte(out), &got); err != nil {
-		t.Fatalf("project current --json: %v\n%s", err, out)
-	}
-	if got.Project != wantProject || got.Source != wantSource {
-		t.Errorf("project current = %+v, want %s from %s", got, wantProject, wantSource)
-	}
-	plain, _, code := runCmd(t, append([]string{"project", "current", "--data", dir}, extra...)...)
-	if code != 0 || plain != wantProject+"\n" {
-		t.Errorf("project current plain = %q (code %d), want %q", plain, code, wantProject+"\n")
-	}
-}
-
-func TestProjectCurrentRefusesWithoutAProject(t *testing.T) {
-	dir := noProjectEnv(t)
-	if _, stderr, code := runCmd(t, "project", "current", "--data", dir); code != 1 || !strings.Contains(stderr, "no project set") {
-		t.Fatalf("project current: code=%d stderr=%q", code, stderr)
 	}
 }
 
@@ -149,9 +107,8 @@ func TestProjectAddHonoursSpelledOutLabel(t *testing.T) {
 		t.Errorf("plain tags dropped: %+v", tasks[0].Tags)
 	}
 
-	// KB_PROJECT loses to the spelled-out label; an explicit -p that
-	// contradicts it is a refusal rather than a silent winner.
-	t.Setenv("KB_PROJECT", "other")
+	// An explicit -p that contradicts the spelled-out label is a refusal
+	// rather than a silent winner.
 	if _, stderr, code := runCmd(t, "add", "Also tagged", "--data", dir, "--tag", "project::web"); code != 0 {
 		t.Fatalf("add: code=%d stderr=%q", code, stderr)
 	}
@@ -174,14 +131,13 @@ func TestProjectAddRefusesTwoProjectLabels(t *testing.T) {
 }
 
 func TestProjectInvariantSurvivesUpdates(t *testing.T) {
-	dir := localEnv(t) // KB_PROJECT=inbox
-	if _, stderr, code := runCmd(t, "add", "Task", "--data", dir, "--tag", "keep"); code != 0 {
+	dir := noProjectEnv(t)
+	if _, stderr, code := runCmd(t, "add", "Task", "--data", dir, "-p", inboxProject, "--tag", "keep"); code != 0 {
 		t.Fatalf("add: code=%d stderr=%q", code, stderr)
 	}
 
 	// Replacing the labels wholesale keeps the task in its project instead of
-	// dropping the label or re-filing the task under whatever is active.
-	t.Setenv("KB_PROJECT", "elsewhere")
+	// dropping the label or demanding -p again.
 	if _, stderr, code := runCmd(t, "update", "1", "--data", dir, "--tag", "fresh"); code != 0 {
 		t.Fatalf("update --tag: code=%d stderr=%q", code, stderr)
 	}
@@ -238,7 +194,6 @@ func TestProjectUpdateNeedsAResolvableProject(t *testing.T) {
 	if err := st.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	t.Setenv("KB_PROJECT", "")
 	// Opening the store backfills, so strip again through the same command.
 	if _, stderr, code := runCmd(t, "update", "1", "--data", dir, "--tag", "plain"); code != 0 {
 		t.Fatalf("update after backfill: code=%d stderr=%q", code, stderr)
@@ -302,7 +257,7 @@ func TestProjectBackfillRunsOnLocalOpen(t *testing.T) {
 	assertOneProject(t, listJSON(t, "--data", dir), inboxProject)
 }
 
-func TestProjectListCountsAndMarksActive(t *testing.T) {
+func TestProjectListCounts(t *testing.T) {
 	dir := noProjectEnv(t)
 	for _, args := range [][]string{
 		{"add", "One", "-p", "web"},
@@ -317,16 +272,13 @@ func TestProjectListCountsAndMarksActive(t *testing.T) {
 	if _, stderr, code := runCmd(t, "cancel", "3", "--data", dir); code != 0 {
 		t.Fatalf("cancel: code=%d stderr=%q", code, stderr)
 	}
-	if _, stderr, code := runCmd(t, "project", "use", "api", "--data", dir); code != 0 {
-		t.Fatalf("project use: code=%d stderr=%q", code, stderr)
-	}
 	out, stderr, code := runCmd(t, "project", "list", "--data", dir)
 	if code != 0 {
 		t.Fatalf("project list: code=%d stderr=%q", code, stderr)
 	}
-	want := "PROJECT  TASKS  ACTIVE\n" +
-		"api      1      *\n" +
-		"web      2      -\n"
+	want := "PROJECT  TASKS\n" +
+		"api      1\n" +
+		"web      2\n"
 	if out != want {
 		t.Errorf("project list:\n%q\nwant:\n%q", out, want)
 	}
@@ -338,21 +290,9 @@ func TestProjectListCountsAndMarksActive(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
 		t.Fatalf("project list --json: %v\n%s", err, out)
 	}
-	if len(rows) != 2 || rows[0] != (projectCountJSON{Project: "api", Tasks: 1, Active: true}) ||
+	if len(rows) != 2 || rows[0] != (projectCountJSON{Project: "api", Tasks: 1}) ||
 		rows[1] != (projectCountJSON{Project: "web", Tasks: 2}) {
 		t.Errorf("project list --json = %+v", rows)
-	}
-}
-
-func TestProjectListShowsEmptyActiveProject(t *testing.T) {
-	dir := noProjectEnv(t)
-	if _, _, code := runCmd(t, "project", "use", "fresh", "--data", dir); code != 0 {
-		t.Fatal("project use failed")
-	}
-	out, _, code := runCmd(t, "project", "list", "--data", dir)
-	want := "PROJECT  TASKS  ACTIVE\nfresh    0      *\n"
-	if code != 0 || out != want {
-		t.Errorf("project list = %q (code %d), want %q", out, code, want)
 	}
 }
 
@@ -377,9 +317,9 @@ func TestProjectNameValidation(t *testing.T) {
 
 func TestProjectInvalidNamesAreRefusedEverywhere(t *testing.T) {
 	dir := noProjectEnv(t)
-	if _, stderr, code := runCmd(t, "project", "use", "bad name", "--data", dir); code != 2 ||
+	if _, stderr, code := runCmd(t, "add", "Task", "--data", dir, "-p", "bad name"); code != 2 ||
 		!strings.Contains(stderr, "must not contain whitespace") {
-		t.Fatalf("project use bad name: code=%d stderr=%q", code, stderr)
+		t.Fatalf("add -p bad name: code=%d stderr=%q", code, stderr)
 	}
 	if _, stderr, code := runCmd(t, "add", "Task", "--data", dir, "-p", "a::b"); code != 2 ||
 		!strings.Contains(stderr, `must not contain "::"`) {
@@ -388,19 +328,6 @@ func TestProjectInvalidNamesAreRefusedEverywhere(t *testing.T) {
 	if _, stderr, code := runCmd(t, "add", "Task", "--data", dir, "--tag", "project::"); code != 2 ||
 		!strings.Contains(stderr, "must not be empty") {
 		t.Fatalf("add --tag project:: : code=%d stderr=%q", code, stderr)
-	}
-	t.Setenv("KB_PROJECT", "bad name")
-	if _, stderr, code := runCmd(t, "add", "Task", "--data", dir); code != 2 ||
-		!strings.Contains(stderr, "KB_PROJECT:") {
-		t.Fatalf("add with bad KB_PROJECT: code=%d stderr=%q", code, stderr)
-	}
-	if _, stderr, code := runCmd(t, "project", "current", "--data", dir); code != 1 ||
-		!strings.Contains(stderr, "KB_PROJECT:") {
-		t.Fatalf("current with bad KB_PROJECT: code=%d stderr=%q", code, stderr)
-	}
-	if _, stderr, code := runCmd(t, "project", "list", "--data", dir); code != 1 ||
-		!strings.Contains(stderr, "KB_PROJECT:") {
-		t.Fatalf("list with bad KB_PROJECT: code=%d stderr=%q", code, stderr)
 	}
 }
 
@@ -412,11 +339,8 @@ func TestProjectUsageErrors(t *testing.T) {
 		want string
 	}{
 		{[]string{"project", "wat"}, 2, `unknown project subcommand "wat"`},
-		{[]string{"project", "use"}, 2, "exactly one <name>"},
-		{[]string{"project", "use", "a", "b"}, 2, "exactly one <name>"},
-		{[]string{"project", "use", "--nope"}, 2, "flag provided but not defined"},
-		{[]string{"project", "current", "extra"}, 2, "takes no arguments"},
-		{[]string{"project", "current", "--nope"}, 2, "flag provided but not defined"},
+		{[]string{"project", "use", "web"}, 2, `unknown project subcommand "use"`},
+		{[]string{"project", "current"}, 2, `unknown project subcommand "current"`},
 		{[]string{"project", "list", "extra"}, 2, "takes no arguments"},
 		{[]string{"project", "list", "--nope"}, 2, "flag provided but not defined"},
 	}
@@ -433,64 +357,9 @@ func TestProjectUsageErrors(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "usage: kb project") {
 		t.Errorf("project help = %q (code %d)", out, code)
 	}
-	out, _, code = runCmd(t, "project", "use", "-h")
+	out, _, code = runCmd(t, "project", "list", "-h")
 	if code != 0 || !strings.Contains(out, "usage: kb") {
-		t.Errorf("project use -h = %q (code %d)", out, code)
-	}
-}
-
-func TestCLIStateRoundTripAndFailures(t *testing.T) {
-	dir := t.TempDir()
-	if state, err := loadCLIState(dir); err != nil || state.ActiveProject != "" {
-		t.Fatalf("missing state = %+v, %v", state, err)
-	}
-	if err := saveCLIState(filepath.Join(dir, "nested"), cliState{ActiveProject: "web"}); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	state, err := loadCLIState(filepath.Join(dir, "nested"))
-	if err != nil || state.ActiveProject != "web" {
-		t.Fatalf("round trip = %+v, %v", state, err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, cliStateFile), []byte("{"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if _, err := loadCLIState(dir); err == nil || !strings.Contains(err.Error(), "decode cli state") {
-		t.Fatalf("corrupt state err = %v", err)
-	}
-	// Root ignores the mode bits, so the permission branches only assert
-	// where they can actually be provoked.
-	if err := os.Chmod(filepath.Join(dir, cliStateFile), 0); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	if _, err := loadCLIState(dir); err == nil && os.Geteuid() != 0 {
-		t.Error("unreadable state file loaded without error")
-	} else if err != nil && !strings.Contains(err.Error(), "read cli state") {
-		t.Errorf("unreadable state err = %v", err)
-	}
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("chmod dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	if err := saveCLIState(dir, cliState{ActiveProject: "web"}); err == nil && os.Geteuid() != 0 {
-		t.Error("save into a read-only directory succeeded")
-	}
-}
-
-func TestProjectStateFollowsDataDir(t *testing.T) {
-	dir := noProjectEnv(t)
-	t.Setenv("KB_DATA", dir)
-	if _, _, code := runCmd(t, "project", "use", "viaenv"); code != 0 {
-		t.Fatal("project use without --data failed")
-	}
-	if _, err := os.Stat(filepath.Join(dir, cliStateFile)); err != nil {
-		t.Fatalf("state file not written to KB_DATA: %v", err)
-	}
-	assertCurrent(t, dir, "viaenv", "stored")
-	// The state file is per data directory, like the board it sits beside.
-	other := t.TempDir()
-	if _, stderr, code := runCmd(t, "project", "current", "--data", other); code != 1 ||
-		!strings.Contains(stderr, "no project set") {
-		t.Fatalf("other data dir: code=%d stderr=%q", code, stderr)
+		t.Errorf("project list -h = %q (code %d)", out, code)
 	}
 }
 
@@ -510,49 +379,6 @@ func TestCurrentProjectOfWantsExactlyOne(t *testing.T) {
 	}
 }
 
-// TestActiveProjectIsTheExportedResolution covers the seam other local
-// surfaces (the TUI) take their default from: the same order as the commands,
-// minus the flag they do not have.
-func TestActiveProjectIsTheExportedResolution(t *testing.T) {
-	dir := noProjectEnv(t)
-	name, ok, err := ActiveProject(dir)
-	if err != nil || ok || name != "" {
-		t.Fatalf("unset active project = %q, %v, %v", name, ok, err)
-	}
-	if _, _, code := runCmd(t, "project", "use", "stored", "--data", dir); code != 0 {
-		t.Fatal("project use failed")
-	}
-	if name, ok, err := ActiveProject(dir); err != nil || !ok || name != "stored" {
-		t.Fatalf("stored active project = %q, %v, %v", name, ok, err)
-	}
-	t.Setenv("KB_PROJECT", "fromenv")
-	if name, ok, err := ActiveProject(dir); err != nil || !ok || name != "fromenv" {
-		t.Fatalf("env active project = %q, %v, %v", name, ok, err)
-	}
-	t.Setenv("KB_PROJECT", "two words")
-	if _, _, err := ActiveProject(dir); err == nil || !strings.Contains(err.Error(), "KB_PROJECT") {
-		t.Fatalf("invalid KB_PROJECT = %v", err)
-	}
-}
-
-func TestProjectCommandsReportUnreadableState(t *testing.T) {
-	dir := noProjectEnv(t)
-	if err := os.WriteFile(filepath.Join(dir, cliStateFile), []byte("not json"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	for _, args := range [][]string{
-		{"project", "use", "web"},
-		{"project", "current"},
-		{"project", "list"},
-		{"add", "Task"},
-	} {
-		_, stderr, code := runCmd(t, append(args, "--data", dir)...)
-		if code == 0 || !strings.Contains(stderr, "decode cli state") {
-			t.Errorf("%v: code=%d stderr=%q, want a decode failure", args, code, stderr)
-		}
-	}
-}
-
 func TestProjectBackfillReportsStoreFailures(t *testing.T) {
 	dir := localEnv(t)
 	st := openTestStore(t, dir)
@@ -561,86 +387,6 @@ func TestProjectBackfillReportsStoreFailures(t *testing.T) {
 	}
 	if _, err := BackfillProjects(st, defaultUser); err == nil {
 		t.Error("backfill over a closed store succeeded")
-	}
-}
-
-// stubTempFile is a stateTempFile whose write, sync, and close can each be
-// made to fail.
-type stubTempFile struct {
-	name                        string
-	writeErr, syncErr, closeErr error
-	closed                      bool
-}
-
-func (f *stubTempFile) Write(p []byte) (int, error) {
-	if f.writeErr != nil {
-		return 0, f.writeErr
-	}
-	return len(p), nil
-}
-func (f *stubTempFile) Name() string { return f.name }
-func (f *stubTempFile) Sync() error  { return f.syncErr }
-func (f *stubTempFile) Close() error { f.closed = true; return f.closeErr }
-
-// stubStateOps builds ops around one stub temp file, defaulting every
-// filesystem call to success.
-func stubStateOps(file *stubTempFile, removed *bool) stateFileOps {
-	return stateFileOps{
-		mkdirAll:  func(string, os.FileMode) error { return nil },
-		createTmp: func(string, string) (stateTempFile, error) { return file, nil },
-		rename:    func(string, string) error { return nil },
-		remove:    func(string) error { *removed = true; return nil },
-	}
-}
-
-func TestSaveCLIStateReportsEveryWriteFailure(t *testing.T) {
-	boom := errors.New("boom")
-	cases := []struct {
-		name string
-		ops  func(*stubTempFile, *bool) stateFileOps
-		file *stubTempFile
-		want string
-	}{
-		{"mkdir", func(f *stubTempFile, r *bool) stateFileOps {
-			ops := stubStateOps(f, r)
-			ops.mkdirAll = func(string, os.FileMode) error { return boom }
-			return ops
-		}, &stubTempFile{}, "create data dir"},
-		{"createTemp", func(f *stubTempFile, r *bool) stateFileOps {
-			ops := stubStateOps(f, r)
-			ops.createTmp = func(string, string) (stateTempFile, error) { return nil, boom }
-			return ops
-		}, &stubTempFile{}, "create cli state temp file"},
-		{"write", stubStateOps, &stubTempFile{writeErr: boom}, "write cli state"},
-		{"sync", stubStateOps, &stubTempFile{syncErr: boom}, "sync cli state"},
-		{"close", stubStateOps, &stubTempFile{closeErr: boom}, "close cli state"},
-		{"rename", func(f *stubTempFile, r *bool) stateFileOps {
-			ops := stubStateOps(f, r)
-			ops.rename = func(string, string) error { return boom }
-			return ops
-		}, &stubTempFile{}, "publish cli state"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			removed := false
-			err := saveCLIStateWithOps(t.TempDir(), cliState{ActiveProject: "web"}, tc.ops(tc.file, &removed))
-			if err == nil || !strings.Contains(err.Error(), tc.want) || !errors.Is(err, boom) {
-				t.Fatalf("err = %v, want %q wrapping boom", err, tc.want)
-			}
-			// Everything past the temp file's creation must clean it up.
-			if tc.name != "mkdir" && tc.name != "createTemp" && !removed {
-				t.Error("failed save left the temp file behind")
-			}
-		})
-	}
-	// The happy path publishes and leaves no temp file to remove.
-	removed := false
-	file := &stubTempFile{name: "tmp"}
-	if err := saveCLIStateWithOps(t.TempDir(), cliState{ActiveProject: "web"}, stubStateOps(file, &removed)); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	if removed || !file.closed {
-		t.Errorf("published save removed=%v closed=%v", removed, file.closed)
 	}
 }
 
@@ -673,40 +419,13 @@ func TestProjectCommandsNeedAResolvableDataDir(t *testing.T) {
 	t.Setenv("KB_DATA", "")
 	t.Setenv("HOME", "")
 	for _, args := range [][]string{
-		{"project", "use", "web"},
-		{"project", "current"},
 		{"project", "list"},
-		{"add", "Task"},
+		{"add", "Task", "-p", "web"},
 	} {
 		_, stderr, code := runCmd(t, args...)
 		if code == 0 || !strings.Contains(stderr, "cannot determine home directory") {
 			t.Errorf("%v: code=%d stderr=%q, want a data-directory failure", args, code, stderr)
 		}
-	}
-}
-
-func TestProjectUseReportsAnUnwritableDataDir(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory permissions")
-	}
-	dir := noProjectEnv(t)
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	if _, stderr, code := runCmd(t, "project", "use", "web", "--data", dir); code != 1 ||
-		!strings.Contains(stderr, "cli state") {
-		t.Fatalf("project use into a read-only dir: code=%d stderr=%q", code, stderr)
-	}
-}
-
-func TestProjectCurrentPropagatesWriterFailure(t *testing.T) {
-	dir := localEnv(t)
-	want := errors.New("output unavailable")
-	var stderr strings.Builder
-	code := Run([]string{"project", "current", "--json", "--data", dir}, coverageFailWriter{err: want}, &stderr)
-	if code != 1 || !strings.Contains(stderr.String(), want.Error()) {
-		t.Fatalf("project current writer failure: code=%d stderr=%q", code, stderr.String())
 	}
 }
 

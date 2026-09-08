@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
-	"github.com/RandomCodeSpace/kb/internal/cliapp"
 	"github.com/RandomCodeSpace/kb/internal/project"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
@@ -18,14 +17,12 @@ func init() { featureRoutes = append(featureRoutes, (*server).boardRoutes) }
 // action list (ctrl+k), the graveyard reason behind a cancelled card, the
 // forge link lookup, and the shipped-today tally the celebration counts.
 //
-// Everything here is read-only except the active project, which is client
-// state rather than board data and lives in the CLI's state.json so that
-// `kb project current`, the TUI's opening scope and the web UI cannot
-// disagree about what "the active project" means.
+// Everything here is read-only. The selected project is the browser's own
+// view state: there is no ambient project on the server, so every card the
+// web creates names its project in the request.
 
 const (
-	projectsPattern      = "/api/projects"
-	activeProjectPattern = "/api/projects/active"
+	projectsPattern = "/api/projects"
 	// byLinkPattern sits beside /api/similar rather than under /api/tasks/
 	// because a literal /api/tasks/by-link and the method-less 405 catch-all
 	// the route table registers for GET /api/tasks/{ref} are an ambiguous pair
@@ -40,7 +37,6 @@ func (s *server) boardRoutes() []route {
 	return []route{
 		{"GET", "/api/actions", s.listActions},
 		{"GET", projectsPattern, s.listProjects},
-		{"PUT", activeProjectPattern, s.putActiveProject},
 		{"GET", byLinkPattern, s.tasksByLink},
 		{"GET", "/api/tasks/{ref}/tombstone", s.taskTombstone},
 		{"GET", "/api/shipped", s.shipped},
@@ -87,7 +83,7 @@ var webActions = []actionJSON{
 	{"filterText", "navigate", "/", "/", "text filter", true, "GET /api/tasks?q="},
 	{"filterLabel", "navigate", "f", "f", "label filter", true, "GET /api/tasks?tag="},
 	{"filterClear", "navigate", "X", "X", "clear filter", true, "GET /api/tasks"},
-	{"switchProject", "navigate", "p", "p/P", "switch project", true, "PUT /api/projects/active"},
+	{"switchProject", "navigate", "p", "p/P", "switch project", true, "GET /api/projects"},
 	{"openPalette", "navigate", "ctrl+k", "ctrl+k", "command palette", true, "GET /api/actions"},
 
 	{"shipCard", "act", "t", "t", "ship card", true, "POST /api/tasks/{ref}/move"},
@@ -141,13 +137,12 @@ type projectJSON struct {
 }
 
 // listProjects mirrors `kb project list` and the TUI's switcher: every project
-// on the board plus the active one, which is what lets a project that has no
-// cards yet exist at all. A task carrying two project labels — only possible
-// on a board a foreign writer touched — counts under both, as it does in the
-// CLI.
+// on the board. A task carrying two project labels — only possible on a board
+// a foreign writer touched — counts under both, as it does in the CLI.
 func (s *server) listProjects(w http.ResponseWriter, _ *http.Request) {
-	active, tasks, ok := s.boardProjectState(w)
-	if !ok {
+	tasks, err := s.st.FilterTasks(s.user, store.TaskFilter{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	counts := map[string]*statusCountsJSON{}
@@ -162,7 +157,7 @@ func (s *server) listProjects(w http.ResponseWriter, _ *http.Request) {
 			row.add(t.Status)
 		}
 	}
-	names := projectNames(tasks, active)
+	names := projectNames(tasks)
 	rows := make([]projectJSON, 0, len(names))
 	for _, name := range names {
 		row := projectJSON{Name: name}
@@ -171,51 +166,7 @@ func (s *server) listProjects(w http.ResponseWriter, _ *http.Request) {
 		}
 		rows = append(rows, row)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"active": active, "projects": rows})
-}
-
-// boardProjectState resolves the active project and reads the whole board,
-// answering 500 on either failure the way /api/meta does.
-func (s *server) boardProjectState(w http.ResponseWriter) (string, []board.Task, bool) {
-	active, _, err := cliapp.ActiveProject(s.dataDir)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return "", nil, false
-	}
-	tasks, err := s.st.FilterTasks(s.user, store.TaskFilter{})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return "", nil, false
-	}
-	return active, tasks, true
-}
-
-// putActiveProject is the web's `kb project use`: it validates the name and
-// stores it in the CLI's state.json, so switching here moves the CLI and the
-// TUI too. A name no card carries is accepted — that is the only way a new
-// project can exist before its first card, and the TUI's switcher lists the
-// active project whether or not the board has a card under it.
-//
-// KB_PROJECT still wins when it is set, in this process as in the CLI, so the
-// stored value can be written and not be what /api/projects then reports.
-func (s *server) putActiveProject(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Name string `json:"name"`
-	}
-	if err := decode(r, &in); err != nil {
-		badBody(w, err)
-		return
-	}
-	name, err := project.ValidateName(in.Name)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := cliapp.SetActiveProject(s.dataDir, name); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"active": name})
+	writeJSON(w, http.StatusOK, map[string]any{"projects": rows})
 }
 
 // --- graveyard and provenance ---

@@ -85,7 +85,6 @@ func (u *aiUpstream) requests() []string {
 func aiHandler(t *testing.T) (http.Handler, *store.Store, string) {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("KB_PROJECT", "work")
 	// Deterministic regardless of the developer's environment: the fake
 	// upstream is on loopback, which the guarded dialer refuses otherwise.
 	t.Setenv("KB_AI_ALLOW_PRIVATE", "1")
