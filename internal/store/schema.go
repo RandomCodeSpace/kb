@@ -286,6 +286,15 @@ CREATE INDEX task_links_blocked ON task_links (scope, blocked_id);
 	`
 UPDATE tasks SET prio = 3 WHERE prio < 1 OR prio > 3;
 `,
+	// v11: last-modified stamp. updated_at records the most recent write to
+	// the row (field edit, move, reorder, replace), where moved_at only
+	// tracks column changes. Existing rows have no better signal than their
+	// last move, so the backfill copies moved_at. The empty default is a
+	// placeholder for the ALTER only; every write path stamps a real value.
+	`
+ALTER TABLE tasks ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
+UPDATE tasks SET updated_at = moved_at WHERE updated_at = '';
+`,
 }
 
 // migrate creates the meta table and applies any pending schema versions.

@@ -95,8 +95,8 @@ func TestMigrateV10CollapsesPriorityScale(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&schemaVersion); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if schemaVersion != "10" {
-		t.Fatalf("schema version = %q, want 10", schemaVersion)
+	if schemaVersion != "11" {
+		t.Fatalf("schema version = %q, want 11", schemaVersion)
 	}
 
 	got := storedPriorities(t, s, len(seeded))

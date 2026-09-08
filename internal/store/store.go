@@ -312,7 +312,7 @@ func isSQLiteBusy(err error) bool {
 }
 
 // taskCols is the canonical select list matched by scanTask.
-const taskCols = `id, seq, emoji, title, "desc", status, blocked, prio, due, effort, tags, checks, position, created_at, moved_at`
+const taskCols = `id, seq, emoji, title, "desc", status, blocked, prio, due, effort, tags, checks, position, created_at, moved_at, updated_at`
 
 // statusRank orders rows by board column order (todo, doing, done,
 // cancelled).
@@ -509,11 +509,11 @@ func prepareReplacementTask(task board.Task, match *exTask, positions map[board.
 	if match == nil {
 		// Seq stays 0 here; writeReplacementTasksTx allocates a fresh number
 		// for tasks with no preserved identity.
-		task.ID, task.CreatedAt, task.MovedAt = uuid.NewString(), now, now
+		task.ID, task.CreatedAt, task.MovedAt, task.UpdatedAt = uuid.NewString(), now, now, now
 		task.Seq = 0
 		return task, nil
 	}
-	task.ID, task.Seq, task.CreatedAt = match.id, match.seq, match.created
+	task.ID, task.Seq, task.CreatedAt, task.UpdatedAt = match.id, match.seq, match.created, now
 	if match.status == task.Status {
 		task.MovedAt = match.moved
 	} else {
@@ -654,7 +654,7 @@ func prepareNewTask(t board.Task) (board.Task, error) {
 	}
 	now := time.Now().UTC()
 	t.ID = uuid.NewString()
-	t.CreatedAt, t.MovedAt = now, now
+	t.CreatedAt, t.MovedAt, t.UpdatedAt = now, now, now
 	return t, nil
 }
 
@@ -848,16 +848,19 @@ func (s *Store) updateAndMoveTaskTx(tx *sql.Tx, user, idPrefix string, patch Tas
 			return board.Task{}, err
 		}
 	}
+	// One stamp for every row this transaction repositions or moves, so a
+	// card and the neighbours it displaces share the same UpdatedAt.
+	now := time.Now().UTC()
 	if moveTo == nil {
 		if index == nil {
 			return task, nil
 		}
 		// Same-column reorder: position changes, MovedAt does not.
-		pos, err := repositionTask(tx, user, task.Status, task.ID, *index)
+		pos, err := repositionTask(tx, user, task.Status, task.ID, *index, now)
 		if err != nil {
 			return board.Task{}, err
 		}
-		task.Position = pos
+		task.Position, task.UpdatedAt = pos, now
 		return task, nil
 	}
 	from := task.Status
@@ -865,20 +868,20 @@ func (s *Store) updateAndMoveTaskTx(tx *sql.Tx, user, idPrefix string, patch Tas
 	// reorder as the moveTo == nil path: repositionTask below does the work and
 	// MovedAt survives it.
 	if index == nil || *moveTo != from {
-		task, err = moveTask(tx, user, task, *moveTo)
+		task, err = moveTask(tx, user, task, *moveTo, now)
 		if err != nil {
 			return board.Task{}, err
 		}
 	}
 	if index != nil {
-		pos, err := repositionTask(tx, user, task.Status, task.ID, *index)
+		pos, err := repositionTask(tx, user, task.Status, task.ID, *index, now)
 		if err != nil {
 			return board.Task{}, err
 		}
-		task.Position = pos
+		task.Position, task.UpdatedAt = pos, now
 		if from != task.Status {
 			// The task left a hole behind; close it so both columns stay 0..n-1.
-			if err := compactColumn(tx, user, from); err != nil {
+			if err := compactColumn(tx, user, from, now); err != nil {
 				return board.Task{}, err
 			}
 		}
@@ -949,10 +952,12 @@ func (s *Store) patchTask(tx *sql.Tx, user, id string, patch TaskPatch) (board.T
 	if err != nil {
 		return board.Task{}, fmt.Errorf("store: marshal checks: %w", err)
 	}
-	if _, err := tx.Exec(`UPDATE tasks SET emoji = ?, title = ?, "desc" = ?, blocked = ?, prio = ?, due = ?, effort = ?, tags = ?, checks = ? WHERE user = ? AND id = ?`,
-		t.Emoji, t.Title, t.Desc, boolToInt(t.Blocked), t.Prio, t.Due, t.Effort, string(tags), string(checks), user, id); err != nil {
+	now := time.Now().UTC()
+	if _, err := tx.Exec(`UPDATE tasks SET emoji = ?, title = ?, "desc" = ?, blocked = ?, prio = ?, due = ?, effort = ?, tags = ?, checks = ?, updated_at = ? WHERE user = ? AND id = ?`,
+		t.Emoji, t.Title, t.Desc, boolToInt(t.Blocked), t.Prio, t.Due, t.Effort, string(tags), string(checks), now.Format(time.RFC3339Nano), user, id); err != nil {
 		return board.Task{}, fmt.Errorf("store: update task: %w", err)
 	}
+	t.UpdatedAt = now
 	if patch.Tags != nil {
 		if err := s.upsertLabels(tx, user, t.Tags); err != nil {
 			return board.Task{}, err
@@ -1000,8 +1005,8 @@ func (s *Store) CancelTask(user, idPrefix string, reason *string) (board.Task, e
 // repositionTask splices id into column st at index, clamped to the column
 // length, and rewrites that column's positions to 0..n-1. Columns hold a
 // handful of tasks, so a full rewrite is cheaper to reason about than sparse
-// gaps.
-func repositionTask(tx *sql.Tx, user string, st board.Status, id string, index int) (int, error) {
+// gaps. Every rewritten row is stamped with now as its UpdatedAt.
+func repositionTask(tx *sql.Tx, user string, st board.Status, id string, index int, now time.Time) (int, error) {
 	ids, err := columnTaskIDs(tx, user, st, id)
 	if err != nil {
 		return 0, err
@@ -1013,19 +1018,20 @@ func repositionTask(tx *sql.Tx, user string, st board.Status, id string, index i
 	ordered = append(ordered, ids[:index]...)
 	ordered = append(ordered, id)
 	ordered = append(ordered, ids[index:]...)
-	if err := writePositions(tx, user, ordered); err != nil {
+	if err := writePositions(tx, user, ordered, now); err != nil {
 		return 0, err
 	}
 	return index, nil
 }
 
-// compactColumn rewrites column st's positions to 0..n-1.
-func compactColumn(tx *sql.Tx, user string, st board.Status) error {
+// compactColumn rewrites column st's positions to 0..n-1, stamping each row
+// with now as its UpdatedAt.
+func compactColumn(tx *sql.Tx, user string, st board.Status, now time.Time) error {
 	ids, err := columnTaskIDs(tx, user, st, "")
 	if err != nil {
 		return err
 	}
-	return writePositions(tx, user, ids)
+	return writePositions(tx, user, ids, now)
 }
 
 // columnTaskIDs lists a column's task ids in position order, skipping exclude.
@@ -1052,29 +1058,31 @@ func columnTaskIDs(q dbtx, user string, st board.Status, exclude string) ([]stri
 	return ids, nil
 }
 
-// writePositions stamps ids with positions 0..len(ids)-1.
-func writePositions(tx *sql.Tx, user string, ids []string) error {
+// writePositions stamps ids with positions 0..len(ids)-1 and now as their
+// UpdatedAt: a reorder changes the row, so it counts as an update.
+func writePositions(tx *sql.Tx, user string, ids []string, now time.Time) error {
+	stamp := now.Format(time.RFC3339Nano)
 	for i, id := range ids {
-		if _, err := tx.Exec(`UPDATE tasks SET position = ? WHERE user = ? AND id = ?`, i, user, id); err != nil {
+		if _, err := tx.Exec(`UPDATE tasks SET position = ?, updated_at = ? WHERE user = ? AND id = ?`, i, stamp, user, id); err != nil {
 			return fmt.Errorf("store: set position: %w", err)
 		}
 	}
 	return nil
 }
 
-// moveTask appends t to column to and stamps MovedAt, returning the moved
-// task.
-func moveTask(tx *sql.Tx, user string, t board.Task, to board.Status) (board.Task, error) {
+// moveTask appends t to column to and stamps both MovedAt and UpdatedAt with
+// now, returning the moved task.
+func moveTask(tx *sql.Tx, user string, t board.Task, to board.Status, now time.Time) (board.Task, error) {
 	pos, err := nextPosition(tx, user, to)
 	if err != nil {
 		return board.Task{}, err
 	}
-	now := time.Now().UTC()
-	if _, err := tx.Exec(`UPDATE tasks SET status = ?, position = ?, moved_at = ? WHERE user = ? AND id = ?`,
-		string(to), pos, now.Format(time.RFC3339Nano), user, t.ID); err != nil {
+	stamp := now.Format(time.RFC3339Nano)
+	if _, err := tx.Exec(`UPDATE tasks SET status = ?, position = ?, moved_at = ?, updated_at = ? WHERE user = ? AND id = ?`,
+		string(to), pos, stamp, stamp, user, t.ID); err != nil {
 		return board.Task{}, fmt.Errorf("store: move task: %w", err)
 	}
-	t.Status, t.Position, t.MovedAt = to, pos, now
+	t.Status, t.Position, t.MovedAt, t.UpdatedAt = to, pos, now, now
 	return t, nil
 }
 
@@ -1318,8 +1326,13 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-// insertTask inserts one fully populated task row.
+// insertTask inserts one fully populated task row. A zero UpdatedAt falls
+// back to CreatedAt: a task that has never been edited was last changed when
+// it was created.
 func insertTask(q dbtx, user string, t board.Task) error {
+	if t.UpdatedAt.IsZero() {
+		t.UpdatedAt = t.CreatedAt
+	}
 	tags, err := json.Marshal(t.Tags)
 	if err != nil {
 		return fmt.Errorf("store: marshal tags: %w", err)
@@ -1328,10 +1341,10 @@ func insertTask(q dbtx, user string, t board.Task) error {
 	if err != nil {
 		return fmt.Errorf("store: marshal checks: %w", err)
 	}
-	if _, err := q.Exec(`INSERT INTO tasks (id, seq, user, emoji, title, "desc", status, blocked, prio, due, effort, tags, checks, position, created_at, moved_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	if _, err := q.Exec(`INSERT INTO tasks (id, seq, user, emoji, title, "desc", status, blocked, prio, due, effort, tags, checks, position, created_at, moved_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.Seq, user, t.Emoji, t.Title, t.Desc, string(t.Status), boolToInt(t.Blocked), t.Prio, t.Due, t.Effort, string(tags), string(checks), t.Position,
-		t.CreatedAt.UTC().Format(time.RFC3339Nano), t.MovedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+		t.CreatedAt.UTC().Format(time.RFC3339Nano), t.MovedAt.UTC().Format(time.RFC3339Nano), t.UpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("store: insert task %s: %w", t.ID, err)
 	}
 	return nil
@@ -1355,9 +1368,9 @@ func nextSeq(q dbtx, user string) (int, error) {
 // scanTask decodes one row produced with taskCols.
 func scanTask(row interface{ Scan(dest ...any) error }) (board.Task, error) {
 	var t board.Task
-	var status, tags, checks, created, moved string
+	var status, tags, checks, created, moved, updated string
 	var blocked int
-	if err := row.Scan(&t.ID, &t.Seq, &t.Emoji, &t.Title, &t.Desc, &status, &blocked, &t.Prio, &t.Due, &t.Effort, &tags, &checks, &t.Position, &created, &moved); err != nil {
+	if err := row.Scan(&t.ID, &t.Seq, &t.Emoji, &t.Title, &t.Desc, &status, &blocked, &t.Prio, &t.Due, &t.Effort, &tags, &checks, &t.Position, &created, &moved, &updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return board.Task{}, ErrNotFound
 		}
@@ -1377,6 +1390,9 @@ func scanTask(row interface{ Scan(dest ...any) error }) (board.Task, error) {
 	}
 	if t.MovedAt, err = time.Parse(time.RFC3339Nano, moved); err != nil {
 		return board.Task{}, fmt.Errorf("store: task %s moved_at: %w", t.ID, err)
+	}
+	if t.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated); err != nil {
+		return board.Task{}, fmt.Errorf("store: task %s updated_at: %w", t.ID, err)
 	}
 	return t, nil
 }

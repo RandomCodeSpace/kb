@@ -28,6 +28,8 @@ func TestViewShowsTaskAndComments(t *testing.T) {
 		"Two\nlines",
 		"[x] repro",
 		"[ ] fix",
+		"created: ",
+		"updated: ",
 		"comments:",
 		"c1  default",
 		"a finding",
@@ -42,9 +44,10 @@ func TestViewShowsTaskAndComments(t *testing.T) {
 		t.Fatalf("view --json failed")
 	}
 	var v struct {
-		Seq      int    `json:"seq"`
-		Title    string `json:"title"`
-		Comments []struct {
+		Seq       int    `json:"seq"`
+		Title     string `json:"title"`
+		UpdatedAt string `json:"updatedAt"`
+		Comments  []struct {
 			ID   int    `json:"id"`
 			Body string `json:"body"`
 		} `json:"comments"`
@@ -54,6 +57,9 @@ func TestViewShowsTaskAndComments(t *testing.T) {
 	}
 	if v.Seq != 1 || v.Title != "Inspect me" || len(v.Comments) != 1 || v.Comments[0].Body != "a finding" {
 		t.Fatalf("view --json = %+v", v)
+	}
+	if v.UpdatedAt == "" {
+		t.Fatalf("view --json missing updatedAt: %s", out)
 	}
 
 	// Empty comment section and errors.

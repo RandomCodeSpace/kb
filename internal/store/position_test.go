@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 )
@@ -245,13 +246,13 @@ func TestPositionHelpersReportReadFailures(t *testing.T) {
 	if _, err := columnTaskIDs(tx, "u", board.StatusTodo, ""); err == nil || !strings.Contains(err.Error(), "list column") {
 		t.Fatalf("columnTaskIDs err = %v, want list column failure", err)
 	}
-	if _, err := repositionTask(tx, "u", board.StatusTodo, target.ID, 0); err == nil || !strings.Contains(err.Error(), "list column") {
+	if _, err := repositionTask(tx, "u", board.StatusTodo, target.ID, 0, time.Now()); err == nil || !strings.Contains(err.Error(), "list column") {
 		t.Fatalf("repositionTask err = %v, want list column failure", err)
 	}
-	if err := compactColumn(tx, "u", board.StatusTodo); err == nil || !strings.Contains(err.Error(), "list column") {
+	if err := compactColumn(tx, "u", board.StatusTodo, time.Now()); err == nil || !strings.Contains(err.Error(), "list column") {
 		t.Fatalf("compactColumn err = %v, want list column failure", err)
 	}
-	if _, err := moveTask(tx, "u", target, board.StatusDoing); err == nil {
+	if _, err := moveTask(tx, "u", target, board.StatusDoing, time.Now()); err == nil {
 		t.Fatal("moveTask succeeded without a tasks table")
 	}
 }
@@ -268,16 +269,16 @@ func TestPositionHelpersReportWriteFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writePositions(tx, "u", []string{target.ID}); err == nil || !strings.Contains(err.Error(), "set position") {
+	if err := writePositions(tx, "u", []string{target.ID}, time.Now()); err == nil || !strings.Contains(err.Error(), "set position") {
 		t.Fatalf("writePositions err = %v, want set position failure", err)
 	}
-	if _, err := repositionTask(tx, "u", board.StatusTodo, target.ID, 0); err == nil || !strings.Contains(err.Error(), "set position") {
+	if _, err := repositionTask(tx, "u", board.StatusTodo, target.ID, 0, time.Now()); err == nil || !strings.Contains(err.Error(), "set position") {
 		t.Fatalf("repositionTask err = %v, want set position failure", err)
 	}
-	if err := compactColumn(tx, "u", board.StatusTodo); err == nil || !strings.Contains(err.Error(), "set position") {
+	if err := compactColumn(tx, "u", board.StatusTodo, time.Now()); err == nil || !strings.Contains(err.Error(), "set position") {
 		t.Fatalf("compactColumn err = %v, want set position failure", err)
 	}
-	if _, err := moveTask(tx, "u", target, board.StatusDoing); err == nil || !strings.Contains(err.Error(), "move task") {
+	if _, err := moveTask(tx, "u", target, board.StatusDoing, time.Now()); err == nil || !strings.Contains(err.Error(), "move task") {
 		t.Fatalf("moveTask err = %v, want move task failure", err)
 	}
 	if err := tx.Rollback(); err != nil {

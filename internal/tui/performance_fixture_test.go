@@ -86,6 +86,7 @@ func performanceBoard(taskCount int) board.Board {
 				Position:  positions[status],
 				CreatedAt: now.Add(-time.Duration(i) * time.Hour),
 				MovedAt:   now.Add(-time.Duration(i) * time.Minute),
+				UpdatedAt: now.Add(-time.Duration(i) * time.Minute),
 			})
 			positions[status]++
 		}
@@ -188,8 +189,8 @@ func normalizePerformanceTaskIdentities(t testing.TB, databasePath, user string,
 	}
 	defer transaction.Rollback()
 	for _, task := range tasks {
-		result, err := transaction.Exec(`UPDATE tasks SET id = ?, created_at = ?, moved_at = ? WHERE user = ? AND seq = ?`,
-			task.ID, task.CreatedAt.UTC().Format(time.RFC3339Nano), task.MovedAt.UTC().Format(time.RFC3339Nano), user, task.Seq)
+		result, err := transaction.Exec(`UPDATE tasks SET id = ?, created_at = ?, moved_at = ?, updated_at = ? WHERE user = ? AND seq = ?`,
+			task.ID, task.CreatedAt.UTC().Format(time.RFC3339Nano), task.MovedAt.UTC().Format(time.RFC3339Nano), task.UpdatedAt.UTC().Format(time.RFC3339Nano), user, task.Seq)
 		if err != nil {
 			t.Fatal(err)
 		}

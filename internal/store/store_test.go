@@ -203,6 +203,9 @@ func TestTaskCRUD(t *testing.T) {
 	if t1.ID == "" || t1.Status != board.StatusTodo || t1.Prio != 3 || t1.Position != 0 {
 		t.Errorf("t1 = %+v, want defaults todo/3/pos0", t1)
 	}
+	if t1.UpdatedAt.IsZero() || !t1.UpdatedAt.Equal(t1.CreatedAt) {
+		t.Errorf("t1.UpdatedAt = %v, want CreatedAt %v", t1.UpdatedAt, t1.CreatedAt)
+	}
 	t2, err := s.AddTask("u", board.Task{Title: "Second", Status: board.StatusTodo})
 	if err != nil {
 		t.Fatalf("AddTask: %v", err)
@@ -219,6 +222,9 @@ func TestTaskCRUD(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("UpdateTask: %v", err)
+	}
+	if !up.UpdatedAt.After(t1.UpdatedAt) || !up.MovedAt.Equal(t1.MovedAt) {
+		t.Errorf("UpdateTask stamps: updated %v (was %v), moved %v (was %v)", up.UpdatedAt, t1.UpdatedAt, up.MovedAt, t1.MovedAt)
 	}
 	if up.Desc != "details" || up.Prio != 2 || up.Title != "First" {
 		t.Errorf("updated = %+v", up)
@@ -242,6 +248,9 @@ func TestTaskCRUD(t *testing.T) {
 	}
 	if !mv.MovedAt.After(t1.MovedAt) {
 		t.Errorf("MovedAt not bumped: %v <= %v", mv.MovedAt, t1.MovedAt)
+	}
+	if !mv.UpdatedAt.Equal(mv.MovedAt) {
+		t.Errorf("MoveTask UpdatedAt = %v, want the MovedAt stamp %v", mv.UpdatedAt, mv.MovedAt)
 	}
 
 	doing, err := s.ListTasks("u", board.StatusDoing)
@@ -402,8 +411,8 @@ func TestMigrateV3FromV2(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != "10" {
-		t.Fatalf("schema version = %q, want 10", version)
+	if version != "11" {
+		t.Fatalf("schema version = %q, want 11", version)
 	}
 	for _, table := range []string{"tasks_fts", "import_links_fts"} {
 		var definition string
@@ -739,7 +748,7 @@ func TestOpenRepairsLegacyCredentialURLSuffixes(t *testing.T) {
 	if _, baseURL, _ := mustForgePAT(t, s, "bob", "loaded"); strings.ContainsAny(baseURL, "?#") {
 		t.Fatal("scoped forge load returned a suffix")
 	}
-	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil || version != "10" {
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&version); err != nil || version != "11" {
 		t.Fatalf("schema version changed during repair err=%v", err)
 	}
 }

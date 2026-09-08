@@ -919,6 +919,7 @@ type taskJSON struct {
 	Position  int         `json:"position"`
 	CreatedAt string      `json:"createdAt,omitempty"`
 	MovedAt   string      `json:"movedAt,omitempty"`
+	UpdatedAt string      `json:"updatedAt,omitempty"`
 }
 
 // itemJSON builds the wire shape of one task. Remote tasks carry no UUID,
@@ -941,6 +942,9 @@ func itemJSON(it item) taskJSON {
 	}
 	if !t.MovedAt.IsZero() {
 		j.MovedAt = t.MovedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !t.UpdatedAt.IsZero() {
+		j.UpdatedAt = t.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return j
 }

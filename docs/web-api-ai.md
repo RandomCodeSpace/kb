@@ -55,7 +55,8 @@ collected: the cards are real, the set is not complete.
 ## Wire type
 
 `draft` carries the `task` wire type's field names minus everything the store
-assigns (`id`, `seq`, `status`, `position`, `createdAt`, `movedAt`), because a
+assigns (`id`, `seq`, `status`, `position`, `createdAt`, `movedAt`,
+`updatedAt`), because a
 draft is not a task until the UI posts it:
 
 ```json

@@ -526,6 +526,9 @@
   .ring .fill { fill: none; stroke: var(--t-fg-2); stroke-width: 2; }
   .ring.complete .fill { stroke: var(--t-done); }
 
+  /* toasts stack top-centre in the top layer, above any open dialog */
+  .toasts { position: fixed; inset: auto 0; top: calc(8px + env(safe-area-inset-top)); z-index: 60; display: flex; flex-direction: column; align-items: center; gap: 8px; width: auto; height: auto; margin: 0; padding: 0 16px; border: 0; background: transparent; color: inherit; overflow: visible; pointer-events: none; }
+  .toasts:not([popover]) { display: flex; }
   .toast { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 6px 6px 6px 12px; border-radius: var(--radius-lg); background: var(--t-fg); color: var(--t-canvas); font-size: 13px; box-shadow: var(--t-shadow-lg); pointer-events: auto; max-width: 420px; }
   .toast.error { background: var(--t-danger); color: #fff; }
   .toast .btn { height: 28px; padding: 0 8px; background: transparent; border-color: rgb(128 128 128 / 0.35); color: inherit; font-size: 12px; }
@@ -565,6 +568,7 @@
   .task-link .t.done, .task-link .t.cancelled { color: var(--t-fg-3); }
 
   .comment { padding: 10px 12px; border-radius: var(--radius-lg); background: var(--t-card); border: 1px solid var(--t-line); }
+  .desc-box { padding: 10px 12px; border-radius: var(--radius-lg); background: var(--t-card); border: 1px solid var(--t-line); }
   .comment-head { display: flex; align-items: center; gap: 8px; height: 24px; margin-bottom: 4px; }
   .comment .act { opacity: 0; }
   .comment:hover .act, .comment:focus-within .act { opacity: 1; }

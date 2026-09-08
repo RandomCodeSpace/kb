@@ -60,7 +60,7 @@ a force retry.
   "prio": 1, "due": "YYYY-MM-DD", "effort": "S|M|L", "tags": ["a", "type::bug"],
   "checks": [{"text": "…", "done": false}],
   "project": "personal", "position": 0,
-  "createdAt": "RFC3339", "movedAt": "RFC3339"
+  "createdAt": "RFC3339", "movedAt": "RFC3339", "updatedAt": "RFC3339"
 }
 ```
 

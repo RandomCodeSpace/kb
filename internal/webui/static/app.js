@@ -596,7 +596,7 @@ function defaultSettings() {
   return {
     theme: 'system', density: 'comfortable',
     show: { seq: true, emoji: true, desc: true, tags: true, due: true, effort: true, checks: true, comments: true },
-    hideEmpty: false, showCancelled: false, wip: {}, sort: 'position', collapsed: {}, v: 2,
+    hideEmpty: false, showCancelled: false, wip: {}, sort: 'updated', collapsed: {}, v: 3,
   };
 }
 function loadSettings() {
@@ -604,6 +604,7 @@ function loadSettings() {
   try {
     const raw = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     if ((raw.v || 1) < 2) delete raw.showCancelled; // v2: the cancelled column starts hidden
+    if ((raw.v || 1) < 3 && raw.sort === 'position') delete raw.sort; // v3: recently updated on top
     for (const k of Object.keys(base)) {
       if (raw[k] === undefined) continue;
       if (typeof base[k] === 'object' && base[k] !== null) Object.assign(base[k], raw[k] || {});
@@ -620,6 +621,7 @@ function applySettings(rerender = true) {
   const root = document.documentElement;
   if (settings.theme === 'light' || settings.theme === 'dark') root.dataset.theme = settings.theme; else delete root.dataset.theme;
   if (settings.density === 'compact') root.dataset.density = 'compact'; else delete root.dataset.density;
+  state.cardEpoch = (state.cardEpoch || 0) + 1;
   saveSettings();
   if (rerender && state.loaded) render();
 }
@@ -719,6 +721,18 @@ async function withForce(run, task) {
 }
 const moveBody = (status, index, force) => Object.assign({ status }, index === undefined ? {} : { index }, force ? { force: true } : {});
 const patchTask = (id, patch) => withForce((force) => api('PATCH', taskPath(id), force ? Object.assign({ force: true }, patch) : patch), findTask(id));
+// Flips the detail panel's Blocked switch in place so its 160ms transition plays, and holds
+// re-renders (loadDetail parks them while the panel is busy) until it has; reverts on failure.
+async function setBlocked(task, on) {
+  const sw = dom.detailBody.querySelector('.switch[aria-label="Blocked"]');
+  if (sw) {
+    sw.setAttribute('aria-checked', String(on));
+    sw.dataset.animating = '';
+    setTimeout(() => { delete sw.dataset.animating; detailIdle(); }, 200);
+  }
+  try { const out = await patchTask(task.id, { blocked: on }); task.blocked = on; return out; }
+  catch (err) { if (sw) sw.setAttribute('aria-checked', String(!on)); throw err; }
+}
 
 function tasksURL(unfiltered) {
   const params = new URLSearchParams();
@@ -1135,9 +1149,15 @@ function buildBoard() {
     btn.addEventListener('click', () => cols[btn.dataset.status].col.scrollIntoView({ behavior: dur(1) ? 'smooth' : 'auto', inline: 'start', block: 'nearest' }));
   }
 }
+// Column sorts. Position is the hand-dragged order; the rest derive from the
+// card, newest first for the two time sorts.
+const SORTS = [['updated', 'Recently updated'], ['created', 'Recently created'], ['position', 'Position'], ['prio', 'Priority'], ['due', 'Due date']];
+const updatedAt = (t) => t.updatedAt || t.movedAt || t.createdAt || '';
 function sortTasks(list) {
   if (settings.sort === 'prio') return list.slice().sort((a, b) => (a.prio || 3) - (b.prio || 3) || a.position - b.position);
   if (settings.sort === 'due') return list.slice().sort((a, b) => (a.due ? 1 : 2) - (b.due ? 1 : 2) || (a.due || '').localeCompare(b.due || '') || a.position - b.position);
+  if (settings.sort === 'created') return list.slice().sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '') || a.position - b.position);
+  if (settings.sort === 'updated') return list.slice().sort((a, b) => updatedAt(b).localeCompare(updatedAt(a)) || a.position - b.position);
   return list;
 }
 function groupTasks(list = state.tasks) {
@@ -1163,6 +1183,17 @@ function dueChipEl(due, long) {
   return el('span', { class: 'chip chip-tone chip-mono', style: d.tone ? `--tone:${TONE[d.tone]}` : null, title: 'Due ' + due }, icon('calendar', 11), el('span', {}, long ? `${due} · ${d.label}` : d.label));
 }
 
+// Everything a card's markup depends on. A node whose signature still matches
+// is kept as is, so a refresh only rebuilds the cards that changed.
+const cardSig = (t) => JSON.stringify(t) + '|' + [state.selected.has(t.id) ? 1 : 0, state.focusId === t.id ? 1 : 0, state.lifted === t.id ? 1 : 0, state.commentCounts[t.id] ?? '', state.cardEpoch || 0, [...state.tags].sort().join(' ')].join(',');
+function cardNodeFor(t, existing) {
+  const sig = cardSig(t);
+  const old = existing.get(t.id);
+  if (old && old.dataset.sig === sig && !old.classList.contains('leaving')) return old;
+  const node = cardEl(t);
+  node.dataset.sig = sig;
+  return node;
+}
 function cardEl(t) {
   const show = settings.show;
   const checks = t.checks || [];
@@ -1230,12 +1261,16 @@ function renderBoard() {
   if (state.focusId && !state.tasks.some((t) => t.id === state.focusId)) state.focusId = null;
   for (const id of state.selected) if (!state.tasks.some((t) => t.id === id)) state.selected.delete(id);
   const template = [];
+  const existing = new Map($$('.card[data-id]', dom.board).map((c) => [c.dataset.id, c]));
+  const keepAll = new Set();
+  for (const status of STATUSES) for (const t of groups[status]) keepAll.add(t.id);
   for (const status of STATUSES) {
     const { col, body, count } = cols[status];
     const tasks = sortTasks(groups[status]);
-    const keep = new Set(tasks.map((t) => t.id));
-    for (const c of $$('.card[data-id]', body)) if (!keep.has(c.dataset.id) && !(state.dropped && state.dropped.has(c.dataset.id))) leaveCard(c, first.get(c.dataset.id).rect);
-    body.replaceChildren(...(tasks.length ? tasks.map(cardEl) : [emptyEl(status)]));
+    // Only a card that leaves the board gets a ghost; one that changes column
+    // slides there. A card in a hidden column has an empty rect and gets nothing.
+    for (const c of $$('.card[data-id]', body)) if (!keepAll.has(c.dataset.id) && !(state.dropped && state.dropped.has(c.dataset.id)) && first.get(c.dataset.id).rect.width) leaveCard(c, first.get(c.dataset.id).rect);
+    body.replaceChildren(...(tasks.length ? tasks.map((t) => cardNodeFor(t, existing)) : [emptyEl(status)]));
     const limit = Number(settings.wip[status]) || 0;
     const over = limit > 0 && tasks.length > limit;
     col.classList.toggle('is-over', over);
@@ -1260,7 +1295,7 @@ function renderBoard() {
   for (const c of $$('.card[data-id]', dom.board)) {
     const prev = first.get(c.dataset.id);
     if (state.dropped && state.dropped.has(c.dataset.id)) animate(c, [{ transform: 'scale(0.98)', opacity: 0.6 }, { transform: 'none', opacity: 1 }], 140);
-    else if (prev) {
+    else if (prev && prev.rect.width) {
       const r = c.getBoundingClientRect();
       const dx = prev.rect.left - r.left, dy = prev.rect.top - r.top;
       if (dx || dy) animate(c, [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], 180);
@@ -1365,9 +1400,12 @@ function onDrop(e) {
 }
 function dropOn(col) {
   const status = col.dataset.status;
-  const index = col.classList.contains('is-collapsed') ? undefined : slotIndex(cols[status].body);
+  const manual = settings.sort === 'position';
+  const index = manual && !col.classList.contains('is-collapsed') ? slotIndex(cols[status].body) : undefined;
   const ids = state.dragging.ids;
+  const same = ids.every((id) => { const t = findTask(id); return t && t.status === status; });
   cleanupDrag(true);
+  if (!manual && same) { invalidate(); return; } // nothing to reorder: the sort decides the order
   moveMany(ids, status, index);
 }
 // dropped is true when a move follows: moveMany renders the new order itself and
@@ -1922,7 +1960,7 @@ async function closeDetail(opts = {}) {
   if (back) setFocus(t.id); else dom.board.focus({ preventScroll: true });
 }
 // busy: an inline editor is open (do not repaint under it). dirty: it holds unsaved changes (confirm before closing).
-const panelBusy = () => !!dom.detail.querySelector('[data-busy]');
+const panelBusy = () => !!dom.detail.querySelector('[data-busy], [data-animating]');
 const panelDirty = () => !!dom.detail.querySelector('[data-busy]:not(.editor), .editor[data-busy].is-dirty');
 // The card plus what only other endpoints know: why it was killed, and where it was imported from.
 async function detailExtras(ref, task) {
@@ -2009,7 +2047,7 @@ function renderDetail(data) {
   }, label)));
   const labelsBox = el('div', { class: 'w-full' });
   labelEditor(labelsBox, { tags: userTags(task), onChange: (tags) => save({ tags }, `Labels saved on #${task.seq}`) });
-  const blockedSwitch = el('button', { type: 'button', role: 'switch', class: 'switch', 'aria-checked': task.blocked ? 'true' : 'false', 'aria-label': 'Blocked', onclick: () => save({ blocked: !task.blocked }, task.blocked ? `#${task.seq} unblocked` : `#${task.seq} marked blocked`) });
+  const blockedSwitch = el('button', { type: 'button', role: 'switch', class: 'switch', 'aria-checked': task.blocked ? 'true' : 'false', 'aria-label': 'Blocked', onclick: () => mutate(() => setBlocked(task, !task.blocked), task.blocked ? `#${task.seq} unblocked` : `#${task.seq} marked blocked`).then((out) => { if (out) loadDetail(state.detail, true); }) });
   const projectSel = el('select', { class: 'input w-auto', 'aria-label': 'Project', onchange: (e) => save({ project: e.target.value }, `#${task.seq} moved to ${e.target.value}`) },
     ...projectList(task.project).map((p) => el('option', { value: p, selected: p === task.project }, p)));
   const props = el('dl', { class: 'props' },
@@ -2021,22 +2059,21 @@ function renderDetail(data) {
     el('dt', {}, 'Blocked'), el('dd', {}, blockedSwitch, el('span', { class: 'text-12 text-fg-3' }, task.blocked ? 'Finishing needs --force' : 'No')),
     el('dt', {}, 'Project'), el('dd', {}, projectSel),
     el('dt', {}, 'Created'), el('dd', { class: 'text-12 text-fg-2' }, el('time', { class: 'num', datetime: task.createdAt, title: fmtDate(task.createdAt) }, relTime(task.createdAt)),
-      task.movedAt && task.movedAt !== task.createdAt ? el('span', { class: 'text-fg-3' }, ' · moved ', el('time', { class: 'num', datetime: task.movedAt, title: fmtDate(task.movedAt) }, relTime(task.movedAt))) : null),
+      task.movedAt && task.movedAt !== task.createdAt ? el('span', { class: 'text-fg-3' }, ' · moved ', el('time', { class: 'num', datetime: task.movedAt, title: fmtDate(task.movedAt) }, relTime(task.movedAt))) : null,
+      task.updatedAt && task.updatedAt !== task.createdAt && task.updatedAt !== task.movedAt ? el('span', { class: 'text-fg-3' }, ' · updated ', el('time', { class: 'num', datetime: task.updatedAt, title: fmtDate(task.updatedAt) }, relTime(task.updatedAt))) : null),
     ...(tombstone ? [
       el('dt', {}, 'Killed'), el('dd', { class: 'text-12 text-fg-2' }, el('time', { class: 'num', datetime: tombstone.killedAt, title: fmtDate(tombstone.killedAt) }, fmtDate(tombstone.killedAt))),
       el('dt', {}, 'Reason'), el('dd', { class: 'text-13' }, tombstone.reason ? mdInline(tombstone.reason) : el('span', { class: 'text-fg-3' }, 'None given')),
     ] : []),
   );
 
-  // description: rendered markdown, click to edit
+  // description: rendered markdown in a bordered box; the pencil opens the editor
   const descBox = el('div', {});
   const descEdit = el('button', { type: 'button', class: 'btn btn-ghost btn-xs btn-icon ml-auto', 'aria-label': 'Edit description', 'data-tip': 'Edit description', onclick: () => editDesc() }, icon('pencil', 12));
   const showDesc = () => {
     descEdit.hidden = false;
-    const view = renderMarkdown(task.desc, { empty: 'No description. Click to add one.' });
-    view.classList.add('cursor-text', 'rounded-md', '-mx-2', 'px-2', 'py-1', 'hover:bg-raised');
-    view.addEventListener('click', (e) => { if (!e.target.closest('a, button')) editDesc(); });
-    descBox.replaceChildren(view);
+    const view = renderMarkdown(task.desc, { empty: 'No description yet.' });
+    descBox.replaceChildren(el('div', { class: 'desc-box' }, view));
   };
   const editDesc = () => {
     descEdit.hidden = true;
@@ -2200,6 +2237,8 @@ async function addLink(task, direction, number) {
   const body = direction === 'blocks' ? { blocker: String(task.seq), blocked: other } : { blocker: other, blocked: String(task.seq) };
   try {
     await api('POST', '/api/links', body);
+    // A new blocker flips the card's blocked flag, so the toggle and the chip follow the link.
+    if (direction === 'blockedBy' && !task.blocked) await setBlocked(task, true);
     toast(`Linked #${task.seq} and #${other}`, 'ok');
     loadDetail(state.detail, true);
     invalidate();
@@ -2209,6 +2248,9 @@ async function removeLink(task, other) {
   const blocks = (state.detailData && state.detailData.links && state.detailData.links.blocks || []).some((t) => t.id === other.id);
   try {
     await api('DELETE', '/api/links', { a: task.id, b: other.id });
+    // The last blocker gone clears the flag it set.
+    const left = (state.detailData && state.detailData.links && state.detailData.links.blockedBy || []).filter((t) => t.id !== other.id);
+    if (!blocks && task.blocked && !left.length) await setBlocked(task, false);
     loadDetail(state.detail, true);
     invalidate();
     const relink = blocks ? { blocker: task.id, blocked: other.id } : { blocker: other.id, blocked: task.id };
@@ -2256,9 +2298,11 @@ async function deleteTask(task) {
 }
 
 /* ============================== dialogs: generic, edit ============================== */
+let dialogSeq = 0;
 function showDialog(d) {
   if (d.open) return;
   d.showModal();
+  d.dataset.layer = String(++dialogSeq);
   animate(d, [{ opacity: 0, transform: 'translateY(6px) scale(0.99)' }, { opacity: 1, transform: 'none' }], 160);
 }
 async function closeDialog(d) {
@@ -2269,6 +2313,7 @@ async function closeDialog(d) {
     d.style.pointerEvents = '';
   }
   d.close();
+  if (d.contains(dom.toasts)) hostToasts();
 }
 function parseChecks(text) {
   return text.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => (/^x\s+/i.test(l) ? { text: l.replace(/^x\s+/i, ''), done: true } : { text: l, done: false }));
@@ -2460,7 +2505,7 @@ function paletteCommands() {
   for (const p of projectNames()) if (p !== state.project) add('Project', `Switch to ${p}`, () => setProject(p), '', 'project');
   for (const l of allLabels()) add('Label', `${state.tags.has(l) ? 'Remove' : 'Filter'} label ${l}`, () => toggleTag(l), '', 'tag');
   for (const q of QUICK) add('Filter', `${state.quick.has(q.id) ? 'Remove filter' : 'Filter'}: ${q.label}`, () => toggleQuick(q.id));
-  for (const s of ['position', 'prio', 'due']) if (settings.sort !== s) add('Sort', `Sort columns by ${s === 'prio' ? 'priority' : s}`, () => { settings.sort = s; applySettings(); });
+  for (const [s, label] of SORTS) if (settings.sort !== s) add('Sort', `Sort columns: ${label.toLowerCase()}`, () => { settings.sort = s; applySettings(); });
   for (const t of state.tasks) add('Task', `#${t.seq} ${t.title}`, () => openDetail(t.seq), '', (t.tags || []).join(' '), t);
   return items;
 }
@@ -2540,7 +2585,7 @@ function renderDisplay() {
     head('Columns'),
     el('div', { class: 'grid grid-cols-2 gap-x-3' }, check('Hide empty', () => settings.hideEmpty, (v) => { settings.hideEmpty = v; }), check('Show cancelled', () => settings.showCancelled, (v) => { settings.showCancelled = v; })),
     row('Sort', el('select', { class: 'input w-auto', 'aria-label': 'Column sort', onchange: (e) => { settings.sort = e.target.value; applySettings(); } },
-      ...[['position', 'Position'], ['prio', 'Priority'], ['due', 'Due date']].map(([v, t]) => el('option', { value: v, selected: settings.sort === v }, t)))),
+      ...SORTS.map(([v, t]) => el('option', { value: v, selected: settings.sort === v }, t)))),
     head('WIP limits'),
     el('div', { class: 'grid grid-cols-4 gap-2' }, ...STATUSES.map((s) => el('label', { class: 'flex flex-col gap-1 text-11 text-fg-3' }, STATUS_LABEL[s], el('input', { type: 'text', class: 'input num px-2', inputmode: 'numeric', autocomplete: 'off', value: settings.wip[s] || '', placeholder: '∞', 'aria-label': `WIP limit for ${STATUS_LABEL[s]}`,
       onchange: (e) => { const n = Number(e.target.value); if (n > 0) settings.wip[s] = n; else delete settings.wip[s]; applySettings(); } })))),
@@ -3400,20 +3445,29 @@ function renderHelp() {
 }
 
 /* ============================== toasts / announcements ============================== */
+// A modal dialog makes everything outside it inert, top layer included, so the
+// toast stack lives inside the newest open dialog while one is up.
+function hostToasts() {
+  const open = $$('dialog[open]').sort((a, b) => Number(b.dataset.layer || 0) - Number(a.dataset.layer || 0));
+  const host = open[0] || document.body;
+  if (dom.toasts.parentElement !== host) host.append(dom.toasts); // moving a popover hides it
+  if (POPOVER && dom.toasts.children.length && !dom.toasts.matches(':popover-open')) dom.toasts.showPopover();
+}
 function toast(message, kind = 'error', opts = {}) {
   const life = opts.life || (kind === 'error' ? 6000 : 3000);
   let gone = false;
   const dismiss = () => {
     if (gone) return;
     gone = true;
-    const a = animate(node, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(8px)' }], 150);
-    a.onfinish = a.oncancel = () => node.remove();
+    const a = animate(node, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-8px)' }], 150);
+    a.onfinish = a.oncancel = () => { node.remove(); if (POPOVER && !dom.toasts.children.length && dom.toasts.matches(':popover-open')) dom.toasts.hidePopover(); };
   };
   const node = el('div', { class: 'toast ' + kind }, el('span', { class: 'min-w-0 flex-1 truncate' }, mdInline(message)),
     opts.action ? el('button', { type: 'button', class: 'btn', onclick: () => { dismiss(); opts.action.run(); } }, opts.action.label) : null,
     el('button', { type: 'button', class: 'btn btn-icon', 'aria-label': 'Dismiss', onclick: dismiss }, icon('x', 12)));
   dom.toasts.append(node);
-  animate(node, [{ opacity: 0, transform: 'translateY(12px) scale(0.98)' }, { opacity: 1, transform: 'none' }], 180);
+  hostToasts();
+  animate(node, [{ opacity: 0, transform: 'translateY(-8px) scale(0.98)' }, { opacity: 1, transform: 'none' }], 180);
   setTimeout(dismiss, life);
   while (dom.toasts.children.length > 4) dom.toasts.firstElementChild.remove();
 }

@@ -101,7 +101,7 @@ func (s *Store) insertImportedBoard(tx *sql.Tx, user string, imported board.Boar
 	positions := map[board.Status]int{}
 	for _, task := range imported.Tasks {
 		task.ID = uuid.NewString()
-		task.CreatedAt, task.MovedAt = now, now
+		task.CreatedAt, task.MovedAt, task.UpdatedAt = now, now, now
 		task.Position = positions[task.Status]
 		positions[task.Status]++
 		seq, err := nextSeq(tx, user)
