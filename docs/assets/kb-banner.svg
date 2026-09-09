@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="420" viewBox="0 0 1440 420" role="img" aria-labelledby="title desc">
+  <title id="title">kb, your private Kanban board</title>
+  <desc id="desc">The kb logo with the message Plan work without giving up your data.</desc>
+  <defs>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" fill="none" stroke="#2b2f29" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1440" height="420" rx="32" fill="#151714"/>
+  <rect width="1440" height="420" rx="32" fill="url(#grid)" opacity="0.7"/>
+  <circle cx="1310" cy="72" r="170" fill="#c5f13a" opacity="0.08"/>
+  <circle cx="1230" cy="390" r="240" fill="#c5f13a" opacity="0.04"/>
+
+  <g transform="translate(104 114)">
+    <rect width="192" height="192" rx="44" fill="#c5f13a"/>
+    <g fill="#161816">
+      <rect x="42" y="48" width="27" height="96" rx="9"/>
+      <rect x="82.5" y="48" width="27" height="66" rx="9"/>
+      <rect x="123" y="48" width="27" height="39" rx="9"/>
+    </g>
+  </g>
+
+  <text x="350" y="178" fill="#f4f7f1" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="92" font-weight="760" letter-spacing="-4">kb</text>
+  <text x="350" y="238" fill="#c5f13a" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="40" font-weight="680">Plan work without giving up your data.</text>
+  <text x="352" y="284" fill="#aeb5aa" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24">A private Kanban board for your terminal and browser.</text>
+</svg>

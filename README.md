@@ -1,335 +1,197 @@
-<h1 align="center">kb</h1>
+<p align="center">
+  <img src="internal/webui/static/logo.svg" width="72" height="72" alt="kb logo">
+</p>
+
+<h1 align="center">kb: private Kanban task manager</h1>
 
 <p align="center">
-  A fast, local-first kanban board for your terminal.<br>
-  Use the same tasks from the TUI, CLI, scripts, and AI agents.
+  Your task board in the terminal or browser.<br>
+  No account, cloud workspace, or subscription.
 </p>
 
 <p align="center">
-  <a href="https://github.com/RandomCodeSpace/kb/actions/workflows/quality.yml"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/RandomCodeSpace/kb/quality.yml?branch=main&amp;style=for-the-badge&amp;logo=githubactions&amp;logoColor=white&amp;label=build"></a>
   <a href="https://github.com/RandomCodeSpace/kb/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/RandomCodeSpace/kb?sort=semver&amp;style=for-the-badge&amp;logo=github&amp;logoColor=white"></a>
-  <a href="go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/RandomCodeSpace/kb?style=for-the-badge&amp;logo=go&amp;logoColor=white"></a>
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-7f5af0?style=for-the-badge&amp;logo=opensourceinitiative&amp;logoColor=white"></a>
-  <img alt="Local-only storage" src="https://img.shields.io/badge/storage-local--only-3fbf7f?style=for-the-badge&amp;logo=sqlite&amp;logoColor=white">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-c5f13a?style=for-the-badge&amp;logoColor=161816"></a>
+  <img alt="Linux, macOS, and Windows" src="https://img.shields.io/badge/Linux%20%7C%20macOS%20%7C%20Windows-161816?style=for-the-badge&amp;logoColor=white">
 </p>
 
 <p align="center">
-  <img src="docs/assets/kb-tui.svg" width="100%" alt="Illustrated preview of the kb terminal board with Todo, Doing, and Done columns">
+  <img src="docs/assets/kb-banner.svg" width="100%" alt="kb, a private local-first Kanban task manager for the terminal and browser">
 </p>
 
-`kb` is one executable with no hosted account, remote mode, or build step. Your
-board lives in local SQLite—no signup and no service to keep running. Open it
-full-screen, automate it from the command line, connect a local MCP client over
-stdio, or view it in a browser. Only `kb web` opens a TCP listener; it
-binds to 127.0.0.1 by default, and no other command listens on a port.
+`kb` keeps personal projects, work tasks, and everyday to-dos on one Kanban
+board. Open it as a full-screen terminal app or in your browser. Both views use
+the same tasks, so you can switch without exporting or syncing anything.
 
-## Why kb
+Your board stays on your computer. `kb` is local-only, works without an
+account, and does not send task data to a hosted kb service.
 
-- **Terminal-native:** keyboard and mouse controls, responsive columns, forms,
-  filters, Markdown, comments, checklists, and blocker links.
-- **Local-only:** TUI, CLI, MCP, and the web UI all use the same SQLite
-  database.
-- **Scriptable:** stable task numbers, JSON output on supported commands, and a
-  focused task CLI.
-- **Agent-ready:** 12 MCP tools plus optional AI-assisted drafting and imports.
-- **Safe task flow:** completion guards catch open checklist items and blockers;
-  cancellation stays reversible until you explicitly delete a task.
+## See kb in action
+
+### Terminal board
+
+Use the keyboard or mouse to create tasks, move cards, filter projects, and
+open task details without leaving the terminal.
+
+<p align="center">
+  <img src="docs/assets/kb-tui.svg" width="100%" alt="kb terminal Kanban board showing personal tasks in Todo, Doing, and Done columns">
+</p>
+
+### Browser board
+
+Prefer a visual workspace? Run `kb web` and the same board opens in your
+browser. Changes appear in both views without a restart.
+
+<p align="center">
+  <img src="docs/assets/kb-web-ui.png" width="100%" alt="kb web Kanban board showing personal tasks, filters, checklists, and three status columns">
+</p>
+
+<p align="center"><sub>Both images show the same example personal board.</sub></p>
+
+## Why people use kb
+
+- **Your tasks stay yours.** The board lives on your computer. There is no
+  company account to create and no subscription to maintain.
+- **Terminal or browser, your choice.** Use the fast terminal board when you
+  are already at the command line, or open the browser view when you want more
+  room.
+- **Enough structure for real work.** Group tasks into projects and add
+  priorities, due dates, labels, checklists, notes, comments, and blockers.
+- **Safe by default.** Finishing a task with open checklist items or blockers
+  requires an explicit override. Cancelled tasks can be restored.
+- **Useful alone or with your tools.** Work by mouse and keyboard, automate
+  common actions, or let an AI agent use the same board when you choose.
 
 ## Get started
 
-### Install with Go
+### 1. Download kb
 
-Go 1.26.5 or newer is required. Use the local toolchain so Go does not download
-another version during installation:
+Download the current version for your computer:
+
+| System | Download |
+| --- | --- |
+| Linux, Intel or AMD 64-bit | [`kb-linux-amd64`](https://github.com/RandomCodeSpace/kb/releases/latest/download/kb-linux-amd64) |
+| Linux, ARM 64-bit | [`kb-linux-arm64`](https://github.com/RandomCodeSpace/kb/releases/latest/download/kb-linux-arm64) |
+| macOS, Intel | [`kb-darwin-amd64`](https://github.com/RandomCodeSpace/kb/releases/latest/download/kb-darwin-amd64) |
+| macOS, Apple silicon | [`kb-darwin-arm64`](https://github.com/RandomCodeSpace/kb/releases/latest/download/kb-darwin-arm64) |
+| Windows, Intel or AMD 64-bit | [`kb-windows-amd64.exe`](https://github.com/RandomCodeSpace/kb/releases/latest/download/kb-windows-amd64.exe) |
+
+Rename the downloaded file to `kb`, or `kb.exe` on Windows, make it executable
+where required, and place it in a folder on your `PATH`.
+
+<details>
+<summary>Install with Go instead</summary>
+
+Go 1.26.5 or newer is required.
 
 ```sh
 GOTOOLCHAIN=local go install github.com/RandomCodeSpace/kb@latest
-kb version
 ```
 
-### Install a release binary
+</details>
 
-CGO-free binaries for Linux amd64/arm64, macOS amd64/arm64, and Windows amd64
-are attached to the [latest release](https://github.com/RandomCodeSpace/kb/releases/latest).
-Download the matching binary and `SHA256SUMS`, then verify it before installing:
+### 2. Open your board
 
 ```sh
-grep ' kb-linux-amd64$' SHA256SUMS | sha256sum -c -
-```
-
-On macOS, use `shasum -a 256 -c -`. On Windows, compare
-`Get-FileHash -Algorithm SHA256` with the matching manifest entry.
-
-Linux example after verification:
-
-```sh
-mkdir -p "$HOME/.local/bin"
-install -m 0755 kb-linux-amd64 "$HOME/.local/bin/kb"
-```
-
-Make sure `$HOME/.local/bin` is on your `PATH`.
-
-### Create your first board
-
-```sh
-kb add "Write launch notes" -p personal --prio high --tag docs
-kb list
 kb
 ```
 
-That is the whole setup. Every task belongs to a project, named with `-p` on
-the command that creates it; there is no stored default. A bare `kb` opens the
-TUI when run in an interactive terminal.
+Press `n` to create a task. Give it a title and a project such as `personal`,
+then save it. That is the whole setup.
 
-Data is stored in `$KB_DATA` or `~/.local/share/kb`. To use another location:
+### 3. Try the browser view
 
 ```sh
-kb tui --data /path/to/kb-data
+kb web
 ```
 
-## Use the board
+`kb` chooses a private local address and opens your browser. Close the command
+when you are done with the web view.
 
-The footer always shows actions available in the current view. These are the
-keys worth learning first:
+## Everyday controls
 
-| Key | Action |
+The footer always shows the actions available on the current screen. These are
+the useful ones to learn first:
+
+| Key | What it does |
 | --- | --- |
-| `j`/`k`, arrows | Select a card |
-| `h`/`l`, `Tab`/`Shift+Tab` | Move between columns |
-| `Enter` | Open card details |
-| `Space` | Lift or drop a card |
-| `n` / `e` | Create / edit |
-| `t` / `x` / `r` | Ship / cancel / restore |
-| `/` / `f` / `X` | Text filter / label filter / clear filters |
-| `p` / `P` | Next / previous project |
-| `Ctrl+K` | Command palette |
-| `s` | Settings |
-| `?` | Full keyboard help |
+| `j` / `k` or arrows | Select a task |
+| `h` / `l` or `Tab` | Move between columns |
+| `Enter` | Open task details |
+| `Space` | Pick up or drop a task |
+| `n` | Create a task |
+| `e` | Edit the selected task |
+| `t` | Mark the selected task done |
+| `/` | Search tasks |
+| `p` / `P` | Move between projects |
+| `Ctrl+K` | Open the command palette |
+| `?` | Show all shortcuts |
 | `q` | Quit |
 
-Editors use `Tab` and `Shift+Tab` between fields and `Ctrl+S` or `Ctrl+Enter`
-to save. The TUI asks before discarding changed forms. Local CLI changes appear
-without restarting the board.
+## Keep your board private and backed up
 
-## Use the CLI
+There is no hosted account, remote mode, or build step. Your task content stays
+in the kb data folder on your computer. Core task management works offline.
+Optional AI tools and issue imports connect only to providers you configure.
 
-A normal task lifecycle stays pleasantly boring:
+To back up your board, close every running kb window and copy the entire data
+folder. The default location is `$KB_DATA` when set, otherwise
+`~/.local/share/kb`. Keep the folder together. Copying only the database file
+can leave out information needed for a complete restore.
 
-```sh
-kb add "Ship the docs" -p web --prio high --tag release
-kb list -p web
-# kb add prints the new task number; #12 is an example
-kb view 12
-kb move 12 doing
-kb comment add 12 "Ready for review"
-kb done 12
-```
+Do not place the data folder in Dropbox, iCloud, OneDrive, or another synced
+folder, and do not share one data folder between computers.
 
-Tasks receive stable per-board numbers such as `#12`. Use bare `12`, quoted
-`'#12'`, a full UUID, or a unique UUID prefix anywhere a task reference is
-expected.
+Only `kb web` opens a TCP listener. It binds to 127.0.0.1 by default, and no
+other command listens on a port. The web view has no login screen, so keep the
+default local address unless you know how to protect a network service.
 
-Useful commands:
+## Optional AI and automation
 
-```text
-add  list  view  update  move  done  cancel  restore  rm
-project  users  comment  link  unlink
-```
+You can use kb without AI. If you choose to connect an OpenAI-compatible
+provider, kb can turn rough notes into a task, split a decision document into
+smaller tasks, or prepare tasks from GitHub and GitLab issues. You review the
+suggestions before anything reaches your board.
 
-Run `kb help` for task-command syntax and flags. Moving to Done is refused
-while a task is blocked, has an incomplete checklist, or has an open linked
-blocker. Use `--force` only when you mean to bypass that guard. `cancel` is
-reversible; `rm ID --yes` is permanent.
-
-### Work with projects
-
-Projects are simple views inside one board. Every task carries exactly one,
-stored as the scoped label `project::<name>`:
-
-```sh
-kb add "Ship the docs" -p web      # -p, --project, or --tag project::web
-kb add "Fix auth" -p api
-kb list -p api                     # one project; without -p, every project
-kb project list                    # every project with task counts
-kb update 12 -p api                # move task #12 to api
-```
-
-`kb add` refuses a task without a project: "no project given: pass -p <name>
-or --tag project::<name>". There is no stored default and no environment
-override, so two shells or agents sharing one data directory cannot file tasks
-into each other's project. Commands addressed by task number (`update`,
-`done`, `move`, `cancel`, `rm`, `comment`, `link`) need no project. Tasks from
-older kb versions without a project are placed in `inbox` when a local mode
-opens the store.
-
-## Use the web UI
-
-The web UI is an optional browser view of the same board. It starts only when
-you ask for it:
-
-```sh
-kb web                                  # pick a free loopback port, open the browser
-kb web --no-open --addr 127.0.0.1:8321  # fixed port, print the URL only
-```
-
-| Flag | Purpose |
-| --- | --- |
-| `--data DIR` | Data directory (default `$KB_DATA` or `~/.local/share/kb`) |
-| `--addr HOST:PORT` | Listen address; default `127.0.0.1:0` |
-| `--no-open` | Do not launch a browser |
-| `--unsafe-listen` | Allow a non-loopback `--addr` |
-
-The web UI has no authentication. A non-loopback `--addr` is refused unless
-`--unsafe-listen` is also given, and with it anyone who can reach the address
-can read and change your board. Keep the default loopback bind unless you have
-a firewall or tunnel in front of it.
-
-TUI, CLI, MCP, and the web UI share one SQLite database; changes made in any
-of them appear in the others without a restart.
-
-## Use AI and agents
-
-AI is optional. Press `s` in the TUI to configure an OpenAI-compatible Chat
-Completions endpoint, model, and API key. The endpoint must support tool calls.
-Drafting, ADR splitting, and forge import show proposals for review before
-creating tasks.
-
-Built-in skills:
-
-- `story-draft` turns rough notes into one card;
-- `adr-split` turns an ADR into reviewable cards;
-- `import-transform` turns GitHub or GitLab issues into reviewable cards.
-
-Add or replace skills with direct-child Markdown files in `<data>/skills`.
-Provider and forge credentials are encrypted in the local SQLite database.
-
-### Connect an MCP client
-
-`kb mcp` exposes the local board over stdio. It opens no network listener.
-
-```toml
-[mcp_servers.kb]
-command = "kb"
-args = ["mcp"]
-```
-
-The MCP process exposes task listing, creation, updates, moves, reversible
-cancellation, explicit permanent deletion, similarity and duplicate checks,
-task details, comments, and blocker links. It registers 12 tools and no MCP
-resources. `add_task` requires a `project` argument, as `kb add` requires
-`-p`.
+The command line can create, update, move, search, finish, cancel, and restore
+tasks. `kb mcp` also lets compatible AI tools work with the local board. Both
+use the same data as the terminal and browser views.
 
 <details>
-<summary>Exact MCP tool names</summary>
+<summary>Command-line example</summary>
 
-```text
-list_tasks        add_task          update_task       move_task
-delete_task       search_similar    duplicate_check   get_task
-add_comment       list_comments     link_tasks        unlink_tasks
+```sh
+kb add "Plan the autumn road trip" -p personal --prio high --tag travel
+kb list -p personal
+kb move 1 doing
+kb done 1
 ```
+
+Run `kb help` for the complete command reference.
 
 </details>
 
-## Keep your data safe
+## Common questions
 
-Important files in the data directory:
+### Does kb sync between computers?
 
-| Path | Purpose |
-| --- | --- |
-| `kb.db` | Tasks and settings |
-| `kb.db-wal`, `kb.db-shm` | Active SQLite sidecars |
-| `secret` | Generated key when `KB_SECRET` is unset |
-| `.kb-tui/` | TUI preferences |
-| `skills/` | Optional custom AI skills |
+No. kb is deliberately local-only. It does not include a cloud account or
+multi-device sync.
 
-### Back up
+### Does kb need an internet connection?
 
-1. Quit the TUI and stop any CLI scripts or MCP clients that may be writing.
-2. Copy the entire data directory as one unit—not just `kb.db`. This keeps the
-   database, any SQLite sidecars, the generated `secret`, preferences, and
-   custom skills together. Copy to a fresh destination, not over an existing one.
-3. If you set `KB_SECRET` outside the data directory, preserve that exact value
-   with the backup. It is part of the backup even though it is stored elsewhere.
+No for the board, terminal app, browser view, and command line. Optional AI and
+issue-import tools need access to the provider or forge you configure.
 
-### Restore
+### Where are my tasks stored?
 
-1. Stop every kb process that uses the destination data directory.
-2. Restore the complete directory to an empty directory. Use the original
-   generated `secret` file or the exact external `KB_SECRET` value.
-3. Open the restored directory first with the same kb version or a newer one.
-4. Start kb normally. It validates the database schema before migration and
-   refuses an existing database when its generated secret is missing, instead
-   of silently creating a key that cannot decrypt the stored credentials.
+In the kb data folder on your computer. Every view reads the same local board.
 
-Losing the generated or external key makes stored credentials unreadable. Task
-content remains in SQLite, but the complete directory plus the matching secret
-is the supported recovery unit.
+### Which systems are supported?
 
-### Unsupported
-
-Do not:
-
-- Back up live copies of the directory while kb is running anywhere.
-- Copy only `kb.db` without the rest of the directory.
-- Overlay a restored backup onto an existing directory.
-- Store the data directory on network filesystems or synced folders (Dropbox,
-  iCloud, OneDrive, and similar).
-- Use the same data directory from multiple hosts.
-- Downgrade to an older kb version with an existing database.
-
-Legacy `<user>.md` boards in the data directory are considered for one-time
-import when that owner has no tasks. Use `default.md` for the board visible to
-local modes. Source Markdown files are not deleted.
-
-<details>
-<summary>Environment variables</summary>
-
-| Variable | Purpose |
-| --- | --- |
-| `KB_DATA` | Data directory |
-| `KB_SECRET` | Encryption secret override |
-| `KB_AI_ALLOW_PRIVATE` | Allow private AI endpoints; defaults to `1`, set `0` to block them |
-| `KB_FORGE_ALLOW_PRIVATE` | Bypass the forge guard for named hosts or all hosts |
-| `KB_LINK_ALLOW_PRIVATE` | Bypass the skill-link guard for named hosts or all hosts |
-
-The three `*_ALLOW_PRIVATE` settings control separate network boundaries. AI
-allows private endpoints when unset or set to `1`; set it to `0` to block them.
-Forge and skill links accept a host list or `1`/`*` for all.
-
-</details>
-
-## Build and contribute
-
-Build the local binary:
-
-```sh
-CGO_ENABLED=0 go build -o kb .
-```
-
-Run the test for the package or contract you changed. After committing, the
-repository-owned impact calculator shows the same scope GitHub Quality will
-use:
-
-```sh
-base=$(git merge-base origin/main HEAD)
-sh scripts/ci/impact.sh --base "$base" --head HEAD
-```
-
-Every pull request still reports the same nine Quality jobs. Unaffected jobs
-say `not affected`; affected jobs run only the owning packages and mapped
-contracts. Changes to shared migrations, terminal performance, CI, docs, or
-release behavior select their focused gate automatically. Node is used only by
-the repository's CI monitor and is not an application build or runtime
-dependency.
-
-When Go, release, or CI behavior changes, a native smoke matrix builds and
-exercises the local task flow on Linux, macOS, and Windows.
-
-Use conventional commit subjects and target pull requests at `main`.
-
-Current release notes are in
-[`docs/releases/v1.7.2.md`](docs/releases/v1.7.2.md).
+Release downloads are available for Linux on amd64 and arm64, macOS on Intel
+and Apple silicon, and Windows on amd64.
 
 ## License
 
-kb is available under the [MIT License](LICENSE).
+kb is open source under the [MIT License](LICENSE).

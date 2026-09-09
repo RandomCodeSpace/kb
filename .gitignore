@@ -7,6 +7,11 @@
 /docs/
 !/docs/
 /docs/*
+!/docs/assets/
+/docs/assets/*
+!/docs/assets/kb-banner.svg
+!/docs/assets/kb-tui.svg
+!/docs/assets/kb-web-ui.png
 !/docs/research/
 /docs/research/*
 !/docs/research/bubbletea-stack.md
