@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="820" viewBox="0 0 1440 820" role="img" aria-labelledby="title desc">
   <title id="title">kb terminal board</title>
-  <desc id="desc">A dark terminal window showing Todo, Doing, and Done columns with project-scoped task cards.</desc>
+  <desc id="desc">A dark terminal window showing a personal Kanban board with Todo, Doing, and Done columns.</desc>
   <defs>
     <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#111722"/>
@@ -31,7 +31,7 @@
   <circle cx="70" cy="61" r="8" fill="#ff7b54"/>
   <circle cx="98" cy="61" r="8" fill="#ffb020"/>
   <circle cx="126" cy="61" r="8" fill="#3fbf7f"/>
-  <text x="720" y="68" text-anchor="middle" class="mono label">kb · local board</text>
+  <text x="720" y="68" text-anchor="middle" class="mono label">kb · personal board</text>
 
   <rect x="54" y="112" width="5" height="32" rx="2" fill="#ff7b54"/>
   <text x="72" y="137" class="mono" fill="#ff7b54" font-size="27" font-weight="700">kb</text>
@@ -42,7 +42,7 @@
   <rect x="54" y="166" width="192" height="36" rx="9" fill="#151c28" stroke="#4f8ef7"/>
   <text x="72" y="190" class="mono" fill="#7aa2f7" font-size="16" font-weight="700">project: personal</text>
   <rect x="258" y="166" width="108" height="36" rx="9" fill="#201b12" stroke="#ffb020"/>
-  <text x="279" y="190" class="mono" fill="#ffb020" font-size="16" font-weight="700">#launch</text>
+  <text x="279" y="190" class="mono" fill="#ffb020" font-size="16" font-weight="700">#travel</text>
 
   <rect x="54" y="226" width="420" height="48" rx="9" fill="#26344b"/>
   <rect x="494" y="226" width="420" height="48" rx="9" fill="#252f3d"/>
@@ -51,7 +51,7 @@
   <rect x="494" y="226" width="7" height="48" rx="3" fill="#f2a33c"/>
   <rect x="934" y="226" width="7" height="48" rx="3" fill="#3fbf7f"/>
   <text x="78" y="257" class="mono column" fill="#7aa2f7">● 1  TODO</text>
-  <text x="430" y="257" text-anchor="end" class="mono small">3</text>
+  <text x="430" y="257" text-anchor="end" class="mono small">2</text>
   <text x="518" y="257" class="mono column" fill="#f2a33c">● 2  DOING</text>
   <text x="870" y="257" text-anchor="end" class="mono small">2</text>
   <text x="958" y="257" class="mono column" fill="#3fbf7f">● 3  DONE</text>
@@ -61,9 +61,9 @@
     <rect x="54" y="292" width="420" height="130" rx="12" fill="url(#selected)" stroke="#4f8ef7" stroke-width="2"/>
     <rect x="54" y="292" width="7" height="130" rx="3" fill="#4f8ef7"/>
     <text x="80" y="326" class="mono small" fill="#7aa2f7">#12</text>
-    <text x="80" y="361" class="mono title">Write launch notes</text>
+    <text x="80" y="361" class="mono title">Plan the autumn road trip</text>
     <rect x="80" y="382" width="122" height="25" rx="7" fill="#3a2c10"/>
-    <text x="92" y="400" class="mono" fill="#ffb020" font-size="14">#docs</text>
+    <text x="92" y="400" class="mono" fill="#ffb020" font-size="14">#travel</text>
     <rect x="210" y="382" width="154" height="25" rx="7" fill="#271e39"/>
     <text x="222" y="400" class="mono" fill="#b98af7" font-size="14">project: personal</text>
     <text x="438" y="400" text-anchor="end" class="mono small">high</text>
@@ -72,39 +72,33 @@
   <g>
     <rect x="54" y="438" width="420" height="112" rx="12" fill="#171d27" stroke="#253043"/>
     <text x="80" y="472" class="mono small" fill="#7aa2f7">#15</text>
-    <text x="80" y="507" class="mono title">Review onboarding flow</text>
-    <text x="80" y="532" class="mono small">□ install  □ first task  □ shortcuts</text>
-  </g>
-
-  <g>
-    <rect x="54" y="566" width="420" height="98" rx="12" fill="#171d27" stroke="#253043"/>
-    <text x="80" y="600" class="mono small" fill="#7aa2f7">#18</text>
-    <text x="80" y="635" class="mono title">Connect the MCP client</text>
+    <text x="80" y="507" class="mono title">Renew passport</text>
+    <text x="80" y="532" class="mono small">due Oct 15  ·  #errands</text>
   </g>
 
   <g>
     <rect x="494" y="292" width="420" height="142" rx="12" fill="#252f3d" stroke="#3d4d63"/>
     <rect x="494" y="292" width="7" height="142" rx="3" fill="#4f8ef7"/>
     <text x="520" y="326" class="mono small" fill="#7aa2f7">#9</text>
-    <text x="520" y="361" class="mono title">Polish the terminal board</text>
-    <text x="520" y="392" class="mono small">☑ keyboard flow</text>
-    <text x="520" y="416" class="mono small">□ verify mouse drag</text>
+    <text x="520" y="361" class="mono title">Compare cabin options</text>
+    <text x="520" y="392" class="mono small">☑ set the budget</text>
+    <text x="520" y="416" class="mono small">□ shortlist three places</text>
   </g>
 
   <g>
     <rect x="494" y="450" width="420" height="116" rx="12" fill="#171d27" stroke="#253043"/>
     <text x="520" y="484" class="mono small" fill="#7aa2f7">#14</text>
-    <text x="520" y="519" class="mono title">Check forge import</text>
+    <text x="520" y="519" class="mono title">Set up a weekly review</text>
     <rect x="520" y="536" width="93" height="22" rx="6" fill="#142b22"/>
-    <text x="531" y="552" class="mono" fill="#3fbf7f" font-size="13">github</text>
+    <text x="531" y="552" class="mono" fill="#3fbf7f" font-size="13">routine</text>
   </g>
 
   <g>
     <rect x="934" y="292" width="446" height="124" rx="12" fill="#171d27" stroke="#253043"/>
     <rect x="934" y="292" width="7" height="124" rx="3" fill="#3fbf7f"/>
     <text x="960" y="326" class="mono small" fill="#7aa2f7">#7</text>
-    <text x="960" y="361" class="mono title">Ship the README</text>
-    <text x="960" y="394" class="mono small">✓ copy  ✓ commands  ✓ links</text>
+    <text x="960" y="361" class="mono title">Clear the kitchen counter</text>
+    <text x="960" y="394" class="mono small">✓ recycle mail  ✓ put tools away</text>
   </g>
 
   <line x1="54" y1="704" x2="1380" y2="704" stroke="#253043"/>
