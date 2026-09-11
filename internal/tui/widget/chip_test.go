@@ -108,12 +108,11 @@ func TestLabelForms(t *testing.T) {
 		{"scoped compact", "type::feature", true, "feature"},
 		{"empty key falls back to plain", "::feature", false, " #::feature "},
 		{"empty value falls back to plain", "type::", false, " #type:: "},
-		// Spec section 3.5 cuts on "::" and nothing else. A single colon is an
-		// ordinary character in an ordinary tag, so the pill is plain and keeps
-		// the section 10.4.1 MarkTag prefix - which is what a hand-written
-		// "scope:value" reads as on a card (issue #229).
-		{"single colon is a plain tag", "scope:terminal", false, " #scope:terminal "},
-		{"single colon compact", "scope:terminal", true, "#scope:terminal"},
+		// A single colon scopes too, the spelling GitHub projects use. Issue
+		// #229 once kept it plain; v1.11.0 reversed that so imported labels
+		// read the same way GitLab's "::" ones do.
+		{"single colon is scoped", "scope:terminal", false, " scope terminal "},
+		{"single colon compact", "scope:terminal", true, "terminal"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -140,6 +139,43 @@ func TestScopedLabelDoesNotInjectAColon(t *testing.T) {
 		plain := ansi.Strip(rendered)
 		if strings.Contains(plain, ":") || !strings.Contains(plain, "type feature") {
 			t.Errorf("scoped label presentation = %q", plain)
+		}
+	}
+}
+
+func TestCutScopeAcceptsEveryForgeSpelling(t *testing.T) {
+	cases := []struct {
+		tag          string
+		scope, value string
+		scoped       bool
+	}{
+		{"type::bug", "type", "bug", true},
+		{"type: bug", "type", "bug", true},
+		{"type:bug", "type", "bug", true},
+		{"WIP: do not merge", "WIP", "do not merge", true},
+		{"a::b", "a", "b", true},
+		{"a:::b", "a", ":b", true},
+		{"bug", "", "bug", false},
+		{"type:", "", "type:", false},
+		{"type::", "", "type::", false},
+		{":bug", "", ":bug", false},
+		{"::bug", "", "::bug", false},
+		{"", "", "", false},
+	}
+	for _, tc := range cases {
+		scope, value, scoped := CutScope(tc.tag)
+		if scope != tc.scope || value != tc.value || scoped != tc.scoped {
+			t.Errorf("CutScope(%q) = %q, %q, %v; want %q, %q, %v", tc.tag, scope, value, scoped, tc.scope, tc.value, tc.scoped)
+		}
+	}
+}
+
+func TestLabelRendersSingleColonAsScoped(t *testing.T) {
+	styles := theme.New(true)
+	for _, tag := range []string{"type: feature", "type:feature"} {
+		plain := ansi.Strip(Label(styles, tag, theme.Card, false, false))
+		if strings.Contains(plain, ":") || !strings.Contains(plain, "type feature") {
+			t.Errorf("Label(%q) = %q, want the scoped presentation", tag, plain)
 		}
 	}
 }

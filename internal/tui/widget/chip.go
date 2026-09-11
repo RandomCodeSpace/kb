@@ -98,14 +98,32 @@ func chipBody(runs theme.ChipStyles, opts ChipOpts) (body, flat lipgloss.Style) 
 // cut are decided, so the board pill and the filter pill cannot fork.
 func labelParts(styles *theme.Styles, tag string, flat bool) (text, key string, fill theme.Slot) {
 	fill = theme.LabelSlot(LabelWheel(tag))
-	scopeKey, value, scoped := strings.Cut(tag, "::")
-	if !scoped || scopeKey == "" || value == "" {
+	scopeKey, value, scoped := CutScope(tag)
+	if !scoped {
 		return styles.Glyph.MarkTag + tag, "", fill
 	}
 	if flat {
 		return value, "", fill
 	}
 	return value, scopeKey + " ", fill
+}
+
+// CutScope splits a label into its scope and value. A label is scoped when a
+// colon separates a non-empty key from a non-empty value: "type::bug" is
+// GitLab's spelling, "type: bug" and "type:bug" are the ones GitHub projects
+// use. The double colon is tried first so "a::b" never reads as the value
+// ":b", and one space after a single colon belongs to the separator. The tag
+// text itself is never rewritten; only its presentation splits.
+func CutScope(tag string) (scope, value string, scoped bool) {
+	key, rest, found := strings.Cut(tag, "::")
+	if !found {
+		key, rest, found = strings.Cut(tag, ":")
+		rest = strings.TrimPrefix(rest, " ")
+	}
+	if !found || key == "" || rest == "" {
+		return "", tag, false
+	}
+	return key, rest, true
 }
 
 // Label renders one label pill, wheel-hued by the hash of spec section 1.6.
