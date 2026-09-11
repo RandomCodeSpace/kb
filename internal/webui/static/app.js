@@ -467,9 +467,19 @@ const isProjectTag = (tag) => tag.startsWith('project::');
 const isProvenanceTag = (tag) => tag.startsWith('link::') || tag.startsWith('import::');
 const userTags = (t) => (t.tags || []).filter((tag) => !isProjectTag(tag));
 const shownTags = (t) => userTags(t).filter((tag) => !isProvenanceTag(tag));
-function splitLabel(tag) {
-  const i = tag.indexOf('::');
-  return i > 0 ? { scope: tag.slice(0, i), value: tag.slice(i + 2) } : { scope: '', value: tag };
+// A label is scoped when a colon separates a non-empty key from a non-empty
+// value: "type::bug" is GitLab's spelling, "type: bug" and "type:bug" are the
+// ones GitHub projects use. The double colon is tried first so "a::b" never
+// reads as the value ":b"; one space after a single colon belongs to the
+// separator. The tag text is never rewritten, only its presentation splits.
+// allowEmpty keeps a bare "type:" as a scope query for the label picker.
+function splitLabel(tag, allowEmpty = false) {
+  let i = tag.indexOf('::'), len = 2;
+  if (i < 0) { i = tag.indexOf(':'); len = 1; }
+  if (i <= 0) return { scope: '', value: tag };
+  let value = tag.slice(i + len);
+  if (len === 1) value = value.replace(/^ /, '');
+  return value || allowEmpty ? { scope: tag.slice(0, i), value } : { scope: '', value: tag };
 }
 // Deterministic 12-hue wheel, hashed from the scope name so every type::* shares a hue.
 function hueOf(name) {
@@ -1870,13 +1880,15 @@ function labelEditor(container, opts = {}) {
     const pool = allLabels().filter((l) => !tags.includes(l));
     let list;
     if (!ql) list = pool;
-    else if (ql.includes('::')) { const [scope, value] = ql.split('::'); list = pool.filter((l) => { const p = splitLabel(l); return p.scope.toLowerCase() === scope && (!value || p.value.toLowerCase().includes(value)); }); }
+    else if (splitLabel(ql, true).scope) { const { scope, value } = splitLabel(ql, true); list = pool.filter((l) => { const p = splitLabel(l); return p.scope.toLowerCase() === scope && (!value || p.value.toLowerCase().includes(value)); }); }
     else list = pool.map((l) => ({ l, m: fuzzy(ql, l) })).filter((x) => x.m).sort((a, b) => b.m.score - a.m.score).map((x) => x.l);
     const out = [];
     const { scopes, plain } = groupLabels(list);
     for (const [scope, ts] of scopes) { out.push({ head: scope }); for (const t of ts) out.push({ tag: t }); }
     if (plain.length) { if (scopes.size) out.push({ head: 'Other' }); for (const t of plain) out.push({ tag: t }); }
-    if (q && !/\s/.test(q) && !pool.includes(q) && !tags.includes(q) && !isProjectTag(q) && q !== '::' && !q.endsWith('::')) out.push({ create: q });
+    // A new label needs a value after its colon, and the project scope is
+    // reserved in either spelling so a decoy like project:web cannot exist.
+    if (q && !/\s/.test(q) && !pool.includes(q) && !tags.includes(q) && !isProjectTag(q) && !/^project:/i.test(q) && !/:$/.test(q) && !/^:/.test(q)) out.push({ create: q });
     return out;
   };
   const render = () => {
