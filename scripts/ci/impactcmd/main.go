@@ -259,9 +259,6 @@ func classify(repo, base, head, modulePath string, changes []change, packages []
 
 			if path == "go.mod" || path == "go.sum" {
 				result.Go.CompileAll = true
-				for _, pkg := range allPackages {
-					ownerSet[pkg] = true
-				}
 				addReason(result.Reasons, "focused_quality", path)
 			}
 			if hasTestdataSegment(path) {

@@ -126,11 +126,7 @@ module="$(commit_all module)"
 run_impact "$leaf" "$module" || fail 'module impact failed'
 assert_contains '"compile_all": true' 'module compile expansion'
 assert_contains '"repository_tests": false' 'module test restraint'
-run_impact "$leaf" "$module" --format plan || fail 'module plan failed'
-for package in example.test/impact example.test/impact/internal/board example.test/impact/internal/importer example.test/impact/internal/leaf example.test/impact/internal/store example.test/impact/internal/tui; do
-  assert_contains "$(printf 'owner\t%s' "$package")" 'module full test owner'
-done
-run_impact "$leaf" "$module" || fail 'module impact failed'
+assert_contains '"owners": []' 'module-only has no changed owner coverage'
 assert_contains '"binary_release_contract": true' 'module release classification'
 
 printf 'package main\n\nimport "example.test/impact/internal/importer"\n\nfunc main() { println(importer.Value()) }\n' >"$fixture/main.go"
@@ -202,10 +198,7 @@ run_impact "$sonar" "$checksums" || fail 'go.sum impact failed'
 assert_contains '"compile_all": true' 'go.sum compile expansion'
 assert_contains '"binary_release_contract": true' 'go.sum release classification'
 assert_contains '"focused_quality": true' 'go.sum quality classification'
-run_impact "$sonar" "$checksums" --format plan || fail 'go.sum plan failed'
-for package in example.test/impact example.test/impact/internal/board example.test/impact/internal/importer example.test/impact/internal/store example.test/impact/internal/tui; do
-  assert_contains "$(printf 'owner\t%s' "$package")" 'go.sum full test owner'
-done
+assert_contains '"owners": []' 'go.sum-only has no changed owner coverage'
 
 printf 'package store\n\nfunc Schema() int { return 2 }\n' >"$fixture/internal/store/schema.go"
 schema="$(commit_all schema)"

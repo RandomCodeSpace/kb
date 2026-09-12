@@ -4,8 +4,8 @@
 # Usage: scripts/release.sh vX.Y.Z notes-file [--dry-run]
 #
 # Run this from a clean plain clone on linux/amd64. A dry run performs the
-# complete test, vulnerability, build, and smoke suite, then removes its temporary annotated
-# tag. It does not contact GitHub or mutate the remote repository. Vulnerability
+# complete test, vulnerability, build, and smoke suite, then removes its
+# temporary annotated tag. It does not contact GitHub or mutate the remote repository. Vulnerability
 # scanning downloads the pinned scanner and current Go vulnerability database.
 #
 # A published tag is permanent. If publication fails after the tag is pushed,
@@ -241,6 +241,8 @@ sh scripts/check-go-vuln.sh
 if [[ $focused_quality == true ]]; then
   sh scripts/check-go-format.sh --changed "$previous_commit" "$source_commit"
   if [[ ${#impact_owners[@]} -gt 0 ]]; then
+    GO_COVERAGE_PROFILE="$output_dir/go-coverage.out" \
+      sh scripts/check-go-coverage.sh --packages "${impact_owners[@]}"
     go vet -buildvcs=false "${impact_owners[@]}"
   fi
 else
