@@ -22,7 +22,9 @@ func TestBackupRejectsRelativePathsAfterWorkingDirectoryRemoved(t *testing.T) {
 			t.Fatalf("removed working directory %v: %v", paths, err)
 		}
 	}
-	if lock, err := acquireBackupLock("relative-source"); !errors.Is(err, os.ErrNotExist) || lock != nil {
+	// Depending on the OS, resolution or SQLite can report the missing cwd.
+	// Neither path may acquire a maintenance connection.
+	if lock, err := acquireBackupLock("relative-source"); err == nil || lock != nil {
 		t.Fatalf("acquired backup lock with unresolved relative path: %v, %v", lock, err)
 	}
 	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
