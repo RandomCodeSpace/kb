@@ -2,8 +2,6 @@ package store
 
 import (
 	"bytes"
-	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -104,7 +102,7 @@ func TestColdCopyRecoveryRoundTrip(t *testing.T) {
 			if err := source.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if err := copyRecoveryTree(sourceDir, restoredDir); err != nil {
+			if err := BackupDirectory(sourceDir, restoredDir); err != nil {
 				t.Fatal(err)
 			}
 
@@ -215,38 +213,4 @@ func assertRecoveryFiles(t *testing.T, source, restored string) {
 			t.Fatalf("restored file %s differs: %x, %v", name, got, err)
 		}
 	}
-}
-
-func copyRecoveryTree(source, target string) error {
-	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		relative, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		destination := filepath.Join(target, relative)
-		if entry.IsDir() {
-			return os.MkdirAll(destination, 0o700)
-		}
-		input, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer input.Close()
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(output, input); err != nil {
-			_ = output.Close()
-			return err
-		}
-		return output.Close()
-	})
 }

@@ -182,22 +182,18 @@ func Open(path string, secret []byte) (*Store, error) {
 	// Create the database with private permissions before SQLite opens it. An
 	// existing database is tightened too; SQLite derives WAL/SHM permissions
 	// from the main database file.
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("store: create %s: %w", path, err)
-	}
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("store: chmod %s: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		return nil, fmt.Errorf("store: close %s: %w", path, err)
+	if err := prepareDatabaseFile(path); err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
+	if err := checkDatabaseIntegrity(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, err

@@ -42,6 +42,8 @@ commands:
   restore <id>           move a cancelled task back to todo
   rm <id>                hard delete: erase a task for good, no undo
                          (requires --yes)
+  backup <dir>           copy the entire data directory to a new directory;
+                         close every running kb process first
   project list           list every project with its task count
   users                  list board owners and their task counts (local
                          database only; --json for machine output)
@@ -161,6 +163,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return a.cmdRestore(rest)
 	case "rm":
 		return a.cmdRm(rest)
+	case "backup":
+		return a.cmdBackup(rest)
 	case "users":
 		return a.cmdUsers(rest)
 	case "project":

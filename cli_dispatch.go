@@ -15,7 +15,7 @@ import (
 // cliVerbs must list every verb cliapp.Run dispatches; a verb missing here is
 // unreachable from the binary however well it is implemented and documented.
 // TestEveryCLIVerbIsDispatched pins the two lists together.
-var cliVerbs = []string{"add", "list", "view", "update", "move", "done", "cancel", "restore", "rm", "users", "project", "comment", "link", "unlink", "help"}
+var cliVerbs = []string{"add", "list", "view", "update", "move", "done", "cancel", "restore", "rm", "backup", "users", "project", "comment", "link", "unlink", "help"}
 
 func init() {
 	for _, cmd := range cliVerbs {
