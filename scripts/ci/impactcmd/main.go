@@ -389,11 +389,8 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 		mark("ci_contract", &result.Checks.CIContract)
 	}
 
-	if strings.HasPrefix(path, "internal/store/testdata/migrations/") ||
-		path == "internal/store/released_fixtures_test.go" || path == "scripts/generate-migration-fixtures.py" {
-		mark("migration_recovery", &result.Checks.MigrationRecovery)
-	}
-	if matchesAny(path,
+	if strings.HasPrefix(path, "internal/store/testdata/migrations/") || matchesAny(path,
+		"internal/store/released_fixtures_test.go", "scripts/generate-migration-fixtures.py",
 		"internal/store/migrate.go", "internal/store/migrate_test.go",
 		"internal/store/store.go", "internal/store/store_test.go",
 		"internal/store/schema.go", "internal/store/settings.go",

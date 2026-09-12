@@ -212,9 +212,27 @@ run_impact "$schema" "$migrate" || fail 'migrate impact failed'
 assert_contains '"contract_race": true' 'migrate race classification'
 assert_contains '"migration_recovery": true' 'migrate recovery classification'
 
+mkdir -p -- "$fixture/internal/store/testdata/migrations/v0.2.0"
+printf 'frozen database\n' >"$fixture/internal/store/testdata/migrations/v0.2.0/kb.db"
+released_database="$(commit_all released-database)"
+run_impact "$migrate" "$released_database" || fail 'released database impact failed'
+assert_contains '"migration_recovery": true' 'released database recovery classification'
+assert_contains 'example.test/impact/internal/store' 'released database owner'
+
+printf 'package store\n\nfunc fixture() {}\n' >"$fixture/internal/store/released_fixtures_test.go"
+released_test="$(commit_all released-test)"
+run_impact "$released_database" "$released_test" || fail 'released fixture test impact failed'
+assert_contains '"migration_recovery": true' 'released fixture test recovery classification'
+
+printf '# fixture generator\n' >"$fixture/scripts/generate-migration-fixtures.py"
+released_generator="$(commit_all released-generator)"
+run_impact "$released_test" "$released_generator" || fail 'released fixture generator impact failed'
+assert_contains '"migration_recovery": true' 'released fixture generator recovery classification'
+assert_contains '"unclassified": []' 'released fixture generator classified'
+
 printf '// ci monitor fixture\nprocess.exit(0);\n' >"$fixture/scripts/ci_monitor.cjs"
 monitor="$(commit_all monitor)"
-run_impact "$migrate" "$monitor" || fail 'ci monitor impact failed'
+run_impact "$released_generator" "$monitor" || fail 'ci monitor impact failed'
 assert_contains '"ci_contract": true' 'ci monitor classification'
 assert_contains '"focused_quality": false' 'ci monitor Go exclusion'
 
@@ -246,23 +264,10 @@ assert_contains '"ci_contract": true' 'vulnerability gate CI classification'
 assert_contains '"binary_release_contract": true' 'vulnerability gate release classification'
 assert_contains '"unclassified": []' 'vulnerability gate classified'
 
-mkdir -p "$fixture/internal/store/testdata/migrations/v0.2.0"
-printf 'frozen database fixture\n' >"$fixture/internal/store/testdata/migrations/v0.2.0/kb.db"
-migration_fixture="$(commit_all migration-fixture)"
-run_impact "$vulnerability" "$migration_fixture" || fail 'migration fixture impact failed'
-assert_contains '"migration_recovery": true' 'released database migration classification'
-assert_contains 'example.test/impact/internal/store' 'released database store owner'
-
-printf '#!/usr/bin/env python3\n' >"$fixture/scripts/generate-migration-fixtures.py"
-migration_generator="$(commit_all migration-generator)"
-run_impact "$migration_fixture" "$migration_generator" || fail 'migration generator impact failed'
-assert_contains '"migration_recovery": true' 'migration generator classification'
-assert_contains '"unclassified": []' 'migration generator classified'
-
 printf 'unknown\n' >"$fixture/mystery.bin"
 unknown="$(commit_all unknown)"
 status=0
-run_impact "$migration_generator" "$unknown" 2>/dev/null || status=$?
+run_impact "$vulnerability" "$unknown" 2>/dev/null || status=$?
 [ "$status" -ne 0 ] || fail 'unclassified path unexpectedly passed'
 assert_contains 'mystery.bin' 'unclassified path manifest'
 
