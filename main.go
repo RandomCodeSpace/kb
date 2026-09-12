@@ -21,7 +21,7 @@ const rootUsageText = `usage: kb                    open the local board in the 
 
 commands:
   add, list, view, update, move, done, cancel, restore, rm, users,
-  project, comment, link, unlink
+  project, comment, link, unlink, backup
              the task CLI - run "kb help" for the full reference
   mcp        expose the local board to AI agents over MCP stdio
   tui        open the local board in a full-screen terminal UI

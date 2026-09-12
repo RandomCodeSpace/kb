@@ -152,13 +152,49 @@ There is no hosted account, remote mode, or build step. Your task content stays
 in the kb data folder on your computer. Core task management works offline.
 Optional AI tools and issue imports connect only to providers you configure.
 
-To back up your board, close every running kb window and copy the entire data
-folder. The default location is `$KB_DATA` when set, otherwise
+To back up your board, close every kb process, including terminal windows,
+web servers, MCP sessions, and CLI commands, then run:
+
+```sh
+kb backup ./kb-backup
+```
+
+The destination must be a new directory outside your data folder, with an
+existing parent directory. kb copies the entire folder and refuses to overwrite
+an existing destination, even an empty one. Use `--data <source>` to choose the
+source. The default location is `$KB_DATA` when set, otherwise
 `~/.local/share/kb` on Linux, macOS, and Windows. On Windows, `~` is your
 user-profile folder. kb keeps the same default layout on all three platforms;
 it does not use macOS Application Support or Windows AppData. Set `KB_DATA`
 or pass `--data` to choose another location. Keep the folder together. Copying
 only the database file can leave out information needed for a complete restore.
+
+<details>
+<summary>Backup and restore details</summary>
+
+During the copy, kb keeps an exclusive SQLite maintenance connection open to
+exclude database writers. It checkpoints committed WAL data before copying,
+runs no transaction during the copy, and restores the original journal mode
+afterward. Close every other kb process first; an active database connection
+causes a refusal. Keep other programs from changing files in the data folder.
+Symbolic links, special files, and additional links to `kb.db` are refused.
+
+A failed copy remains marked with `.kb-backup-incomplete`. Retry into a new
+destination; removing the marker does not make an incomplete backup valid.
+If you use `KB_SECRET`, keep its original value separately: the environment
+secret is not written into the backup. File-backed secrets are included.
+
+To restore, copy a completed backup to a new data folder and open it with the
+same or a newer kb version using `kb --data <restored-folder>`. Supply the
+original `KB_SECRET` if the backup used it. Keep the original folder until you
+have checked the restored board.
+
+On opening a board, kb checks SQLite integrity before migration and refuses
+empty or damaged databases, orphan database sidecars, missing required file
+secrets, and marked incomplete backups. A structurally valid database cannot
+reveal every omitted WAL or optional file, so always retain the whole folder.
+
+</details>
 
 Do not place the data folder in Dropbox, iCloud, OneDrive, or another synced
 folder, and do not share one data folder between computers.
@@ -225,13 +261,14 @@ strings.
 | `comment list` | Array of comments |
 | `project list` | Array of objects with `project` and `tasks` |
 | `users` | Array of objects with `user` and `tasks` |
+| `backup` | Object with absolute destination `path` and `requiresExternalSecret` boolean |
 | `version` | Object with `version` and optional `revision` and `modified` |
 
 `blocks` and `blockedBy` contain task sequence numbers. Comment objects have
 `id`, `task`, `taskId`, `author`, `body`, and `createdAt`; `task` is the sequence
 number and `taskId` is the UUID.
 
-Task commands use these exit codes:
+CLI commands use these exit codes:
 
 | Code | Meaning |
 | --- | --- |
@@ -242,7 +279,8 @@ Task commands use these exit codes:
 | `4` | Ambiguous reference or refused/conflicting mutation |
 
 Code `4` includes the completion guard, a self/duplicate/cyclic link, restoring
-a task that is not cancelled, and a deletion missing `--yes`.
+a task that is not cancelled, a deletion missing `--yes`, and a backup refused
+because its destination exists or another database connection is active.
 `kb restore` accepts only cancelled tasks. Use `kb move <id> todo` to reopen a
 task in another state.
 
