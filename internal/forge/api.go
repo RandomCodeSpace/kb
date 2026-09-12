@@ -190,7 +190,7 @@ func (s *Service) Preview(ctx context.Context, user string, request PreviewReque
 	if sourceCount == 0 {
 		return result, nil
 	}
-	runCtx, cancel := context.WithTimeout(ctx, skillRunDeadline)
+	runCtx, cancel := context.WithTimeout(ctx, SkillRunDeadline)
 	defer cancel()
 	run, err := s.runner.RunSkill(runCtx, user, ai.ScopeReadOnly, importTransformSkillName,
 		"Transform these numbered forge issues into kanban-card proposals:\n\n"+packed, sourceCount, aiImportMaxTokens)

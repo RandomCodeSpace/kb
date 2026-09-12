@@ -11,7 +11,8 @@ import (
 )
 
 const (
-	skillRunDeadline                   = 4 * time.Minute
+	// SkillRunDeadline bounds an assistant run shared by local interfaces.
+	SkillRunDeadline                   = 4 * time.Minute
 	storageErrorMessage                = "storage error"
 	configuredSourceUnavailableMessage = "configured source unavailable"
 	connectionFailedMessage            = "connection failed"
