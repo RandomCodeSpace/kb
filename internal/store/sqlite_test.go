@@ -2,9 +2,11 @@ package store
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -57,5 +59,24 @@ func TestOpenSQLitePaths(t *testing.T) {
 				t.Fatalf("intended path %q does not contain the SQLite database", tc.path)
 			}
 		})
+	}
+}
+
+func TestOpenRejectsUnresolvableRelativePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not allow removing the current directory")
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open("kb.db", []byte("test-secret"))
+	if st != nil {
+		_ = st.Close()
+		t.Fatal("opened a database without a resolvable path")
+	}
+	if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "store: database path:") {
+		t.Fatalf("Open error = %v, want the wrapped path-resolution error", err)
 	}
 }

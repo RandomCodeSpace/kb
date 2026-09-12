@@ -15,10 +15,7 @@ func SQLiteDSN(path string, pragmas ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	uriPath := filepath.ToSlash(absolute)
-	if !strings.HasPrefix(uriPath, "/") {
-		uriPath = "/" + uriPath
-	}
+	uriPath := "/" + strings.TrimPrefix(filepath.ToSlash(absolute), "/")
 	query := url.Values{}
 	for _, pragma := range pragmas {
 		query.Add("_pragma", pragma)
