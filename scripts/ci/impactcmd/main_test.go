@@ -42,3 +42,29 @@ func TestClassifyMigrationFixtures(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyReadinessContracts(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want checks
+	}{
+		{"CONTEXT.md", checks{DocsContract: true}},
+		{"scripts/check-go-vuln.sh", checks{BinaryReleaseContract: true, CIContract: true}},
+		{"scripts/ci/impactcmd/main.go", checks{CIContract: true}},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			repo := t.TempDir()
+			packages := []packageInfo{{ImportPath: "example.test/kb/scripts/ci/impactcmd", Dir: filepath.Join(repo, "scripts/ci/impactcmd")}}
+			got := classify(repo, "base", "head", "example.test/kb", []change{{Status: "M", Paths: []string{tc.path}}}, packages)
+			if got.Checks != tc.want {
+				t.Errorf("checks = %+v, want %+v", got.Checks, tc.want)
+			}
+			if len(got.Go.Owners) != 0 {
+				t.Errorf("non-application change selected coverage owners: %v", got.Go.Owners)
+			}
+			if len(got.Unclassified) != 0 {
+				t.Errorf("unclassified paths = %v", got.Unclassified)
+			}
+		})
+	}
+}
