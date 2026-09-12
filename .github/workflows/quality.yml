@@ -122,7 +122,8 @@ jobs:
           mapfile -t compile_packages < <(jq -r '.go.compile_packages[]' <<<"$IMPACT_MANIFEST")
           sh scripts/check-go-format.sh --changed "$IMPACT_BASE" "$IMPACT_HEAD"
           if [[ $EVENT_NAME == push ]] || jq -e '.go.compile_all' <<<"$IMPACT_MANIFEST" >/dev/null; then
-            go test -buildvcs=false -count=1 ./...
+            mkdir -p "$(dirname "$GO_COVERAGE_PROFILE")"
+            go test -buildvcs=false -count=1 -covermode=atomic -coverprofile="$GO_COVERAGE_PROFILE" ./...
           else
             if ((${#owners[@]})); then
               sh scripts/check-go-coverage.sh --packages "${owners[@]}"
