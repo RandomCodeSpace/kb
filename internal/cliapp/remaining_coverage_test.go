@@ -50,6 +50,7 @@ func TestOpenLocalRemainingFilesystemPaths(t *testing.T) {
 	t.Run("default data fails", func(t *testing.T) {
 		t.Setenv("KB_DATA", "")
 		t.Setenv("HOME", "")
+		t.Setenv("USERPROFILE", "")
 		if _, err := openLocal("default", "", io.Discard); err == nil || !strings.Contains(err.Error(), "cannot determine home") {
 			t.Fatalf("openLocal missing default error = %v", err)
 		}

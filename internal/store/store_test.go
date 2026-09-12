@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -995,7 +996,7 @@ func TestLoadOrCreateSecret(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stat secret: %v", err)
 		}
-		if perm := fi.Mode().Perm(); perm != 0o600 {
+		if perm := fi.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 			t.Errorf("secret mode = %o, want 600", perm)
 		}
 		s2, err := LoadOrCreateSecret(dataDir)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -172,7 +173,7 @@ func TestCreateSecretConcurrentPublication(t *testing.T) {
 		if info.Size() != secretFileBytes {
 			t.Errorf("secret temp size = %d, want %d", info.Size(), secretFileBytes)
 		}
-		if perm := info.Mode().Perm(); perm != 0o600 {
+		if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 			t.Errorf("secret temp mode = %o, want 600", perm)
 		}
 	}
@@ -209,7 +210,7 @@ func TestCreateSecretConcurrentPublication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat final secret: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 		t.Errorf("final secret mode = %o, want 600", perm)
 	}
 	temps, err = filepath.Glob(filepath.Join(dataDir, secretTempPattern))
@@ -283,10 +284,11 @@ func TestCreateSecretPublicationOrder(t *testing.T) {
 		"before publish",
 		"link:temp:final",
 		"open dir:data",
-		"dir sync",
-		"dir close",
-		"remove:temp",
 	}
+	if runtime.GOOS != "windows" {
+		wantEvents = append(wantEvents, "dir sync")
+	}
+	wantEvents = append(wantEvents, "dir close", "remove:temp")
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("publication events = %v, want %v", events, wantEvents)
 	}

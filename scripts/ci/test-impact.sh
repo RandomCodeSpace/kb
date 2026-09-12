@@ -126,6 +126,7 @@ module="$(commit_all module)"
 run_impact "$leaf" "$module" || fail 'module impact failed'
 assert_contains '"compile_all": true' 'module compile expansion'
 assert_contains '"repository_tests": false' 'module test restraint'
+assert_contains '"owners": []' 'module-only has no changed owner coverage'
 assert_contains '"binary_release_contract": true' 'module release classification'
 
 printf 'package main\n\nimport "example.test/impact/internal/importer"\n\nfunc main() { println(importer.Value()) }\n' >"$fixture/main.go"
@@ -197,6 +198,7 @@ run_impact "$sonar" "$checksums" || fail 'go.sum impact failed'
 assert_contains '"compile_all": true' 'go.sum compile expansion'
 assert_contains '"binary_release_contract": true' 'go.sum release classification'
 assert_contains '"focused_quality": true' 'go.sum quality classification'
+assert_contains '"owners": []' 'go.sum-only has no changed owner coverage'
 
 printf 'package store\n\nfunc Schema() int { return 2 }\n' >"$fixture/internal/store/schema.go"
 schema="$(commit_all schema)"
@@ -255,10 +257,17 @@ assert_contains 'example.test/impact/internal/webui' 'stylesheet source owner'
 assert_contains '"focused_quality": true' 'stylesheet source classification'
 assert_contains '"unclassified": []' 'stylesheet source classified'
 
+printf '#!/usr/bin/env sh\nexit 0\n' >"$fixture/scripts/check-go-vuln.sh"
+vulnerability="$(commit_all vulnerability)"
+run_impact "$stylesheet" "$vulnerability" || fail 'vulnerability gate impact failed'
+assert_contains '"ci_contract": true' 'vulnerability gate CI classification'
+assert_contains '"binary_release_contract": true' 'vulnerability gate release classification'
+assert_contains '"unclassified": []' 'vulnerability gate classified'
+
 printf 'unknown\n' >"$fixture/mystery.bin"
 unknown="$(commit_all unknown)"
 status=0
-run_impact "$stylesheet" "$unknown" 2>/dev/null || status=$?
+run_impact "$vulnerability" "$unknown" 2>/dev/null || status=$?
 [ "$status" -ne 0 ] || fail 'unclassified path unexpectedly passed'
 assert_contains 'mystery.bin' 'unclassified path manifest'
 

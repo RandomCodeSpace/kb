@@ -24,6 +24,16 @@ func importKey(user string) string { return "imported:" + user }
 // never reimported either). The original files are left untouched. It
 // returns the number of boards imported.
 func (s *Store) ImportMarkdownDir(dir string) (int, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("store: read markdown dir: %w", err)
+	}
+	if !info.IsDir() {
+		return 0, fmt.Errorf("store: read markdown dir: %s is not a directory", dir)
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

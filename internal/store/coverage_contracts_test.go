@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -478,13 +479,8 @@ func TestCreateSecretReportsInjectedDurabilityFailures(t *testing.T) {
 			installCoverageSecretOps(t)
 			createSecretTemp = func(string, string) (secretTempFile, error) { return tt.file, nil }
 			removeSecretFile = func(string) error { return nil }
-			_, err := createSecret("dir", "path", random(), nil)
-			wantError := tt.name != "sync data directory" || runtime.GOOS != "windows"
-			if wantError && err == nil {
+			if _, err := createSecret("dir", "path", random(), nil); err == nil {
 				t.Fatal("createSecret returned nil error")
-			}
-			if !wantError && err != nil {
-				t.Fatalf("createSecret returned error: %v", err)
 			}
 		})
 	}
@@ -538,8 +534,13 @@ func TestCreateSecretReportsInjectedDurabilityFailures(t *testing.T) {
 			linkSecretFile = func(string, string) error { return nil }
 			openSecretDir = func(string) (secretDirectory, error) { return tt.dir, tt.openErr }
 			removeSecretFile = func(string) error { return tt.remove }
-			if _, err := createSecret("dir", "path", random(), nil); err == nil {
+			_, err := createSecret("dir", "path", random(), nil)
+			wantError := tt.name != "sync data directory" || runtime.GOOS != "windows"
+			if wantError && err == nil {
 				t.Fatal("createSecret returned nil error")
+			}
+			if !wantError && err != nil {
+				t.Fatalf("createSecret returned error: %v", err)
 			}
 		})
 	}
@@ -1225,5 +1226,21 @@ func TestImportMarkdownDirRejectsNonDirectoryPath(t *testing.T) {
 	}
 	if _, err := s.ImportMarkdownDir(path); err == nil {
 		t.Fatal("ImportMarkdownDir accepted a regular file")
+	}
+}
+
+func TestImportMarkdownDirPreservesStatError(t *testing.T) {
+	s := newStore(t)
+	path := filepath.Join(t.TempDir(), "invalid\x00directory")
+	imported, err := s.ImportMarkdownDir(path)
+	if imported != 0 || !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("ImportMarkdownDir = (%d, %v), want zero imports and an invalid-path error", imported, err)
+	}
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) || pathErr.Path != path {
+		t.Fatalf("ImportMarkdownDir error = %v, want the original filesystem path", err)
+	}
+	if !strings.Contains(err.Error(), "store: read markdown dir:") {
+		t.Fatalf("ImportMarkdownDir error = %v, want import context", err)
 	}
 }

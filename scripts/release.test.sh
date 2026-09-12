@@ -45,6 +45,9 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_GO_LOG:-/dev/null}"
 case ${1:-} in
   run)
+    if [[ ${3:-} == golang.org/x/vuln/cmd/govulncheck@v1.8.0 ]]; then
+      exit "${FAKE_VULN_STATUS:-0}"
+    fi
     base=''
     head=''
     output_format=''
@@ -66,10 +69,18 @@ case ${1:-} in
     printf 'compile_all\tfalse\n'
     for check_name in focused_quality contract_race migration_recovery \
       tui_performance binary_release_contract ci_contract docs_contract sonar; do
-      printf 'check\t%s\tfalse\n' "$check_name"
+      if [[ $check_name == focused_quality && ${FAKE_FOCUSED:-0} == 1 ]]; then
+        printf 'check\tfocused_quality\ttrue\n'
+        printf 'owner\tgithub.com/RandomCodeSpace/kb\n'
+      else
+        printf 'check\t%s\tfalse\n' "$check_name"
+      fi
     done
     ;;
   test)
+    exit "${FAKE_TEST_STATUS:-0}"
+    ;;
+  vet)
     exit 0
     ;;
   list)
@@ -204,6 +215,13 @@ printf 'release fixture baseline\n' >"$source_repo/baseline.txt"
 cp "$repo_root/scripts/release.sh" "$source_repo/scripts/release.sh"
 cp "$repo_root/scripts/verify-release-artifacts.sh" \
   "$source_repo/scripts/verify-release-artifacts.sh"
+cp "$repo_root/scripts/check-go-vuln.sh" "$source_repo/scripts/check-go-vuln.sh"
+printf '#!/usr/bin/env sh\nexit 0\n' >"$source_repo/scripts/check-go-format.sh"
+cat >"$source_repo/scripts/check-go-coverage.sh" <<'FAKE_COVERAGE'
+#!/usr/bin/env sh
+printf 'selected owner coverage ran\n'
+exit "${FAKE_COVERAGE_STATUS:-0}"
+FAKE_COVERAGE
 cp "$repo_root/scripts/ci/impact.sh" "$source_repo/scripts/ci/impact.sh"
 printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.3.md"
 printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.4.md"
@@ -308,12 +326,33 @@ assert_contains 'dry run complete: v1.2.3 verified locally; nothing published' \
   "$test_root/dry-run.out"
 assert_contains 'run -buildvcs=false ./scripts/ci/impactcmd' "$test_root/go.log"
 assert_contains '--format plan' "$test_root/go.log"
+assert_contains 'test -buildvcs=false -count=1 ./...' "$test_root/go.log"
+assert_contains 'run -buildvcs=false golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...' "$test_root/go.log"
 [[ $(git -C "$source_repo" rev-parse HEAD) == "$head_before" ]] || fail 'dry run changed HEAD'
 [[ $(git -C "$source_repo" rev-parse 'HEAD^{tree}') == "$tree_before" ]] || fail 'dry run changed tree'
 [[ $(git -C "$source_repo" write-tree) == "$index_before" ]] || fail 'dry run changed index'
 [[ -z $(git -C "$source_repo" status --porcelain=v2 --untracked-files=all) ]] || fail 'dry run changed status'
 git -C "$source_repo" show-ref --verify --quiet refs/tags/v1.2.3 && fail 'dry run left its tag'
 [[ ! -e $test_root/gh.log ]] || fail 'dry run invoked gh'
+
+coverage_status=0
+FAKE_FOCUSED=1 FAKE_COVERAGE_STATUS=9 release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/coverage-failure.out" 2>&1 || coverage_status=$?
+[[ $coverage_status -eq 9 ]] || fail 'selected owner coverage failure did not stop release'
+assert_contains 'selected owner coverage ran' "$test_root/coverage-failure.out"
+git -C "$source_repo" show-ref --verify --quiet refs/tags/v1.2.3 && fail 'coverage failure left a tag'
+[[ ! -e $test_root/gh.log ]] || fail 'coverage failure invoked gh'
+
+for gate in test vuln; do
+  gate_status=0
+  if [[ $gate == test ]]; then
+    FAKE_TEST_STATUS=7 release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/gate.out" 2>&1 || gate_status=$?
+  else
+    FAKE_VULN_STATUS=3 release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/gate.out" 2>&1 || gate_status=$?
+  fi
+  [[ $gate_status -ne 0 ]] || fail "$gate failure did not fail release"
+  git -C "$source_repo" show-ref --verify --quiet refs/tags/v1.2.3 && fail "$gate failure left a tag"
+  [[ ! -e $test_root/gh.log ]] || fail "$gate failure invoked gh"
+done
 
 run_fails 'has the wrong source revision' \
   bad_revision_release
