@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"slices"
@@ -386,7 +385,7 @@ func (s *Service) fetchIssueSnapshot(ctx context.Context, ref forgeRef) (forgeIs
 		return forgeIssue{}, "", "", err
 	}
 	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
-		return forgeIssue{}, "", "", forgeRequestError(ref, issuePath)
+		return forgeIssue{}, "", "", forgeStatusError(ref.Kind, response)
 	}
 
 	var issue forgeIssue
@@ -455,11 +454,14 @@ func (s *Service) fetchIssuePages(ctx context.Context, ref forgeRef, apiBase, li
 		}
 		state.observeTotal(ref.Kind, response.header)
 		if forgeRateLimited(ref.Kind, response) {
+			if len(state.issues) == 0 {
+				return nil, 0, false, "", forgeStatusError(ref.Kind, response)
+			}
 			state.markRateLimited()
 			return state.result()
 		}
 		if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
-			return nil, 0, false, "", forgeRequestError(ref, listPath)
+			return nil, 0, false, "", forgeStatusError(ref.Kind, response)
 		}
 
 		batch, err := parseForgeIssueList(ref.Kind, response.body)
@@ -541,7 +543,7 @@ func (s *Service) forgeIssuesList(ctx context.Context, ref forgeRef, apiBase str
 		return "", nil, err
 	}
 	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
-		return "", nil, forgeRequestError(ref, milestonePath)
+		return "", nil, forgeStatusError(ref.Kind, response)
 	}
 	if !setForgeMilestoneQuery(ref.Kind, query, response.body) {
 		return "", nil, forgeRequestError(ref, milestonePath)
@@ -600,7 +602,7 @@ func (s *Service) fetchForgeComments(ctx context.Context, ref forgeRef, apiBase,
 		return nil, err
 	}
 	if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
-		return nil, forgeRequestError(ref, commentsPath)
+		return nil, forgeStatusError(ref.Kind, response)
 	}
 
 	comments, err := parseForgeComments(ref.Kind, response.body)
@@ -691,6 +693,9 @@ func forgeProjectPath(ref forgeRef) (string, error) {
 }
 
 func (s *Service) forgeGet(ctx context.Context, ref forgeRef, apiBase, path string, query url.Values) (forgeHTTPResponse, error) {
+	if err := validateForgeTokenTransport(apiBase, ref.pat != ""); err != nil {
+		return forgeHTTPResponse{}, badRequest(err.Error(), err)
+	}
 	endpoint := strings.TrimRight(apiBase, "/") + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
@@ -719,20 +724,36 @@ func (s *Service) forgeGet(ctx context.Context, ref forgeRef, apiBase, path stri
 	if err != nil {
 		return forgeHTTPResponse{}, forgeRequestError(ref, path)
 	}
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxForgeBodyBytes))
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxForgeBodyBytes+1))
 	closeErr := response.Body.Close()
 	if readErr != nil || closeErr != nil {
 		return forgeHTTPResponse{}, forgeRequestError(ref, path)
 	}
+	if len(body) > maxForgeBodyBytes {
+		return forgeHTTPResponse{}, &Error{Code: http.StatusBadGateway, Message: "forge response exceeds 2 MiB page limit"}
+	}
 	return forgeHTTPResponse{status: response.StatusCode, header: response.Header.Clone(), body: body}, nil
 }
 
-// The name and path are already constrained (names match ^[a-z0-9._-]{1,64}$ and
-// paths are url.PathEscape'd), but both are stripped anyway so no future caller
-// can turn this line into a log-forging primitive.
-func forgeRequestError(ref forgeRef, path string) error {
-	log.Printf("forge: request failed source=%s path=%s", logSafe(ref.Source.Name), logSafe(path))
+// Request errors are returned to the caller that owns the terminal. Never log
+// request paths, credentials, or upstream response bodies here.
+func forgeRequestError(_ forgeRef, _ string) error {
 	return &Error{Code: http.StatusBadGateway, Message: "forge request failed"}
+}
+
+func forgeStatusError(kind string, response forgeHTTPResponse) error {
+	message := "upstream request failed"
+	switch {
+	case forgeRateLimited(kind, response):
+		message = "rate limit reached; retry later"
+	case response.status == http.StatusUnauthorized:
+		message = "authentication failed; check the integration token"
+	case response.status == http.StatusForbidden:
+		message = "permission denied; check token permissions and project access"
+	case response.status == http.StatusNotFound:
+		message = "resource not found; check the reference and project access"
+	}
+	return &Error{Code: http.StatusBadGateway, Message: fmt.Sprintf("forge HTTP %d: %s", response.status, message)}
 }
 
 func forgeTotalHint(header http.Header) int {
@@ -958,6 +979,9 @@ func trimmedForgeProbeValue(value *string) string {
 }
 
 func newForgeTestRequest(ctx context.Context, kind string, target forgeTestTarget, project string) (*http.Request, error) {
+	if err := validateForgeTokenTransport(target.baseURL, target.pat != ""); err != nil {
+		return nil, err
+	}
 	apiBase, err := forgeAPIBase(kind, target.baseURL)
 	if err != nil {
 		return nil, err

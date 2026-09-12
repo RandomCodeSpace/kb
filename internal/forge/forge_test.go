@@ -724,7 +724,7 @@ func TestImportedCardDriftsOnFirstCheck(t *testing.T) {
 	}
 	title.Store("Renamed upstream")
 	drift, err := service.CheckDrift(context.Background(), "alice", "primary", key)
-	if err != nil || drift.State != "drifted" || drift.BaselineTitle != "Imported" || drift.UpstreamTitle != "Renamed upstream" {
+	if err != nil || drift.State != "drifted" || drift.BaselineTitle != "Imported" || drift.UpstreamTitle != "Renamed upstream" || !strings.Contains(drift.Summary, "AI summary unavailable") {
 		t.Fatalf("first check after import = %+v, %v", drift, err)
 	}
 }
@@ -927,7 +927,7 @@ func TestMilestonePaginationRateLimitAndFetchErrors(t *testing.T) {
 	}
 	mode.Store(3)
 	issues, _, truncated, note, err = service.fetchIssues(context.Background(), project, 1)
-	if err != nil || len(issues) != 0 || !truncated || !strings.Contains(note, "rate limited") {
+	if err == nil || !strings.Contains(err.Error(), "rate limit") {
 		t.Fatalf("rate limit = %+v %t %q %v", issues, truncated, note, err)
 	}
 }

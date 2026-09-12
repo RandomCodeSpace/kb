@@ -34,7 +34,7 @@ func TestRunLifecycleAndDisconnects(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			called := false
-			serveMCP = func(srv *mcp.Server) error {
+			serveMCP = func(_ context.Context, srv *mcp.Server) error {
 				called = srv != nil
 				return tt.serve
 			}
@@ -56,7 +56,7 @@ func TestRunLifecycleAndDisconnects(t *testing.T) {
 func TestRunRejectsInvalidInputsBeforeServing(t *testing.T) {
 	original := serveMCP
 	t.Cleanup(func() { serveMCP = original })
-	serveMCP = func(*mcp.Server) error {
+	serveMCP = func(context.Context, *mcp.Server) error {
 		t.Fatal("serveMCP called for invalid input")
 		return nil
 	}

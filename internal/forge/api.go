@@ -135,6 +135,25 @@ func (s *Service) SaveSource(user, name, kind string, baseURL, token *string) (b
 			return false, badRequest(err.Error(), err)
 		}
 	}
+	// Match the store's patch semantics without decrypting the saved token.
+	sources, err := s.store.ForgeSources(user)
+	if err != nil {
+		return false, storageFailure(err)
+	}
+	current, _ := sourceByName(sources, name)
+	targetBase, hasToken := current.BaseURL, current.HasToken
+	if baseURL != nil {
+		targetBase = *baseURL
+		if token == nil && !store.SameAIOrigin(current.BaseURL, targetBase) {
+			hasToken = false
+		}
+	}
+	if token != nil {
+		hasToken = *token != ""
+	}
+	if err := validateForgeTokenTransport(targetBase, hasToken); err != nil {
+		return false, badRequest(err.Error(), err)
+	}
 	cleared, err := s.store.SetForgeSource(user, name, kind, baseURL, token)
 	if err != nil {
 		switch err.Error() {
@@ -480,7 +499,11 @@ func (s *Service) driftSummary(ctx context.Context, user string, baseline, curre
 		truncateImportText(current.Title, maxImportCommentBytes), current.Excerpt)
 	result, err := s.runner.RunText(ctx, user, importDriftSummaryPrompt, truncateImportText(prompt, maxImportPackBytes), aiDriftMaxTokens)
 	if err != nil {
-		return ""
+		var safe *ai.Error
+		if errors.As(err, &safe) {
+			return "AI summary unavailable: " + safe.Message
+		}
+		return "AI summary unavailable"
 	}
 	return truncateImportText(strings.TrimSpace(result), maxImportCommentBytes)
 }
