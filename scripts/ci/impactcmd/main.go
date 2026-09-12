@@ -14,7 +14,10 @@ import (
 	"strings"
 )
 
-const schemaVersion = 1
+const (
+	schemaVersion   = 1
+	buildWebCSSPath = "scripts/build-web-css.sh"
+)
 
 type change struct {
 	Status string   `json:"status"`
@@ -288,7 +291,7 @@ func classify(repo, base, head, modulePath string, changes []change, packages []
 				}
 			}
 			if strings.HasPrefix(path, "internal/webui/static/") ||
-				strings.HasPrefix(path, "internal/webui/tailwind/") || path == "scripts/build-web-css.sh" {
+				strings.HasPrefix(path, "internal/webui/tailwind/") || path == buildWebCSSPath {
 				if pkg := dirToPackage["internal/webui"]; pkg != "" {
 					ownerSet[pkg] = true
 				}
@@ -363,7 +366,7 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 		mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
 	case strings.HasPrefix(path, "internal/webui/e2e/"):
 		mark("web_smoke", &result.Checks.WebSmoke)
-	case strings.HasPrefix(path, "internal/webui/tailwind/") || path == "scripts/build-web-css.sh":
+	case strings.HasPrefix(path, "internal/webui/tailwind/") || path == buildWebCSSPath:
 		// Stylesheet source and its build script own the committed CSS.
 		// The browser job rebuilds it and rejects drift.
 		mark("focused_quality", &result.Checks.FocusedQuality)
@@ -409,7 +412,7 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 		mark("contract_race", &result.Checks.ContractRace)
 	}
 	if strings.HasPrefix(path, "internal/webui/") || matchesAny(path,
-		"scripts/build-web-css.sh", ".github/workflows/quality.yml",
+		buildWebCSSPath, ".github/workflows/quality.yml",
 		"scripts/ci/impactcmd/main.go", "scripts/ci/impactcmd/main_test.go") {
 		mark("web_smoke", &result.Checks.WebSmoke)
 	}
