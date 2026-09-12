@@ -129,7 +129,7 @@ func TestBackupFilesystemFailuresPreserveExistingData(t *testing.T) {
 	assertBackupSourceUsable(t, source)
 }
 
-func TestBackupWalkRefusesSourceFileRemovedAfterListing(t *testing.T) {
+func TestBackupRefusesSourceFileRemovedAfterListing(t *testing.T) {
 	source := backupSource(t)
 	trigger := filepath.Join(source, "aa-trigger")
 	removed := filepath.Join(source, "ab-removed")
@@ -138,18 +138,20 @@ func TestBackupWalkRefusesSourceFileRemovedAfterListing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	info, err := os.Stat(filepath.Join(source, "kb.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = walkBackupFiles(source, info, func(path string, _ os.DirEntry) error {
-		if path == trigger {
-			return os.Remove(removed)
+	destination := filepath.Join(t.TempDir(), "backup")
+	err := backupDirectory(source, destination, func(input io.Reader, target string) error {
+		if filepath.Base(target) == "aa-trigger" {
+			if err := os.Remove(removed); err != nil {
+				return err
+			}
 		}
-		return nil
+		return copyBackupFile(input, target)
 	})
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("silently omitted a file removed after listing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, BackupIncompleteFile)); err != nil {
+		t.Fatalf("interrupted copy lost incomplete marker: %v", err)
 	}
 	assertBackupSourceUsable(t, source)
 }
