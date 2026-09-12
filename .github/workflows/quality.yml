@@ -88,11 +88,11 @@ jobs:
 
     steps:
       - name: Report unaffected contract
-        if: needs.impact.outputs.focused_quality != 'true'
+        if: github.event_name != 'push' && needs.impact.outputs.focused_quality != 'true'
         run: echo 'focused-quality not affected'
 
       - name: Check out the exact candidate
-        if: needs.impact.outputs.focused_quality == 'true'
+        if: github.event_name == 'push' || needs.impact.outputs.focused_quality == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.impact.outputs.head }}
@@ -100,19 +100,20 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        if: needs.impact.outputs.focused_quality == 'true'
+        if: github.event_name == 'push' || needs.impact.outputs.focused_quality == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      - name: Test owners and compile importers
-        if: needs.impact.outputs.focused_quality == 'true'
+      - name: Test the candidate and direct importers
+        if: github.event_name == 'push' || needs.impact.outputs.focused_quality == 'true'
         shell: bash
         env:
           IMPACT_MANIFEST: ${{ needs.impact.outputs.manifest }}
           IMPACT_BASE: ${{ needs.impact.outputs.base }}
           IMPACT_HEAD: ${{ needs.impact.outputs.head }}
+          EVENT_NAME: ${{ github.event_name }}
           GO_PACKAGE_COVERAGE_THRESHOLD: '95.0'
           GO_COVERAGE_PROFILE: coverage/go.out
         run: |
@@ -120,12 +121,18 @@ jobs:
           mapfile -t owners < <(jq -r '.go.owners[]' <<<"$IMPACT_MANIFEST")
           mapfile -t compile_packages < <(jq -r '.go.compile_packages[]' <<<"$IMPACT_MANIFEST")
           sh scripts/check-go-format.sh --changed "$IMPACT_BASE" "$IMPACT_HEAD"
-          if ((${#owners[@]})); then
-            sh scripts/check-go-coverage.sh --packages "${owners[@]}"
-            go vet -buildvcs=false "${owners[@]}"
+          if [[ $EVENT_NAME == push ]] || jq -e '.go.compile_all' <<<"$IMPACT_MANIFEST" >/dev/null; then
+            go test -buildvcs=false -count=1 ./...
+          else
+            if ((${#owners[@]})); then
+              sh scripts/check-go-coverage.sh --packages "${owners[@]}"
+            fi
+            if ((${#compile_packages[@]})); then
+              go test -buildvcs=false -count=1 "${compile_packages[@]}"
+            fi
           fi
-          if ((${#compile_packages[@]})); then
-            go test -buildvcs=false -run '^$' "${compile_packages[@]}"
+          if ((${#owners[@]})); then
+            go vet -buildvcs=false "${owners[@]}"
           fi
 
       - name: Run SonarQube Cloud scan
@@ -140,6 +147,27 @@ jobs:
             -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
             -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
             ${{ hashFiles('coverage/go.out') != '' && '-Dsonar.go.coverage.reportPaths=coverage/go.out' || '' }}
+
+  vulnerability-check:
+    name: vulnerability-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Reject reachable vulnerabilities
+        run: sh scripts/check-go-vuln.sh
 
   contract-race:
     name: contract-race
@@ -241,7 +269,7 @@ jobs:
           recovery_tui=0
           while IFS= read -r reason; do
             case "$reason" in
-              internal/store/*) recovery_store=1 ;;
+              internal/store/*|scripts/generate-migration-fixtures.py) recovery_store=1 ;;
               internal/tui/*) recovery_tui=1 ;;
             esac
           done < <(jq -r '.reasons.migration_recovery[]?' <<<"$IMPACT_MANIFEST")
@@ -251,7 +279,7 @@ jobs:
           }
           if [[ $recovery_store == 1 ]]; then
             go test -buildvcs=false ./internal/store \
-              -run '^(TestColdCopyRecoveryRoundTrip|TestLoadOrCreateSecret.*|TestOpenRejectsInvalidPathsAndSchemas|TestConnectionPragmas|TestConcurrentOpenSerializesMigration)$' \
+              -run '^(TestReleasedDatabaseFixturesMigrate|TestColdCopyRecoveryRoundTrip|TestLoadOrCreateSecret.*|TestOpenRejectsInvalidPathsAndSchemas|TestConnectionPragmas|TestConcurrentOpenSerializesMigration)$' \
               -count=1
           fi
           if [[ $recovery_tui == 1 ]]; then
@@ -354,6 +382,7 @@ jobs:
             . == "scripts/release.sh" or
             . == "scripts/release.test.sh" or
             . == "scripts/verify-release-artifacts.sh" or
+            . == "scripts/check-go-vuln.sh" or
             . == ".github/workflows/release.yml")' <<<"$IMPACT_MANIFEST" >/dev/null; then
             bash scripts/release.test.sh
           else
@@ -429,6 +458,17 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      - name: Test native store, TUI, CLI, web, MCP, and startup contracts
+        if: >-
+          matrix.platform != 'linux' &&
+          (needs.impact.outputs.focused_quality == 'true' ||
+          needs.impact.outputs.binary_release_contract == 'true' ||
+          needs.impact.outputs.ci_contract == 'true')
+        shell: bash
+        env:
+          CGO_ENABLED: '0'
+        run: go test -buildvcs=false -short -count=1 ./internal/store ./internal/tui ./internal/cliapp ./internal/mcpserv ./internal/webui .
+
       - name: Build and run the local task flow
         if: >-
           needs.impact.outputs.focused_quality == 'true' ||
@@ -464,6 +504,7 @@ jobs:
           "$binary" list --data "$smoke/data" --json >"$smoke/list.json"
           grep -F 'Platform smoke' "$smoke/list.json" >/dev/null
           grep -F 'project::platform-smoke' "$smoke/list.json" >/dev/null
+          python3 scripts/ci/platform-startup.py "$binary" "$smoke/data"
           printf 'platform-smoke: %s/%s pass\n' "$actual_goos" "$(go env GOARCH)"
 
   ci-contract:

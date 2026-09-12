@@ -45,6 +45,9 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_GO_LOG:-/dev/null}"
 case ${1:-} in
   run)
+    if [[ ${3:-} == golang.org/x/vuln/cmd/govulncheck@v1.8.0 ]]; then
+      exit "${FAKE_VULN_STATUS:-0}"
+    fi
     base=''
     head=''
     output_format=''
@@ -70,7 +73,7 @@ case ${1:-} in
     done
     ;;
   test)
-    exit 0
+    exit "${FAKE_TEST_STATUS:-0}"
     ;;
   list)
     printf '%s\n' 'github.com/RandomCodeSpace/kb'
@@ -204,6 +207,7 @@ printf 'release fixture baseline\n' >"$source_repo/baseline.txt"
 cp "$repo_root/scripts/release.sh" "$source_repo/scripts/release.sh"
 cp "$repo_root/scripts/verify-release-artifacts.sh" \
   "$source_repo/scripts/verify-release-artifacts.sh"
+cp "$repo_root/scripts/check-go-vuln.sh" "$source_repo/scripts/check-go-vuln.sh"
 cp "$repo_root/scripts/ci/impact.sh" "$source_repo/scripts/ci/impact.sh"
 printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.3.md"
 printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.4.md"
@@ -308,12 +312,26 @@ assert_contains 'dry run complete: v1.2.3 verified locally; nothing published' \
   "$test_root/dry-run.out"
 assert_contains 'run -buildvcs=false ./scripts/ci/impactcmd' "$test_root/go.log"
 assert_contains '--format plan' "$test_root/go.log"
+assert_contains 'test -buildvcs=false -count=1 ./...' "$test_root/go.log"
+assert_contains 'run -buildvcs=false golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...' "$test_root/go.log"
 [[ $(git -C "$source_repo" rev-parse HEAD) == "$head_before" ]] || fail 'dry run changed HEAD'
 [[ $(git -C "$source_repo" rev-parse 'HEAD^{tree}') == "$tree_before" ]] || fail 'dry run changed tree'
 [[ $(git -C "$source_repo" write-tree) == "$index_before" ]] || fail 'dry run changed index'
 [[ -z $(git -C "$source_repo" status --porcelain=v2 --untracked-files=all) ]] || fail 'dry run changed status'
 git -C "$source_repo" show-ref --verify --quiet refs/tags/v1.2.3 && fail 'dry run left its tag'
 [[ ! -e $test_root/gh.log ]] || fail 'dry run invoked gh'
+
+for gate in test vuln; do
+  gate_status=0
+  if [[ $gate == test ]]; then
+    FAKE_TEST_STATUS=7 release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/gate.out" 2>&1 || gate_status=$?
+  else
+    FAKE_VULN_STATUS=3 release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/gate.out" 2>&1 || gate_status=$?
+  fi
+  [[ $gate_status -ne 0 ]] || fail "$gate failure did not fail release"
+  git -C "$source_repo" show-ref --verify --quiet refs/tags/v1.2.3 && fail "$gate failure left a tag"
+  [[ ! -e $test_root/gh.log ]] || fail "$gate failure invoked gh"
+done
 
 run_fails 'has the wrong source revision' \
   bad_revision_release

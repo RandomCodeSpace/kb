@@ -53,6 +53,11 @@ cat >"$fake_go_dir/go" <<'EOF'
 #!/usr/bin/env sh
 set -eu
 case "$1" in
+  run)
+    [ "$#" -eq 4 ] && [ "$2" = "-buildvcs=false" ] && \
+      [ "$3" = "golang.org/x/vuln/cmd/govulncheck@v1.8.0" ] && [ "$4" = "./..." ] || exit 64
+    exit "${FAKE_VULN_STATUS:-0}"
+    ;;
   test)
     if [ "$#" -eq 5 ] && [ "$2" = "-buildvcs=false" ] && \
       [ "$3" = "./internal/tui/testdata/generate_web_lower_fixture.go" ] && \
@@ -96,6 +101,16 @@ case "$1" in
 esac
 EOF
 chmod +x "$fake_go_dir/go"
+
+vuln_output="$test_dir/vuln-output"
+status=0
+PATH="$fake_go_dir:$PATH" run_capture "$vuln_output" \
+  sh "$repo_root/scripts/check-go-vuln.sh" || status=$?
+assert_status 0 "$status" "pinned vulnerability scanner accepts clean code"
+status=0
+PATH="$fake_go_dir:$PATH" FAKE_VULN_STATUS=3 run_capture "$vuln_output" \
+  sh "$repo_root/scripts/check-go-vuln.sh" || status=$?
+assert_status 3 "$status" "reachable vulnerability fails the gate"
 
 coverage_output="$test_dir/coverage-output"
 coverage_profile="$test_dir/coverage.out"

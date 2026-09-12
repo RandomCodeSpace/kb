@@ -259,6 +259,9 @@ func classify(repo, base, head, modulePath string, changes []change, packages []
 
 			if path == "go.mod" || path == "go.sum" {
 				result.Go.CompileAll = true
+				for _, pkg := range allPackages {
+					ownerSet[pkg] = true
+				}
 				addReason(result.Reasons, "focused_quality", path)
 			}
 			if hasTestdataSegment(path) {
@@ -372,7 +375,7 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 			mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
 		}
 	case path == "scripts/release.sh" || path == "scripts/release.test.sh" ||
-		path == "scripts/verify-release-artifacts.sh":
+		path == "scripts/verify-release-artifacts.sh" || path == "scripts/check-go-vuln.sh":
 		mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
 		mark("ci_contract", &result.Checks.CIContract)
 	case path == "scripts/ci_monitor.cjs" || path == "scripts/ci/test_ci_monitor.cjs":
@@ -389,6 +392,10 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 		mark("ci_contract", &result.Checks.CIContract)
 	}
 
+	if strings.HasPrefix(path, "internal/store/testdata/migrations/") ||
+		path == "internal/store/released_fixtures_test.go" || path == "scripts/generate-migration-fixtures.py" {
+		mark("migration_recovery", &result.Checks.MigrationRecovery)
+	}
 	if matchesAny(path,
 		"internal/store/migrate.go", "internal/store/migrate_test.go",
 		"internal/store/store.go", "internal/store/store_test.go",

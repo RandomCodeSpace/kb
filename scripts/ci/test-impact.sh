@@ -119,6 +119,11 @@ module="$(commit_all module)"
 run_impact "$leaf" "$module" || fail 'module impact failed'
 assert_contains '"compile_all": true' 'module compile expansion'
 assert_contains '"repository_tests": false' 'module test restraint'
+run_impact "$leaf" "$module" --format plan || fail 'module plan failed'
+for package in example.test/impact example.test/impact/internal/board example.test/impact/internal/importer example.test/impact/internal/leaf example.test/impact/internal/store example.test/impact/internal/tui; do
+  assert_contains "$(printf 'owner\t%s' "$package")" 'module full test owner'
+done
+run_impact "$leaf" "$module" || fail 'module impact failed'
 assert_contains '"binary_release_contract": true' 'module release classification'
 
 printf 'package main\n\nimport "example.test/impact/internal/importer"\n\nfunc main() { println(importer.Value()) }\n' >"$fixture/main.go"
@@ -190,6 +195,10 @@ run_impact "$sonar" "$checksums" || fail 'go.sum impact failed'
 assert_contains '"compile_all": true' 'go.sum compile expansion'
 assert_contains '"binary_release_contract": true' 'go.sum release classification'
 assert_contains '"focused_quality": true' 'go.sum quality classification'
+run_impact "$sonar" "$checksums" --format plan || fail 'go.sum plan failed'
+for package in example.test/impact example.test/impact/internal/board example.test/impact/internal/importer example.test/impact/internal/store example.test/impact/internal/tui; do
+  assert_contains "$(printf 'owner\t%s' "$package")" 'go.sum full test owner'
+done
 
 printf 'package store\n\nfunc Schema() int { return 2 }\n' >"$fixture/internal/store/schema.go"
 schema="$(commit_all schema)"
@@ -230,10 +239,30 @@ assert_contains 'example.test/impact/internal/webui' 'stylesheet source owner'
 assert_contains '"focused_quality": true' 'stylesheet source classification'
 assert_contains '"unclassified": []' 'stylesheet source classified'
 
+printf '#!/usr/bin/env sh\nexit 0\n' >"$fixture/scripts/check-go-vuln.sh"
+vulnerability="$(commit_all vulnerability)"
+run_impact "$stylesheet" "$vulnerability" || fail 'vulnerability gate impact failed'
+assert_contains '"ci_contract": true' 'vulnerability gate CI classification'
+assert_contains '"binary_release_contract": true' 'vulnerability gate release classification'
+assert_contains '"unclassified": []' 'vulnerability gate classified'
+
+mkdir -p "$fixture/internal/store/testdata/migrations/v0.2.0"
+printf 'frozen database fixture\n' >"$fixture/internal/store/testdata/migrations/v0.2.0/kb.db"
+migration_fixture="$(commit_all migration-fixture)"
+run_impact "$vulnerability" "$migration_fixture" || fail 'migration fixture impact failed'
+assert_contains '"migration_recovery": true' 'released database migration classification'
+assert_contains 'example.test/impact/internal/store' 'released database store owner'
+
+printf '#!/usr/bin/env python3\n' >"$fixture/scripts/generate-migration-fixtures.py"
+migration_generator="$(commit_all migration-generator)"
+run_impact "$migration_fixture" "$migration_generator" || fail 'migration generator impact failed'
+assert_contains '"migration_recovery": true' 'migration generator classification'
+assert_contains '"unclassified": []' 'migration generator classified'
+
 printf 'unknown\n' >"$fixture/mystery.bin"
 unknown="$(commit_all unknown)"
 status=0
-run_impact "$stylesheet" "$unknown" 2>/dev/null || status=$?
+run_impact "$migration_generator" "$unknown" 2>/dev/null || status=$?
 [ "$status" -ne 0 ] || fail 'unclassified path unexpectedly passed'
 assert_contains 'mystery.bin' 'unclassified path manifest'
 

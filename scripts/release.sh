@@ -4,8 +4,9 @@
 # Usage: scripts/release.sh vX.Y.Z notes-file [--dry-run]
 #
 # Run this from a clean plain clone on linux/amd64. A dry run performs the
-# complete local build and smoke suite, then removes its temporary annotated
-# tag. It does not contact GitHub or mutate the remote repository.
+# complete test, vulnerability, build, and smoke suite, then removes its temporary annotated
+# tag. It does not contact GitHub or mutate the remote repository. Vulnerability
+# scanning downloads the pinned scanner and current Go vulnerability database.
 #
 # A published tag is permanent. If publication fails after the tag is pushed,
 # fix the problem in the next patch release. Never move or delete the tag.
@@ -96,7 +97,7 @@ fi
 
 # A fresh workflow checkout has every remote tag locally. The publish path
 # also queries origin immediately before creating anything, closing the race
-# between the checkout and this script. Dry runs remain deliberately offline.
+# between the checkout and this script. Dry runs do not contact the Git remote.
 if [[ $dry_run == 0 ]]; then
   require_publish_access
   require_current_origin_main
@@ -232,15 +233,15 @@ array_contains() {
   return 1
 }
 
+# Every release candidate must pass the full suite and vulnerability gate,
+# including documentation-only releases, before any tag is created.
+go test -buildvcs=false -count=1 ./...
+sh scripts/check-go-vuln.sh
+
 if [[ $focused_quality == true ]]; then
   sh scripts/check-go-format.sh --changed "$previous_commit" "$source_commit"
   if [[ ${#impact_owners[@]} -gt 0 ]]; then
-    GO_COVERAGE_PROFILE="$output_dir/go-coverage.out" \
-      sh scripts/check-go-coverage.sh --packages "${impact_owners[@]}"
     go vet -buildvcs=false "${impact_owners[@]}"
-  fi
-  if [[ ${#impact_compile_packages[@]} -gt 0 ]]; then
-    go test -buildvcs=false -run '^$' "${impact_compile_packages[@]}"
   fi
 else
   printf 'release: focused-quality not affected\n'
@@ -279,29 +280,12 @@ else
 fi
 
 if [[ $migration_recovery == true ]]; then
-  if array_contains 'github.com/RandomCodeSpace/kb/internal/store' "${impact_owners[@]}"; then
-    printf 'release: store migration/recovery covered by focused owner tests\n'
-  else
-    go test -buildvcs=false ./internal/store \
-      -run '^(TestColdCopyRecoveryRoundTrip|TestLoadOrCreateSecret.*|TestOpenRejectsInvalidPathsAndSchemas|TestConnectionPragmas|TestConcurrentOpenSerializesMigration)$' \
-      -count=1
-  fi
-  if array_contains 'github.com/RandomCodeSpace/kb/internal/tui' "${impact_owners[@]}"; then
-    printf 'release: TUI preferences covered by focused owner tests\n'
-  else
-    go test -buildvcs=false ./internal/tui \
-      -run '^(TestPreference.*|TestCancelledPreference.*)' -count=1
-  fi
+  printf 'release: migration/recovery covered by the full test suite\n'
 else
   printf 'release: migration-recovery not affected\n'
 fi
 
 if [[ $tui_performance == true ]]; then
-  if ! array_contains 'github.com/RandomCodeSpace/kb/internal/tui' "${impact_owners[@]}"; then
-    go test -buildvcs=false ./internal/tui \
-      -run '^(TestPerformance.*|TestPointerResolverCostIsBoundedByVisibleHitSnapshot|TestNavigationArtifactAcceptanceRejectsMissingOrUnboundedReuse)$' \
-      -count=1
-  fi
   KB_PERF_ACCEPT=1 KB_PERF_CORPORA=17,120,500,1000 \
     KB_PERF_REPORT="$output_dir/tui-performance.json" GOMAXPROCS=8 \
     go test -buildvcs=false ./internal/tui \
