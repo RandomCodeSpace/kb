@@ -5,7 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
+
+	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
 // DataVersionWatcher compares PRAGMA data_version on one pinned SQLite
@@ -19,7 +20,10 @@ type DataVersionWatcher struct {
 // OpenDataVersionWatcher opens a dedicated, otherwise-idle connection to the
 // board database. It never holds a transaction across polls.
 func OpenDataVersionWatcher(ctx context.Context, path string) (*DataVersionWatcher, error) {
-	dsn := (&url.URL{Scheme: "file", Path: path}).String() + "?_pragma=busy_timeout(5000)"
+	dsn, err := store.SQLiteDSN(path, "busy_timeout(5000)")
+	if err != nil {
+		return nil, fmt.Errorf("tui: database path: %w", err)
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("tui: open data-version database: %w", err)

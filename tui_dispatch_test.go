@@ -122,3 +122,21 @@ func TestRunTUIProgramDefaultStartsTheBoard(t *testing.T) {
 		t.Fatalf("runTUIProgram: %v", err)
 	}
 }
+
+func TestRunTUIWithRelativeDataStartsTheBoard(t *testing.T) {
+	restoreTUISeams(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("KB_SECRET", "")
+	program := runTUIProgram
+	runTUIProgram = func(st *store.Store, path, user, version string, options ...tea.ProgramOption) error {
+		return program(st, path, user, version, append(options,
+			tea.WithInput(strings.NewReader("q")),
+			tea.WithOutput(io.Discard),
+			tea.WithoutSignals(),
+			tea.WithWindowSize(80, 24),
+		)...)
+	}
+	if err := runTUI([]string{"--data", "reldata"}); err != nil {
+		t.Fatalf("kb tui --data reldata: %v", err)
+	}
+}
