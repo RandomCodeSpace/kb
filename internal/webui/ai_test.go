@@ -12,9 +12,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
 	"github.com/RandomCodeSpace/kb/internal/cliapp"
+	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -383,5 +385,86 @@ func TestAIMethodNotAllowed(t *testing.T) {
 		if rec.Header().Get("Allow") == "" {
 			t.Fatalf("%s %s: no Allow header", tc.method, tc.path)
 		}
+	}
+}
+
+// The runner observes the actual context passed by both web skill endpoints.
+type contextRunner struct {
+	stubRunner
+	run func(context.Context) (ai.RunResult, error)
+}
+
+func (s contextRunner) RunSkill(ctx context.Context, _ string, _ ai.Scope, _, _ string, _ int, _ int64) (ai.RunResult, error) {
+	return s.run(ctx)
+}
+
+func TestAISkillDeadlineAndCancellation(t *testing.T) {
+	for _, path := range []string{"/api/ai/draft", "/api/ai/split"} {
+		t.Run(path, func(t *testing.T) {
+			h, _ := aiConfiguredHandler(t)
+			previous := newAIRunner
+			t.Cleanup(func() { newAIRunner = previous })
+			for _, mode := range []string{"bounded", "parent deadline", "parent cancelled"} {
+				t.Run(mode, func(t *testing.T) {
+					parent, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					var parentDeadline time.Time
+					if mode == "parent deadline" {
+						parentDeadline = time.Now().Add(time.Minute)
+						var cancelDeadline context.CancelFunc
+						parent, cancelDeadline = context.WithDeadline(parent, parentDeadline)
+						defer cancelDeadline()
+					}
+					var runContext context.Context
+					before := time.Now()
+					newAIRunner = func(*store.Store, string) aiRunner {
+						return contextRunner{run: func(ctx context.Context) (ai.RunResult, error) {
+							runContext = ctx
+							deadline, ok := ctx.Deadline()
+							if !ok || deadline.Before(before) || deadline.After(time.Now().Add(forge.SkillRunDeadline)) {
+								t.Fatalf("skill deadline = %v, present %v", deadline, ok)
+							}
+							if mode == "bounded" && deadline.Before(before.Add(forge.SkillRunDeadline)) {
+								t.Fatalf("skill deadline %v shorter than shared budget", deadline)
+							}
+							if mode == "parent deadline" && !deadline.Equal(parentDeadline) {
+								t.Fatalf("parent deadline changed: %v, want %v", deadline, parentDeadline)
+							}
+							if mode == "parent cancelled" {
+								cancel()
+								select {
+								case <-ctx.Done():
+								case <-time.After(time.Second):
+									t.Fatal("request cancellation did not reach runner")
+								}
+								return ai.RunResult{}, ctx.Err()
+							}
+							return ai.RunResult{Cards: []ai.Draft{{Title: "draft"}}}, nil
+						}}
+					}
+					body := `{"prompt":"draft"}`
+					if path == "/api/ai/split" {
+						body = `{"text":"split"}`
+					}
+					r := httptest.NewRequest(http.MethodPost, "http://127.0.0.1"+path, strings.NewReader(body)).WithContext(parent)
+					r.Header.Set("Content-Type", "application/json")
+					w := httptest.NewRecorder()
+					h.ServeHTTP(w, r)
+					if runContext == nil {
+						t.Fatalf("runner not called: %d %s", w.Code, w.Body.String())
+					}
+					if runContext.Err() != context.Canceled {
+						t.Fatalf("runner context not released after request: %v", runContext.Err())
+					}
+					want := http.StatusOK
+					if mode == "parent cancelled" {
+						want = http.StatusBadGateway
+					}
+					if w.Code != want {
+						t.Fatalf("status = %d, want %d: %s", w.Code, want, w.Body.String())
+					}
+				})
+			}
+		})
 	}
 }
