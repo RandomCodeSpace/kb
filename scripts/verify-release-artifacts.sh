@@ -8,13 +8,18 @@ die() {
   exit 2
 }
 
-[[ $# -eq 3 || ( $# -eq 4 && $4 == --verify-only ) ]] || \
-  die 'usage: scripts/verify-release-artifacts.sh vX.Y.Z SOURCE_COMMIT OUTPUT_DIR [--verify-only]'
+[[ $# -eq 3 || ( $# -eq 5 && $4 == --verify-only ) ]] || \
+  die 'usage: scripts/verify-release-artifacts.sh vX.Y.Z SOURCE_COMMIT OUTPUT_DIR [--verify-only TRUSTED_CHECKSUMS]'
 verify_only=0
 [[ ${4:-} != --verify-only ]] || verify_only=1
 version=$1
 source_commit=$2
 output_dir=$3
+trusted_checksums=${5:-}
+if [[ $verify_only == 1 ]]; then
+  [[ $trusted_checksums == /* && -f $trusted_checksums && -r $trusted_checksums && -s $trusted_checksums ]] || \
+    die 'trusted checksums must be an absolute, readable, non-empty file'
+fi
 [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
   die 'version must match vX.Y.Z'
 
@@ -138,6 +143,10 @@ done
     cmp -s SHA256SUMS <(sha256sum kb-*) || die 'downloaded SHA256SUMS does not match the five binaries'
   fi
   sha256sum -c SHA256SUMS
+  if [[ $verify_only == 1 ]]; then
+    cmp -s "$trusted_checksums" <(sha256sum SHA256SUMS kb-*) || \
+      die 'downloaded release files do not match the trusted local build digests'
+  fi
 )
 
 run_native_smokes() {

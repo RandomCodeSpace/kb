@@ -343,8 +343,10 @@ head_before=$(git -C "$source_repo" rev-parse HEAD)
 tree_before=$(git -C "$source_repo" rev-parse 'HEAD^{tree}')
 index_before=$(git -C "$source_repo" write-tree)
 git -C "$source_repo" remote set-url origin "$test_root/does-not-exist"
-release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/dry-run.out"
+KB_RELEASE_DIGESTS_FILE="$test_root/dry-run-digests" \
+  release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/dry-run.out"
 git -C "$source_repo" remote set-url origin "$remote"
+[[ ! -e $test_root/dry-run-digests ]] || fail 'dry run exported release digests'
 assert_contains 'dry run complete: v1.2.3 verified locally; nothing published' \
   "$test_root/dry-run.out"
 assert_contains 'run -buildvcs=false ./scripts/ci/impactcmd' "$test_root/go.log"
@@ -405,7 +407,11 @@ terminated_release >"$test_root/terminated.out" 2>&1 || term_status=$?
 git -C "$source_repo" show-ref --verify --quiet refs/tags/v1.2.3 && fail 'terminated build left its tag'
 [[ -z $(git -C "$source_repo" status --porcelain=v2 --untracked-files=all) ]] || fail 'terminated build changed status'
 
-release v1.2.4 docs/releases/v1.2.4.md >"$test_root/publish.out"
+trusted_checksums="$test_root/release-build.sha256"
+KB_RELEASE_DIGESTS_FILE="$trusted_checksums" \
+  release v1.2.4 docs/releases/v1.2.4.md >"$test_root/publish.out"
+[[ $(wc -l <"$trusted_checksums") -eq 6 ]] || fail 'trusted manifest must contain all six upload digests'
+assert_contains '  SHA256SUMS' "$trusted_checksums"
 assert_contains 'v1.2.4 published from' "$test_root/publish.out"
 [[ $(git --git-dir="$remote" cat-file -t refs/tags/v1.2.4) == tag ]] || \
   fail 'published tag is not annotated'
@@ -439,7 +445,8 @@ verify_downloads() {
   (
     cd "$source_repo"
     PATH="$fake_bin:$PATH" FAKE_GO_LOG="$test_root/download-go.log" \
-      bash scripts/verify-release-artifacts.sh v1.2.4 "$head_before" "$download_dir" --verify-only
+      bash scripts/verify-release-artifacts.sh v1.2.4 "$head_before" "$download_dir" \
+        --verify-only "$trusted_checksums"
   )
 }
 refresh_checksums
@@ -451,6 +458,9 @@ fi
 printf 'tampered\n' >>"$download_dir/kb-linux-amd64"
 run_fails 'downloaded SHA256SUMS does not match' verify_downloads
 refresh_checksums
+# Embedded metadata is unchanged and the downloaded checksum file agrees with
+# the forged binary. Only the independently retained build hashes reject it.
+run_fails 'do not match the trusted local build digests' verify_downloads
 cp "$download_dir/kb-linux-amd64" "$test_root/original-download"
 sed -i 's/# fake-revision=.*/# fake-revision=deadbeef/' "$download_dir/kb-linux-amd64"
 refresh_checksums
