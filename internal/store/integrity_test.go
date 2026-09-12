@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,38 @@ import (
 
 	"github.com/RandomCodeSpace/kb/internal/board"
 )
+
+func TestIntegrityInspectionErrorsDoNotCreateDatabase(t *testing.T) {
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, "file")
+	if err := os.WriteFile(blocked, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ path, message string }{
+		{filepath.Join(blocked, "kb.db"), "inspect backup marker"},
+		{filepath.Join(dir, "invalid\x00"), "inspect existing database"},
+		{filepath.Join(dir, strings.Repeat("x", 255)), "inspect database sidecar"},
+	} {
+		if err := checkPartialCopy(tc.path); err == nil || !strings.Contains(err.Error(), tc.message) {
+			t.Fatalf("inspection %q: %v", tc.path, err)
+		}
+	}
+	if err := prepareDatabaseFile(filepath.Join(dir, "missing", "kb.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing parent: %v", err)
+	}
+	// Publication failure must remove its own completed candidate and retain
+	// unrelated evidence. The final name cannot be represented by this filesystem.
+	if err := publishEmptyDatabase(filepath.Join(dir, "invalid\x00")); err == nil || !strings.Contains(err.Error(), "publish database") {
+		t.Fatalf("invalid publication: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "file" {
+		t.Fatalf("failed publication changed directory: %v, %v", entries, err)
+	}
+	if got, err := os.ReadFile(blocked); err != nil || string(got) != "keep" {
+		t.Fatalf("inspection changed existing file: %q, %v", got, err)
+	}
+}
 
 func TestOpenRefusesDamagedDatabaseWithoutReinitializing(t *testing.T) {
 	for _, kind := range []string{"empty", "non-sqlite", "truncated", "constraint"} {

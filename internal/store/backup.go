@@ -51,21 +51,45 @@ func backupDirectory(source, destination string, copyFile func(io.Reader, string
 		return err
 	}
 	defer func() { err = errors.Join(err, lock.close()) }()
-	if err := os.Mkdir(destination, 0o700); err != nil {
-		return fmt.Errorf("backup: destination must not exist: %w", err)
+	marker, err := reserveBackupDestination(destination)
+	if err != nil {
+		return err
 	}
-	marker := filepath.Join(destination, BackupIncompleteFile)
-	if err := copyBackupFile(strings.NewReader("Incomplete kb backup. Do not open this directory.\n"), marker); err != nil {
+	if err := copyBackupTree(source, destination, info, lock, copyFile); err != nil {
+		return err
+	}
+	if err := lock.close(); err != nil {
+		return err
+	}
+	if err := os.Remove(marker); err != nil {
 		return err
 	}
 	if err := syncSecretDirectory(destination); err != nil {
 		return err
 	}
-	if err := syncSecretDirectory(filepath.Dir(destination)); err != nil {
-		return err
+	return syncSecretDirectory(filepath.Dir(destination))
+}
+
+func reserveBackupDestination(destination string) (string, error) {
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		return "", fmt.Errorf("backup: destination must not exist: %w", err)
 	}
+	marker := filepath.Join(destination, BackupIncompleteFile)
+	if err := copyBackupFile(strings.NewReader("Incomplete kb backup. Do not open this directory.\n"), marker); err != nil {
+		return "", err
+	}
+	if err := syncSecretDirectory(destination); err != nil {
+		return "", err
+	}
+	if err := syncSecretDirectory(filepath.Dir(destination)); err != nil {
+		return "", err
+	}
+	return marker, nil
+}
+
+func copyBackupTree(source, destination string, info os.FileInfo, lock *backupLock, copyFile func(io.Reader, string) error) error {
 	var directories []string
-	err = walkBackupFiles(source, info, func(path string, entry fs.DirEntry) error {
+	err := walkBackupFiles(source, info, func(path string, entry fs.DirEntry) error {
 		rel, err := filepath.Rel(source, path)
 		if err != nil {
 			return err
@@ -80,18 +104,7 @@ func backupDirectory(source, destination string, copyFile func(io.Reader, string
 			directories = append(directories, target)
 			return nil
 		}
-		input, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		if rel == "kb.db" {
-			// On Unix, closing any raw descriptor for kb.db releases this
-			// process's SQLite locks. Keep it until the maintenance DB closes.
-			lock.input = input
-		} else {
-			defer input.Close()
-		}
-		return copyFile(input, target)
+		return copyBackupRegularFile(path, target, rel == "kb.db", lock, copyFile)
 	})
 	if err != nil {
 		return fmt.Errorf("backup: copy incomplete at %s: %w", destination, err)
@@ -101,16 +114,22 @@ func backupDirectory(source, destination string, copyFile func(io.Reader, string
 			return err
 		}
 	}
-	if err := lock.close(); err != nil {
+	return nil
+}
+
+func copyBackupRegularFile(path, target string, database bool, lock *backupLock, copyFile func(io.Reader, string) error) error {
+	input, err := os.Open(path)
+	if err != nil {
 		return err
 	}
-	if err := os.Remove(marker); err != nil {
-		return err
+	if database {
+		// On Unix, closing any raw descriptor for kb.db releases this
+		// process's SQLite locks. Keep it until the maintenance DB closes.
+		lock.input = input
+	} else {
+		defer input.Close()
 	}
-	if err := syncSecretDirectory(destination); err != nil {
-		return err
-	}
-	return syncSecretDirectory(filepath.Dir(destination))
+	return copyFile(input, target)
 }
 
 func backupPaths(source, destination string) (string, string, error) {

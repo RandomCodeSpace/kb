@@ -82,6 +82,215 @@ func TestBackupRefusesExistingAndNestedDestinations(t *testing.T) {
 	assertBackupSourceUsable(t, source)
 }
 
+func TestBackupFilesystemFailuresPreserveExistingData(t *testing.T) {
+	source := backupSource(t)
+	for _, destination := range []string{
+		filepath.Join(t.TempDir(), "missing", "backup"),
+		filepath.Join(t.TempDir(), "invalid\x00"),
+	} {
+		if err := BackupDirectory(source, destination); err == nil {
+			t.Fatalf("accepted invalid destination %q", destination)
+		}
+	}
+	if _, err := reserveBackupDestination(source); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("reservation replaced existing destination: %v", err)
+	}
+	existing := filepath.Join(source, "zz-last.txt")
+	if err := copyBackupFile(strings.NewReader("overwrite"), existing); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("file copy replaced existing file: %v", err)
+	}
+	if got, err := os.ReadFile(existing); err != nil || string(got) != "portable user file" {
+		t.Fatalf("existing destination changed: %q, %v", got, err)
+	}
+	missing := filepath.Join(source, "missing")
+	info, err := os.Stat(filepath.Join(source, "kb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := walkBackupFiles(missing, info, nil); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing source walk: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "copy")
+	if err := copyBackupRegularFile(missing, target, false, nil, copyBackupFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing input: %v", err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing input created output: %v", err)
+	}
+	if err := copyBackupFile(io.MultiReader(strings.NewReader("partial bytes"), coverageErrorReader{}), target); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("source read failure was lost: %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "partial bytes" {
+		t.Fatalf("failed copy discarded written bytes: %q, %v", got, err)
+	}
+	assertBackupSourceUsable(t, source)
+}
+
+func TestBackupDestinationInterferenceRetainsIncompleteMarker(t *testing.T) {
+	for _, kind := range []string{"directory collision", "directory removed", "marker replaced"} {
+		t.Run(kind, func(t *testing.T) {
+			source := backupSource(t)
+			if err := os.Mkdir(filepath.Join(source, "subdir"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(t.TempDir(), "backup")
+			err := backupDirectory(source, destination, func(input io.Reader, target string) error {
+				if kind == "directory collision" && filepath.Base(target) == "secret" {
+					if err := os.WriteFile(filepath.Join(destination, "subdir"), []byte("external file"), 0o600); err != nil {
+						return err
+					}
+				}
+				if filepath.Base(target) == "zz-last.txt" {
+					switch kind {
+					case "directory removed":
+						if err := os.Remove(filepath.Join(destination, "subdir")); err != nil {
+							return err
+						}
+					case "marker replaced":
+						marker := filepath.Join(destination, BackupIncompleteFile)
+						if err := os.Remove(marker); err != nil {
+							return err
+						}
+						if err := os.Mkdir(marker, 0o700); err != nil {
+							return err
+						}
+						if err := os.WriteFile(filepath.Join(marker, "keep"), []byte("external file"), 0o600); err != nil {
+							return err
+						}
+					}
+				}
+				return copyBackupFile(input, target)
+			})
+			if err == nil {
+				t.Fatal("reported an interfered-with destination as complete")
+			}
+			if _, err := os.Stat(filepath.Join(destination, BackupIncompleteFile)); err != nil {
+				t.Fatalf("failure removed marker: %v", err)
+			}
+			if _, err := LoadOrCreateSecret(destination); err == nil || !strings.Contains(err.Error(), "incomplete backup") {
+				t.Fatalf("accepted incomplete destination: %v", err)
+			}
+			if kind == "directory collision" {
+				if got, err := os.ReadFile(filepath.Join(destination, "subdir")); err != nil || string(got) != "external file" {
+					t.Fatalf("overwrote colliding file: %q, %v", got, err)
+				}
+			}
+			assertBackupSourceUsable(t, source)
+		})
+	}
+}
+
+func TestBackupReportsDirectoryDurabilityFailures(t *testing.T) {
+	for failAt := 1; failAt <= 5; failAt++ {
+		t.Run(fmt.Sprint(failAt), func(t *testing.T) {
+			source := backupSource(t)
+			destination := filepath.Join(t.TempDir(), "backup")
+			want := errors.New("directory unavailable for durability check")
+			original := openSecretDir
+			t.Cleanup(func() { openSecretDir = original })
+			calls := 0
+			openSecretDir = func(path string) (secretDirectory, error) {
+				calls++
+				if calls == failAt {
+					return nil, want
+				}
+				return original(path)
+			}
+			if err := BackupDirectory(source, destination); !errors.Is(err, want) {
+				t.Fatalf("durability failure %d: %v", failAt, err)
+			}
+			openSecretDir = original
+			if failAt <= 3 {
+				if _, err := LoadOrCreateSecret(destination); err == nil || !strings.Contains(err.Error(), "incomplete backup") {
+					t.Fatalf("early durability failure accepted as complete: %v", err)
+				}
+			} else {
+				// Final directory flushes happen after all files are synced and
+				// the marker is removed. Report the error without deleting data.
+				secret, err := LoadOrCreateSecret(destination)
+				if err != nil {
+					t.Fatal(err)
+				}
+				copy, err := Open(filepath.Join(destination, "kb.db"), secret)
+				if err != nil {
+					t.Fatal(err)
+				}
+				task, err := copy.Task("default", "1")
+				if err != nil || task.Title != "original" {
+					t.Fatalf("final durability failure discarded copied data: %+v, %v", task, err)
+				}
+				if err := copy.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := BackupDirectory(source, destination); !errors.Is(err, os.ErrExist) {
+				t.Fatalf("retry overwrites failed destination: %v", err)
+			}
+			assertBackupSourceUsable(t, source)
+		})
+	}
+}
+
+func TestBackupRejectsConstraintCorruptionAndRestoresJournal(t *testing.T) {
+	source := backupSource(t)
+	db, err := sql.Open("sqlite", filepath.Join(source, "kb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=ON; UPDATE label_sequence SET id=2`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "backup")
+	if err := BackupDirectory(source, destination); err == nil || !strings.Contains(err.Error(), "integrity check failed") {
+		t.Fatalf("constraint corruption: %v", err)
+	}
+	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corruption refusal created destination: %v", err)
+	}
+	assertBackupSourceUsable(t, source)
+}
+
+func TestBackupLockReportsFailedJournalRestorationAndClosesInput(t *testing.T) {
+	source := backupSource(t)
+	lock, err := acquireBackupLock(filepath.Join(source, "kb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate loss of the maintenance connection before cleanup; restoration
+	// must be reported, while the held raw descriptor must still be closed.
+	lock.input, err = os.Open(filepath.Join(source, "kb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.close(); err == nil || !strings.Contains(err.Error(), "restore source journal mode") {
+		t.Fatalf("lost connection cleanup: %v", err)
+	}
+	if _, err := lock.input.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("cleanup leaked raw database descriptor: %v", err)
+	}
+	if err := lock.close(); err != nil {
+		t.Fatalf("second cleanup: %v", err)
+	}
+	secret, err := LoadOrCreateSecret(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(filepath.Join(source, "kb.db"), secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertBackupSourceUsable(t, source)
+}
+
 func TestBackupRefusesDatabaseAliasesAndSymlinks(t *testing.T) {
 	source := backupSource(t)
 	alias := filepath.Join(source, "database-alias")
