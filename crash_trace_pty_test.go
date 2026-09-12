@@ -17,6 +17,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/term"
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 type crashProbeModel struct{ mode string }
@@ -60,22 +61,37 @@ func TestCrashTracePanicProcess(t *testing.T) {
 
 func runCrashProbeChild(t *testing.T, mode string) {
 	t.Helper()
-	before, err := term.GetState(os.Stdin.Fd())
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = runWithCrashTrace(os.Getenv("KB_CRASH_TRACE_DATA"), "crash-test-version", func() error {
+	before := crashProbeTerminalState(t)
+	err := runWithCrashTrace(os.Getenv("KB_CRASH_TRACE_DATA"), "crash-test-version", func() error {
 		_, err := tea.NewProgram(crashProbeModel{mode: mode}, tea.WithoutSignals()).Run()
 		return err
 	})
 	if !errors.Is(err, tea.ErrProgramPanic) {
 		t.Fatalf("run error = %v", err)
 	}
-	after, err := term.GetState(os.Stdin.Fd())
-	if err != nil || !reflect.DeepEqual(before, after) {
-		t.Fatalf("terminal state not restored: before=%+v after=%+v error=%v", before, after, err)
+	after := crashProbeTerminalState(t)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("terminal state not restored: before=%+v after=%+v", before, after)
 	}
 	fmt.Println("TERMINAL_RESTORED")
+}
+
+func crashProbeTerminalState(t *testing.T) *term.State {
+	t.Helper()
+	// Darwin sets PENDIN when canonical input is restored. A read-readiness
+	// query processes that pending input bookkeeping without consuming bytes
+	// or changing terminal settings, so the complete state can be compared.
+	fd := int(os.Stdin.Fd())
+	var readable unix.FdSet
+	readable.Set(fd)
+	if _, err := unix.Select(fd+1, &readable, nil, nil, &unix.Timeval{}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := term.GetState(os.Stdin.Fd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state
 }
 
 func runCrashProbeProcess(t *testing.T, mode, data string) string {
