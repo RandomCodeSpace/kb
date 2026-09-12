@@ -217,8 +217,8 @@ func TestLocalLifecycle(t *testing.T) {
 
 	// rm refuses without --yes, deletes with it.
 	_, errS, code = runCmd(t, "rm", t2.ID, "--data", dir)
-	if code != 1 || !strings.Contains(errS, "--yes") {
-		t.Errorf("rm without --yes: code %d stderr %q, want code 1 mentioning --yes", code, errS)
+	if code != 4 || !strings.Contains(errS, "--yes") {
+		t.Errorf("rm without --yes: code %d stderr %q, want code 4 mentioning --yes", code, errS)
 	}
 	if n := len(listJSON(t, "--data", dir)); n != 2 {
 		t.Fatalf("rm without --yes deleted something: %d tasks left", n)
@@ -243,7 +243,7 @@ func TestLocalPrefixErrors(t *testing.T) {
 
 	// UUIDs are hex, so "zz" can never match.
 	_, errS, code := runCmd(t, "update", "zz", "--prio", "2", "--data", dir)
-	if code != 1 || !strings.Contains(errS, "no task matches") {
+	if code != 3 || !strings.Contains(errS, "no task matches") {
 		t.Errorf("unknown prefix: code %d stderr %q", code, errS)
 	}
 
@@ -272,7 +272,7 @@ func TestLocalPrefixErrors(t *testing.T) {
 		t.Fatal("no shared first letter across 100 UUIDs (vanishingly unlikely)")
 	}
 	_, errS, code = runCmd(t, "move", prefix, "done", "--data", dir)
-	if code != 1 || !strings.Contains(errS, "ambiguous") {
+	if code != 4 || !strings.Contains(errS, "ambiguous") {
 		t.Errorf("ambiguous prefix: code %d stderr %q", code, errS)
 	}
 }
@@ -345,8 +345,8 @@ func TestDoneRefusesOpenWork(t *testing.T) {
 	id := listJSON(t, "--data", dir)[0].ID
 
 	_, errS, code := runCmd(t, "done", id, "--data", dir)
-	if code != 1 {
-		t.Fatalf("done with open checks: code %d, want 1", code)
+	if code != 4 {
+		t.Fatalf("done with open checks: code %d, want 4", code)
 	}
 	if !strings.Contains(errS, "2 of 2 checklist items are still open") || !strings.Contains(errS, "--force") {
 		t.Errorf("done stderr = %q, want the open-item count and --force", errS)
@@ -356,8 +356,8 @@ func TestDoneRefusesOpenWork(t *testing.T) {
 	}
 
 	// move <id> done is the same transition and refuses identically.
-	if _, _, code = runCmd(t, "move", id, "done", "--data", dir); code != 1 {
-		t.Errorf("move ... done with open checks: code %d, want 1", code)
+	if _, _, code = runCmd(t, "move", id, "done", "--data", dir); code != 4 {
+		t.Errorf("move ... done with open checks: code %d, want 4", code)
 	}
 
 	// Ticking everything off clears the warning without --force.
@@ -369,7 +369,7 @@ func TestDoneRefusesOpenWork(t *testing.T) {
 	}
 	// Still blocked, so still refused — and the message says so.
 	_, errS, code = runCmd(t, "done", id, "--data", dir)
-	if code != 1 || !strings.Contains(errS, "flagged blocked") {
+	if code != 4 || !strings.Contains(errS, "flagged blocked") {
 		t.Fatalf("done while blocked: code %d stderr %q", code, errS)
 	}
 	if _, errS, code = runCmd(t, "update", id, "--data", dir, "--no-blocked"); code != 0 {
@@ -432,7 +432,7 @@ func TestCheckDonePrefixClosesTheDoneGuard(t *testing.T) {
 
 	// The same call with the item left open is still refused.
 	_, errS, code := runCmd(t, "update", id, "--check", "reproduce locally", "--status", "done", "--data", dir)
-	if code != 1 || !strings.Contains(errS, "1 of 1 checklist items are still open") {
+	if code != 4 || !strings.Contains(errS, "1 of 1 checklist items are still open") {
 		t.Fatalf("update leaving the item open: code %d stderr %q", code, errS)
 	}
 	if got := listJSON(t, "--data", dir)[0].Status; got != "todo" {
@@ -466,8 +466,8 @@ func TestUpdateStatusDoneGuard(t *testing.T) {
 	// Refused — and the field patch that rode along in the same call must be
 	// rolled back with the move, not left behind.
 	_, errS, code := runCmd(t, "update", id, "--status", "done", "--title", "Renamed", "--data", dir)
-	if code != 1 {
-		t.Fatalf("update --status done with open checks: code %d, want 1", code)
+	if code != 4 {
+		t.Fatalf("update --status done with open checks: code %d, want 4", code)
 	}
 	if !strings.Contains(errS, "2 of 2 checklist items are still open") || !strings.Contains(errS, "--force") {
 		t.Errorf("update stderr = %q, want the open-item count and --force", errS)
@@ -502,8 +502,8 @@ func TestUpdateStatusDoneGuard(t *testing.T) {
 	if blocked.ID == "" {
 		t.Fatal("blocked task missing from the listing")
 	}
-	if _, _, code := runCmd(t, "update", blocked.ID, "--status", "done", "--data", dir); code != 1 {
-		t.Errorf("update --status done on a blocked task: code %d, want 1", code)
+	if _, _, code := runCmd(t, "update", blocked.ID, "--status", "done", "--data", dir); code != 4 {
+		t.Errorf("update --status done on a blocked task: code %d, want 4", code)
 	}
 	if _, errS, code := runCmd(t, "update", blocked.ID, "--no-blocked", "--status", "done", "--data", dir); code != 0 {
 		t.Fatalf("clearing blocked and finishing in one update failed (code %d): %s", code, errS)
@@ -615,8 +615,8 @@ func TestAddDoneFinishingGuard(t *testing.T) {
 		wantCode int
 		warning  string
 	}{
-		{name: "open item", flags: []string{"--check", "open"}, wantCode: 1, warning: "checklist items are still open"},
-		{name: "blocked", flags: []string{"--blocked"}, wantCode: 1, warning: "flagged blocked"},
+		{name: "open item", flags: []string{"--check", "open"}, wantCode: 4, warning: "checklist items are still open"},
+		{name: "blocked", flags: []string{"--blocked"}, wantCode: 4, warning: "flagged blocked"},
 		{name: "override", flags: []string{"--blocked", "--check", "open", "--force"}},
 		{name: "clear"},
 		{name: "ticked", flags: []string{"--check", "x checked"}},

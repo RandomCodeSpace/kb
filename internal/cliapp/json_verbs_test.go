@@ -55,7 +55,7 @@ func TestMutationVerbsEmitJSON(t *testing.T) {
 
 	// rm --json still demands --yes; with it, the deleted task comes back.
 	_, errS, code = runCmd(t, "rm", "1", "--json", "--data", dir)
-	if code != 1 || !strings.Contains(errS, "--yes") {
+	if code != 4 || !strings.Contains(errS, "--yes") {
 		t.Fatalf("rm --json without --yes: code=%d stderr=%q", code, errS)
 	}
 	out, _, code = runCmd(t, "rm", "1", "--yes", "--json", "--data", dir)

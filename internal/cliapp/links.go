@@ -3,8 +3,6 @@ package cliapp
 import (
 	"errors"
 	"fmt"
-
-	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
 // cmdLink records a blocks edge: kb link <a> blocks <b> ("a blocks b") or
@@ -56,10 +54,7 @@ func (a *app) cmdUnlink(args []string) int {
 	}
 	return a.withLocal(*data, func(be *localBackend) error {
 		if err := be.unlink(pos[0], pos[1]); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("no link between %q and %q", pos[0], pos[1])
-			}
-			return friendlyIDErr(err, pos[0])
+			return err
 		}
 		if *jsonF {
 			return writeSingleJSON(a.stdout, struct {

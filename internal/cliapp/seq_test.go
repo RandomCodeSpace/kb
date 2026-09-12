@@ -30,7 +30,7 @@ func TestStableIDAddressing(t *testing.T) {
 
 	// A number that never existed is not found, not treated as a UUID prefix.
 	_, errS, code = runCmd(t, "done", "9", "--data", dir)
-	if code != 1 || !strings.Contains(errS, "no task matches") {
+	if code != 3 || !strings.Contains(errS, "no task matches") {
 		t.Fatalf("done 9: code=%d stderr=%q", code, errS)
 	}
 }
