@@ -1,0 +1,86 @@
+{
+  "version": "v1.12.0",
+  "binary": {
+    "asset": "kb-linux-amd64",
+    "sha256": "edd97ff14cbffb94ddd68a50f5c050d1ee377a12689dcb2fec63366f1b2deb1f",
+    "url": "https://github.com/RandomCodeSpace/kb/releases/download/v1.12.0/kb-linux-amd64"
+  },
+  "database_sha256": "c05c9587bd6d0fb304aa19d6bc8617f0ae8b84d98fea593e67022c7298616346",
+  "schema_version": 11,
+  "row_counts": {
+    "tasks": 3,
+    "labels": 2,
+    "settings": 0,
+    "forge_sources": 0,
+    "import_links": 0,
+    "tombstones": 0,
+    "comments": 0,
+    "task_links": 0
+  },
+  "tasks": [
+    {
+      "id": "371aaebb-7d39-4330-8ee6-0bb71166fac6",
+      "title": "Migration high",
+      "desc": "Synthetic migration fixture: Migration high",
+      "status": "todo",
+      "prio": 1,
+      "due": "2030-01-02",
+      "effort": "M",
+      "created_at": "2026-09-12T19:55:33.127002824Z",
+      "moved_at": "2026-09-12T19:55:33.127002824Z",
+      "updated_at": "2026-09-12T19:55:33.127002824Z",
+      "seq": 1,
+      "tags": [
+        "fixture",
+        "project::migration"
+      ],
+      "checks": [
+        {
+          "Text": "Inspect migrated task",
+          "Done": false
+        }
+      ]
+    },
+    {
+      "id": "c5370ce4-5044-49f0-ae4f-e464319f13d4",
+      "title": "Migration low",
+      "desc": "Synthetic migration fixture: Migration low",
+      "status": "done",
+      "prio": 3,
+      "due": "2030-01-02",
+      "effort": "M",
+      "created_at": "2026-09-12T19:55:33.249892165Z",
+      "moved_at": "2026-09-12T19:55:33.249892165Z",
+      "updated_at": "2026-09-12T19:55:33.249892165Z",
+      "seq": 3,
+      "tags": [
+        "fixture",
+        "project::migration"
+      ],
+      "checks": []
+    },
+    {
+      "id": "3a11f74d-5299-4f9a-801b-3d6b90639831",
+      "title": "Migration medium",
+      "desc": "Synthetic migration fixture: Migration medium",
+      "status": "doing",
+      "prio": 2,
+      "due": "2030-01-02",
+      "effort": "M",
+      "created_at": "2026-09-12T19:55:33.188318009Z",
+      "moved_at": "2026-09-12T19:55:33.188318009Z",
+      "updated_at": "2026-09-12T19:55:33.188318009Z",
+      "seq": 2,
+      "tags": [
+        "fixture",
+        "project::migration"
+      ],
+      "checks": [
+        {
+          "Text": "Inspect migrated task",
+          "Done": false
+        }
+      ]
+    }
+  ]
+}
