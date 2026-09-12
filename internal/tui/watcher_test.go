@@ -252,6 +252,10 @@ func TestOpenDataVersionWatcherRejectsUnresolvableRelativePath(t *testing.T) {
 	if err := os.Remove(dir); err != nil {
 		t.Fatal(err)
 	}
+	// Some platforms can still resolve a removed working directory.
+	if path, err := filepath.Abs("kb.db"); err == nil {
+		t.Skipf("removed working directory still resolves to %q", path)
+	}
 	watcher, err := OpenDataVersionWatcher(context.Background(), "kb.db")
 	if watcher != nil {
 		_ = watcher.Close()
