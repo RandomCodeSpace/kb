@@ -31,6 +31,7 @@ func defaultDataDir() (string, error) {
 type localBackend struct {
 	st              *store.Store
 	user            string
+	author          string
 	beforeDoneGuard func()
 }
 
@@ -193,7 +194,11 @@ func (l *localBackend) view(ref string) (item, []store.Comment, store.TaskLinks,
 }
 
 func (l *localBackend) commentAdd(ref, body string) (store.Comment, error) {
-	c, err := l.st.AddComment(l.user, ref, l.user, body)
+	author := strings.TrimSpace(l.author)
+	if author == "" {
+		author = l.user
+	}
+	c, err := l.st.AddComment(l.user, ref, author, body)
 	if err != nil {
 		return store.Comment{}, friendlyIDErr(err, ref)
 	}
@@ -213,11 +218,20 @@ func (l *localBackend) commentRm(id int) (store.Comment, error) {
 }
 
 func (l *localBackend) link(blockerRef, blockedRef string) (board.Task, board.Task, error) {
-	return l.st.Link(l.user, blockerRef, blockedRef)
+	blocker, blocked, err := l.st.Link(l.user, blockerRef, blockedRef)
+	return blocker, blocked, friendlyLinkErr(err)
 }
 
 func (l *localBackend) unlink(aRef, bRef string) error {
-	return l.st.Unlink(l.user, aRef, bRef)
+	err := l.st.Unlink(l.user, aRef, bRef)
+	var refErr *store.TaskRefError
+	if errors.As(err, &refErr) {
+		return friendlyLinkErr(err)
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return describedError{err, fmt.Sprintf("no link between %q and %q", aRef, bRef)}
+	}
+	return err
 }
 
 // friendlyIDErr rewords the store's prefix-resolution sentinels with the id
@@ -225,9 +239,43 @@ func (l *localBackend) unlink(aRef, bRef string) error {
 func friendlyIDErr(err error, ref string) error {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		return fmt.Errorf("no task matches id %q", ref)
+		return describedError{err, fmt.Sprintf("no task matches id %q", ref)}
 	case errors.Is(err, store.ErrAmbiguous):
-		return fmt.Errorf("task id prefix %q is ambiguous; use more characters", ref)
+		return describedError{err, fmt.Sprintf("task id prefix %q is ambiguous; use more characters", ref)}
 	}
 	return err
+}
+
+// describedError preserves classification while replacing diagnostic wording.
+type describedError struct {
+	cause   error
+	message string
+}
+
+func (e describedError) Error() string { return e.message }
+func (e describedError) Unwrap() error { return e.cause }
+
+var errRefused = errors.New("mutation refused")
+
+func friendlyLinkErr(err error) error {
+	var refErr *store.TaskRefError
+	if errors.As(err, &refErr) {
+		return friendlyIDErr(err, refErr.Ref)
+	}
+	return err
+}
+
+func (l *localBackend) restore(ref string) (item, error) {
+	to := board.StatusTodo
+	guard := func(t board.Task) error {
+		if t.Status != board.StatusCancelled {
+			return describedError{store.ErrTaskNotCancelled, fmt.Sprintf("cannot restore %s: task is %s; restore requires a cancelled task", ref, t.Status)}
+		}
+		return nil
+	}
+	t, err := l.st.UpdateAndMoveTask(l.user, ref, store.TaskPatch{}, &to, nil, guard)
+	if err != nil {
+		return item{}, friendlyIDErr(err, ref)
+	}
+	return item{ref: t.ID, task: t}, nil
 }

@@ -196,6 +196,59 @@ Run `kb help` for the complete command reference.
 
 </details>
 
+<details>
+<summary>CLI JSON and exit codes</summary>
+
+### CLI JSON and exit codes
+
+Use `--json` in scripts. Successful data goes to stdout and errors go to
+stderr; human-readable tables and messages are intended for people.
+
+Task objects always include `id`, `seq`, `emoji`, `title`, `desc`, `status`,
+`blocked`, `prio`, `due`, `effort`, `tags`, `checks`, `position`, `createdAt`,
+`movedAt`, and `updatedAt`. Empty strings, `false`, and `0` remain present.
+`tags` and `checks` are arrays, including `[]` when empty. Each checklist
+entry has `text` and `done` fields. Populated timestamps are UTC RFC3339Nano
+strings.
+
+| Command | JSON result |
+| --- | --- |
+| `list` | Array of tasks |
+| `add`, `update`, `move`, `done`, `cancel`, `restore`, `rm` | One task |
+| `view` | One task plus `blocks`, `blockedBy`, and `comments` arrays |
+| `link` | Two tasks, blocker first |
+| `unlink` | `{"removed":true}` |
+| `comment add`, `comment rm` | One comment |
+| `comment list` | Array of comments |
+| `project list` | Array of objects with `project` and `tasks` |
+| `users` | Array of objects with `user` and `tasks` |
+| `version` | Object with `version` and optional `revision` and `modified` |
+
+`blocks` and `blockedBy` contain task sequence numbers. Comment objects have
+`id`, `task`, `taskId`, `author`, `body`, and `createdAt`; `task` is the sequence
+number and `taskId` is the UUID.
+
+Task commands use these exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success or help |
+| `1` | Other failure, including storage or output errors |
+| `2` | Invalid arguments or flags |
+| `3` | Task, comment, or link not found |
+| `4` | Ambiguous reference or refused/conflicting mutation |
+
+Code `4` includes the completion guard, a self/duplicate/cyclic link, restoring
+a task that is not cancelled, and a deletion missing `--yes`.
+`kb restore` accepts only cancelled tasks. Use `kb move <id> todo` to reopen a
+task in another state.
+
+Set a comment author with `kb comment add 1 "Reviewed" --author "Alice"`.
+This leaves the board namespace unchanged. An omitted or blank author uses
+the existing `default` author.
+
+</details>
+
 ## Common questions
 
 ### Does kb sync between computers?

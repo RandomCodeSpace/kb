@@ -14,7 +14,7 @@ import (
 // commentJSON is the wire shape of one comment.
 type commentJSON struct {
 	ID        int    `json:"id"`
-	TaskSeq   int    `json:"task,omitempty"`
+	TaskSeq   int    `json:"task"`
 	TaskID    string `json:"taskId"`
 	Author    string `json:"author"`
 	Body      string `json:"body"`
@@ -58,6 +58,7 @@ func (a *app) cmdComment(args []string) int {
 
 func (a *app) cmdCommentAdd(args []string) int {
 	fs, data := a.newFlagSet("comment add")
+	author := fs.String("author", "", "comment author (defaults to the board namespace)")
 	jsonF := fs.Bool("json", false, "print the comment as JSON")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
@@ -70,6 +71,7 @@ func (a *app) cmdCommentAdd(args []string) int {
 		return a.usageErr(errors.New("comment text must not be empty"))
 	}
 	return a.withLocal(*data, func(be *localBackend) error {
+		be.author = *author
 		c, err := be.commentAdd(pos[0], pos[1])
 		if err != nil {
 			return err
@@ -131,12 +133,12 @@ func (a *app) cmdCommentRm(args []string) int {
 		return a.usageErr(fmt.Errorf("invalid comment id %q (want c7 or 7)", pos[0]))
 	}
 	if !*yes {
-		return a.fail(fmt.Errorf("refusing to delete comment c%d; re-run with --yes", id))
+		return a.fail(describedError{errRefused, fmt.Sprintf("refusing to delete comment c%d; re-run with --yes", id)})
 	}
 	return a.withLocal(*data, func(be *localBackend) error {
 		c, err := be.commentRm(id)
 		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("no comment matches id c%d", id)
+			return describedError{err, fmt.Sprintf("no comment matches id c%d", id)}
 		}
 		if err != nil {
 			return err

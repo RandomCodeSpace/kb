@@ -69,7 +69,7 @@ func TestViewShowsTaskAndComments(t *testing.T) {
 	if out, _, _ = runCmd(t, "view", "2", "--data", dir); !strings.Contains(out, "comments: none") {
 		t.Errorf("view of uncommented task:\n%s", out)
 	}
-	if _, errS, code := runCmd(t, "view", "9", "--data", dir); code != 1 || !strings.Contains(errS, "no task matches") {
+	if _, errS, code := runCmd(t, "view", "9", "--data", dir); code != 3 || !strings.Contains(errS, "no task matches") {
 		t.Errorf("view missing task: code=%d stderr=%q", code, errS)
 	}
 	if _, _, code := runCmd(t, "view", "--data", dir); code != 2 {
