@@ -1,0 +1,72 @@
+{
+  "version": "v0.2.0",
+  "binary": {
+    "asset": "kb-linux-amd64",
+    "sha256": "c743ae343a046be7ccbe06e2e10dab16aa58d31e78712c656459aeff23dc80d9",
+    "url": "https://github.com/RandomCodeSpace/kb/releases/download/v0.2.0/kb-linux-amd64"
+  },
+  "database_sha256": "cec9a102c902459c060e6fd0a09283f4b077f1e221045574f0d415b260625e69",
+  "schema_version": 1,
+  "row_counts": {
+    "tasks": 3,
+    "labels": 1,
+    "settings": 0
+  },
+  "tasks": [
+    {
+      "id": "805b90fc-a7bd-44da-9463-e1752efbac69",
+      "title": "Migration high",
+      "desc": "Synthetic migration fixture: Migration high",
+      "status": "todo",
+      "prio": 1,
+      "due": "2030-01-02",
+      "effort": "M",
+      "created_at": "2026-09-12T15:10:30.362949378Z",
+      "moved_at": "2026-09-12T15:10:30.362949378Z",
+      "tags": [
+        "fixture"
+      ],
+      "checks": [
+        {
+          "Text": "Inspect migrated task",
+          "Done": false
+        }
+      ]
+    },
+    {
+      "id": "ca465b73-653e-48d3-9db9-ad7954b6b7ff",
+      "title": "Migration low",
+      "desc": "Synthetic migration fixture: Migration low",
+      "status": "done",
+      "prio": 4,
+      "due": "2030-01-02",
+      "effort": "M",
+      "created_at": "2026-09-12T15:10:30.382447788Z",
+      "moved_at": "2026-09-12T15:10:30.382447788Z",
+      "tags": [
+        "fixture"
+      ],
+      "checks": null
+    },
+    {
+      "id": "975a6fe2-4304-4e57-b808-6dbb10db4854",
+      "title": "Migration medium",
+      "desc": "Synthetic migration fixture: Migration medium",
+      "status": "doing",
+      "prio": 2,
+      "due": "2030-01-02",
+      "effort": "M",
+      "created_at": "2026-09-12T15:10:30.373025215Z",
+      "moved_at": "2026-09-12T15:10:30.373025215Z",
+      "tags": [
+        "fixture"
+      ],
+      "checks": [
+        {
+          "Text": "Inspect migrated task",
+          "Done": false
+        }
+      ]
+    }
+  ]
+}
