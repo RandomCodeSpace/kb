@@ -12,6 +12,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+var openCrashTracePipe = os.Pipe
+
 // runWithCrashTrace belongs at the single TUI process boundary: Bubble Tea
 // writes recovered panics directly to os.Stderr, without a writer option.
 // Keep its recovery enabled so it still restores the terminal.
@@ -21,7 +23,7 @@ func runWithCrashTrace(dataDir, version string, run func() error) (runErr error)
 		fmt.Fprintf(tuiStderr, "kb: cannot capture TUI crash trace: %v\n", err)
 		return run()
 	}
-	reader, writer, err := os.Pipe()
+	reader, writer, err := openCrashTracePipe()
 	if err != nil {
 		_ = file.Close()
 		_ = os.Remove(file.Name())

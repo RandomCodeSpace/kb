@@ -136,3 +136,55 @@ func TestCrashTraceMissingStackReportsIncompleteCapture(t *testing.T) {
 		t.Fatalf("partial crash files = %v, %v", files, err)
 	}
 }
+
+func TestCrashTracePipeFailureCleansUpAndStillRuns(t *testing.T) {
+	restoreTUISeams(t)
+	originalPipe := openCrashTracePipe
+	t.Cleanup(func() { openCrashTracePipe = originalPipe })
+	pipeErr := errors.New("pipe unavailable")
+	openCrashTracePipe = func() (*os.File, *os.File, error) { return nil, nil, pipeErr }
+	var warning bytes.Buffer
+	tuiStderr = &warning
+	data := t.TempDir()
+	originalStderr := os.Stderr
+	want := errors.New("program failure")
+	called := false
+	err := runWithCrashTrace(data, "test", func() error {
+		called = true
+		files, err := os.ReadDir(data)
+		if err != nil || len(files) != 0 {
+			t.Fatalf("pipe failure left artifacts before fallback: %v, %v", files, err)
+		}
+		return want
+	})
+	if !called || !errors.Is(err, want) {
+		t.Fatalf("fallback called=%v error=%v", called, err)
+	}
+	if os.Stderr != originalStderr {
+		t.Fatal("pipe failure changed stderr")
+	}
+	if !strings.Contains(warning.String(), "cannot capture TUI crash trace: pipe unavailable") {
+		t.Fatalf("capture warning = %q", warning.String())
+	}
+}
+
+func TestCrashTraceContinuesForwardingAfterCompletedStack(t *testing.T) {
+	var file, stderr bytes.Buffer
+	writer := &crashTraceWriter{file: &file, stderr: &stderr, complete: make(chan struct{})}
+	const trace = "Restoring terminal...\r\n\r\ngoroutine 1 [running]:\r\nprobe()\r\n\r\n"
+	if _, err := writer.Write([]byte(trace)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-writer.complete:
+	default:
+		t.Fatal("stack completion was not signaled")
+	}
+	const diagnostic = "later diagnostic\n"
+	if _, err := writer.Write([]byte(diagnostic)); err != nil {
+		t.Fatal(err)
+	}
+	if writer.err != nil || file.String() != trace+diagnostic || stderr.String() != trace+diagnostic {
+		t.Fatalf("post-stack forwarding error=%v file=%q stderr=%q", writer.err, file.String(), stderr.String())
+	}
+}
