@@ -142,6 +142,13 @@ can leave out information needed for a complete restore.
 Do not place the data folder in Dropbox, iCloud, OneDrive, or another synced
 folder, and do not share one data folder between computers.
 
+Use a local filesystem that supports file locking and hard links for the data
+folder. FAT32, exFAT, and network shares are not supported data locations. On
+first use, kb must publish its encryption key without replacing a key created
+by another running kb process. If the filesystem cannot do that, startup fails
+instead of risking unreadable saved credentials. Keep the data folder on a
+supported local disk; a closed backup can be stored elsewhere.
+
 Only `kb web` opens a TCP listener. It binds to 127.0.0.1 by default, and no
 other command listens on a port. The web view has no login screen, so keep the
 default local address unless you know how to protect a network service.
