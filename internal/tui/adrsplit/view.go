@@ -594,24 +594,7 @@ func areaDisplay(area *textarea.Model, focused bool, width, rows int) []string {
 }
 
 func cursorViewport(value string, position, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	if width == 1 {
-		return "|"
-	}
-	runes := []rune(value)
-	position = min(max(position, 0), len(runes))
-	start := max(position-width+2, 0)
-	end := min(start+width-1, len(runes))
-	visible := append([]rune(nil), runes[start:end]...)
-	cursor := position - start
-	if cursor >= len(visible) {
-		visible = append(visible, '|')
-	} else {
-		visible = append(visible[:cursor], append([]rune{'|'}, visible[cursor:]...)...)
-	}
-	return ansi.Truncate(string(visible), width, "")
+	return formview.CursorViewport(value, position, width)
 }
 
 func statusName(status board.Status) string {

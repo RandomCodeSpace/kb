@@ -659,7 +659,7 @@ func (m *Model) updatePointer(message pointerClickMsg) tea.Cmd {
 	if m.guardClose {
 		switch message.target {
 		case "discard":
-			return m.updateKey(tea.KeyPressMsg(tea.Key{Code: 'd', Text: "d"}))
+			return m.updateKey(tea.KeyPressMsg(tea.Key{Code: 'D', Text: "D"}))
 		case "keep":
 			return m.updateKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 		default:
@@ -721,7 +721,7 @@ func (m *Model) updateKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	if m.guardClose {
 		switch key {
-		case "d", "D":
+		case "D":
 			m.cancelDraft()
 			m.open, m.guardClose = false, false
 		case "esc":

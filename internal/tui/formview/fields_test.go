@@ -112,3 +112,25 @@ func TestAreaKeepsCursorVisibleAcrossSoftWrapViewport(t *testing.T) {
 		t.Fatalf("repeated render reset viewport: first=%#v/%d second=%#v/%d", got, offset, again, area.ScrollYOffset())
 	}
 }
+
+func TestCursorViewportUsesCellsAndClampsPosition(t *testing.T) {
+	for _, tc := range []struct {
+		name, value     string
+		position, width int
+		want            string
+	}{
+		{"no space", "abc", 1, 0, ""},
+		{"cursor only", "界", 1, 1, "|"},
+		{"negative position", "abc", -1, 4, "|abc"},
+		{"past end", "abc", 99, 4, "abc|"},
+		{"CJK", "界界界", 3, 5, "界界|"},
+		{"emoji", "🙂🙂🙂", 3, 5, "🙂🙂|"},
+		{"middle", "a界b", 1, 5, "a|界b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CursorViewport(tc.value, tc.position, tc.width); got != tc.want || ansi.StringWidth(got) > tc.width {
+				t.Fatalf("viewport = %q, want %q within %d cells", got, tc.want, tc.width)
+			}
+		})
+	}
+}

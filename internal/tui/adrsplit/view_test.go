@@ -109,6 +109,26 @@ func TestViewsCoverFileReviewProgressErrorsAndNarrowTerminals(t *testing.T) {
 	}
 }
 
+func TestCursorViewportKeepsWideTextCursorVisible(t *testing.T) {
+	for _, tc := range []struct {
+		name, value     string
+		position, width int
+		want            string
+	}{
+		{"CJK end", "界界界", 3, 5, "界界|"},
+		{"emoji end", "🙂🙂🙂", 3, 5, "🙂🙂|"},
+		{"wide middle", "界界ab", 2, 5, "界界|"},
+		{"text after cursor", "a界b", 1, 5, "a|界b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cursorViewport(tc.value, tc.position, tc.width)
+			if got != tc.want || ansi.StringWidth(got) > tc.width {
+				t.Fatalf("viewport = %q, want %q within %d cells", got, tc.want, tc.width)
+			}
+		})
+	}
+}
+
 func TestViewHelpersCoverCursorPlaceholdersAndLabels(t *testing.T) {
 	input := textinput.New()
 	input.Placeholder = "placeholder"

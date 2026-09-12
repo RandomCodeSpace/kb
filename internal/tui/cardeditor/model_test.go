@@ -260,6 +260,10 @@ func TestUnsavedGuardAndWatcherRefreshNeverOverwriteDirtyFields(t *testing.T) {
 	}
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	model.Update(press('d'))
+	if !model.IsOpen() || !model.guardClose || model.title.Value() != "My edits" {
+		t.Fatal("lowercase d discarded dirty fields or dismissed the guard")
+	}
+	model.Update(press('D'))
 	if model.IsOpen() {
 		t.Fatal("explicit discard did not close")
 	}

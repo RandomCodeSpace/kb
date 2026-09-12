@@ -310,19 +310,7 @@ func (m Model) refRow(width int) importRow {
 
 // cursorViewport is the text-cursor window of the shared form renderer.
 func cursorViewport(value string, position, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	if width == 1 {
-		return "|"
-	}
-	runes := []rune(value)
-	position = min(max(position, 0), len(runes))
-	before, after := string(runes[:position]), string(runes[position:])
-	content := width - 1
-	column := ansi.StringWidth(before)
-	visible := ansi.Cut(before, max(column-content, 0), column)
-	return visible + "|" + ansi.Truncate(after, max(content-ansi.StringWidth(visible), 0), "")
+	return formview.CursorViewport(value, position, width)
 }
 
 // sanitize strips terminal control sequences from untrusted forge text.
