@@ -1,6 +1,6 @@
 module github.com/RandomCodeSpace/kb
 
-go 1.26.8
+go 1.26.5
 
 require (
 	charm.land/bubbles/v2 v2.2.1

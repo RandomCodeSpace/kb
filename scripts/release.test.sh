@@ -46,6 +46,8 @@ printf '%s\n' "$*" >>"${FAKE_GO_LOG:-/dev/null}"
 case ${1:-} in
   run)
     if [[ ${3:-} == golang.org/x/vuln/cmd/govulncheck@v1.8.0 ]]; then
+      [[ ${4:-} == -json && ${5:-} == ./... ]] || exit 64
+      printf '%s\n' '{"config":{"protocol_version":"v1.0.0","go_version":"go1.26.5","scan_level":"symbol","scan_mode":"source"}}'
       exit "${FAKE_VULN_STATUS:-0}"
     fi
     base=''
@@ -327,7 +329,7 @@ assert_contains 'dry run complete: v1.2.3 verified locally; nothing published' \
 assert_contains 'run -buildvcs=false ./scripts/ci/impactcmd' "$test_root/go.log"
 assert_contains '--format plan' "$test_root/go.log"
 assert_contains 'test -buildvcs=false -count=1 ./...' "$test_root/go.log"
-assert_contains 'run -buildvcs=false golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...' "$test_root/go.log"
+assert_contains 'run -buildvcs=false golang.org/x/vuln/cmd/govulncheck@v1.8.0 -json ./...' "$test_root/go.log"
 [[ $(git -C "$source_repo" rev-parse HEAD) == "$head_before" ]] || fail 'dry run changed HEAD'
 [[ $(git -C "$source_repo" rev-parse 'HEAD^{tree}') == "$tree_before" ]] || fail 'dry run changed tree'
 [[ $(git -C "$source_repo" write-tree) == "$index_before" ]] || fail 'dry run changed index'

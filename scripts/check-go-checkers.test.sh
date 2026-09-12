@@ -53,9 +53,18 @@ cat >"$fake_go_dir/go" <<'EOF'
 #!/usr/bin/env sh
 set -eu
 case "$1" in
+  env)
+    [ "$2" = "GOVERSION" ] || exit 64
+    printf '%s\n' "${FAKE_GO_VERSION:-go1.26.5}"
+    ;;
   run)
-    [ "$#" -eq 4 ] && [ "$2" = "-buildvcs=false" ] && \
-      [ "$3" = "golang.org/x/vuln/cmd/govulncheck@v1.8.0" ] && [ "$4" = "./..." ] || exit 64
+    [ "$#" -eq 5 ] && [ "$2" = "-buildvcs=false" ] && \
+      [ "$3" = "golang.org/x/vuln/cmd/govulncheck@v1.8.0" ] && [ "$4" = "-json" ] && [ "$5" = "./..." ] || exit 64
+    if [ -n "${FAKE_VULN_JSON:-}" ]; then
+      cat "$FAKE_VULN_JSON"
+    else
+      printf '%s\n' '{"config":{"protocol_version":"v1.0.0","go_version":"go1.26.5","scan_level":"symbol","scan_mode":"source"}}'
+    fi
     exit "${FAKE_VULN_STATUS:-0}"
     ;;
   test)
@@ -110,7 +119,50 @@ assert_status 0 "$status" "pinned vulnerability scanner accepts clean code"
 status=0
 PATH="$fake_go_dir:$PATH" FAKE_VULN_STATUS=3 run_capture "$vuln_output" \
   sh "$repo_root/scripts/check-go-vuln.sh" || status=$?
-assert_status 3 "$status" "reachable vulnerability fails the gate"
+assert_status 3 "$status" "scanner failure preserves its exit status"
+
+# JSON mode reports vulnerabilities with status zero. Exercise the policy through
+# the real gate script while substituting only the scanner process.
+vuln_config='{"config":{"protocol_version":"v1.0.0","go_version":"go1.26.5","scan_level":"symbol","scan_mode":"source"}}'
+stdlib_finding='{"finding":{"osv":"GO-TEST-STDLIB","fixed_version":"v1.26.6","trace":[{"module":"stdlib","version":"v1.26.5","package":"net/http","function":"Serve"}]}}'
+third_party_finding='{"finding":{"osv":"GO-TEST-DEPENDENCY","trace":[{"module":"example.test/dependency","version":"v1.0.0","package":"example.test/dependency","function":"Call"}]}}'
+vuln_json="$test_dir/vuln.json"
+printf '%s\n' "$vuln_config" "$stdlib_finding" >"$vuln_json"
+PATH="$fake_go_dir:$PATH" FAKE_VULN_JSON="$vuln_json" run_capture "$vuln_output" \
+  sh "$repo_root/scripts/check-go-vuln.sh" || fail 'accepted Go 1.26.5 vulnerability failed gate'
+assert_contains 'ACCEPTED Go 1.26.5 standard-library risk: GO-TEST-STDLIB' "$vuln_output" 'accepted risk remains visible'
+assert_contains 'net/http' "$vuln_output" 'finding details remain visible'
+for findings in third_party mixed; do
+  printf '%s\n' "$vuln_config" "$third_party_finding" >"$vuln_json"
+  if [ "$findings" = mixed ]; then printf '%s\n' "$stdlib_finding" >>"$vuln_json"; fi
+  status=0
+  PATH="$fake_go_dir:$PATH" FAKE_VULN_JSON="$vuln_json" run_capture "$vuln_output" \
+    sh "$repo_root/scripts/check-go-vuln.sh" || status=$?
+  [ "$status" -ne 0 ] || fail "$findings reachable dependency passed gate"
+  assert_contains 'REJECTED reachable vulnerability: GO-TEST-DEPENDENCY' "$vuln_output" 'dependency refusal'
+done
+printf '%s\n' "$vuln_config" '{"finding":{"osv":"GO-TEST-UNUSED","trace":[{"module":"example.test/unused","version":"v1.0.0"}]}}' >"$vuln_json"
+PATH="$fake_go_dir:$PATH" FAKE_VULN_JSON="$vuln_json" run_capture "$vuln_output" \
+  sh "$repo_root/scripts/check-go-vuln.sh" || fail 'uncalled dependency failed reachable-only gate'
+assert_contains 'GO-TEST-UNUSED' "$vuln_output" 'uncalled finding remains visible'
+for invalid in empty malformed wrong_version package_scan wrong_stdlib_version missing_trace; do
+  case "$invalid" in
+    empty) : >"$vuln_json" ;;
+    malformed) printf '{' >"$vuln_json" ;;
+    wrong_version) printf '%s\n' "$vuln_config" "$stdlib_finding" | sed 's/1.26.5/1.26.8/g' >"$vuln_json" ;;
+    package_scan) printf '%s\n' "$vuln_config" | sed 's/"symbol"/"package"/' >"$vuln_json" ;;
+    wrong_stdlib_version) printf '%s\n' "$vuln_config" >"$vuln_json"; printf '%s\n' "$stdlib_finding" | sed 's/v1.26.5/v1.26.4/' >>"$vuln_json" ;;
+    missing_trace) printf '%s\n' "$vuln_config" '{"finding":{"osv":"GO-TEST-BROKEN","trace":[]}}' >"$vuln_json" ;;
+  esac
+  status=0
+  PATH="$fake_go_dir:$PATH" FAKE_VULN_JSON="$vuln_json" run_capture "$vuln_output" \
+    sh "$repo_root/scripts/check-go-vuln.sh" || status=$?
+  [ "$status" -ne 0 ] || fail "$invalid scanner output passed gate"
+done
+status=0
+PATH="$fake_go_dir:$PATH" FAKE_GO_VERSION=go1.26.8 run_capture "$vuln_output" \
+  sh "$repo_root/scripts/check-go-vuln.sh" || status=$?
+[ "$status" -ne 0 ] || fail 'Go version above the cap passed gate'
 
 coverage_output="$test_dir/coverage-output"
 coverage_profile="$test_dir/coverage.out"
