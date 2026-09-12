@@ -3,11 +3,13 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,42 +73,47 @@ func TestDataVersionWatcherDetectsAnotherConnection(t *testing.T) {
 			if tc.unixOnly && runtime.GOOS == "windows" {
 				t.Skip("filename requires Unix filesystem semantics")
 			}
-			if err := os.MkdirAll(filepath.Dir(tc.path), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			st, err := store.Open(tc.path, []byte("test-secret"))
-			if err != nil {
-				t.Fatalf("open store: %v", err)
-			}
-			t.Cleanup(func() { _ = st.Close() })
-
-			watcher, err := OpenDataVersionWatcher(context.Background(), tc.path)
-			if err != nil {
-				t.Fatalf("open watcher: %v", err)
-			}
-			t.Cleanup(func() { _ = watcher.Close() })
-			var timeout int
-			if err := watcher.conn.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&timeout); err != nil {
-				t.Fatal(err)
-			}
-			if timeout != 5000 {
-				t.Errorf("busy_timeout = %d, want 5000", timeout)
-			}
-			before, err := watcher.DataVersion(context.Background())
-			if err != nil {
-				t.Fatalf("initial data_version: %v", err)
-			}
-			if _, err := st.AddTask("alice", board.Task{Title: "external", Status: board.StatusTodo, Prio: 3}); err != nil {
-				t.Fatalf("external write: %v", err)
-			}
-			after, err := watcher.DataVersion(context.Background())
-			if err != nil {
-				t.Fatalf("updated data_version: %v", err)
-			}
-			if after == before {
-				t.Fatalf("data_version did not change after other-connection commit: %d", after)
-			}
+			assertDataVersionChangesAfterWrite(t, tc.path)
 		})
+	}
+}
+
+func assertDataVersionChangesAfterWrite(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(path, []byte("test-secret"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	watcher, err := OpenDataVersionWatcher(context.Background(), path)
+	if err != nil {
+		t.Fatalf("open watcher: %v", err)
+	}
+	t.Cleanup(func() { _ = watcher.Close() })
+	var timeout int
+	if err := watcher.conn.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&timeout); err != nil {
+		t.Fatal(err)
+	}
+	if timeout != 5000 {
+		t.Errorf("busy_timeout = %d, want 5000", timeout)
+	}
+	before, err := watcher.DataVersion(context.Background())
+	if err != nil {
+		t.Fatalf("initial data_version: %v", err)
+	}
+	if _, err := st.AddTask("alice", board.Task{Title: "external", Status: board.StatusTodo, Prio: 3}); err != nil {
+		t.Fatalf("external write: %v", err)
+	}
+	after, err := watcher.DataVersion(context.Background())
+	if err != nil {
+		t.Fatalf("updated data_version: %v", err)
+	}
+	if after == before {
+		t.Fatalf("data_version did not change after other-connection commit: %d", after)
 	}
 }
 
@@ -234,4 +241,23 @@ func TestDataVersionWatcherErrors(t *testing.T) {
 	}
 	_ = watcher.db.Close()
 	_ = st.Close()
+}
+
+func TestOpenDataVersionWatcherRejectsUnresolvableRelativePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not allow removing the current directory")
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	watcher, err := OpenDataVersionWatcher(context.Background(), "kb.db")
+	if watcher != nil {
+		_ = watcher.Close()
+		t.Fatal("opened a watcher without a resolvable path")
+	}
+	if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "tui: database path:") {
+		t.Fatalf("OpenDataVersionWatcher error = %v, want the wrapped path-resolution error", err)
+	}
 }
