@@ -85,9 +85,16 @@ assert_contains '"docs_contract": true' 'docs-only classification'
 assert_contains '"focused_quality": false' 'docs-only Go exclusion'
 assert_contains '"owners": []' 'docs-only owner set'
 
+printf '# Domain glossary\n' >"$fixture/CONTEXT.md"
+context="$(commit_all context)"
+run_impact "$docs" "$context" || fail 'context documentation impact failed'
+assert_contains '"docs_contract": true' 'context documentation classification'
+assert_contains '"focused_quality": false' 'context Go exclusion'
+assert_contains '"unclassified": []' 'context documentation classified'
+
 printf 'MIT License\n' >"$fixture/LICENSE"
 license="$(commit_all license)"
-run_impact "$docs" "$license" || fail 'license impact failed'
+run_impact "$context" "$license" || fail 'license impact failed'
 assert_contains '"docs_contract": true' 'license documentation classification'
 assert_contains '"focused_quality": false' 'license Go exclusion'
 

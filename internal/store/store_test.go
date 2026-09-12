@@ -863,10 +863,10 @@ func TestTaskFieldValidation(t *testing.T) {
 		t.Error("ReplaceBoard with newline title should fail")
 	}
 	err = s.ReplaceBoard("u", board.Board{Title: "B", Tasks: []board.Task{
-		{Title: "odd", Due: "2026-13-45", Status: board.StatusTodo, Prio: 3},
+		{Title: "odd", Due: "2026-13-45", Status: board.StatusTodo, Prio: 3, Checks: []board.Check{{Text: ""}}},
 	}})
 	if err != nil {
-		t.Errorf("ReplaceBoard with wire-shaped odd due should succeed: %v", err)
+		t.Errorf("ReplaceBoard with legacy odd due and blank check should succeed: %v", err)
 	}
 }
 
@@ -1186,5 +1186,32 @@ func TestWriteWaitsForConcurrentImmediateTransaction(t *testing.T) {
 	}
 	if len(b.Tasks) != 1 || b.Tasks[0].Title != "blocked write" {
 		t.Fatalf("board after the blocked write = %+v", b.Tasks)
+	}
+}
+
+func TestDirectTaskWritesRejectBlankChecks(t *testing.T) {
+	s := newStore(t)
+	original, err := s.AddTask("u", board.Task{Title: "Keep", Checks: []board.Check{{Text: "open"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"", "  ", "\t", "\ufeff"} {
+		checks := []board.Check{{Text: text}}
+		if err := ValidateTaskFields(board.Task{Title: "Invalid", Checks: checks}); err == nil {
+			t.Errorf("ValidateTaskFields accepted blank check %q", text)
+		}
+		if _, err := s.AddTask("u", board.Task{Title: "Invalid", Checks: checks}); err == nil {
+			t.Errorf("AddTask accepted blank check %q", text)
+		}
+		if _, err := s.UpdateTask("u", original.ID, TaskPatch{Checks: &checks}); err == nil {
+			t.Errorf("UpdateTask accepted blank check %q", text)
+		}
+	}
+	tasks, err := s.ListTasks("u", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || len(tasks[0].Checks) != 1 || tasks[0].Checks[0].Text != "open" {
+		t.Fatalf("rejected writes changed board: %+v", tasks)
 	}
 }

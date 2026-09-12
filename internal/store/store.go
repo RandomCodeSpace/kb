@@ -84,9 +84,11 @@ func validateTaskLines(t board.Task) error {
 // ValidateTaskFields enforces, for direct task writers such as AddTask and
 // UpdateTask, the field formats a task must satisfy to survive the Markdown
 // codec unchanged: a non-blank title, a real YYYY-MM-DD due date, S/M/L effort,
-// single-token tags without a leading '#', and a single-emoji Emoji.
+// non-blank checklist text, single-token tags without a leading '#', and
+// a single-emoji Emoji.
 // ReplaceBoard deliberately skips these checks: it ingests board.Parse
 // output, which is defined to be tolerant of odd-but-representable values.
+// That legacy import boundary also retains blank checklist text.
 func ValidateTaskFields(t board.Task) error {
 	if err := validateTaskLines(t); err != nil {
 		return err
@@ -97,6 +99,12 @@ func ValidateTaskFields(t board.Task) error {
 	if board.IsBlank(t.Title) {
 		return errors.New("store: title must not be empty")
 	}
+	for _, check := range t.Checks {
+		if board.IsBlank(check.Text) {
+			return errors.New("store: checklist text must not be empty")
+		}
+	}
+
 	if t.Due != "" {
 		if !dueRe.MatchString(t.Due) {
 			return fmt.Errorf("store: invalid due date %q (want YYYY-MM-DD)", t.Due)

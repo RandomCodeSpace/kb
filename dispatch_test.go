@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime/debug"
@@ -12,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/RandomCodeSpace/kb/internal/cliapp"
+	"github.com/RandomCodeSpace/kb/internal/webui"
 )
 
 func TestDispatchArgs(t *testing.T) {
@@ -328,5 +331,53 @@ func TestResolveDefaultDataDir(t *testing.T) {
 	userHomeDir = func() (string, error) { return "", wantErr }
 	if got, err := resolveDefaultDataDir(); got != "" || !errors.Is(err, wantErr) {
 		t.Fatalf("home error = %q, %v; want no home", got, err)
+	}
+}
+
+func TestDispatchDataDirectoryWithoutHome(t *testing.T) {
+	for _, command := range []string{"web", "mcp"} {
+		for _, mode := range []string{"help", "explicit", "missing"} {
+			t.Run(command+"/"+mode, func(t *testing.T) {
+				restoreRootSeams(t)
+				t.Setenv("HOME", "")
+				t.Setenv("USERPROFILE", "")
+				t.Setenv("KB_DATA", "")
+				userHomeDir = os.UserHomeDir
+				fatalLogf = func(format string, args ...any) { t.Fatalf("dispatcher invoked fatal log: "+format, args...) }
+				originalMCP, originalWeb := mcpRun, webRun
+				t.Cleanup(func() { mcpRun, webRun = originalMCP, originalWeb })
+				called, gotData := false, ""
+				mcpRun = func(data, user, version string) error { called, gotData = true, data; return nil }
+				webRun = func(opts webui.Options, stdout, stderr io.Writer) error {
+					called, gotData = true, opts.DataDir
+					return nil
+				}
+				args := []string{command}
+				data := t.TempDir()
+				wantCode := 0
+				switch mode {
+				case "help":
+					args = append(args, "--help")
+				case "explicit":
+					args = append(args, "--data", data)
+				case "missing":
+					wantCode = 1
+				}
+				var stderr bytes.Buffer
+				handled, code := dispatchArgs(args, &stderr)
+				if !handled || code != wantCode {
+					t.Fatalf("handled=%v code=%d stderr=%q", handled, code, stderr.String())
+				}
+				if called != (mode == "explicit") {
+					t.Fatalf("server called=%v for %s", called, mode)
+				}
+				if mode == "explicit" && gotData != data {
+					t.Fatalf("data=%q, want %q", gotData, data)
+				}
+				if mode == "missing" && !strings.Contains(stderr.String(), "set KB_DATA or --data") {
+					t.Fatalf("missing-home error=%q", stderr.String())
+				}
+			})
+		}
 	}
 }
