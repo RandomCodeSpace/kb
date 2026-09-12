@@ -379,7 +379,7 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 		mark("ci_contract", &result.Checks.CIContract)
 	case path == "sonar-project.properties":
 		mark("ci_contract", &result.Checks.CIContract)
-	case path == "README.md" || path == "LICENSE" || strings.HasPrefix(path, "docs/") || strings.HasPrefix(path, ".claude/"):
+	case path == "README.md" || path == "CONTEXT.md" || path == "LICENSE" || strings.HasPrefix(path, "docs/") || strings.HasPrefix(path, ".claude/"):
 		mark("docs_contract", &result.Checks.DocsContract)
 		if strings.HasPrefix(path, "docs/releases/") {
 			mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
