@@ -2,7 +2,10 @@ package mcpserv
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -316,5 +319,126 @@ func TestRunReportsABackfillFailure(t *testing.T) {
 	}
 	if err := Run(t.TempDir(), "default", "test-version"); err == nil || !strings.Contains(err.Error(), "backfill refused") {
 		t.Fatalf("Run error = %v, want the backfill failure", err)
+	}
+}
+
+// Stable IDs make the numeric-prefix collision deterministic: task #1 has
+// its own project, while a different task has a UUID starting with "1".
+func TestUpdateTaskProjectUsesStoreReferences(t *testing.T) {
+	for _, tc := range []struct{ name, ref string }{{"sequence", "1"}, {"hash sequence", "#1"}, {"UUID prefix", "aaaaaaaa-"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "kb.db")
+			st, err := store.Open(path, []byte("test-secret"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { st.Close() })
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			for _, seed := range []struct{ id, project string }{
+				{"aaaaaaaa-0000-4000-8000-000000000001", "own"},
+				{"1aaaaaaa-0000-4000-8000-000000000002", "foreign"},
+			} {
+				task, err := st.AddTask("tester", board.Task{Title: seed.project, Tags: []string{"project::" + seed.project}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec("UPDATE tasks SET id = ? WHERE id = ?", seed.id, task.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			k := &kb{st: st, user: "tester"}
+			_, updated, err := k.updateTask(context.Background(), nil, updateTaskInput{ID: tc.ref, Tags: &[]string{"release"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if updated.ID != "aaaaaaaa-0000-4000-8000-000000000001" || !slices.Equal(updated.Tags, []string{"release", "project::own"}) {
+				t.Fatalf("update = %+v, want task #1 with its own project", updated)
+			}
+			own, err := st.Task("tester", "#1")
+			if err != nil || !slices.Equal(own.Tags, []string{"release", "project::own"}) {
+				t.Fatalf("persisted task #1 = %+v, %v", own, err)
+			}
+			foreign, err := st.Task("tester", "#2")
+			if err != nil || !slices.Equal(foreign.Tags, []string{"project::foreign"}) {
+				t.Fatalf("foreign task changed = %+v, %v", foreign, err)
+			}
+		})
+	}
+}
+
+func captureRunOutput(t *testing.T, run func() error) (stdout, stderr string, runErr error) {
+	t.Helper()
+	out, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	errOut, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer errOut.Close()
+	originalOut, originalErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = out, errOut
+	defer func() { os.Stdout, os.Stderr = originalOut, originalErr }()
+	runErr = run()
+	read := func(f *os.File) string {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			t.Fatal(err)
+		}
+		b, err := io.ReadAll(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	return read(out), read(errOut), runErr
+}
+
+func TestRunWarnsAboutProjectBackfill(t *testing.T) {
+	dir := t.TempDir()
+	secret, err := store.LoadOrCreateSecret(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "kb.db"), secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddTask("default", board.Task{Title: "multiple projects", Tags: []string{"project::first", "project::dropped"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	original := serveMCP
+	t.Cleanup(func() { serveMCP = original })
+	serveMCP = func(*mcp.Server) error { return nil }
+	for _, want := range []string{"kb: warning: project backfill changed labels on 1 task(s)\n", ""} {
+		stdout, stderr, err := captureRunOutput(t, func() error { return Run(dir, "default", "test-version") })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stdout != "" || stderr != want {
+			t.Fatalf("stdout=%q stderr=%q, want no stdout and stderr=%q", stdout, stderr, want)
+		}
+	}
+}
+
+func TestRunWarnsAboutPartialProjectBackfill(t *testing.T) {
+	originalServe, originalBackfill := serveMCP, backfillProjects
+	t.Cleanup(func() { serveMCP, backfillProjects = originalServe, originalBackfill })
+	serveMCP = func(*mcp.Server) error { t.Fatal("served after failed backfill"); return nil }
+	backfillProjects = func(cliapp.ProjectBackfiller, string) (int, error) { return 2, errors.New("backfill refused") }
+	stdout, stderr, err := captureRunOutput(t, func() error { return Run(t.TempDir(), "default", "test-version") })
+	if err == nil || !strings.Contains(err.Error(), "backfill refused") {
+		t.Fatalf("Run error = %v", err)
+	}
+	if stdout != "" || stderr != "kb: warning: project backfill changed labels on 2 task(s)\n" {
+		t.Fatalf("stdout=%q stderr=%q", stdout, stderr)
 	}
 }
