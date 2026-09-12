@@ -179,8 +179,10 @@ afterward. Close every other kb process first; an active database connection
 causes a refusal. Keep other programs from changing files in the data folder.
 Symbolic links, special files, and additional links to `kb.db` are refused.
 
-A failed copy remains marked with `.kb-backup-incomplete`. Retry into a new
-destination; removing the marker does not make an incomplete backup valid.
+An interrupted or incomplete copy carries `.kb-backup-incomplete`. Retry into
+a new destination; removing the marker does not make an incomplete backup
+valid. A final filesystem-sync error can be reported after the complete copy's
+marker is removed; retain the reported error and retry into a new destination.
 If you use `KB_SECRET`, keep its original value separately: the environment
 secret is not written into the backup. File-backed secrets are included.
 
