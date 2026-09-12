@@ -89,3 +89,22 @@ func runeIndexAtCell(value string, cell int) int {
 	}
 	return len(runes)
 }
+
+// CursorViewport keeps a rune-indexed cursor visible within a terminal-cell width.
+func CursorViewport(value string, position, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if width == 1 {
+		return "|"
+	}
+	runes := []rune(value)
+	position = min(max(position, 0), len(runes))
+	before, after := string(runes[:position]), string(runes[position:])
+	contentWidth := width - 1
+	cursorColumn := ansi.StringWidth(before)
+	left := max(cursorColumn-contentWidth, 0)
+	visibleBefore := ansi.Cut(before, left, cursorColumn)
+	remaining := max(contentWidth-ansi.StringWidth(visibleBefore), 0)
+	return visibleBefore + "|" + ansi.Truncate(after, remaining, "")
+}

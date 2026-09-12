@@ -351,7 +351,13 @@ func TestPillCapsStaySeparableAt256(t *testing.T) {
 		groundIndex := index256(darkPalette[ground])
 		seen := map[uint8]int{}
 		for index := 0; index < LabelWheel; index++ {
-			quantized := index256(darkPalette[LabelSlot(index)])
+			slot := LabelSlot(index)
+			quantized := index256(darkPalette[slot])
+			// Record contrast alongside the visibility assertion. Caps are glyphs,
+			// so the text contrast floor does not apply.
+			t.Logf("cap slot %d on ground %d: truecolor %.2f, 256-color %.2f",
+				index, ground, contrastRatio(darkPalette[slot], darkPalette[ground]),
+				contrastRatio(xterm256(int(quantized)), xterm256(int(groundIndex))))
 			if quantized == groundIndex {
 				t.Errorf("wheel slot %d caps vanish into ground %d at 256 colors (index %d)",
 					index, ground, quantized)
@@ -369,41 +375,6 @@ func TestPillCapsStaySeparableAt256(t *testing.T) {
 			if index256(darkPalette[fill]) == groundIndex {
 				t.Errorf("fill %d caps vanish into ground %d at 256 colors", fill, ground)
 			}
-		}
-	}
-}
-
-// TestPillCapContrastIsRecorded logs the cap-versus-ground pairs of issue #219
-// for the record. The caps are glyph area, not prose, so section 1.9's AA floor
-// does not bind them; what binds them is being visible at all, which is the
-// separability assertion above. The numbers are logged rather than asserted so
-// the record moves with the palette instead of pinning it.
-//
-// Measured, dark palette, truecolor/256-color, cap hue over each ground:
-//
-//	slot            Card       Zebra      Raised     Canvas       OverlaySurf
-//	Label1 #ff7b54  5.29/5.58  5.96/6.40  4.11/4.12  7.55/7.92    3.57/3.52
-//	Label2 #4f8ef7  4.22/4.02  4.75/4.61  3.28/2.97  6.02/5.71    2.85/2.53
-//	Label3 #3f9d58  3.98/4.89  4.48/5.61  3.09/3.61  5.68/6.94    2.69/3.08
-//	Label4 #b98af7  5.18/4.86  5.83/5.57  4.03/3.59  7.40/6.90    3.50/3.06
-//	Label5 #ffb020  7.40/7.15  8.33/8.20  5.75/5.28  10.56/10.16  4.99/4.51
-//
-// The worst pair is Label3 on OverlaySurf at 2.69 truecolor and 3.08 after
-// quantization: a clearly visible edge, and nowhere near the 4.5 the same hue
-// clears as prose on Surface, which is the difference between a glyph and a
-// word.
-func TestPillCapContrastIsRecorded(t *testing.T) {
-	for index := 0; index < LabelWheel; index++ {
-		slot := LabelSlot(index)
-		for _, ground := range pillGrounds {
-			truecolor := contrastRatio(darkPalette[slot], darkPalette[ground])
-			quantized := contrastRatio(
-				xterm256(int(index256(darkPalette[slot]))),
-				xterm256(int(index256(darkPalette[ground]))),
-			)
-			t.Logf("cap slot %d %s on ground %d %s  truecolor %.2f  256-color %.2f",
-				index, darkPalette[slot].hex(), ground, darkPalette[ground].hex(),
-				truecolor, quantized)
 		}
 	}
 }

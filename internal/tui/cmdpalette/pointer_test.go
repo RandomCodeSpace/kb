@@ -86,7 +86,7 @@ func TestHoverBecomesTheActingSelection(t *testing.T) {
 	m := openModel(t)
 	typeQuery(m, "car")
 	if len(m.entries) < 2 {
-		t.Skip("the ranked list is too short to distinguish two rows")
+		t.Fatalf("fixture query returned %d entries; need at least two to test pointer selection", len(m.entries))
 	}
 	first := firstEntryRow(m)
 	x, y := rowCell(m, first+1)
@@ -223,7 +223,7 @@ func TestArrowAdoptsTheHoveredRowThenMoves(t *testing.T) {
 	m := openModel(t)
 	typeQuery(m, "c")
 	if len(m.entries) < 4 {
-		t.Skip("the ranked list is too short to distinguish adopt-then-move")
+		t.Fatalf("fixture query returned %d entries; need at least four to test adopt-then-move", len(m.entries))
 	}
 	first := firstEntryRow(m)
 	x, y := rowCell(m, first+2)
@@ -246,7 +246,7 @@ func TestAnyOtherKeyRunsAgainstTheKeyboardCursor(t *testing.T) {
 	m := openModel(t)
 	typeQuery(m, "c")
 	if len(m.entries) < 2 {
-		t.Skip("the ranked list is too short to distinguish two rows")
+		t.Fatalf("fixture query returned %d entries; need at least two to test keyboard selection", len(m.entries))
 	}
 	want := m.entries[0].Action
 	first := firstEntryRow(m)

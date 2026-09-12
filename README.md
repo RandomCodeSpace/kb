@@ -154,8 +154,11 @@ Optional AI tools and issue imports connect only to providers you configure.
 
 To back up your board, close every running kb window and copy the entire data
 folder. The default location is `$KB_DATA` when set, otherwise
-`~/.local/share/kb`. Keep the folder together. Copying only the database file
-can leave out information needed for a complete restore.
+`~/.local/share/kb` on Linux, macOS, and Windows. On Windows, `~` is your
+user-profile folder. kb keeps the same default layout on all three platforms;
+it does not use macOS Application Support or Windows AppData. Set `KB_DATA`
+or pass `--data` to choose another location. Keep the folder together. Copying
+only the database file can leave out information needed for a complete restore.
 
 Do not place the data folder in Dropbox, iCloud, OneDrive, or another synced
 folder, and do not share one data folder between computers.
