@@ -96,7 +96,8 @@ card flags (add and update):
                  item with its text intact; write \x for an item that really
                  does start with "x ".
                  On update the list is replaced, so pass every item you want
-                 to keep, ticked or not.
+                 to keep, ticked or not. A lone --check "" clears the list;
+                 blank values cannot be mixed with other items.
   --blocked      flag the task as blocked
   --no-blocked   clear the blocked flag
   --title text   new title (update only; add takes the title as argument)
@@ -108,14 +109,14 @@ list flags:
   --tag t        keep tasks carrying this label; repeatable, all must match
   --all          include cancelled tasks (hidden by default)
 
-move, done, and update flags:
+add, move, done, and update flags:
   --force        finish a task that still has open checklist items or is
                  flagged blocked; without it kb refuses (it never prompts).
-                 Applies to done <id>, move <id> done, and update <id>
-                 --status done alike. The check reads the task as it will be
-                 once the update lands, so closing the last item and
-                 finishing in one update needs no --force; when it does
-                 refuse, nothing is written at all.
+                 Applies to add --status done, done <id>, move <id> done,
+                 and update <id> --status done alike. The check reads the
+                 task as it will be once the update lands. Closing the last
+                 item and finishing in one update needs no --force.
+                 When the guard refuses, nothing is written at all.
 
 rm flags:
   --yes          confirm the delete. rm erases the row: the task leaves the
@@ -354,6 +355,22 @@ func parseCheckFlag(s string) board.Check {
 	return board.Check{Text: s}
 }
 
+// parseCheckFlags treats one blank value as an explicit empty checklist.
+func parseCheckFlags(values []string) ([]board.Check, error) {
+	if len(values) == 1 && board.IsBlank(values[0]) {
+		return nil, nil
+	}
+	checks := make([]board.Check, 0, len(values))
+	for _, value := range values {
+		check := parseCheckFlag(value)
+		if board.IsBlank(check.Text) {
+			return nil, errors.New("blank checklist item: use a lone --check \"\" to clear the list")
+		}
+		checks = append(checks, check)
+	}
+	return checks, nil
+}
+
 // parseDue validates a due date; empty is allowed (clears / unset).
 func parseDue(s string) (string, error) {
 	if s == "" {
@@ -430,10 +447,8 @@ func taskFromAddFlags(title string, cf cardFlags, set map[string]bool) (board.Ta
 		t.Blocked = *blocked
 	}
 	t.Tags = append([]string(nil), cf.tags...)
-	for _, c := range cf.checks {
-		t.Checks = append(t.Checks, parseCheckFlag(c))
-	}
-	return t, nil
+	t.Checks, err = parseCheckFlags(cf.checks)
+	return t, err
 }
 
 func (a *app) cmdAdd(args []string) int {
@@ -442,6 +457,7 @@ func (a *app) cmdAdd(args []string) int {
 	registerCardFlags(fs, &cf, false)
 	projectF := registerProjectFlag(fs)
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
+	force := fs.Bool("force", false, "finish despite open checklist items or a blocked flag")
 	pos, err := parseInterleaved(fs, args)
 	if code, done := a.parseResult(err); done {
 		return code
@@ -463,6 +479,11 @@ func (a *app) cmdAdd(args []string) int {
 		return a.usageErr(err)
 	}
 	return a.withLocal(*data, func(be *localBackend) error {
+		if t.Status == board.StatusDone && !*force {
+			if err := doneGuardErr("new task", t); err != nil {
+				return err
+			}
+		}
 		it, err := be.add(t)
 		if err != nil {
 			return err
@@ -627,9 +648,9 @@ func setUpdateMetadataFields(p *store.TaskPatch, cf *cardFlags, set map[string]b
 		p.Tags = &tags
 	}
 	if set["check"] {
-		checks := make([]board.Check, 0, len(cf.checks))
-		for _, c := range cf.checks {
-			checks = append(checks, parseCheckFlag(c))
+		checks, err := parseCheckFlags(cf.checks)
+		if err != nil {
+			return err
 		}
 		p.Checks = &checks
 	}

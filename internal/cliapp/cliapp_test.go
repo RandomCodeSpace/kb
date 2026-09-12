@@ -607,3 +607,81 @@ func TestCancelRestore(t *testing.T) {
 		t.Errorf("after rm --yes: %d tasks, want 1", n)
 	}
 }
+
+func TestAddDoneFinishingGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		flags    []string
+		wantCode int
+		warning  string
+	}{
+		{name: "open item", flags: []string{"--check", "open"}, wantCode: 1, warning: "checklist items are still open"},
+		{name: "blocked", flags: []string{"--blocked"}, wantCode: 1, warning: "flagged blocked"},
+		{name: "override", flags: []string{"--blocked", "--check", "open", "--force"}},
+		{name: "clear"},
+		{name: "ticked", flags: []string{"--check", "x checked"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := localEnv(t)
+			args := append([]string{"add", "Ship", "--status", "done", "--data", dir}, tc.flags...)
+			_, stderr, code := runCmd(t, args...)
+			if code != tc.wantCode {
+				t.Fatalf("code=%d, want %d; stderr=%q", code, tc.wantCode, stderr)
+			}
+			tasks := listJSON(t, "--data", dir)
+			if tc.wantCode != 0 {
+				if !strings.Contains(stderr, tc.warning) || !strings.Contains(stderr, "--force") {
+					t.Fatalf("refusal=%q", stderr)
+				}
+				if len(tasks) != 0 {
+					t.Fatalf("refused add wrote tasks: %+v", tasks)
+				}
+			} else if len(tasks) != 1 || tasks[0].Status != "done" {
+				t.Fatalf("tasks=%+v", tasks)
+			}
+		})
+	}
+}
+
+func TestBlankCheckClearsChecklist(t *testing.T) {
+	dir := localEnv(t)
+	if _, stderr, code := runCmd(t, "add", "Ship", "--data", dir, "--check", "open"); code != 0 {
+		t.Fatalf("seed: %d %s", code, stderr)
+	}
+	id := listJSON(t, "--data", dir)[0].ID
+	if _, stderr, code := runCmd(t, "update", id, "--data", dir, "--check", "", "--status", "done"); code != 0 {
+		t.Fatalf("clear and finish: %d %s", code, stderr)
+	}
+	task := listJSON(t, "--data", dir)[0]
+	if len(task.Checks) != 0 || task.Status != "done" {
+		t.Fatalf("cleared task=%+v", task)
+	}
+	if _, stderr, code := runCmd(t, "add", "Already done", "--data", dir, "--check", "", "--status", "done"); code != 0 {
+		t.Fatalf("add blank check: %d %s", code, stderr)
+	}
+	for _, task := range listJSON(t, "--data", dir) {
+		if len(task.Checks) != 0 {
+			t.Fatalf("blank check persisted: %+v", task)
+		}
+	}
+}
+
+func TestBlankCheckCannotBeMixedWithItems(t *testing.T) {
+	dir := localEnv(t)
+	if _, stderr, code := runCmd(t, "add", "Keep", "--data", dir, "--check", "original"); code != 0 {
+		t.Fatalf("seed: %d %s", code, stderr)
+	}
+	id := listJSON(t, "--data", dir)[0].ID
+	for _, command := range [][]string{{"add", "Bad"}, {"update", id}} {
+		for _, checks := range [][]string{{"--check", "", "--check", "open"}, {"--check", "open", "--check", " "}, {"--check", "", "--check", ""}} {
+			args := append(append(append([]string{}, command...), "--data", dir), checks...)
+			if _, stderr, code := runCmd(t, args...); code != 2 || !strings.Contains(stderr, "blank checklist") {
+				t.Fatalf("%v: code=%d stderr=%q", args, code, stderr)
+			}
+		}
+	}
+	tasks := listJSON(t, "--data", dir)
+	if len(tasks) != 1 || len(tasks[0].Checks) != 1 || tasks[0].Checks[0].Text != "original" {
+		t.Fatalf("refused writes changed board: %+v", tasks)
+	}
+}

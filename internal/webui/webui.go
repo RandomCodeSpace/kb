@@ -83,7 +83,7 @@ func run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			fmt.Fprintf(stderr, "kb web: open browser: %v\n", err)
 		}
 	}
-	handler, events := newHandler(st, user, opts.DataDir, opts.Version)
+	handler, events := newHandler(st, user, opts.DataDir, opts.Version, opts.AllowRemote)
 	// Event streams are long-lived requests: Shutdown would wait out its whole
 	// timeout on them, so cancellation ends them first.
 	stopEvents := context.AfterFunc(ctx, events.Close)
@@ -205,13 +205,13 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // static UI at /. The event hub it opens stops with its last subscriber, so a
 // caller that never shuts down (a test) leaks nothing.
 func NewHandler(st *store.Store, user, dataDir, version string) http.Handler {
-	h, _ := newHandler(st, user, dataDir, version)
+	h, _ := newHandler(st, user, dataDir, version, false)
 	return h
 }
 
 // newHandler also returns the event hub, so the server that owns the process
 // can end live streams on shutdown instead of waiting out Shutdown's timeout.
-func newHandler(st *store.Store, user, dataDir, version string) (http.Handler, *eventHub) {
+func newHandler(st *store.Store, user, dataDir, version string, allowRemote bool) (http.Handler, *eventHub) {
 	s := &server{st: st, user: user, dataDir: dataDir, version: version}
 	s.events = newEventHub(st, user, dataDir)
 	mux := http.NewServeMux()
@@ -220,5 +220,5 @@ func newHandler(st *store.Store, user, dataDir, version string) (http.Handler, *
 		writeError(w, http.StatusNotFound, "no such endpoint")
 	})
 	mux.Handle("/", newStaticHandler())
-	return secure(s.notifyChanges(mux)), s.events
+	return secure(s.notifyChanges(mux), allowRemote), s.events
 }

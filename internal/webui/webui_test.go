@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +42,26 @@ func TestStaticServing(t *testing.T) {
 	rec := call(t, h, "GET", "/api/", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("/api/: %d", rec.Code)
+	}
+}
+
+func TestStaticUIUsesOnlyLocalStylesAndFonts(t *testing.T) {
+	h, _ := newTestHandler(t)
+	index := call(t, h, "GET", "/", nil)
+	links := regexp.MustCompile(`<link\b[^>]*\bhref="([^"]+)"`).FindAllStringSubmatch(index.Body.String(), -1)
+	for _, link := range links {
+		href := link[1]
+		if !strings.HasPrefix(href, "/") || strings.HasPrefix(href, "//") {
+			t.Errorf("page links to external asset %q", href)
+			continue
+		}
+		if rec := call(t, h, "GET", href, nil); rec.Code != http.StatusOK {
+			t.Errorf("local asset %q returned %d", href, rec.Code)
+		}
+	}
+	css := call(t, h, "GET", "/app.css", nil)
+	if regexp.MustCompile(`(?i)@import\b|url\(\s*["']?(?:https?:)?//`).Match(css.Body.Bytes()) {
+		t.Error("stylesheet imports or fetches external assets")
 	}
 }
 
@@ -219,6 +241,48 @@ func TestRunServesUntilCancelled(t *testing.T) {
 	}
 	if strings.Count(stdout.String(), "\n") != 1 {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunEnforcesHostOption(t *testing.T) {
+	for _, allowRemote := range []bool{false, true} {
+		t.Run(fmt.Sprint(allowRemote), func(t *testing.T) {
+			stdout := &syncBuffer{}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			dir := t.TempDir()
+			go func() {
+				done <- run(ctx, Options{DataDir: dir, AllowRemote: allowRemote}, stdout, io.Discard)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Errorf("run: %v", err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Error("run did not stop after cancel")
+				}
+			})
+			req, err := http.NewRequest("GET", waitForURL(t, stdout)+"/api/meta", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Host = "remote.example:4321"
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			want := http.StatusForbidden
+			if allowRemote {
+				want = http.StatusOK
+			}
+			if resp.StatusCode != want {
+				t.Fatalf("remote Host status = %d, want %d", resp.StatusCode, want)
+			}
+		})
 	}
 }
 

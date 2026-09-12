@@ -1,6 +1,8 @@
 package cliapp
 
 import (
+	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -435,5 +437,64 @@ func TestProjectUpdateReportsUnknownTask(t *testing.T) {
 	if _, stderr, code := runCmd(t, "update", "9", "--data", dir, "-p", "web"); code != 1 ||
 		!strings.Contains(stderr, "no task matches id") {
 		t.Fatalf("update unknown: code=%d stderr=%q", code, stderr)
+	}
+}
+
+func TestOpenLocalStoreWarnsAboutProjectBackfill(t *testing.T) {
+	for _, partialFailure := range []bool{false, true} {
+		name := "successful backfill"
+		if partialFailure {
+			name = "partial backfill"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := localEnv(t)
+			st := openTestStore(t, dir)
+			if _, err := st.AddTask(defaultUser, board.Task{Title: "repair", Tags: []string{"project::first", "project::dropped"}}); err != nil {
+				t.Fatal(err)
+			}
+			if partialFailure {
+				if _, err := st.AddTask(defaultUser, board.Task{Title: "fail"}); err != nil {
+					t.Fatal(err)
+				}
+				db, err := sql.Open("sqlite", filepath.Join(dir, dbFile))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				if _, err := db.Exec(`CREATE TRIGGER refuse_backfill BEFORE UPDATE ON tasks WHEN OLD.title = 'fail' BEGIN SELECT RAISE(FAIL, 'backfill refused'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := st.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			opened, err := OpenLocalStore(dir, &stderr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := opened.Close(); err != nil {
+				t.Fatal(err)
+			}
+			want := "kb: warning: project backfill changed labels on 1 task(s)\n"
+			if strings.Count(stderr.String(), want) != 1 {
+				t.Fatalf("stderr = %q, want one %q", stderr.String(), want)
+			}
+			if partialFailure {
+				if !strings.Contains(stderr.String(), "backfill refused") {
+					t.Fatalf("missing failure warning: %q", stderr.String())
+				}
+				return
+			}
+			stderr.Reset()
+			opened, err = OpenLocalStore(dir, &stderr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer opened.Close()
+			if stderr.Len() != 0 {
+				t.Fatalf("clean board stderr = %q", stderr.String())
+			}
+		})
 	}
 }

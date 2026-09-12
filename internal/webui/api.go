@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -96,13 +97,24 @@ func (s *server) routes(mux *http.ServeMux) {
 // --- middleware ---
 
 // secure applies the request-safety rules from docs/web-api.md: same-host
-// Origin and a JSON Content-Type on mutating requests, a body cap, no-store
-// on the API, nosniff everywhere.
-func secure(next http.Handler) http.Handler {
+// Origin and a JSON Content-Type on mutating requests, loopback Host unless
+// remote access is enabled, a body cap, no-store on the API, and response headers.
+func secure(next http.Handler, allowRemote bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Cache-Control", "no-store")
+		}
+		host := r.Host
+		if parsed, _, err := net.SplitHostPort(host); err == nil {
+			host = parsed
+		} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			host = host[1 : len(host)-1]
+		}
+		if !allowRemote && !isLoopbackHost(host) {
+			writeError(w, http.StatusForbidden, "non-loopback Host refused")
+			return
 		}
 		if isMutating(r.Method) {
 			if !originAllowed(r) {

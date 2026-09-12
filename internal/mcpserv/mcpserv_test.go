@@ -503,6 +503,7 @@ func TestUpdateMoveDelete(t *testing.T) {
 	}
 
 	var deleted taskJSON
+	callOK(t, cs, "delete_task", map[string]any{"id": created.ID}, &deleted)
 	callOK(t, cs, "delete_task", map[string]any{"id": created.ID, "soft": false}, &deleted)
 	if deleted.ID != created.ID {
 		t.Errorf("delete returned %+v, want id %s", deleted, created.ID)
@@ -736,5 +737,32 @@ func TestToolErrorsAreActionable(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Fatal("expected tool error for unknown id")
+	}
+}
+
+func TestHardDeleteRequiresCancelledTask(t *testing.T) {
+	for _, status := range []string{"todo", "doing", "done"} {
+		t.Run(status, func(t *testing.T) {
+			cs, st := connectWithStore(t)
+			var created taskJSON
+			callOK(t, cs, "add_task", map[string]any{"title": "keep me", "project": testProject, "status": status}, &created)
+			comment, err := st.AddComment("tester", created.ID, "tester", "keep this too")
+			if err != nil {
+				t.Fatal(err)
+			}
+			msg := callErr(t, cs, "delete_task", map[string]any{"id": created.ID, "soft": false})
+			if !strings.Contains(msg, "cancelled") {
+				t.Fatalf("refusal = %q", msg)
+			}
+			var task getTaskOutput
+			callOK(t, cs, "get_task", map[string]any{"id": created.ID}, &task)
+			if task.Task.Status != status {
+				t.Fatalf("refused deletion changed status to %q", task.Task.Status)
+			}
+			comments, err := st.Comments("tester", created.ID)
+			if err != nil || len(comments) != 1 || comments[0].ID != comment.ID {
+				t.Fatalf("comments = %+v, %v", comments, err)
+			}
+		})
 	}
 }

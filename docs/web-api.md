@@ -29,13 +29,20 @@ explicitly started listener: nothing else in `kb` opens a port.
 
 ## Request safety
 
+- Every request, including GET and SSE, requires a `Host` of `localhost` or a
+  literal loopback IP. The optional port is removed before validation. Other
+  hosts receive 403 unless `--unsafe-listen` sets `AllowRemote=true`.
 - Mutating methods (POST, PATCH, PUT, DELETE) require either no `Origin`
   header or an `Origin` whose host equals the request `Host`. Otherwise 403.
 - Mutating requests must send `Content-Type: application/json`. Otherwise 415.
 - Request bodies are capped at 1 MiB.
 - No CORS headers are ever emitted.
 - Responses set `Cache-Control: no-store` on `/api/`, and
-  `X-Content-Type-Options: nosniff` everywhere.
+  `X-Content-Type-Options: nosniff` and
+  `Content-Security-Policy: frame-ancestors 'none'` everywhere.
+- There is no per-launch API token. Loopback Host validation and the existing
+  Origin rule reject the DNS-rebinding request path without changing API
+  clients. `--unsafe-listen` still exposes an unauthenticated API.
 
 ## Error shape
 
@@ -122,9 +129,9 @@ Embedded from `internal/webui/static/` via `embed.FS`: `index.html`, `app.css`,
 `app.js`, plus the vendored `marked.min.js` and `purify.min.js` (see
 `static/VENDOR.md`). `app.css` is generated: edit
 `internal/webui/tailwind/app.css` and run `sh scripts/build-web-css.sh`
-(`--check` verifies the committed output). No bundler and no runtime script
-CDN; the only external fetch is the Inter / JetBrains Mono stylesheet from
-Google Fonts, with a system font fallback when offline. Served at `/` with
+(`--check` verifies the committed output). No bundler, runtime script CDN, or
+external font request. Fonts use locally installed Inter / JetBrains Mono
+when available, then the existing system font fallbacks. Served at `/` with
 `Content-Type` by extension. Unknown paths under `/` fall back to
 `index.html`; `/api/*` never falls back.
 

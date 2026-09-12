@@ -203,13 +203,21 @@ func runMCP(args []string) error {
 func runMCPWithFlagOutput(args []string, output io.Writer) error {
 	fs := flag.NewFlagSet("kb mcp", flag.ContinueOnError)
 	fs.SetOutput(output)
-	dataDir := fs.String("data", defaultDataDir(), "board storage directory (env KB_DATA)")
+	dataDir := fs.String("data", "", "board storage directory (default $KB_DATA or ~/.local/share/kb)")
 	if err := fs.Parse(args); err != nil {
 		return &commandFlagError{err: err}
 	}
+	resolvedData := *dataDir
+	if resolvedData == "" {
+		var err error
+		resolvedData, err = resolveDefaultDataDir()
+		if err != nil {
+			return fmt.Errorf("cannot determine home directory, set KB_DATA or --data: %w", err)
+		}
+	}
 	info, ok := readBuildInfo()
 	version, _, _ := versionParts(info, ok)
-	return mcpRun(*dataDir, defaultBoardUser, version)
+	return mcpRun(resolvedData, defaultBoardUser, version)
 }
 
 // defaultDataDir resolves the board storage directory: KB_DATA if set, else

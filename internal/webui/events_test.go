@@ -37,7 +37,7 @@ func newEventFixture(t *testing.T, tune func(*eventHub)) *eventFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, hub := newHandler(st, "default", dir, "v-test")
+	handler, hub := newHandler(st, "default", dir, "v-test", false)
 	hub.sample = 10 * time.Millisecond
 	hub.ping = time.Hour
 	if tune != nil {

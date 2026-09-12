@@ -59,7 +59,11 @@ func Run(dataDir, user, version string) error {
 	// surface opens the board first; kb mcp opens its own store rather than
 	// going through cliapp.OpenLocalStore, so it runs the same idempotent
 	// pass here instead of serving a board the invariant is not yet true of.
-	if _, err := backfillProjects(st, user); err != nil {
+	changed, err := backfillProjects(st, user)
+	if changed > 0 {
+		fmt.Fprintf(os.Stderr, "kb: warning: project backfill changed labels on %d task(s)\n", changed)
+	}
+	if err != nil {
 		return err
 	}
 	err = serveMCP(newServer(st, user, version))
@@ -126,7 +130,7 @@ func newServer(st *store.Store, user, version string) *mcp.Server {
 	}, k.moveTask)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "delete_task",
-		Description: "Delete a task identified by its id (a unique id prefix is accepted). By default this is a soft delete: the task moves to the cancelled column and can be moved back. Pass soft: false to remove the row permanently, which cannot be undone. Returns the deleted task.",
+		Description: "Delete a task identified by its id (a unique id prefix is accepted). By default this is a soft delete: the task moves to the cancelled column and can be moved back. Cancel the task first, then pass soft: false to remove the row permanently, which cannot be undone. Returns the deleted task.",
 	}, k.deleteTask)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "search_similar",
@@ -454,7 +458,8 @@ func (k *kb) updateTask(_ context.Context, _ *mcp.CallToolRequest, in updateTask
 		bc := toBoardChecks(*in.Checks)
 		patch.Checks = &bc
 	}
-	if err := k.applyProjectPatch(in.ID, &patch, in.Project); err != nil {
+	resolvedID, err := k.applyProjectPatch(in.ID, &patch, in.Project)
+	if err != nil {
 		return nil, taskJSON{}, err
 	}
 	// Status is parsed before anything is written: a bad status now rejects
@@ -479,7 +484,7 @@ func (k *kb) updateTask(_ context.Context, _ *mcp.CallToolRequest, in updateTask
 			return nil
 		}
 	}
-	t, err := k.st.UpdateAndMoveTask(k.user, in.ID, patch, moveTo, nil, guard)
+	t, err := k.st.UpdateAndMoveTask(k.user, resolvedID, patch, moveTo, nil, guard)
 	if err != nil {
 		return nil, taskJSON{}, k.idError(err, in.ID)
 	}
@@ -521,7 +526,7 @@ func (k *kb) deleteTask(_ context.Context, _ *mcp.CallToolRequest, in deleteTask
 		}
 		return nil, toTaskJSON(t), nil
 	}
-	t, err := k.st.DeleteTask(k.user, in.ID)
+	t, err := k.st.DeleteCancelledTask(k.user, in.ID)
 	if err != nil {
 		return nil, taskJSON{}, k.idError(err, in.ID)
 	}
@@ -534,14 +539,16 @@ func (k *kb) deleteTask(_ context.Context, _ *mcp.CallToolRequest, in deleteTask
 // the task only when the call actually rewrites labels — tags replaced the
 // whole list, or project moves the task — so an update that touches neither
 // leaves the project alone. move_task and delete_task write no labels at
-// all, which is why they need nothing here.
-func (k *kb) applyProjectPatch(id string, patch *store.TaskPatch, project string) error {
+// all, which is why they need nothing here. The returned UUID also names
+// the write. The project merge remains outside the write transaction, so a
+// concurrent project edit can still be replaced by this snapshot.
+func (k *kb) applyProjectPatch(id string, patch *store.TaskPatch, project string) (string, error) {
 	if patch.Tags == nil && strings.TrimSpace(project) == "" {
-		return nil
+		return id, nil
 	}
 	t, err := k.findTask(id)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var base []string
 	if patch.Tags != nil {
@@ -551,10 +558,10 @@ func (k *kb) applyProjectPatch(id string, patch *store.TaskPatch, project string
 	}
 	tags, err := cliapp.ProjectTags(base, project, cliapp.CurrentProjectOf(t))
 	if err != nil {
-		return err
+		return "", err
 	}
 	patch.Tags = &tags
-	return nil
+	return t.ID, nil
 }
 
 // parseStatus validates a wire status string.
@@ -587,34 +594,13 @@ func doneWarning(t board.Task) string {
 	return strings.Join(parts, "; ")
 }
 
-// findTask resolves an id prefix to the task it names with the store's rules
-// (an exact id wins, otherwise the prefix must match exactly one task),
-// without mutating anything.
-func (k *kb) findTask(prefix string) (board.Task, error) {
-	if prefix == "" {
-		return board.Task{}, k.idError(store.ErrNotFound, prefix)
-	}
-	tasks, err := k.st.ListTasks(k.user, "")
+// findTask uses the store's sequence, UUID, and unique-prefix resolution.
+func (k *kb) findTask(ref string) (board.Task, error) {
+	t, err := k.st.Task(k.user, ref)
 	if err != nil {
-		return board.Task{}, err
+		return board.Task{}, k.idError(err, ref)
 	}
-	var match board.Task
-	n := 0
-	for _, t := range tasks {
-		if t.ID == prefix {
-			return t, nil
-		}
-		if strings.HasPrefix(t.ID, prefix) {
-			match, n = t, n+1
-		}
-	}
-	switch n {
-	case 0:
-		return board.Task{}, k.idError(store.ErrNotFound, prefix)
-	case 1:
-		return match, nil
-	}
-	return board.Task{}, k.idError(store.ErrAmbiguous, prefix)
+	return t, nil
 }
 
 // idError rewrites store ID-resolution sentinels into actionable tool errors;
