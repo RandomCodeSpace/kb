@@ -273,6 +273,39 @@ In the kb data folder on your computer. Every view reads the same local board.
 Release downloads are available for Linux on amd64 and arm64, macOS on Intel
 and Apple silicon, and Windows on amd64.
 
+### Why do colors or scrolling look different over SSH?
+
+SSH can omit the environment variables that identify your local terminal's
+capabilities. For a terminal that supports true color, add a host entry to the
+client's `~/.ssh/config`, replacing `kb-server` with your SSH host:
+
+```sshconfig
+Host kb-server
+    SetEnv COLORTERM=truecolor
+    SendEnv WT_SESSION
+```
+
+`WT_SESSION` is supplied by Windows Terminal. Forward its existing value when
+using that terminal; do not invent it for another terminal. PowerShell is the
+shell, so check the terminal app hosting it. Use Windows Terminal
+[v1.23.20211.0 or later](https://github.com/microsoft/terminal/releases/tag/v1.23.20211.0)
+for synchronized output, which groups frame updates to reduce tearing.
+
+The SSH server must also accept these variables. Have its administrator add
+this to `sshd_config`, validate and reload the SSH configuration, then reconnect:
+
+```sshdconfig
+AcceptEnv COLORTERM WT_SESSION
+```
+
+On the remote shell, `printenv COLORTERM WT_SESSION` should show `truecolor`
+and, for Windows Terminal, its forwarded session value. Leave `TERM` at the
+value negotiated by your terminal and SSH. Only advertise true color when the
+local terminal supports it.
+
+See OpenSSH's [SetEnv and SendEnv settings](https://man.openbsd.org/ssh_config#SetEnv)
+and [AcceptEnv setting](https://man.openbsd.org/sshd_config#AcceptEnv).
+
 ## License
 
 kb is open source under the [MIT License](LICENSE).
