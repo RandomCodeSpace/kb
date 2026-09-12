@@ -52,3 +52,7 @@
 !/docs/releases/v1.10.0.md
 !/docs/releases/v1.11.0.md
 !/docs/releases/v1.11.1.md
+
+# Web UI browser smoke artifacts.
+/internal/webui/e2e/node_modules/
+/internal/webui/e2e/test-results/

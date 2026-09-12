@@ -1,6 +1,6 @@
 /* kb web: Tailwind v4 source. Build with scripts/build-web-css.sh; the
    committed output is internal/webui/static/app.css. */
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 @source "../static/index.html";
 @source "../static/app.js";
 

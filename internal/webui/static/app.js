@@ -583,9 +583,10 @@ function renderMarkdown(md, opts = {}) {
     while (box.nextSibling) body.append(box.nextSibling);
     li.append(body);
   }
+  // Keep image labels without loading remote resources on any Markdown surface.
+  for (const img of $$('img', root)) img.replaceWith(el('span', { class: 'img-alt' }, icon('image', 12), el('span', {}, img.getAttribute('alt') || 'image')));
   if (mode === 'card') {
     for (const h of $$('h1,h2,h3,h4,h5,h6', root)) { const p = el('p', {}, el('strong', {})); p.firstChild.append(...h.childNodes); h.replaceWith(p); }
-    for (const img of $$('img', root)) img.replaceWith(el('span', { class: 'img-alt' }, icon('image', 12), el('span', {}, img.getAttribute('alt') || 'image')));
     for (const a of $$('a[href]', root)) a.addEventListener('click', (e) => e.stopPropagation());
   } else {
     for (const pre of $$('pre', root)) {
