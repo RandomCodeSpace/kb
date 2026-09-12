@@ -103,6 +103,12 @@ func TestForgeRefusesPlainHTTPToken(t *testing.T) {
 			if err != nil && (!strings.Contains(err.Error(), "HTTPS") || strings.Contains(err.Error(), token)) {
 				t.Errorf("unsafe error %v", err)
 			}
+			if !tc.allowed {
+				sources, err := st.ForgeSources("alice")
+				if err != nil || len(sources) != 0 {
+					t.Fatalf("rejected save persisted a source: count=%d err=%v", len(sources), err)
+				}
+			}
 			err = service.Probe(context.Background(), "alice", ForgeProbeConfig{Name: "primary", Kind: "gitlab", BaseURL: tc.base, Token: token})
 			if (err == nil) != tc.allowed {
 				t.Errorf("probe err=%v allowed=%v", err, tc.allowed)
@@ -123,6 +129,16 @@ func TestForgeRefusesPlainHTTPToken(t *testing.T) {
 
 func TestForgeRefusesStoredPlainHTTPToken(t *testing.T) {
 	st := testStore(t)
+	assertStoredSource := func(name, wantBase, wantToken string) {
+		t.Helper()
+		kind, storedBase, storedToken, err := st.ForgePAT("alice", name)
+		if err != nil {
+			t.Fatalf("read source %q: %v", name, err)
+		}
+		if kind != "gitlab" || storedBase != wantBase || storedToken != wantToken {
+			t.Fatalf("source %q changed: kind=%q base=%q tokenMatches=%v", name, kind, storedBase, storedToken == wantToken)
+		}
+	}
 	base, token := "http://forge.example", "secret-token"
 	if _, err := st.SetForgeSource("alice", "primary", "gitlab", &base, &token); err != nil {
 		t.Fatal(err)
@@ -131,18 +147,25 @@ func TestForgeRefusesStoredPlainHTTPToken(t *testing.T) {
 	if _, err := service.SaveSource("alice", "primary", "gitlab", nil, nil); err == nil {
 		t.Error("saved existing unsafe token")
 	}
+	assertStoredSource("primary", base, token)
 	if err := service.Probe(context.Background(), "alice", ForgeProbeConfig{Name: "primary", Saved: true}); err == nil {
 		t.Error("probed existing unsafe token")
 	}
 	if _, err := service.SaveSource("alice", "primary", "gitlab", nil, ptr("")); err != nil {
 		t.Fatalf("clearing token: %v", err)
 	}
+	assertStoredSource("primary", base, "")
 	if _, err := service.SaveSource("alice", "primary", "gitlab", nil, &token); err == nil {
 		t.Error("added token to existing HTTP source")
 	}
+	assertStoredSource("primary", base, "")
 	if _, err := service.SaveSource("alice", "secure", "gitlab", ptr("https://forge.example"), &token); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := service.SaveSource("alice", "secure", "github", &base, ptr("replacement-token")); err == nil {
+		t.Error("replaced secure source with an authenticated HTTP source")
+	}
+	assertStoredSource("secure", "https://forge.example", token)
 	if cleared, err := service.SaveSource("alice", "secure", "gitlab", &base, nil); err != nil || !cleared {
 		t.Fatalf("endpoint change should clear token: cleared=%v err=%v", cleared, err)
 	}

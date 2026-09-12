@@ -65,4 +65,11 @@ func TestMCPWriteTextLimitBoundary(t *testing.T) {
 	if _, _, err := k.updateTask(context.Background(), nil, updateTaskInput{ID: task.ID, Title: &title}); err != nil {
 		t.Fatalf("omitted legacy field: %v", err)
 	}
+	stored, err := st.Task("tester", task.ID)
+	if err != nil {
+		t.Fatalf("read updated task: %v", err)
+	}
+	if stored.Title != title || stored.Desc != bigger {
+		t.Fatalf("title-only update changed omitted description: title=%q descBytes=%d", stored.Title, len(stored.Desc))
+	}
 }
