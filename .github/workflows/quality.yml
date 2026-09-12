@@ -241,7 +241,7 @@ jobs:
           recovery_tui=0
           while IFS= read -r reason; do
             case "$reason" in
-              internal/store/*) recovery_store=1 ;;
+              internal/store/*|scripts/generate-migration-fixtures.py) recovery_store=1 ;;
               internal/tui/*) recovery_tui=1 ;;
             esac
           done < <(jq -r '.reasons.migration_recovery[]?' <<<"$IMPACT_MANIFEST")
@@ -251,7 +251,7 @@ jobs:
           }
           if [[ $recovery_store == 1 ]]; then
             go test -buildvcs=false ./internal/store \
-              -run '^(TestColdCopyRecoveryRoundTrip|TestLoadOrCreateSecret.*|TestOpenRejectsInvalidPathsAndSchemas|TestConnectionPragmas|TestConcurrentOpenSerializesMigration)$' \
+              -run '^(TestReleasedDatabaseFixturesMigrate|TestColdCopyRecoveryRoundTrip|TestLoadOrCreateSecret.*|TestOpenRejectsInvalidPathsAndSchemas|TestConnectionPragmas|TestConcurrentOpenSerializesMigration)$' \
               -count=1
           fi
           if [[ $recovery_tui == 1 ]]; then
