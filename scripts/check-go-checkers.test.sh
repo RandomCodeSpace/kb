@@ -404,9 +404,14 @@ assert_contains '--format plan' "$release_script" "release impact plan"
 assert_contains 'bash scripts/verify-release-artifacts.sh' "$release_script" \
   "shared release artifact verification"
 
-if grep -E 'go (test|vet)([[:space:]][^[:space:]]+)*[[:space:]]+\./\.\.\.' \
+for gate in "$quality_workflow" "$release_script"; do
+  assert_contains 'go test -buildvcs=false -count=1 ./...' "$gate" 'full-suite gate'
+  assert_contains 'sh scripts/check-go-vuln.sh' "$gate" 'vulnerability gate'
+done
+
+if grep -E 'go vet([[:space:]][^[:space:]]+)*[[:space:]]+\./\.\.\.' \
   "$quality_workflow" "$release_script" >/dev/null; then
-  fail 'quality or release gate contains a blanket Go package command'
+  fail 'quality or release gate contains blanket Go vet'
 fi
 if grep -E 'scripts/check-go-(coverage|format)\.sh[[:space:]]*$' \
   "$quality_workflow" "$release_script" >/dev/null; then
