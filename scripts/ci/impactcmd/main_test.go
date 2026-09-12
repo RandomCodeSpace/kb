@@ -120,25 +120,30 @@ func TestBrowserChangesSelectSmoke(t *testing.T) {
 			if got.Checks.WebSmoke != tc.want || slices.Contains(got.Reasons["web_smoke"], tc.path) != tc.want {
 				t.Fatalf("web smoke = %v, reasons = %v, want %v", got.Checks.WebSmoke, got.Reasons, tc.want)
 			}
-			for format, prefix := range map[string]string{"github": "web_smoke=", "plan": "check\tweb_smoke\t"} {
-				var output bytes.Buffer
-				if err := writeManifest(&output, got, format); err != nil {
-					t.Fatalf("write %s manifest: %v", format, err)
-				}
-				var records []string
-				for _, line := range strings.Split(output.String(), "\n") {
-					if strings.HasPrefix(line, prefix) {
-						records = append(records, line)
-					}
-				}
-				wantLine := prefix + strconv.FormatBool(tc.want)
-				if len(records) != 1 || records[0] != wantLine {
-					t.Errorf("%s web smoke records = %v, want [%s]", format, records, wantLine)
-				}
-			}
+			assertBrowserCheckOutputs(t, got, tc.want)
 			if len(got.Unclassified) != 0 {
 				t.Fatalf("unclassified = %v", got.Unclassified)
 			}
 		})
+	}
+}
+
+func assertBrowserCheckOutputs(t *testing.T, got manifest, want bool) {
+	t.Helper()
+	for format, prefix := range map[string]string{"github": "web_smoke=", "plan": "check\tweb_smoke\t"} {
+		var output bytes.Buffer
+		if err := writeManifest(&output, got, format); err != nil {
+			t.Fatalf("write %s manifest: %v", format, err)
+		}
+		var records []string
+		for _, line := range strings.Split(output.String(), "\n") {
+			if strings.HasPrefix(line, prefix) {
+				records = append(records, line)
+			}
+		}
+		wantLine := prefix + strconv.FormatBool(want)
+		if len(records) != 1 || records[0] != wantLine {
+			t.Errorf("%s web smoke records = %v, want [%s]", format, records, wantLine)
+		}
 	}
 }
