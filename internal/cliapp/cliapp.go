@@ -114,10 +114,9 @@ add, move, done, and update flags:
                  flagged blocked; without it kb refuses (it never prompts).
                  Applies to add --status done, done <id>, move <id> done,
                  and update <id> --status done alike. The check reads the
-                 task as it will be once the update lands, so closing the
-                 last item and
-                 finishing in one update needs no --force; when it does
-                 refuse, nothing is written at all.
+                 task as it will be once the update lands. Closing the last
+                 item and finishing in one update needs no --force.
+                 When the guard refuses, nothing is written at all.
 
 rm flags:
   --yes          confirm the delete. rm erases the row: the task leaves the
