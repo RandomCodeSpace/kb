@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -47,6 +48,7 @@ func call(t *testing.T, h http.Handler, method, path string, body any, headers .
 		}
 	}
 	req := httptest.NewRequest(method, path, reader)
+	req.Host = "localhost"
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -562,8 +564,8 @@ func TestRequestSafety(t *testing.T) {
 	addTask(t, h, map[string]any{"title": "a"})
 	in := map[string]any{"title": "b", "project": "work"}
 
-	wantStatus(t, call(t, h, "POST", "/api/tasks", in, "Origin", "http://example.com"), http.StatusCreated)
-	wantStatus(t, call(t, h, "POST", "/api/tasks", in, "Origin", "http://EXAMPLE.com"), http.StatusCreated)
+	wantStatus(t, call(t, h, "POST", "/api/tasks", in, "Origin", "http://localhost"), http.StatusCreated)
+	wantStatus(t, call(t, h, "POST", "/api/tasks", in, "Origin", "http://LOCALHOST"), http.StatusCreated)
 	wantError(t, call(t, h, "POST", "/api/tasks", in, "Origin", "http://evil.example"), http.StatusForbidden, "cross-origin")
 	wantError(t, call(t, h, "POST", "/api/tasks", in, "Origin", "null"), http.StatusForbidden, "cross-origin")
 	wantError(t, call(t, h, "POST", "/api/tasks", in, "Origin", "http://[::1"), http.StatusForbidden, "cross-origin")
@@ -586,6 +588,49 @@ func TestRequestSafety(t *testing.T) {
 	rec = call(t, h, "GET", "/api/nothing", nil)
 	if rec.Header().Get("Content-Type") != "application/json" || rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("404 headers = %v", rec.Header())
+	}
+}
+
+func TestRequestSafetyRejectsRebindingHost(t *testing.T) {
+	h, _ := newTestHandler(t)
+	for _, route := range []struct{ method, path string }{
+		{"GET", "/"},
+		{"GET", "/api/tasks"},
+		{"GET", "/api/events"},
+		{"PUT", "/api/settings/ai"},
+	} {
+		t.Run(route.method+route.path, func(t *testing.T) {
+			req := httptest.NewRequest(route.method, "http://attacker.example:4321"+route.path, nil)
+			req.Header.Set("Origin", "http://attacker.example:4321")
+			ctx, cancel := context.WithCancel(req.Context())
+			cancel() // An unguarded SSE route must not leave this regression test waiting.
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req.WithContext(ctx))
+			wantError(t, rec, http.StatusForbidden, "Host")
+		})
+	}
+}
+
+func TestRequestSafetyPreventsFraming(t *testing.T) {
+	h, _ := newTestHandler(t)
+	for _, path := range []string{"/", "/app.js", "/api/meta", "/api/nothing"} {
+		rec := call(t, h, "GET", path, nil)
+		if got := rec.Header().Get("Content-Security-Policy"); got != "frame-ancestors 'none'" {
+			t.Errorf("%s: Content-Security-Policy = %q", path, got)
+		}
+	}
+}
+
+func TestRequestSafetyAllowsLoopbackHosts(t *testing.T) {
+	h, _ := newTestHandler(t)
+	for _, host := range []string{"localhost", "LOCALHOST:4321", "127.0.0.1", "127.0.0.2:4321", "[::1]", "[::1]:4321"} {
+		req := httptest.NewRequest("GET", "/api/meta", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("Host %q: status %d, body %s", host, rec.Code, rec.Body.String())
+		}
 	}
 }
 
