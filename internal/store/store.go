@@ -159,6 +159,18 @@ func Open(path string, secret []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// temp_store(2) keeps sorters and temp tables in memory. The default lets
+	// SQLite spill them to $TMPDIR, which would put board text outside the
+	// data directory — kb promises that nothing does.
+	// journal_mode is deliberately not a DSN initialization pragma. On a fresh
+	// database it takes a write lock, so two sql.Open calls could otherwise fail
+	// while acquiring their first connection, before migrate's BEGIN IMMEDIATE
+	// has a chance to serialize them. busy_timeout is connection-local and is
+	// installed first; WAL is enabled after the migration lock is released.
+	dsn, err := SQLiteDSN(path, "busy_timeout(5000)", "foreign_keys(1)", "temp_store(2)", "synchronous(FULL)")
+	if err != nil {
+		return nil, fmt.Errorf("store: database path: %w", err)
+	}
 	// Create the database with private permissions before SQLite opens it. An
 	// existing database is tightened too; SQLite derives WAL/SHM permissions
 	// from the main database file.
@@ -173,15 +185,7 @@ func Open(path string, secret []byte) (*Store, error) {
 	if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("store: close %s: %w", path, err)
 	}
-	// temp_store(2) keeps sorters and temp tables in memory. The default lets
-	// SQLite spill them to $TMPDIR, which would put board text outside the
-	// data directory — kb promises that nothing does.
-	// journal_mode is deliberately not a DSN initialization pragma. On a fresh
-	// database it takes a write lock, so two sql.Open calls could otherwise fail
-	// while acquiring their first connection, before migrate's BEGIN IMMEDIATE
-	// has a chance to serialize them. busy_timeout is connection-local and is
-	// installed first; WAL is enabled after the migration lock is released.
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=temp_store(2)&_pragma=synchronous(FULL)")
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
