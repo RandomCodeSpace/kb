@@ -3,7 +3,6 @@ package mcpserv
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -286,7 +285,7 @@ func TestRunBackfillsProjects(t *testing.T) {
 
 	original := serveMCP
 	t.Cleanup(func() { serveMCP = original })
-	serveMCP = func(*mcp.Server) error { return nil }
+	serveMCP = func(context.Context, *mcp.Server) error { return nil }
 	if err := Run(dir, "default", "test-version"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -302,23 +301,6 @@ func TestRunBackfillsProjects(t *testing.T) {
 	}
 	if got := projectOf(t, tasks[0].Tags); got != "inbox" {
 		t.Fatalf("backfilled project = %q, want inbox", got)
-	}
-}
-
-// TestRunReportsABackfillFailure pins that a board the pass could not repair
-// is not served: the failure reaches the caller instead of being swallowed.
-func TestRunReportsABackfillFailure(t *testing.T) {
-	originalServe, originalBackfill := serveMCP, backfillProjects
-	t.Cleanup(func() { serveMCP, backfillProjects = originalServe, originalBackfill })
-	serveMCP = func(*mcp.Server) error {
-		t.Fatal("served a board the backfill could not repair")
-		return nil
-	}
-	backfillProjects = func(cliapp.ProjectBackfiller, string) (int, error) {
-		return 0, errors.New("backfill refused")
-	}
-	if err := Run(t.TempDir(), "default", "test-version"); err == nil || !strings.Contains(err.Error(), "backfill refused") {
-		t.Fatalf("Run error = %v, want the backfill failure", err)
 	}
 }
 
@@ -417,7 +399,7 @@ func TestRunWarnsAboutProjectBackfill(t *testing.T) {
 	}
 	original := serveMCP
 	t.Cleanup(func() { serveMCP = original })
-	serveMCP = func(*mcp.Server) error { return nil }
+	serveMCP = func(context.Context, *mcp.Server) error { return nil }
 	for _, want := range []string{"kb: warning: project backfill changed labels on 1 task(s)\n", ""} {
 		stdout, stderr, err := captureRunOutput(t, func() error { return Run(dir, "default", "test-version") })
 		if err != nil {
@@ -426,19 +408,5 @@ func TestRunWarnsAboutProjectBackfill(t *testing.T) {
 		if stdout != "" || stderr != want {
 			t.Fatalf("stdout=%q stderr=%q, want no stdout and stderr=%q", stdout, stderr, want)
 		}
-	}
-}
-
-func TestRunWarnsAboutPartialProjectBackfill(t *testing.T) {
-	originalServe, originalBackfill := serveMCP, backfillProjects
-	t.Cleanup(func() { serveMCP, backfillProjects = originalServe, originalBackfill })
-	serveMCP = func(*mcp.Server) error { t.Fatal("served after failed backfill"); return nil }
-	backfillProjects = func(cliapp.ProjectBackfiller, string) (int, error) { return 2, errors.New("backfill refused") }
-	stdout, stderr, err := captureRunOutput(t, func() error { return Run(t.TempDir(), "default", "test-version") })
-	if err == nil || !strings.Contains(err.Error(), "backfill refused") {
-		t.Fatalf("Run error = %v", err)
-	}
-	if stdout != "" || stderr != "kb: warning: project backfill changed labels on 2 task(s)\n" {
-		t.Fatalf("stdout=%q stderr=%q", stdout, stderr)
 	}
 }

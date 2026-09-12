@@ -30,6 +30,7 @@ jobs:
       contract_race: ${{ steps.classify.outputs.contract_race }}
       migration_recovery: ${{ steps.classify.outputs.migration_recovery }}
       tui_performance: ${{ steps.classify.outputs.tui_performance }}
+      web_smoke: ${{ steps.classify.outputs.web_smoke }}
       binary_release_contract: ${{ steps.classify.outputs.binary_release_contract }}
       ci_contract: ${{ steps.classify.outputs.ci_contract }}
       docs_contract: ${{ steps.classify.outputs.docs_contract }}
@@ -335,6 +336,62 @@ jobs:
           path: ${{ runner.temp }}/kb-tui-performance.json
           if-no-files-found: error
           retention-days: 30
+
+  web-smoke:
+    name: web-smoke
+    needs: impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Report unaffected contract
+        if: needs.impact.outputs.web_smoke != 'true'
+        run: echo 'web-smoke not affected'
+
+      - name: Check out the exact candidate
+        if: needs.impact.outputs.web_smoke == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.impact.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        if: needs.impact.outputs.web_smoke == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up Node.js
+        if: needs.impact.outputs.web_smoke == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.15.0
+
+      - name: Check committed stylesheet
+        if: needs.impact.outputs.web_smoke == 'true'
+        run: sh scripts/build-web-css.sh --check
+
+      - name: Test browser task flows
+        if: needs.impact.outputs.web_smoke == 'true'
+        env:
+          GOTOOLCHAIN: go1.26.5
+        run: |
+          set -euo pipefail
+          npm ci --prefix internal/webui/e2e
+          cd internal/webui/e2e
+          npx playwright install --with-deps chromium
+          npm test
+
+      - name: Upload browser failure evidence
+        if: failure() && needs.impact.outputs.web_smoke == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-smoke-${{ needs.impact.outputs.head }}
+          path: internal/webui/e2e/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
 
   binary-release-contract:
     name: binary-release-contract

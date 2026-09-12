@@ -18,6 +18,34 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
+func TestRunRealStdioEOFClosesStore(t *testing.T) {
+	t.Setenv("KB_SECRET", "mcp-stdio-test-secret")
+	input, err := os.CreateTemp(t.TempDir(), "stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	original := os.Stdin
+	os.Stdin = input
+	t.Cleanup(func() { os.Stdin = original })
+	dir := t.TempDir()
+	stdout, stderr, err := captureRunOutput(t, func() error {
+		return Run(dir, "default", "test-version")
+	})
+	if err != nil {
+		t.Fatalf("stdio EOF: %v", err)
+	}
+	if stdout != "" || stderr != "" {
+		t.Fatalf("stdio EOF produced stdout=%q stderr=%q", stdout, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "kb.db")); err != nil {
+		t.Fatalf("database not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "kb.db-wal")); !os.IsNotExist(err) {
+		t.Fatalf("store did not close WAL: %v", err)
+	}
+}
+
 func TestRunLifecycleAndDisconnects(t *testing.T) {
 	original := serveMCP
 	t.Cleanup(func() { serveMCP = original })
@@ -34,7 +62,7 @@ func TestRunLifecycleAndDisconnects(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			called := false
-			serveMCP = func(srv *mcp.Server) error {
+			serveMCP = func(_ context.Context, srv *mcp.Server) error {
 				called = srv != nil
 				return tt.serve
 			}
@@ -56,7 +84,7 @@ func TestRunLifecycleAndDisconnects(t *testing.T) {
 func TestRunRejectsInvalidInputsBeforeServing(t *testing.T) {
 	original := serveMCP
 	t.Cleanup(func() { serveMCP = original })
-	serveMCP = func(*mcp.Server) error {
+	serveMCP = func(context.Context, *mcp.Server) error {
 		t.Fatal("serveMCP called for invalid input")
 		return nil
 	}

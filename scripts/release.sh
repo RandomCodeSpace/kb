@@ -8,6 +8,9 @@
 # temporary annotated tag. It does not contact GitHub or mutate the remote repository. Vulnerability
 # scanning downloads the pinned scanner and current Go vulnerability database.
 #
+# KB_RELEASE_DIGESTS_FILE optionally exports the six upload digests for workflow
+# attestation. It must name a new file outside the checkout. Dry runs ignore it.
+#
 # A published tag is permanent. If publication fails after the tag is pushed,
 # fix the problem in the next patch release. Never move or delete the tag.
 set -euo pipefail
@@ -171,6 +174,7 @@ focused_quality=''
 contract_race=''
 migration_recovery=''
 tui_performance=''
+web_smoke=''
 binary_release_contract=''
 ci_contract=''
 docs_contract=''
@@ -190,7 +194,7 @@ while IFS=$'\t' read -r record first second extra; do
     compile_all) impact_compile_all=$first ;;
     check)
       case "$first" in
-        focused_quality|contract_race|migration_recovery|tui_performance|binary_release_contract|ci_contract|docs_contract|sonar)
+        focused_quality|contract_race|migration_recovery|tui_performance|web_smoke|binary_release_contract|ci_contract|docs_contract|sonar)
           printf -v "$first" '%s' "$second"
           ;;
         *) die "unknown impact check: $first" ;;
@@ -216,7 +220,7 @@ done <"$impact_plan"
 [[ $impact_compile_all == true || $impact_compile_all == false ]] || \
   die 'impact plan omitted compile_all'
 for check_name in focused_quality contract_race migration_recovery tui_performance \
-  binary_release_contract ci_contract docs_contract sonar; do
+  web_smoke binary_release_contract ci_contract docs_contract sonar; do
   check_value=${!check_name}
   [[ $check_value == true || $check_value == false ]] || \
     die "impact plan omitted check: $check_name"
@@ -296,6 +300,19 @@ else
   printf 'release: tui-performance not affected\n'
 fi
 
+if [[ $web_smoke == true ]]; then
+  sh scripts/build-web-css.sh --check
+  command -v npm >/dev/null 2>&1 || die 'required command not found: npm'
+  npm ci --prefix internal/webui/e2e
+  (
+    cd internal/webui/e2e
+    npx playwright install chromium
+    npm test
+  )
+else
+  printf 'release: web-smoke not affected\n'
+fi
+
 if [[ $ci_contract == true ]]; then
   sh scripts/ci/test-impact.sh
   sh scripts/check-go-checkers.test.sh
@@ -345,6 +362,23 @@ if [[ $dry_run == 1 ]]; then
   source_is_unchanged || die 'dry run changed HEAD, tree, index, or status'
   printf 'release: dry run complete: %s verified locally; nothing published\n' "$version"
   exit 0
+fi
+
+# Preserve trusted hashes before the temporary build directory is cleaned up.
+# The workflow compares downloads to this file before issuing provenance.
+if [[ -n ${KB_RELEASE_DIGESTS_FILE:-} ]]; then
+  [[ $KB_RELEASE_DIGESTS_FILE == /* ]] || die 'release digest path must be absolute'
+  digest_parent=$(cd "$(dirname "$KB_RELEASE_DIGESTS_FILE")" && pwd -P) || \
+    die 'release digest parent directory does not exist'
+  digest_file="$digest_parent/$(basename "$KB_RELEASE_DIGESTS_FILE")"
+  case "$digest_file" in
+    "$repo_root"|"$repo_root"/*) die 'release digest file must be outside the checkout' ;;
+  esac
+  (
+    set -o noclobber
+    cd "$artifact_dir"
+    sha256sum SHA256SUMS kb-* >"$digest_file"
+  ) || die 'could not export release digests to a new file'
 fi
 
 require_publish_access

@@ -9,9 +9,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -22,14 +23,9 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
-var serveMCP = func(srv *mcp.Server) error {
-	return srv.Run(context.Background(), &mcp.StdioTransport{})
+var serveMCP = func(ctx context.Context, srv *mcp.Server) error {
+	return srv.Run(ctx, &mcp.StdioTransport{})
 }
-
-// backfillProjects is the mandatory-project pass every local surface runs when
-// it opens the board. It is a variable for the same reason serveMCP is: the
-// failure has to be reachable from a test without a corrupt database.
-var backfillProjects = cliapp.BackfillProjects
 
 // Run opens (creating if needed) the store at <dataDir>/kb.db, imports any
 // legacy markdown boards in dataDir, and serves the MCP tools for user over
@@ -40,33 +36,17 @@ func Run(dataDir, user, version string) error {
 	if err != nil {
 		return fmt.Errorf("mcpserv: %w", err)
 	}
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		return fmt.Errorf("mcpserv: create data dir: %w", err)
-	}
-	secret, err := store.LoadOrCreateSecret(dataDir)
-	if err != nil {
-		return err
-	}
-	st, err := store.Open(filepath.Join(dataDir, "kb.db"), secret)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	st, err := cliapp.OpenLocalStore(dataDir, os.Stderr)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	if _, err := st.ImportMarkdownDir(dataDir); err != nil {
-		return err
+	err = serveMCP(ctx, newServer(st, user, version))
+	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+		return nil
 	}
-	// Tasks that predate mandatory projects are labelled on whichever local
-	// surface opens the board first; kb mcp opens its own store rather than
-	// going through cliapp.OpenLocalStore, so it runs the same idempotent
-	// pass here instead of serving a board the invariant is not yet true of.
-	changed, err := backfillProjects(st, user)
-	if changed > 0 {
-		fmt.Fprintf(os.Stderr, "kb: warning: project backfill changed labels on %d task(s)\n", changed)
-	}
-	if err != nil {
-		return err
-	}
-	err = serveMCP(newServer(st, user, version))
 	if isClientDisconnect(err) {
 		return nil
 	}
@@ -310,6 +290,15 @@ type duplicateCheckOutput struct {
 
 const duplicateCheckMaxCandidates = 10
 
+const maxWriteTextBytes = 1 << 20
+
+func validateWriteText(field, value string) error {
+	if len(value) > maxWriteTextBytes {
+		return fmt.Errorf("%s exceeds 1 MiB limit", field)
+	}
+	return nil
+}
+
 // --- handlers ---
 
 func (k *kb) listTasks(_ context.Context, _ *mcp.CallToolRequest, in listTasksInput) (*mcp.CallToolResult, listTasksOutput, error) {
@@ -400,6 +389,12 @@ func appendDuplicateCandidates(candidates []similarStub, hits []store.SimilarHit
 }
 
 func (k *kb) addTask(_ context.Context, _ *mcp.CallToolRequest, in addTaskInput) (*mcp.CallToolResult, taskJSON, error) {
+	if err := validateWriteText("title", in.Title); err != nil {
+		return nil, taskJSON{}, err
+	}
+	if err := validateWriteText("desc", in.Desc); err != nil {
+		return nil, taskJSON{}, err
+	}
 	if strings.TrimSpace(in.Title) == "" {
 		return nil, taskJSON{}, errors.New("title must not be empty")
 	}
@@ -441,6 +436,16 @@ func (k *kb) addTask(_ context.Context, _ *mcp.CallToolRequest, in addTaskInput)
 }
 
 func (k *kb) updateTask(_ context.Context, _ *mcp.CallToolRequest, in updateTaskInput) (*mcp.CallToolResult, taskJSON, error) {
+	if in.Title != nil {
+		if err := validateWriteText("title", *in.Title); err != nil {
+			return nil, taskJSON{}, err
+		}
+	}
+	if in.Desc != nil {
+		if err := validateWriteText("desc", *in.Desc); err != nil {
+			return nil, taskJSON{}, err
+		}
+	}
 	patch := store.TaskPatch{
 		Emoji:   in.Emoji,
 		Title:   in.Title,

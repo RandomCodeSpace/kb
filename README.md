@@ -80,6 +80,24 @@ Rename the downloaded file to `kb`, or `kb.exe` on Windows, make it executable
 where required, and place it in a folder on your `PATH`.
 
 <details>
+<summary>Verify a download</summary>
+
+Releases from v1.12.0 include build provenance for each binary and the
+`SHA256SUMS` file. After downloading an asset, use the GitHub CLI to verify
+that its bytes came from this repository's release workflow:
+
+```sh
+gh attestation verify kb-linux-amd64 --repo RandomCodeSpace/kb --signer-workflow RandomCodeSpace/kb/.github/workflows/release.yml
+```
+
+Replace `kb-linux-amd64` with your downloaded filename. The same command
+verifies `SHA256SUMS`. To check a particular source revision, add
+`--source-digest` followed by the full commit SHA recorded in the release.
+Releases through v1.11.1 do not include these build attestations.
+
+</details>
+
+<details>
 <summary>Install with Go instead</summary>
 
 Go 1.26.5 is required.

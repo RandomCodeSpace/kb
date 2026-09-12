@@ -2,8 +2,8 @@ name: Release
 
 # Manually triggered release: validates the clean Go source, tags that exact
 # commit, cross-compiles the binaries, and publishes the GitHub release.
-# Everything is delegated to scripts/release.sh — the same script a local
-# release uses — so the two paths cannot drift apart.
+# scripts/release.sh owns immutable publication. This workflow then verifies
+# the published downloads and adds build provenance for those exact bytes.
 
 on:
   workflow_dispatch:
@@ -48,6 +48,11 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.15.0
+
       - name: Configure temporary tag identity
         run: |
           git config user.name "github-actions[bot]"
@@ -72,6 +77,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Check out repository
@@ -84,6 +91,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.15.0
 
       - name: Configure git identity
         run: |
@@ -105,4 +117,48 @@ jobs:
             notes_file="$RUNNER_TEMP/notes.md"
           fi
           args=("$VERSION" "$notes_file")
-          bash scripts/release.sh "${args[@]}"
+          KB_RELEASE_DIGESTS_FILE="$RUNNER_TEMP/release-build.sha256" \
+            bash scripts/release.sh "${args[@]}"
+
+      - name: Download and verify published release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          download_dir="$RUNNER_TEMP/release-downloads"
+          mkdir "$download_dir"
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --dir "$download_dir" \
+            --pattern kb-linux-amd64 --pattern kb-linux-arm64 \
+            --pattern kb-darwin-amd64 --pattern kb-darwin-arm64 \
+            --pattern kb-windows-amd64.exe --pattern SHA256SUMS
+          bash scripts/verify-release-artifacts.sh \
+            "$VERSION" "$SOURCE_COMMIT" "$download_dir" \
+            --verify-only "$RUNNER_TEMP/release-build.sha256"
+
+      # Attestation failure fails the workflow. Published tags/assets remain
+      # immutable; follow the next-patch recovery policy in scripts/release.sh.
+      - name: Attest build provenance of the published downloads
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          create-storage-record: false
+          subject-path: |
+            ${{ runner.temp }}/release-downloads/kb-linux-amd64
+            ${{ runner.temp }}/release-downloads/kb-linux-arm64
+            ${{ runner.temp }}/release-downloads/kb-darwin-amd64
+            ${{ runner.temp }}/release-downloads/kb-darwin-arm64
+            ${{ runner.temp }}/release-downloads/kb-windows-amd64.exe
+            ${{ runner.temp }}/release-downloads/SHA256SUMS
+
+      - name: Verify every published attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          for asset in "$RUNNER_TEMP/release-downloads/"*; do
+            gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$SOURCE_COMMIT" --deny-self-hosted-runners
+          done

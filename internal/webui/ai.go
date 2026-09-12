@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/RandomCodeSpace/kb/internal/ai"
+	"github.com/RandomCodeSpace/kb/internal/forge"
 	"github.com/RandomCodeSpace/kb/internal/store"
 )
 
@@ -262,8 +263,10 @@ func (s *server) runSkill(w http.ResponseWriter, r *http.Request, skill, input s
 		writeJSON(w, http.StatusConflict, map[string]any{"error": aiUnconfigured, "aiUnconfigured": true})
 		return ai.RunResult{}, false
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), forge.SkillRunDeadline)
+	defer cancel()
 	run, err := newAIRunner(s.st, s.dataDir).
-		RunSkill(r.Context(), s.user, ai.ScopeReadOnly, skill, input, maxCards, maxTokens)
+		RunSkill(ctx, s.user, ai.ScopeReadOnly, skill, input, maxCards, maxTokens)
 	if err != nil {
 		writeAIError(w, err)
 		return ai.RunResult{}, false

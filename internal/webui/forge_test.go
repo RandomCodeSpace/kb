@@ -307,7 +307,7 @@ func TestForgePreviewDefaultsAndRefusals(t *testing.T) {
 	wantError(t, call(t, h, "POST", "/api/forge/preview", map[string]any{"source": "primary", "ref": "not a reference"}), http.StatusBadRequest, "forge reference")
 
 	fake.set(true, false)
-	wantError(t, call(t, h, "POST", "/api/forge/preview", map[string]any{"source": "primary", "ref": "owner/repo"}), http.StatusBadGateway, "forge request failed")
+	wantError(t, call(t, h, "POST", "/api/forge/preview", map[string]any{"source": "primary", "ref": "owner/repo"}), http.StatusBadGateway, "forge HTTP 500: upstream request failed")
 }
 
 // TestForgeImportRejectsBadCards keeps the card gate identical to POST

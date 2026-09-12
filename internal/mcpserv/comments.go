@@ -116,6 +116,9 @@ func (k *kb) unlinkTasks(_ context.Context, _ *mcp.CallToolRequest, in unlinkTas
 }
 
 func (k *kb) addComment(_ context.Context, _ *mcp.CallToolRequest, in addCommentInput) (*mcp.CallToolResult, addCommentOutput, error) {
+	if err := validateWriteText("body", in.Body); err != nil {
+		return nil, addCommentOutput{}, err
+	}
 	c, err := k.st.AddComment(k.user, in.ID, k.user, in.Body)
 	if err != nil {
 		return nil, addCommentOutput{}, err

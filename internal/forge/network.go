@@ -92,3 +92,26 @@ func sameHostRedirect(request *http.Request, via []*http.Request) error {
 func httpURL(value *url.URL) bool {
 	return strings.EqualFold(value.Scheme, "http") || strings.EqualFold(value.Scheme, "https")
 }
+
+// Authenticated HTTP is reserved for local development on loopback. Private
+// network allowlists do not permit sending tokens over unencrypted networks.
+func validateForgeTokenTransport(baseURL string, hasToken bool) error {
+	if !hasToken {
+		return nil
+	}
+	u, err := normalizeForgeProbeBase(baseURL)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" {
+		return nil
+	}
+	host := normalizeGuardHost(u.Hostname())
+	if host == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return errors.New("forge token requires HTTPS except on localhost or a loopback IP address")
+}

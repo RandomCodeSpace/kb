@@ -1,6 +1,7 @@
 package mcpserv
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,7 @@ import (
 func TestRunRemainingFilesystemFailures(t *testing.T) {
 	original := serveMCP
 	t.Cleanup(func() { serveMCP = original })
-	serveMCP = func(*mcp.Server) error {
+	serveMCP = func(context.Context, *mcp.Server) error {
 		t.Fatal("serveMCP called after setup failure")
 		return nil
 	}
@@ -45,8 +46,11 @@ func TestRunRemainingFilesystemFailures(t *testing.T) {
 		if err := os.Symlink("missing-target", filepath.Join(dir, "broken.md")); err != nil {
 			t.Fatal(err)
 		}
-		if err := Run(dir, "tester", "test-version"); err == nil || !strings.Contains(err.Error(), "store: read") {
-			t.Fatalf("Run import error = %v", err)
+		served := false
+		serveMCP = func(context.Context, *mcp.Server) error { served = true; return nil }
+		stdout, stderr, err := captureRunOutput(t, func() error { return Run(dir, "default", "test-version") })
+		if err != nil || !served || stdout != "" || !strings.Contains(stderr, "kb: warning: legacy markdown import:") {
+			t.Fatalf("served=%v stdout=%q stderr=%q err=%v", served, stdout, stderr, err)
 		}
 	})
 }
