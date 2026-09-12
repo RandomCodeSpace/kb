@@ -82,7 +82,7 @@ where required, and place it in a folder on your `PATH`.
 <details>
 <summary>Install with Go instead</summary>
 
-Go 1.26.5 or newer is required.
+Go 1.26.5 is required.
 
 ```sh
 GOTOOLCHAIN=local go install github.com/RandomCodeSpace/kb@latest
