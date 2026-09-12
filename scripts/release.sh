@@ -171,6 +171,7 @@ focused_quality=''
 contract_race=''
 migration_recovery=''
 tui_performance=''
+web_smoke=''
 binary_release_contract=''
 ci_contract=''
 docs_contract=''
@@ -190,7 +191,7 @@ while IFS=$'\t' read -r record first second extra; do
     compile_all) impact_compile_all=$first ;;
     check)
       case "$first" in
-        focused_quality|contract_race|migration_recovery|tui_performance|binary_release_contract|ci_contract|docs_contract|sonar)
+        focused_quality|contract_race|migration_recovery|tui_performance|web_smoke|binary_release_contract|ci_contract|docs_contract|sonar)
           printf -v "$first" '%s' "$second"
           ;;
         *) die "unknown impact check: $first" ;;
@@ -216,7 +217,7 @@ done <"$impact_plan"
 [[ $impact_compile_all == true || $impact_compile_all == false ]] || \
   die 'impact plan omitted compile_all'
 for check_name in focused_quality contract_race migration_recovery tui_performance \
-  binary_release_contract ci_contract docs_contract sonar; do
+  web_smoke binary_release_contract ci_contract docs_contract sonar; do
   check_value=${!check_name}
   [[ $check_value == true || $check_value == false ]] || \
     die "impact plan omitted check: $check_name"
@@ -294,6 +295,19 @@ if [[ $tui_performance == true ]]; then
       -run '^TestLargeBoardPerformanceHarness$' -count=1 -timeout=15m
 else
   printf 'release: tui-performance not affected\n'
+fi
+
+if [[ $web_smoke == true ]]; then
+  sh scripts/build-web-css.sh --check
+  command -v npm >/dev/null 2>&1 || die 'required command not found: npm'
+  npm ci --prefix internal/webui/e2e
+  (
+    cd internal/webui/e2e
+    npx playwright install chromium
+    npm test
+  )
+else
+  printf 'release: web-smoke not affected\n'
 fi
 
 if [[ $ci_contract == true ]]; then

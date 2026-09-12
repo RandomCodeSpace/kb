@@ -70,10 +70,12 @@ case ${1:-} in
     printf 'head\t%s\n' "$head"
     printf 'compile_all\tfalse\n'
     for check_name in focused_quality contract_race migration_recovery \
-      tui_performance binary_release_contract ci_contract docs_contract sonar; do
+      tui_performance web_smoke binary_release_contract ci_contract docs_contract sonar; do
       if [[ $check_name == focused_quality && ${FAKE_FOCUSED:-0} == 1 ]]; then
         printf 'check\tfocused_quality\ttrue\n'
         printf 'owner\tgithub.com/RandomCodeSpace/kb\n'
+      elif [[ $check_name == web_smoke && ${FAKE_WEB_SMOKE:-0} == 1 ]]; then
+        printf 'check\tweb_smoke\ttrue\n'
       else
         printf 'check\t%s\tfalse\n' "$check_name"
       fi
@@ -199,11 +201,24 @@ esac
 FAKE_GH
 chmod +x "$fake_bin/gh"
 
+cat >"$fake_bin/npm" <<'FAKE_NPM'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "npm $*" >>"$FAKE_GO_LOG"
+[[ ${1:-} != test ]] || exit "${FAKE_BROWSER_STATUS:-0}"
+FAKE_NPM
+cat >"$fake_bin/npx" <<'FAKE_NPX'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "npx $*" >>"$FAKE_GO_LOG"
+FAKE_NPX
+chmod +x "$fake_bin/npm" "$fake_bin/npx"
+
 remote="$test_root/origin.git"
 source_repo="$test_root/source"
 git init -q --bare "$remote"
 git init -q -b main "$source_repo"
-mkdir -p "$source_repo/scripts/ci" "$source_repo/docs/releases"
+mkdir -p "$source_repo/scripts/ci" "$source_repo/docs/releases" "$source_repo/internal/webui/e2e"
 printf 'module github.com/RandomCodeSpace/kb\n\ngo 1.26.5\n' >"$source_repo/go.mod"
 printf 'release fixture baseline\n' >"$source_repo/baseline.txt"
 (
@@ -224,6 +239,12 @@ cat >"$source_repo/scripts/check-go-coverage.sh" <<'FAKE_COVERAGE'
 printf 'selected owner coverage ran\n'
 exit "${FAKE_COVERAGE_STATUS:-0}"
 FAKE_COVERAGE
+cat >"$source_repo/scripts/build-web-css.sh" <<'FAKE_CSS'
+#!/usr/bin/env sh
+[ "$1" = --check ] || exit 64
+printf 'stylesheet check ran\n'
+exit "${FAKE_CSS_STATUS:-0}"
+FAKE_CSS
 cp "$repo_root/scripts/ci/impact.sh" "$source_repo/scripts/ci/impact.sh"
 printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.3.md"
 printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.4.md"
@@ -344,6 +365,23 @@ assert_contains 'selected owner coverage ran' "$test_root/coverage-failure.out"
 git -C "$source_repo" show-ref --verify --quiet refs/tags/v1.2.3 && fail 'coverage failure left a tag'
 [[ ! -e $test_root/gh.log ]] || fail 'coverage failure invoked gh'
 
+FAKE_WEB_SMOKE=1 release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/browser.out"
+assert_contains 'stylesheet check ran' "$test_root/browser.out"
+assert_contains 'npm ci --prefix internal/webui/e2e' "$test_root/go.log"
+assert_contains 'npx playwright install chromium' "$test_root/go.log"
+assert_contains 'npm test' "$test_root/go.log"
+for gate in css browser; do
+  gate_status=0
+  if [[ $gate == css ]]; then
+    FAKE_WEB_SMOKE=1 FAKE_CSS_STATUS=8 release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/web-failure.out" 2>&1 || gate_status=$?
+  else
+    FAKE_WEB_SMOKE=1 FAKE_BROWSER_STATUS=8 release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/web-failure.out" 2>&1 || gate_status=$?
+  fi
+  [[ $gate_status -eq 8 ]] || fail "$gate failure did not stop release"
+  git -C "$source_repo" show-ref --verify --quiet refs/tags/v1.2.3 && fail "$gate failure left a tag"
+  [[ ! -e $test_root/gh.log ]] || fail "$gate failure invoked gh"
+done
+
 for gate in test vuln; do
   gate_status=0
   if [[ $gate == test ]]; then
@@ -379,5 +417,54 @@ for asset in kb-linux-amd64 kb-linux-arm64 kb-darwin-amd64 kb-darwin-arm64 \
   kb-windows-amd64.exe SHA256SUMS; do
   assert_contains "/$asset" "$test_root/gh.log"
 done
+
+# Reuse the release fixture binaries to exercise the download-only gate. This
+# gate must never rebuild or run a downloaded artifact before attesting it.
+download_dir="$test_root/downloads"
+mkdir "$download_dir"
+(
+  cd "$source_repo"
+  for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+    goos=${target%/*}
+    goarch=${target#*/}
+    artifact="$download_dir/kb-$goos-$goarch"
+    [[ $goos != windows ]] || artifact+='.exe'
+    PATH="$fake_bin:$PATH" GOOS=$goos GOARCH=$goarch go build -o "$artifact" .
+  done
+)
+refresh_checksums() {
+  (cd "$download_dir" && sha256sum kb-* >SHA256SUMS)
+}
+verify_downloads() {
+  (
+    cd "$source_repo"
+    PATH="$fake_bin:$PATH" FAKE_GO_LOG="$test_root/download-go.log" \
+      bash scripts/verify-release-artifacts.sh v1.2.4 "$head_before" "$download_dir" --verify-only
+  )
+}
+refresh_checksums
+verify_downloads >"$test_root/downloads.out"
+assert_contains 'verified from' "$test_root/downloads.out"
+if grep -E '^(build|test) ' "$test_root/download-go.log" >/dev/null; then
+  fail 'download-only verification invoked a build or test'
+fi
+printf 'tampered\n' >>"$download_dir/kb-linux-amd64"
+run_fails 'downloaded SHA256SUMS does not match' verify_downloads
+refresh_checksums
+cp "$download_dir/kb-linux-amd64" "$test_root/original-download"
+sed -i 's/# fake-revision=.*/# fake-revision=deadbeef/' "$download_dir/kb-linux-amd64"
+refresh_checksums
+run_fails 'has the wrong source revision' verify_downloads
+cp "$test_root/original-download" "$download_dir/kb-linux-amd64"
+sed -i 's/# fake-version=.*/# fake-version=v9.9.9/' "$download_dir/kb-linux-amd64"
+refresh_checksums
+run_fails 'version is v9.9.9, want v1.2.4' verify_downloads
+cp "$test_root/original-download" "$download_dir/kb-linux-amd64"
+refresh_checksums
+printf 'extra\n' >"$download_dir/unexpected"
+run_fails 'expected exactly five binaries and SHA256SUMS' verify_downloads
+rm "$download_dir/unexpected"
+mv "$download_dir/kb-linux-arm64" "$download_dir/unexpected"
+run_fails 'missing download: kb-linux-arm64' verify_downloads
 
 printf '%s\n' 'release.test: pass'

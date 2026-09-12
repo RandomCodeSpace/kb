@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build and verify the five release binaries for one already-tagged commit.
+# --verify-only checks downloaded release files without building or executing them.
 set -euo pipefail
 
 die() {
@@ -7,15 +8,17 @@ die() {
   exit 2
 }
 
-[[ $# -eq 3 ]] || \
-  die 'usage: scripts/verify-release-artifacts.sh vX.Y.Z SOURCE_COMMIT OUTPUT_DIR'
+[[ $# -eq 3 || ( $# -eq 4 && $4 == --verify-only ) ]] || \
+  die 'usage: scripts/verify-release-artifacts.sh vX.Y.Z SOURCE_COMMIT OUTPUT_DIR [--verify-only]'
+verify_only=0
+[[ ${4:-} != --verify-only ]] || verify_only=1
 version=$1
 source_commit=$2
 output_dir=$3
 [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
   die 'version must match vX.Y.Z'
 
-for command_name in git go file sha256sum timeout script; do
+for command_name in git go file sha256sum cmp timeout script; do
   command -v "$command_name" >/dev/null 2>&1 || \
     die "required command not found: $command_name"
 done
@@ -35,8 +38,18 @@ resolved_commit=$(git rev-parse --verify "$source_commit^{commit}" 2>/dev/null) 
 [[ $(git rev-parse "$version^{}") == "$source_commit" ]] || \
   die "$version does not dereference to the source commit"
 [[ -d $output_dir ]] || die "output directory does not exist: $output_dir"
-[[ -z $(find "$output_dir" -mindepth 1 -maxdepth 1 -print -quit) ]] || \
-  die "output directory is not empty: $output_dir"
+if [[ $verify_only == 0 ]]; then
+  [[ -z $(find "$output_dir" -mindepth 1 -maxdepth 1 -print -quit) ]] || \
+    die "output directory is not empty: $output_dir"
+else
+  shopt -s nullglob dotglob
+  downloads=("$output_dir"/*)
+  shopt -u nullglob dotglob
+  [[ ${#downloads[@]} == 6 ]] || die 'expected exactly five binaries and SHA256SUMS'
+  for artifact in "${downloads[@]}"; do
+    [[ -f $artifact && ! -L $artifact ]] || die "not a regular download: $artifact"
+  done
+fi
 
 module_path=$(go list -m -f '{{.Path}}')
 expected_go_version=$(awk '$1 == "go" { print "go" $2; exit }' go.mod)
@@ -107,14 +120,23 @@ for target in "${targets[@]}"; do
   goarch=${target#*/}
   artifact="$output_dir/kb-$goos-$goarch"
   [[ $goos == windows ]] && artifact+='.exe'
-  CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
-    go build -trimpath -ldflags='-s -w' -o "$artifact" .
+  if [[ $verify_only == 0 ]]; then
+    CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
+      go build -trimpath -ldflags='-s -w' -o "$artifact" .
+  else
+    [[ -f $artifact ]] || die "missing download: $(basename "$artifact")"
+  fi
   verify_artifact "$artifact" "$goos" "$goarch"
 done
 
 (
   cd "$output_dir"
-  sha256sum kb-* >SHA256SUMS
+  if [[ $verify_only == 0 ]]; then
+    sha256sum kb-* >SHA256SUMS
+  else
+    [[ -f SHA256SUMS ]] || die 'missing download: SHA256SUMS'
+    cmp -s SHA256SUMS <(sha256sum kb-*) || die 'downloaded SHA256SUMS does not match the five binaries'
+  fi
   sha256sum -c SHA256SUMS
 )
 
@@ -160,5 +182,7 @@ run_native_smokes() {
   fi
 }
 
-run_native_smokes
+if [[ $verify_only == 0 ]]; then
+  run_native_smokes
+fi
 printf 'release artifacts: %s verified from %s\n' "$version" "$source_commit"

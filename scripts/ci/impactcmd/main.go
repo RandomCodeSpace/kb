@@ -36,6 +36,7 @@ type checks struct {
 	ContractRace          bool `json:"contract_race"`
 	MigrationRecovery     bool `json:"migration_recovery"`
 	TUIPerformance        bool `json:"tui_performance"`
+	WebSmoke              bool `json:"web_smoke"`
 	BinaryReleaseContract bool `json:"binary_release_contract"`
 	CIContract            bool `json:"ci_contract"`
 	DocsContract          bool `json:"docs_contract"`
@@ -212,6 +213,7 @@ func checkValues(values checks) []checkValue {
 		{name: "contract_race", enabled: values.ContractRace},
 		{name: "migration_recovery", enabled: values.MigrationRecovery},
 		{name: "tui_performance", enabled: values.TUIPerformance},
+		{name: "web_smoke", enabled: values.WebSmoke},
 		{name: "binary_release_contract", enabled: values.BinaryReleaseContract},
 		{name: "ci_contract", enabled: values.CIContract},
 		{name: "docs_contract", enabled: values.DocsContract},
@@ -359,9 +361,11 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 		// are served by their package, so its tests own them.
 		mark("focused_quality", &result.Checks.FocusedQuality)
 		mark("binary_release_contract", &result.Checks.BinaryReleaseContract)
+	case strings.HasPrefix(path, "internal/webui/e2e/"):
+		mark("web_smoke", &result.Checks.WebSmoke)
 	case strings.HasPrefix(path, "internal/webui/tailwind/") || path == "scripts/build-web-css.sh":
-		// Stylesheet source and its build script only matter through the
-		// committed static/app.css, which the webui package tests serve.
+		// Stylesheet source and its build script own the committed CSS.
+		// The browser job rebuilds it and rejects drift.
 		mark("focused_quality", &result.Checks.FocusedQuality)
 	case path == "scripts/check-go-coverage.sh" || path == "scripts/check-go-format.sh" ||
 		path == "scripts/check-go-checkers.test.sh" || path == "scripts/check-docs.sh":
@@ -404,7 +408,13 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 		"internal/tui/pointer_admission.go", "internal/tui/keyboard_admission.go") {
 		mark("contract_race", &result.Checks.ContractRace)
 	}
+	if strings.HasPrefix(path, "internal/webui/") || matchesAny(path,
+		"scripts/build-web-css.sh", ".github/workflows/quality.yml",
+		"scripts/ci/impactcmd/main.go", "scripts/ci/impactcmd/main_test.go") {
+		mark("web_smoke", &result.Checks.WebSmoke)
+	}
 	performancePath := matchesAny(path,
+		"internal/tui/board_view.go", "internal/tui/board_view_test.go",
 		"internal/tui/render_plan.go", "internal/tui/render_geometry.go",
 		"internal/tui/render_projection.go", "internal/tui/watcher.go",
 		"internal/tui/keyboard_admission.go", "internal/tui/pointer_admission.go",
@@ -412,7 +422,10 @@ func classifyPath(result *manifest, path string, classified map[string]bool) {
 	if strings.HasPrefix(path, "internal/tui/performance_") {
 		performancePath = true
 	}
-	if strings.HasPrefix(path, "internal/tui/pointer/") {
+	if strings.HasPrefix(path, "internal/tui/pointer/") ||
+		strings.HasPrefix(path, "internal/tui/widget/") ||
+		strings.HasPrefix(path, "internal/tui/carddetail/") ||
+		strings.HasPrefix(path, "internal/tui/theme/") {
 		performancePath = true
 	}
 	if performancePath {

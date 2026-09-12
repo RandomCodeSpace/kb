@@ -50,7 +50,7 @@ func TestClassifyReadinessContracts(t *testing.T) {
 	}{
 		{"CONTEXT.md", checks{DocsContract: true}},
 		{"scripts/check-go-vuln.sh", checks{BinaryReleaseContract: true, CIContract: true}},
-		{"scripts/ci/impactcmd/main.go", checks{CIContract: true}},
+		{"scripts/ci/impactcmd/main.go", checks{CIContract: true, WebSmoke: true}},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			repo := t.TempDir()
@@ -64,6 +64,61 @@ func TestClassifyReadinessContracts(t *testing.T) {
 			}
 			if len(got.Unclassified) != 0 {
 				t.Errorf("unclassified paths = %v", got.Unclassified)
+			}
+		})
+	}
+}
+
+func TestRenderingChangesSelectPerformance(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"internal/tui/board_view.go", true},
+		{"internal/tui/board_view_test.go", true},
+		{"internal/tui/widget/card.go", true},
+		{"internal/tui/widget/spin/spin.go", true},
+		{"internal/tui/carddetail/model.go", true},
+		{"internal/tui/carddetail/testdata/view.golden", true},
+		{"internal/tui/theme/styles.go", true},
+		{"internal/tui/theme/audit_test.go", true},
+		{"internal/tui/preferences.go", false},
+		{"internal/tui/widget_extra.go", false},
+		{"README.md", false},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			got := classify(t.TempDir(), "base", "head", "example.test/kb", []change{{Status: "M", Paths: []string{tc.path}}}, nil)
+			if got.Checks.TUIPerformance != tc.want || slices.Contains(got.Reasons["tui_performance"], tc.path) != tc.want {
+				t.Fatalf("performance = %v, reasons = %v, want %v", got.Checks.TUIPerformance, got.Reasons, tc.want)
+			}
+		})
+	}
+}
+
+func TestBrowserChangesSelectSmoke(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"internal/webui/static/app.js", true},
+		{"internal/webui/tailwind/app.css", true},
+		{"internal/webui/server.go", true},
+		{"internal/webui/e2e/package-lock.json", true},
+		{"internal/webui/e2e/board.spec.js", true},
+		{"scripts/build-web-css.sh", true},
+		{"scripts/ci/impactcmd/main.go", true},
+		{"scripts/ci/impactcmd/main_test.go", true},
+		{".github/workflows/quality.yml", true},
+		{"internal/webui_extra.go", false},
+		{"README.md", false},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			got := classify(t.TempDir(), "base", "head", "example.test/kb", []change{{Status: "M", Paths: []string{tc.path}}}, nil)
+			if got.Checks.WebSmoke != tc.want || slices.Contains(got.Reasons["web_smoke"], tc.path) != tc.want {
+				t.Fatalf("web smoke = %v, reasons = %v, want %v", got.Checks.WebSmoke, got.Reasons, tc.want)
+			}
+			if len(got.Unclassified) != 0 {
+				t.Fatalf("unclassified = %v", got.Unclassified)
 			}
 		})
 	}
