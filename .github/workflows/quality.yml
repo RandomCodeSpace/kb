@@ -134,6 +134,19 @@ jobs:
             go vet -buildvcs=false "${owners[@]}"
           fi
 
+      - name: Include classifier contract coverage in Sonar
+        if: needs.impact.outputs.sonar == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p coverage
+          go test -buildvcs=false ./scripts/ci/impactcmd -count=1 -covermode=atomic -coverprofile=coverage/impact.out
+          if [[ -f coverage/go.out ]]; then
+            tail -n +2 coverage/impact.out >> coverage/go.out
+          else
+            cp coverage/impact.out coverage/go.out
+          fi
+
       - name: Run SonarQube Cloud scan
         if: >-
           needs.impact.outputs.sonar == 'true' &&
