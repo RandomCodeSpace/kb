@@ -89,41 +89,46 @@ func TestForgeRefusesPlainHTTPToken(t *testing.T) {
 		{"http://forge.example", false}, {"http://192.168.1.2", false}, {"https://forge.example", true}, {"http://127.0.0.1:1234", true}, {"http://[::1]:1234", true}, {"http://localhost:1234", true}, {"http://localhost.evil.example", false},
 	} {
 		t.Run(tc.base, func(t *testing.T) {
-			st := testStore(t)
-			hits := 0
-			service := New(st, nil, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-				hits++
-				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("[]"))}, nil
-			})})
-			token := "secret-token"
-			_, err := service.SaveSource("alice", "primary", "gitlab", &tc.base, &token)
-			if (err == nil) != tc.allowed {
-				t.Errorf("save err=%v allowed=%v", err, tc.allowed)
-			}
-			if err != nil && (!strings.Contains(err.Error(), "HTTPS") || strings.Contains(err.Error(), token)) {
-				t.Errorf("unsafe error %v", err)
-			}
-			if !tc.allowed {
-				sources, err := st.ForgeSources("alice")
-				if err != nil || len(sources) != 0 {
-					t.Fatalf("rejected save persisted a source: count=%d err=%v", len(sources), err)
-				}
-			}
-			err = service.Probe(context.Background(), "alice", ForgeProbeConfig{Name: "primary", Kind: "gitlab", BaseURL: tc.base, Token: token})
-			if (err == nil) != tc.allowed {
-				t.Errorf("probe err=%v allowed=%v", err, tc.allowed)
-			}
-			_, err = service.forgeGet(context.Background(), forgeRef{Kind: "gitlab", pat: token}, tc.base, "/issues", nil)
-			if (err == nil) != tc.allowed {
-				t.Errorf("fetch err=%v allowed=%v", err, tc.allowed)
-			}
-			if !tc.allowed && hits != 0 {
-				t.Errorf("sent %d authenticated HTTP requests", hits)
-			}
-			if _, err := service.SaveSource("alice", "public", "gitlab", &tc.base, nil); err != nil {
-				t.Errorf("public HTTP save: %v", err)
-			}
+			checkForgeTokenTransport(t, tc.base, tc.allowed)
 		})
+	}
+}
+
+func checkForgeTokenTransport(t *testing.T, base string, allowed bool) {
+	t.Helper()
+	st := testStore(t)
+	hits := 0
+	service := New(st, nil, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		hits++
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("[]"))}, nil
+	})})
+	token := "secret-token"
+	_, err := service.SaveSource("alice", "primary", "gitlab", &base, &token)
+	if (err == nil) != allowed {
+		t.Errorf("save err=%v allowed=%v", err, allowed)
+	}
+	if err != nil && (!strings.Contains(err.Error(), "HTTPS") || strings.Contains(err.Error(), token)) {
+		t.Errorf("unsafe error %v", err)
+	}
+	if !allowed {
+		sources, err := st.ForgeSources("alice")
+		if err != nil || len(sources) != 0 {
+			t.Fatalf("rejected save persisted a source: count=%d err=%v", len(sources), err)
+		}
+	}
+	err = service.Probe(context.Background(), "alice", ForgeProbeConfig{Name: "primary", Kind: "gitlab", BaseURL: base, Token: token})
+	if (err == nil) != allowed {
+		t.Errorf("probe err=%v allowed=%v", err, allowed)
+	}
+	_, err = service.forgeGet(context.Background(), forgeRef{Kind: "gitlab", pat: token}, base, "/issues", nil)
+	if (err == nil) != allowed {
+		t.Errorf("fetch err=%v allowed=%v", err, allowed)
+	}
+	if !allowed && hits != 0 {
+		t.Errorf("sent %d authenticated HTTP requests", hits)
+	}
+	if _, err := service.SaveSource("alice", "public", "gitlab", &base, nil); err != nil {
+		t.Errorf("public HTTP save: %v", err)
 	}
 }
 
@@ -195,5 +200,33 @@ func TestDriftSummaryReportsSanitizedAIFailures(t *testing.T) {
 				t.Fatalf("summary=%q", summary)
 			}
 		})
+	}
+}
+
+func TestDriftSummarySanitizesModelConfigurationFailure(t *testing.T) {
+	st := testStore(t)
+	base, key := "https://ai.example/v1", "secret-api-key"
+	if _, err := st.SetAISettings("alice", &base, nil, &key); err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("unconfigured model sent an AI request")
+		return nil, nil
+	})}
+	service := New(st, ai.NewRunner(st, "", client, nil), nil)
+	summary := service.driftSummary(t.Context(), "alice", store.NewImportBaseline("old", "body", "old-at"), store.NewImportBaseline("new", "body", "new-at"))
+	if summary != "AI summary unavailable" {
+		t.Fatalf("unsafe or missing configuration failure: %q", summary)
+	}
+}
+
+func TestForgeRejectsMalformedAuthenticatedRequestBeforeTransport(t *testing.T) {
+	service := New(nil, nil, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("malformed target sent an authenticated request")
+		return nil, nil
+	})})
+	_, err := service.forgeGet(t.Context(), forgeRef{Kind: "gitlab", pat: "secret-token"}, "http://[", "/issues", nil)
+	if err == nil || err.Error() != "invalid forge base URL" {
+		t.Fatalf("malformed target error = %v", err)
 	}
 }
