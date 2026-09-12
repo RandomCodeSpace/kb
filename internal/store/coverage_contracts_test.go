@@ -478,13 +478,8 @@ func TestCreateSecretReportsInjectedDurabilityFailures(t *testing.T) {
 			installCoverageSecretOps(t)
 			createSecretTemp = func(string, string) (secretTempFile, error) { return tt.file, nil }
 			removeSecretFile = func(string) error { return nil }
-			_, err := createSecret("dir", "path", random(), nil)
-			wantError := tt.name != "sync data directory" || runtime.GOOS != "windows"
-			if wantError && err == nil {
+			if _, err := createSecret("dir", "path", random(), nil); err == nil {
 				t.Fatal("createSecret returned nil error")
-			}
-			if !wantError && err != nil {
-				t.Fatalf("createSecret returned error: %v", err)
 			}
 		})
 	}
@@ -538,8 +533,13 @@ func TestCreateSecretReportsInjectedDurabilityFailures(t *testing.T) {
 			linkSecretFile = func(string, string) error { return nil }
 			openSecretDir = func(string) (secretDirectory, error) { return tt.dir, tt.openErr }
 			removeSecretFile = func(string) error { return tt.remove }
-			if _, err := createSecret("dir", "path", random(), nil); err == nil {
+			_, err := createSecret("dir", "path", random(), nil)
+			wantError := tt.name != "sync data directory" || runtime.GOOS != "windows"
+			if wantError && err == nil {
 				t.Fatal("createSecret returned nil error")
+			}
+			if !wantError && err != nil {
+				t.Fatalf("createSecret returned error: %v", err)
 			}
 		})
 	}
