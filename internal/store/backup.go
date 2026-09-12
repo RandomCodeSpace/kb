@@ -258,14 +258,7 @@ func (lock *backupLock) close() error {
 	// A failed BEGIN/COMMIT sequence may still own a transaction. Restore
 	// the persistent journal mode only after rolling that transaction back.
 	_, _ = lock.db.Exec(`ROLLBACK`)
-	var restoreErr error
-	if lock.mode != "" {
-		var mode string
-		restoreErr = lock.db.QueryRow(`PRAGMA journal_mode=` + lock.mode).Scan(&mode)
-		if restoreErr == nil && mode != lock.mode {
-			restoreErr = fmt.Errorf("journal mode is %q, want %q", mode, lock.mode)
-		}
-	}
+	restoreErr := restoreBackupJournalMode(lock.db, lock.mode)
 	if restoreErr != nil {
 		restoreErr = fmt.Errorf("backup: restore source journal mode: %w", restoreErr)
 	}
@@ -276,4 +269,34 @@ func (lock *backupLock) close() error {
 		inputErr = lock.input.Close()
 	}
 	return errors.Join(restoreErr, closeErr, inputErr)
+}
+
+func restoreBackupJournalMode(db *sql.DB, expected string) error {
+	var statement string
+	switch expected {
+	case "":
+		return nil // Opening the connection failed before its mode was read.
+	case "delete":
+		statement = `PRAGMA journal_mode=DELETE`
+	case "truncate":
+		statement = `PRAGMA journal_mode=TRUNCATE`
+	case "persist":
+		statement = `PRAGMA journal_mode=PERSIST`
+	case "memory":
+		statement = `PRAGMA journal_mode=MEMORY`
+	case "wal":
+		statement = `PRAGMA journal_mode=WAL`
+	case "off":
+		statement = `PRAGMA journal_mode=OFF`
+	default:
+		return fmt.Errorf("unsupported journal mode %q", expected)
+	}
+	var actual string
+	if err := db.QueryRow(statement).Scan(&actual); err != nil {
+		return err
+	}
+	if actual != expected {
+		return fmt.Errorf("journal mode is %q, want %q", actual, expected)
+	}
+	return nil
 }

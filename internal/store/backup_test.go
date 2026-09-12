@@ -84,6 +84,9 @@ func TestBackupRefusesExistingAndNestedDestinations(t *testing.T) {
 
 func TestBackupFilesystemFailuresPreserveExistingData(t *testing.T) {
 	source := backupSource(t)
+	if err := BackupDirectory(filepath.Join(source, "missing"), filepath.Join(t.TempDir(), "backup")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing source: %v", err)
+	}
 	for _, destination := range []string{
 		filepath.Join(t.TempDir(), "missing", "backup"),
 		filepath.Join(t.TempDir(), "invalid\x00"),
@@ -126,6 +129,31 @@ func TestBackupFilesystemFailuresPreserveExistingData(t *testing.T) {
 	assertBackupSourceUsable(t, source)
 }
 
+func TestBackupWalkRefusesSourceFileRemovedAfterListing(t *testing.T) {
+	source := backupSource(t)
+	trigger := filepath.Join(source, "aa-trigger")
+	removed := filepath.Join(source, "ab-removed")
+	for _, path := range []string{trigger, removed} {
+		if err := os.WriteFile(path, []byte("temporary user file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Stat(filepath.Join(source, "kb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = walkBackupFiles(source, info, func(path string, _ os.DirEntry) error {
+		if path == trigger {
+			return os.Remove(removed)
+		}
+		return nil
+	})
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("silently omitted a file removed after listing: %v", err)
+	}
+	assertBackupSourceUsable(t, source)
+}
+
 func TestBackupDestinationInterferenceRetainsIncompleteMarker(t *testing.T) {
 	for _, kind := range []string{"directory collision", "directory removed", "marker replaced"} {
 		t.Run(kind, func(t *testing.T) {
@@ -135,30 +163,7 @@ func TestBackupDestinationInterferenceRetainsIncompleteMarker(t *testing.T) {
 			}
 			destination := filepath.Join(t.TempDir(), "backup")
 			err := backupDirectory(source, destination, func(input io.Reader, target string) error {
-				if kind == "directory collision" && filepath.Base(target) == "secret" {
-					if err := os.WriteFile(filepath.Join(destination, "subdir"), []byte("external file"), 0o600); err != nil {
-						return err
-					}
-				}
-				if filepath.Base(target) == "zz-last.txt" {
-					switch kind {
-					case "directory removed":
-						if err := os.Remove(filepath.Join(destination, "subdir")); err != nil {
-							return err
-						}
-					case "marker replaced":
-						marker := filepath.Join(destination, BackupIncompleteFile)
-						if err := os.Remove(marker); err != nil {
-							return err
-						}
-						if err := os.Mkdir(marker, 0o700); err != nil {
-							return err
-						}
-						if err := os.WriteFile(filepath.Join(marker, "keep"), []byte("external file"), 0o600); err != nil {
-							return err
-						}
-					}
-				}
+				interfereWithBackupDestination(t, kind, destination, target)
 				return copyBackupFile(input, target)
 			})
 			if err == nil {
@@ -177,6 +182,82 @@ func TestBackupDestinationInterferenceRetainsIncompleteMarker(t *testing.T) {
 			}
 			assertBackupSourceUsable(t, source)
 		})
+	}
+}
+
+func interfereWithBackupDestination(t *testing.T, kind, destination, target string) {
+	t.Helper()
+	if kind == "directory collision" && filepath.Base(target) == "secret" {
+		if err := os.WriteFile(filepath.Join(destination, "subdir"), []byte("external file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if filepath.Base(target) == "zz-last.txt" {
+		switch kind {
+		case "directory removed":
+			if err := os.Remove(filepath.Join(destination, "subdir")); err != nil {
+				t.Fatal(err)
+			}
+		case "marker replaced":
+			replaceBackupMarker(t, destination)
+		}
+	}
+}
+
+func replaceBackupMarker(t *testing.T, destination string) {
+	t.Helper()
+	marker := filepath.Join(destination, BackupIncompleteFile)
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(marker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(marker, "keep"), []byte("external file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackupRestoresSupportedJournalModes(t *testing.T) {
+	source := backupSource(t)
+	db, err := sql.Open("sqlite", filepath.Join(source, "kb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, mode := range []string{"delete", "truncate", "persist", "memory", "off", "wal"} {
+		if err := restoreBackupJournalMode(db, mode); err != nil {
+			t.Fatalf("restore %s: %v", mode, err)
+		}
+		var actual string
+		if err := db.QueryRow(`PRAGMA journal_mode`).Scan(&actual); err != nil || actual != mode {
+			t.Fatalf("restored %q instead of %q: %v", actual, mode, err)
+		}
+	}
+	if err := restoreBackupJournalMode(db, "wal; DROP TABLE tasks"); err == nil || !strings.Contains(err.Error(), "unsupported journal mode") {
+		t.Fatalf("accepted an unknown mode: %v", err)
+	}
+	if err := restoreBackupJournalMode(nil, ""); err != nil {
+		t.Fatalf("cleanup after connection initialization failed: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertBackupSourceUsable(t, source)
+}
+
+func TestBackupReportsRefusedJournalMode(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := restoreBackupJournalMode(db, "wal"); err == nil || !strings.Contains(err.Error(), `journal mode is "memory", want "wal"`) {
+		t.Fatalf("accepted SQLite refusing the requested mode: %v", err)
+	}
+	var mode string
+	if err := db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil || mode != "memory" {
+		t.Fatalf("refused mode changed database: %q, %v", mode, err)
 	}
 }
 
@@ -207,27 +288,32 @@ func TestBackupReportsDirectoryDurabilityFailures(t *testing.T) {
 			} else {
 				// Final directory flushes happen after all files are synced and
 				// the marker is removed. Report the error without deleting data.
-				secret, err := LoadOrCreateSecret(destination)
-				if err != nil {
-					t.Fatal(err)
-				}
-				copy, err := Open(filepath.Join(destination, "kb.db"), secret)
-				if err != nil {
-					t.Fatal(err)
-				}
-				task, err := copy.Task("default", "1")
-				if err != nil || task.Title != "original" {
-					t.Fatalf("final durability failure discarded copied data: %+v, %v", task, err)
-				}
-				if err := copy.Close(); err != nil {
-					t.Fatal(err)
-				}
+				assertReadableBackupTask(t, destination)
 			}
 			if err := BackupDirectory(source, destination); !errors.Is(err, os.ErrExist) {
 				t.Fatalf("retry overwrites failed destination: %v", err)
 			}
 			assertBackupSourceUsable(t, source)
 		})
+	}
+}
+
+func assertReadableBackupTask(t *testing.T, destination string) {
+	t.Helper()
+	secret, err := LoadOrCreateSecret(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Open(filepath.Join(destination, "kb.db"), secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := restored.Task("default", "1")
+	if err != nil || task.Title != "original" {
+		t.Fatalf("final durability failure discarded copied data: %+v, %v", task, err)
+	}
+	if err := restored.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -271,8 +357,8 @@ func TestBackupLockReportsFailedJournalRestorationAndClosesInput(t *testing.T) {
 	if err := lock.close(); err == nil || !strings.Contains(err.Error(), "restore source journal mode") {
 		t.Fatalf("lost connection cleanup: %v", err)
 	}
-	if _, err := lock.input.Stat(); !errors.Is(err, os.ErrClosed) {
-		t.Fatalf("cleanup leaked raw database descriptor: %v", err)
+	if descriptor := lock.input.Fd(); descriptor != ^uintptr(0) {
+		t.Fatalf("cleanup leaked raw database descriptor: %d", descriptor)
 	}
 	if err := lock.close(); err != nil {
 		t.Fatalf("second cleanup: %v", err)

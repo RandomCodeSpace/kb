@@ -11,6 +11,8 @@ import (
 // BackupIncompleteFile remains in a destination until its complete copy is durable.
 const BackupIncompleteFile = ".kb-backup-incomplete"
 
+var createDatabaseTemp = os.CreateTemp
+
 func checkPartialCopy(path string) error {
 	marker := filepath.Join(filepath.Dir(path), BackupIncompleteFile)
 	if _, err := os.Lstat(marker); err == nil {
@@ -74,7 +76,7 @@ func prepareDatabaseFile(path string) error {
 }
 
 func publishEmptyDatabase(path string) error {
-	file, err := os.CreateTemp(filepath.Dir(path), ".kb-db-*")
+	file, err := createDatabaseTemp(filepath.Dir(path), ".kb-db-*")
 	if err != nil {
 		return fmt.Errorf("store: create database: %w", err)
 	}
