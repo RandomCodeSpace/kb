@@ -50,5 +50,7 @@ func runTUI(args []string) error {
 	// The launch screen's meta row prints the same build identifier kb version
 	// reads, so both answer a bug report with one string (spec section 10.6.5).
 	version, _, _ := versionParts(readBuildInfo())
-	return runTUIProgram(st, filepath.Join(resolvedData, "kb.db"), defaultBoardUser, version)
+	return runWithCrashTrace(resolvedData, version, func() error {
+		return runTUIProgram(st, filepath.Join(resolvedData, "kb.db"), defaultBoardUser, version)
+	})
 }
