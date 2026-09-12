@@ -670,7 +670,7 @@ func (m *Model) labelSuggestionRows(width int) []editorRow {
 	for i, suggestion := range suggestions {
 		marker := "  "
 		if i == min(m.labelHighlight, len(suggestions)-1) {
-			marker = "› "
+			marker = m.themeStyles().Glyph.Chevron + " "
 		}
 		target := "label:" + suggestion
 		rows = append(rows, editorRow{
@@ -745,7 +745,7 @@ func similarText(hit store.SimilarHit) string {
 			context += " " + hit.KilledAt
 		}
 		if reason := strings.TrimSpace(hit.Reason); reason != "" {
-			context += " — " + reason
+			context += " " + theme.DefaultGlyphs().EmDash + " " + reason
 		}
 		return "[" + sanitize(context) + "] " + sanitize(hit.Title)
 	}
