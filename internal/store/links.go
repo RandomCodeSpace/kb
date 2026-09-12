@@ -2,7 +2,6 @@ package store
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -22,14 +21,14 @@ func (s *Store) Link(user, blockerRef, blockedRef string) (blocker, blocked boar
 	err = s.withTx(func(tx *sql.Tx) error {
 		blockerID, err := resolveID(tx, user, blockerRef)
 		if err != nil {
-			return err
+			return &TaskRefError{Ref: blockerRef, Err: err}
 		}
 		blockedID, err := resolveID(tx, user, blockedRef)
 		if err != nil {
-			return err
+			return &TaskRefError{Ref: blockedRef, Err: err}
 		}
 		if blockerID == blockedID {
-			return errors.New("a task cannot block itself")
+			return &LinkConflictError{Message: "a task cannot block itself"}
 		}
 		if blocker, err = getTask(tx, user, blockerID); err != nil {
 			return err
@@ -42,7 +41,7 @@ func (s *Store) Link(user, blockerRef, blockedRef string) (blocker, blocked boar
 			return err
 		}
 		if cyclic {
-			return fmt.Errorf("link would create a cycle: #%d already blocks #%d (transitively)", blocked.Seq, blocker.Seq)
+			return &LinkConflictError{Message: fmt.Sprintf("link would create a cycle: #%d already blocks #%d (transitively)", blocked.Seq, blocker.Seq)}
 		}
 		res, err := tx.Exec(`INSERT INTO task_links (scope, blocker_id, blocked_id) VALUES (?, ?, ?)
 			ON CONFLICT(scope, blocker_id, blocked_id) DO NOTHING`, user, blockerID, blockedID)
@@ -50,7 +49,7 @@ func (s *Store) Link(user, blockerRef, blockedRef string) (blocker, blocked boar
 			return fmt.Errorf("store: insert link: %w", err)
 		}
 		if n, err := res.RowsAffected(); err == nil && n == 0 {
-			return fmt.Errorf("#%d already blocks #%d", blocker.Seq, blocked.Seq)
+			return &LinkConflictError{Message: fmt.Sprintf("#%d already blocks #%d", blocker.Seq, blocked.Seq)}
 		}
 		return nil
 	})
@@ -66,11 +65,11 @@ func (s *Store) Unlink(user, aRef, bRef string) error {
 	return s.withTx(func(tx *sql.Tx) error {
 		aID, err := resolveID(tx, user, aRef)
 		if err != nil {
-			return err
+			return &TaskRefError{Ref: aRef, Err: err}
 		}
 		bID, err := resolveID(tx, user, bRef)
 		if err != nil {
-			return err
+			return &TaskRefError{Ref: bRef, Err: err}
 		}
 		res, err := tx.Exec(`DELETE FROM task_links WHERE scope = ? AND
 			((blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?))`,
@@ -236,3 +235,17 @@ func reconcileLinksTx(tx *sql.Tx, user string) error {
 	}
 	return nil
 }
+
+// TaskRefError identifies which input failed without losing its sentinel.
+type TaskRefError struct {
+	Ref string
+	Err error
+}
+
+func (e *TaskRefError) Error() string { return e.Err.Error() }
+func (e *TaskRefError) Unwrap() error { return e.Err }
+
+// LinkConflictError reports a refused self, duplicate, or cyclic link.
+type LinkConflictError struct{ Message string }
+
+func (e *LinkConflictError) Error() string { return e.Message }

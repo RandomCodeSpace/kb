@@ -60,7 +60,7 @@ func TestCommentLifecycleCLI(t *testing.T) {
 	}
 
 	// rm demands --yes, accepts the c-form, and reports the deletion.
-	if _, errS, code = runCmd(t, "comment", "rm", "c1", "--data", dir); code != 1 || !strings.Contains(errS, "--yes") {
+	if _, errS, code = runCmd(t, "comment", "rm", "c1", "--data", dir); code != 4 || !strings.Contains(errS, "--yes") {
 		t.Fatalf("comment rm without --yes: code=%d stderr=%q", code, errS)
 	}
 	if out, _, code = runCmd(t, "comment", "rm", "c1", "--yes", "--data", dir); code != 0 || out != "deleted c1\n" {
@@ -79,7 +79,7 @@ func TestCommentLifecycleCLI(t *testing.T) {
 	if id, ok := deleted["id"]; !ok || id == nil {
 		t.Fatalf("comment rm --json missing id: %v", deleted)
 	}
-	if _, errS, code = runCmd(t, "comment", "rm", "1", "--yes", "--data", dir); code != 1 || !strings.Contains(errS, "no comment matches") {
+	if _, errS, code = runCmd(t, "comment", "rm", "1", "--yes", "--data", dir); code != 3 || !strings.Contains(errS, "no comment matches") {
 		t.Fatalf("comment rm gone: code=%d stderr=%q", code, errS)
 	}
 }
@@ -101,7 +101,7 @@ func TestCommentUsageErrors(t *testing.T) {
 	}
 
 	// Commenting on a missing task is a runtime error with the friendly id.
-	if _, errS, code := runCmd(t, "comment", "add", "9", "text", "--data", dir); code != 1 || !strings.Contains(errS, "no task matches") {
+	if _, errS, code := runCmd(t, "comment", "add", "9", "text", "--data", dir); code != 3 || !strings.Contains(errS, "no task matches") {
 		t.Errorf("comment on missing task: code=%d stderr=%q", code, errS)
 	}
 }

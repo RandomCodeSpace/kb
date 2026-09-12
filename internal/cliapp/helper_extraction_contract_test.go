@@ -165,7 +165,7 @@ func TestUpdateCompletionRefusalLeavesRevisionUnchanged(t *testing.T) {
 
 	stdout, stderr, code := runCmd(t, "update", id, "--status", "done", "--title", "Should not persist", "--data", dir)
 	wantError := "kb: 1 of 1 checklist items are still open on #1 \"Should not persist\"; re-run with --force to finish it anyway\n"
-	if code != 1 || stdout != "" || stderr != wantError {
+	if code != 4 || stdout != "" || stderr != wantError {
 		t.Fatalf("guarded update: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	after := readLocalSnapshot(t, dir)

@@ -434,7 +434,7 @@ func TestProjectCommandsNeedAResolvableDataDir(t *testing.T) {
 
 func TestProjectUpdateReportsUnknownTask(t *testing.T) {
 	dir := localEnv(t)
-	if _, stderr, code := runCmd(t, "update", "9", "--data", dir, "-p", "web"); code != 1 ||
+	if _, stderr, code := runCmd(t, "update", "9", "--data", dir, "-p", "web"); code != 3 ||
 		!strings.Contains(stderr, "no task matches id") {
 		t.Fatalf("update unknown: code=%d stderr=%q", code, stderr)
 	}

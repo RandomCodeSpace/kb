@@ -20,7 +20,7 @@ func TestLinkUnlinkCLI(t *testing.T) {
 	}
 
 	// Finishing the blocked task refuses; --force overrides.
-	if _, errS, code = runCmd(t, "done", "2", "--data", dir); code != 1 ||
+	if _, errS, code = runCmd(t, "done", "2", "--data", dir); code != 4 ||
 		!strings.Contains(errS, "1 open blocker (#1) still blocks #2") {
 		t.Fatalf("gated done: code=%d stderr=%q", code, errS)
 	}
@@ -39,7 +39,7 @@ func TestLinkUnlinkCLI(t *testing.T) {
 	}
 
 	// Reversing while the original edge exists would close a cycle: refused.
-	if _, errS, code = runCmd(t, "link", "1", "blocked-by", "2", "--data", dir); code != 1 || !strings.Contains(errS, "cycle") {
+	if _, errS, code = runCmd(t, "link", "1", "blocked-by", "2", "--data", dir); code != 4 || !strings.Contains(errS, "cycle") {
 		t.Fatalf("cycle link: code=%d stderr=%q", code, errS)
 	}
 
@@ -61,7 +61,7 @@ func TestLinkUnlinkCLI(t *testing.T) {
 	if len(removed) != 1 || !removed["removed"] {
 		t.Fatalf("unlink --json = %#v", removed)
 	}
-	if _, errS, code = runCmd(t, "unlink", "1", "2", "--data", dir); code != 1 || !strings.Contains(errS, "no link") {
+	if _, errS, code = runCmd(t, "unlink", "1", "2", "--data", dir); code != 3 || !strings.Contains(errS, "no link") {
 		t.Fatalf("unlink absent: code=%d stderr=%q", code, errS)
 	}
 

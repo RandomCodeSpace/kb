@@ -15,9 +15,9 @@ import (
 // cross-references (as stable task numbers).
 type viewJSON struct {
 	taskJSON
-	Blocks    []int         `json:"blocks,omitempty"`
-	BlockedBy []int         `json:"blockedBy,omitempty"`
-	Comments  []commentJSON `json:"comments,omitempty"`
+	Blocks    []int         `json:"blocks"`
+	BlockedBy []int         `json:"blockedBy"`
+	Comments  []commentJSON `json:"comments"`
 }
 
 // cmdView shows one local task in full, with its comments inline.
@@ -44,7 +44,7 @@ func (a *app) cmdView(args []string) int {
 
 func (a *app) renderView(it item, comments []store.Comment, links store.TaskLinks, asJSON bool) error {
 	if asJSON {
-		out := viewJSON{taskJSON: itemJSON(it)}
+		out := viewJSON{taskJSON: itemJSON(it), Blocks: []int{}, BlockedBy: []int{}, Comments: []commentJSON{}}
 		for _, t := range links.Blocks {
 			out.Blocks = append(out.Blocks, t.Seq)
 		}

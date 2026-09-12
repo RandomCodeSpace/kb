@@ -51,7 +51,7 @@ commands:
                          checklist items; --force overrides.
   unlink <a> <b>         remove the link between two tasks
   comment add <id> "text"
-                         append a comment to a task
+                         append a comment to a task; --author name sets its author
   comment list <id>      list a task's comments oldest-first
   comment rm <cid>       delete a comment for good (requires --yes);
                          comment ids are c1, c2, ... per board, stable and
@@ -67,7 +67,7 @@ common flags (every command):
   --data dir     data directory (default $KB_DATA or ~/.local/share/kb)
   --json         machine output: --json is available on every data-producing
                  and mutating command and on version. Shapes are
-                 command-specific; see README.
+                 command-specific; see README "CLI JSON and exit codes".
 
 projects:
   Every task carries exactly one project, stored as the scoped label
@@ -133,7 +133,7 @@ task ids:
 
 // Run executes one kb CLI invocation. args starts with the subcommand,
 // e.g. ["add", "Fix bug", "--prio", "2"]. It returns the process exit code:
-// 0 on success, 1 on runtime errors, 2 on usage errors.
+// 0 success, 1 operational failure, 2 usage, 3 missing entity, 4 state conflict.
 func Run(args []string, stdout, stderr io.Writer) int {
 	a := &app{stdout: stdout, stderr: stderr}
 	if len(args) == 0 {
@@ -185,7 +185,18 @@ type app struct {
 
 func (a *app) fail(err error) int {
 	fmt.Fprintf(a.stderr, "kb: %v\n", err)
-	return 1
+	var completion *store.CompletionBlockedError
+	var conflict *store.TaskFieldsConflictError
+	var linkConflict *store.LinkConflictError
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return 3
+	case errors.Is(err, store.ErrAmbiguous), errors.Is(err, store.ErrTaskNotCancelled),
+		errors.Is(err, errRefused), errors.As(err, &completion), errors.As(err, &conflict), errors.As(err, &linkConflict):
+		return 4
+	default:
+		return 1
+	}
 }
 
 func (a *app) usageErr(err error) int {
@@ -782,10 +793,20 @@ func (a *app) cmdRestore(args []string) int {
 	if len(pos) != 1 {
 		return a.usageErr(errors.New("restore needs exactly one <id-prefix> argument"))
 	}
-	return a.moveTo(*data, pos[0], board.StatusTodo, false, *jsonF)
+	return a.withLocal(*data, func(be *localBackend) error {
+		it, err := be.restore(pos[0])
+		if err != nil {
+			return err
+		}
+		if *jsonF {
+			return writeJSONItem(a.stdout, it)
+		}
+		fmt.Fprintf(a.stdout, "moved %s -> %s\n", displayID(it), it.task.Status)
+		return nil
+	})
 }
 
-// moveTo is the shared body of move, done, cancel, and restore. Moving to
+// moveTo is the shared body of move, done, and cancel. Moving to
 // done with open checklist items or a blocked flag is refused unless force
 // is set: the CLI has no interactive confirmation, so it errors out rather
 // than shipping something the user may not have meant to.
@@ -825,7 +846,7 @@ func (a *app) cmdRm(args []string) int {
 			if err != nil {
 				return err
 			}
-			return fmt.Errorf("refusing to delete %s %q; re-run with --yes", displayID(it), it.task.Title)
+			return describedError{errRefused, fmt.Sprintf("refusing to delete %s %q; re-run with --yes", displayID(it), it.task.Title)}
 		}
 		it, err := be.remove(ref)
 		if err != nil {
@@ -856,7 +877,7 @@ func findItem(items []item, ref string) (item, error) {
 				return it, nil
 			}
 		}
-		return item{}, fmt.Errorf("no task matches id %q", ref)
+		return item{}, friendlyIDErr(store.ErrNotFound, ref)
 	}
 	var match item
 	n := 0
@@ -868,11 +889,11 @@ func findItem(items []item, ref string) (item, error) {
 	}
 	switch n {
 	case 0:
-		return item{}, fmt.Errorf("no task matches id %q", ref)
+		return item{}, friendlyIDErr(store.ErrNotFound, ref)
 	case 1:
 		return match, nil
 	}
-	return item{}, fmt.Errorf("task id prefix %q is ambiguous; use more characters", ref)
+	return item{}, friendlyIDErr(store.ErrAmbiguous, ref)
 }
 
 // --- output ---
@@ -936,21 +957,21 @@ type checkJSON struct {
 
 type taskJSON struct {
 	ID        string      `json:"id"`
-	Seq       int         `json:"seq,omitempty"`
-	Emoji     string      `json:"emoji,omitempty"`
+	Seq       int         `json:"seq"`
+	Emoji     string      `json:"emoji"`
 	Title     string      `json:"title"`
-	Desc      string      `json:"desc,omitempty"`
+	Desc      string      `json:"desc"`
 	Status    string      `json:"status"`
-	Blocked   bool        `json:"blocked,omitempty"`
+	Blocked   bool        `json:"blocked"`
 	Prio      int         `json:"prio"`
-	Due       string      `json:"due,omitempty"`
-	Effort    string      `json:"effort,omitempty"`
-	Tags      []string    `json:"tags,omitempty"`
-	Checks    []checkJSON `json:"checks,omitempty"`
+	Due       string      `json:"due"`
+	Effort    string      `json:"effort"`
+	Tags      []string    `json:"tags"`
+	Checks    []checkJSON `json:"checks"`
 	Position  int         `json:"position"`
-	CreatedAt string      `json:"createdAt,omitempty"`
-	MovedAt   string      `json:"movedAt,omitempty"`
-	UpdatedAt string      `json:"updatedAt,omitempty"`
+	CreatedAt string      `json:"createdAt"`
+	MovedAt   string      `json:"movedAt"`
+	UpdatedAt string      `json:"updatedAt"`
 }
 
 // itemJSON builds the wire shape of one task. Remote tasks carry no UUID,
@@ -960,7 +981,7 @@ func itemJSON(it item) taskJSON {
 	j := taskJSON{
 		ID: t.ID, Seq: t.Seq, Emoji: t.Emoji, Title: t.Title, Desc: t.Desc,
 		Status: string(t.Status), Blocked: t.Blocked, Prio: t.Prio, Due: t.Due,
-		Effort: t.Effort, Tags: t.Tags, Position: t.Position,
+		Effort: t.Effort, Tags: append([]string{}, t.Tags...), Checks: []checkJSON{}, Position: t.Position,
 	}
 	if j.ID == "" {
 		j.ID = it.ref
