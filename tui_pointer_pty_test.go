@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -130,6 +131,25 @@ func waitForPTYPatternAfter(t *testing.T, output *lockedPTYOutput, offset int, p
 	t.Fatalf("PTY output after byte %d did not match %s:\n%s", offset, pattern, output.string())
 }
 
+// A save closes the editor before its asynchronous board reload completes.
+// Request full repaints so a title updated by an ANSI cell diff is observable
+// as a whole string before opening the next editor on that board snapshot.
+func waitForPTYBoardTitle(t *testing.T, process *os.Process, output *lockedPTYOutput, title string) {
+	t.Helper()
+	offset := output.length()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if output.containsAfter(offset, title) {
+			return
+		}
+		if err := process.Signal(syscall.SIGWINCH); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("PTY board did not render saved title %q:\n%s", title, output.string())
+}
+
 func editorSavePoint(t *testing.T, st *store.Store, task board.Task, width, height int) (int, int) {
 	t.Helper()
 	editor := cardeditor.New(st, "default")
@@ -203,7 +223,9 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Each interaction has its own bounded wait. A whole-session deadline can
+	// kill a progressing TUI when scheduling delays accumulate under race load.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, "tui", "--data", data)
 	command.Env = append(os.Environ(), "TERM=xterm-256color")
@@ -212,7 +234,17 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = terminal.Close() })
+	var exitErr error
+	exited := make(chan struct{})
+	go func() {
+		exitErr = command.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = terminal.Close()
+		<-exited
+	})
 	var output lockedPTYOutput
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -253,6 +285,7 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	}
 	waitForTaskTitle(t, st, "default", task.ID, "Drag through raw SGRX")
 	waitForPTYMarkerAfter(t, &output, boardOffset, "DOING")
+	waitForPTYBoardTitle(t, command.Process, &output, "Drag through raw SGRX")
 
 	editOffset = output.length()
 	if _, err := io.WriteString(terminal, "e"); err != nil {
@@ -268,6 +301,7 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	}
 	waitForTaskTitle(t, st, "default", task.ID, "Drag through raw SGRXY")
 	waitForPTYMarkerAfter(t, &output, boardOffset, "DOING")
+	waitForPTYBoardTitle(t, command.Process, &output, "Drag through raw SGRXY")
 
 	editOffset = output.length()
 	if _, err := io.WriteString(terminal, "e"); err != nil {
@@ -298,10 +332,12 @@ func TestPTYRawSGRDragPersistsCardMove(t *testing.T) {
 	if _, err := io.WriteString(terminal, "q"); err != nil {
 		t.Fatal(err)
 	}
-	if err := command.Wait(); err != nil {
-		t.Fatalf("TUI exit: %v\n%s", err, output.string())
-	}
-	if ctx.Err() != nil {
-		t.Fatal(fmt.Errorf("TUI timeout: %w", ctx.Err()))
+	select {
+	case <-exited:
+		if exitErr != nil {
+			t.Fatalf("TUI exit: %v\n%s", exitErr, output.string())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("TUI did not exit within 5s after quit")
 	}
 }
