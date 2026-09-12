@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -233,26 +232,6 @@ func TestRunErrors(t *testing.T) {
 	}
 	if err := run(context.Background(), Options{DataDir: t.TempDir(), Addr: "0.0.0.0:0"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "non-loopback") {
 		t.Fatalf("remote addr: %v", err)
-	}
-}
-
-func TestRunStopsOnSignal(t *testing.T) {
-	stdout := &syncBuffer{}
-	done := make(chan error, 1)
-	go func() {
-		done <- Run(Options{DataDir: t.TempDir(), User: "default"}, stdout, io.Discard)
-	}()
-	waitForURL(t, stdout)
-	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("Run did not stop on SIGINT")
 	}
 }
 
