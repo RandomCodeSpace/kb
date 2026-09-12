@@ -62,18 +62,22 @@ func TestUpdateValidationBranches(t *testing.T) {
 }
 
 func TestLocalStorageDefaultsAndOpenFailures(t *testing.T) {
-	t.Setenv("KB_DATA", "/tmp/kb-explicit-data")
-	if got, err := defaultDataDir(); err != nil || got != "/tmp/kb-explicit-data" {
+	dataDir := t.TempDir()
+	t.Setenv("KB_DATA", dataDir)
+	if got, err := defaultDataDir(); err != nil || got != dataDir {
 		t.Fatalf("KB_DATA default: got=%q err=%v", got, err)
 	}
 	t.Setenv("KB_DATA", "")
-	t.Setenv("HOME", "/tmp/kb-home")
-	if got, err := defaultDataDir(); err != nil || got != "/tmp/kb-home/.local/share/kb" {
-		t.Fatalf("HOME default: got=%q err=%v", got, err)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	if got, err := defaultDataDir(); err != nil || got != filepath.Join(home, ".local", "share", "kb") {
+		t.Fatalf("home default: got=%q err=%v", got, err)
 	}
 	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
 	if _, err := defaultDataDir(); err == nil || !strings.Contains(err.Error(), "cannot determine home") {
-		t.Fatalf("missing HOME: err=%v", err)
+		t.Fatalf("missing home: err=%v", err)
 	}
 
 	var stderr bytes.Buffer

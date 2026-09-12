@@ -418,6 +418,7 @@ func TestProjectCommandsNeedAResolvableDataDir(t *testing.T) {
 	// No --data, no KB_DATA, and no home directory to fall back on.
 	t.Setenv("KB_DATA", "")
 	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
 	for _, args := range [][]string{
 		{"project", "list"},
 		{"add", "Task", "-p", "web"},

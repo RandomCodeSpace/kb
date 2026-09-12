@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -851,7 +852,7 @@ func TestCancelledPreferencePathAndIsolation(t *testing.T) {
 	if got, readErr := loadTUIPreferences(pathB); readErr != nil || got.ShowCancelled || got.Filter.Text != "" || len(got.Filter.Tags) != 0 {
 		t.Fatalf("isolated data-directory preference %q = %v,%v", pathB, got, readErr)
 	}
-	if info, err := os.Stat(pathA); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Stat(pathA); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("preference mode = %v,%v", info, err)
 	}
 	if err := saveTUIPreferences(pathA, tuiPreferences{}); err != nil {

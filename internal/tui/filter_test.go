@@ -349,11 +349,9 @@ func TestPreferenceLegacyDecodeAndReadFailures(t *testing.T) {
 	if err != nil || !got.ShowCancelled || got.Filter.Text != "" || len(got.Filter.Tags) != 0 {
 		t.Fatalf("legacy preference = %+v,%v", got, err)
 	}
-	if err := os.Chmod(path, 0); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadTUIPreferences(path); err == nil && os.Geteuid() != 0 {
-		t.Fatal("unreadable preference loaded")
+	// Reading a directory fails without relying on Unix permissions or the current user.
+	if _, err := loadTUIPreferences(dir); err == nil || !strings.Contains(err.Error(), "tui preferences: read:") {
+		t.Fatalf("directory preference read error = %v", err)
 	}
 
 	root := newTestRootModel(stubBoardReader{}, nil, "u")
