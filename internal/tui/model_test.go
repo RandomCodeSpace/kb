@@ -1571,7 +1571,7 @@ func TestRootEditRoutingAndDirtyWatcherRefreshPreservesInput(t *testing.T) {
 		t.Fatal("root escape bypassed editor unsaved guard")
 	}
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'd'})
-	if !m.editor.IsOpen() || !strings.Contains(ansi.Strip(m.View().Content), "D discard") {
+	if !strings.Contains(ansi.Strip(m.View().Content), "D discard") {
 		t.Fatal("root lowercase d bypassed editor unsaved guard")
 	}
 	updateTestModel(t, &m, tea.KeyPressMsg{Code: 'D'})

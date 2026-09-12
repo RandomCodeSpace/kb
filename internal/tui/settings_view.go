@@ -480,23 +480,7 @@ func settingsInputDisplay(input textinput.Model, secret, focused bool, width int
 }
 
 func settingsCursorViewport(value string, position, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	const cursor = "|"
-	if width == 1 {
-		return cursor
-	}
-	runes := []rune(value)
-	position = min(max(position, 0), len(runes))
-	before, after := string(runes[:position]), string(runes[position:])
-	contentWidth := width - 1
-	cursorColumn := ansi.StringWidth(before)
-	left := max(cursorColumn-contentWidth, 0)
-	visibleBefore := ansi.Cut(before, left, cursorColumn)
-	remaining := max(contentWidth-ansi.StringWidth(visibleBefore), 0)
-	visibleAfter := ansi.Truncate(after, remaining, "")
-	return visibleBefore + cursor + visibleAfter
+	return formview.CursorViewport(value, position, width)
 }
 
 func keyLabel(label string, saved bool) string {
