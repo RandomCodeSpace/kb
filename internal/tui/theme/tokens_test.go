@@ -309,7 +309,10 @@ func TestMetricsCarrySpecNumbers(t *testing.T) {
 }
 
 func TestGlyphsCarryTheAccentVocabulary(t *testing.T) {
-	glyphs := New(true).Glyph
+	glyphs := DefaultGlyphs()
+	if glyphs != New(true).Glyph {
+		t.Fatal("default vocabulary differs from styled vocabulary")
+	}
 	cases := map[string][2]string{
 		"Rail":     {glyphs.Rail, "▌"},
 		"RailFull": {glyphs.RailFull, "█"},
@@ -329,6 +332,10 @@ func TestGlyphsCarryTheAccentVocabulary(t *testing.T) {
 		"Empty":    {glyphs.Empty, "○"},
 		"Alert":    {glyphs.Alert, "▲"},
 		"Bullet":   {glyphs.Bullet, "·"},
+		"Times":    {glyphs.Times, "×"},
+		"EmDash":   {glyphs.EmDash, "—"},
+		"Chevron":  {glyphs.Chevron, "›"},
+		"Rule":     {glyphs.Rule, "─"},
 		"HintSep":  {glyphs.HintSep, " | "},
 
 		"HalfTop":    {glyphs.HalfTop, "▀"},
@@ -376,6 +383,10 @@ func TestGlyphWidthsMatchTheSpecTable(t *testing.T) {
 		"Empty":    {ansi.StringWidth(glyphs.Empty), 1},
 		"Alert":    {ansi.StringWidth(glyphs.Alert), 1},
 		"Bullet":   {ansi.StringWidth(glyphs.Bullet), 1},
+		"Times":    {ansi.StringWidth(glyphs.Times), 1},
+		"EmDash":   {ansi.StringWidth(glyphs.EmDash), 1},
+		"Chevron":  {ansi.StringWidth(glyphs.Chevron), 1},
+		"Rule":     {ansi.StringWidth(glyphs.Rule), 1},
 		"HintSep":  {ansi.StringWidth(glyphs.HintSep), 3},
 
 		"HalfTop":    {ansi.StringWidth(glyphs.HalfTop), 1},

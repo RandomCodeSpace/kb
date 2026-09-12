@@ -19,6 +19,19 @@ import (
 	"github.com/RandomCodeSpace/kb/internal/tui/widget/spin"
 )
 
+func TestDetailLineFitsMinimalWidths(t *testing.T) {
+	for _, tc := range []struct {
+		width int
+		want  string
+	}{
+		{-1, ""}, {0, ""}, {1, "…"}, {3, "界…"}, {4, "界界"},
+	} {
+		if got := fitDetailLine("界界", tc.width); got != tc.want {
+			t.Errorf("width %d: detail line = %q, want %q", tc.width, got, tc.want)
+		}
+	}
+}
+
 type stubReader struct {
 	comments     []store.Comment
 	links        store.TaskLinks

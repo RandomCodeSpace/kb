@@ -29,12 +29,6 @@ const (
 	blockElementsHi = 0x259F
 )
 
-// unpromotedMarks are the section 10.4.1 glyphs that are still written as
-// literals at their render site rather than named as theme.Glyphs tokens
-// (Bullet, Times, EmDash). They are display vocabulary and so they answer to
-// the adjacency rule whether or not the token that will own them exists yet.
-var unpromotedMarks = []rune{'·', '×', '—'}
-
 // spacedMarks is the vocabulary the adjacency rule of spec section 10.4.1
 // binds: every glyph token whose rune is East Asian Ambiguous or East Asian
 // Wide, less the Block Elements carve-out above.
@@ -65,9 +59,6 @@ func spacedMarks(t *testing.T) map[rune]string {
 			continue
 		}
 		marks[runes[0]] = name
-	}
-	for _, mark := range unpromotedMarks {
-		marks[mark] = "literal"
 	}
 	for mark := range marks {
 		kind := width.LookupRune(mark).Kind()

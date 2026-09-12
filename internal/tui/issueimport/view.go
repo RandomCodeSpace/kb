@@ -563,7 +563,7 @@ func fit(value string, width int) string {
 	if width <= 1 {
 		return ansi.Truncate(value, width, "")
 	}
-	return ansi.Truncate(value, width-1, "") + "…"
+	return ansi.Truncate(value, width-1, "") + theme.DefaultGlyphs().Ellipsis
 }
 
 // fitBlock keeps a composed frame inside the cell grid it was composed for.

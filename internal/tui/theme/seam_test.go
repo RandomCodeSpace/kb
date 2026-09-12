@@ -1,12 +1,74 @@
 package theme
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// Display literals belong to the theme vocabulary. Parse Go literals so
+// escaped Unicode is checked too, while comments and user data are excluded.
+func TestNoGlyphLiteralsOutsideTheme(t *testing.T) {
+	walkTUI(t, tuiRoot(t), func(relative, source string) {
+		if strings.HasSuffix(relative, "_test.go") || strings.HasPrefix(relative, "testdata/") || strings.Contains(relative, "/testdata/") {
+			return
+		}
+		// These helpers define Unicode parsing and case conversion for user
+		// content. Their code points are data rules, not display vocabulary.
+		if relative == "mdparity/mdparity.go" || relative == "web_lower.go" {
+			return
+		}
+		for _, position := range glyphLiteralPositions(t, relative, source) {
+			t.Errorf("%s contains a non-ASCII display literal; use theme.Glyphs", position)
+		}
+	})
+}
+
+func glyphLiteralPositions(t *testing.T, name, source string) []token.Position {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, name, source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var positions []token.Position
+	ast.Inspect(file, func(node ast.Node) bool {
+		literal, ok := node.(*ast.BasicLit)
+		if !ok || (literal.Kind != token.STRING && literal.Kind != token.CHAR) {
+			return true
+		}
+		value, err := strconv.Unquote(literal.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range value {
+			if r >= 0xA0 {
+				positions = append(positions, fset.Position(literal.Pos()))
+				break
+			}
+		}
+		return true
+	})
+	return positions
+}
+
+func TestGlyphLiteralGuardRecognizesEscapes(t *testing.T) {
+	for _, literal := range []string{`"×"`, `"\u00d7"`, "`×`", `'\u00d7'`} {
+		positions := glyphLiteralPositions(t, "view.go", "package view\nvar marker = "+literal)
+		if len(positions) != 1 || positions[0].Line != 2 {
+			t.Errorf("literal %s: positions = %v, want one on line 2", literal, positions)
+		}
+	}
+	if positions := glyphLiteralPositions(t, "view.go", "package view\n// × is a glyph\nvar marker = \"ASCII\""); len(positions) != 0 {
+		t.Errorf("ASCII or comment reported: %v", positions)
+	}
+}
 
 // seamAllowlist is the set of files under internal/tui that still construct
 // lipgloss styles by hand. Spec sections 6.2 and 9.2: views take a *Styles and

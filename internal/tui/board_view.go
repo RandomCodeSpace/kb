@@ -697,7 +697,7 @@ func (m Model) renderTopBar(styles *theme.Styles, width int) string {
 		// adjacency rule: U+00D7 is East Asian Ambiguous, so a digit written
 		// straight after it is drawn over a glyph the font took more than its
 		// advertised cell to draw.
-		line += styles.On(theme.StatusOK, theme.Canvas).Render(fmt.Sprintf(" / × %d shipped today", shipped))
+		line += styles.On(theme.StatusOK, theme.Canvas).Render(fmt.Sprintf(" / %s %d shipped today", styles.Glyph.Times, shipped))
 	}
 	return fillRow(styles.Board.Canvas, fitLine(line, width), width)
 }
