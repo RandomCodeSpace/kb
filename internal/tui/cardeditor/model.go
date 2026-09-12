@@ -1612,7 +1612,7 @@ func safeError(err error) string {
 	}
 	runes := []rune(message)
 	if len(runes) > 180 {
-		message = string(runes[:179]) + "…"
+		message = string(runes[:179]) + theme.DefaultGlyphs().Ellipsis
 	}
 	return message
 }

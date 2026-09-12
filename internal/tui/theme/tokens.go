@@ -57,6 +57,10 @@ type Glyphs struct {
 	Empty   string // U+25CB, empty-state mark (section 10.8.3)
 	Alert   string // U+25B2, failure mark (section 10.8.5)
 	Bullet  string // U+00B7, meta separator and card description list marker
+	Times   string // U+00D7, shipped task count
+	EmDash  string // U+2014, contextual text separator
+	Chevron string // U+203A, selected label suggestion
+	Rule    string // U+2500, comment divider
 	HintSep string // hint ladder separator, three cells (section 10.4.6)
 
 	// The half-block pair of spec section 10.6.1. These are the only glyphs in
@@ -109,6 +113,10 @@ var defaultGlyphs = Glyphs{
 	Empty:    "○",
 	Alert:    "▲",
 	Bullet:   "·",
+	Times:    "×",
+	EmDash:   "—",
+	Chevron:  "›",
+	Rule:     "─",
 	HintSep:  " | ",
 
 	HalfTop:    "▀",
@@ -121,6 +129,9 @@ var defaultGlyphs = Glyphs{
 	MarkFilterOff: "+ ",
 	MarkFilterOn:  "x ",
 }
+
+// DefaultGlyphs returns the display vocabulary for helpers without a Styles value.
+func DefaultGlyphs() Glyphs { return defaultGlyphs }
 
 // EffortSlot resolves the fill hue of the section 3.4 effort pill for one
 // effort value: the scale is S, M and L, and the ramp runs cool to warm.

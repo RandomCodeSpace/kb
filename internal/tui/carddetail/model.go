@@ -966,9 +966,9 @@ func fitDetailLine(line string, width int) string {
 		return line
 	}
 	if width <= 1 {
-		return ansi.Cut("…", 0, width)
+		return ansi.Cut(theme.DefaultGlyphs().Ellipsis, 0, width)
 	}
-	return ansi.Cut(line, 0, width-1) + "…"
+	return ansi.Cut(line, 0, width-1) + theme.DefaultGlyphs().Ellipsis
 }
 
 // paneSize is the overlay geometry of spec section 4: the panel spans a share
@@ -1205,7 +1205,7 @@ func (m Model) subtleRow(text string, width int) string {
 }
 
 func (m Model) commentDivider(width int) string {
-	return m.subtleRow(strings.Repeat("─", m.contentWidth(width)), width)
+	return m.subtleRow(strings.Repeat(m.styles.Glyph.Rule, m.contentWidth(width)), width)
 }
 
 // section renders one section break carrying the pane's current mode. Spec
