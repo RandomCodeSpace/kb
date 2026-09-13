@@ -123,15 +123,20 @@ jobs:
           mapfile -t owners < <(jq -r '.go.owners[]' <<<"$IMPACT_MANIFEST")
           mapfile -t compile_packages < <(jq -r '.go.compile_packages[]' <<<"$IMPACT_MANIFEST")
           sh scripts/check-go-format.sh --changed "$IMPACT_BASE" "$IMPACT_HEAD"
+          owner_profile="$GO_COVERAGE_PROFILE"
           if [[ $EVENT_NAME == push ]] || jq -e '.go.compile_all' <<<"$IMPACT_MANIFEST" >/dev/null; then
-            go test -buildvcs=false -count=1 ./...
+            # The whole tree runs here anyway; keep its profile so Sonar measures
+            # every package instead of only this change's owners.
+            mkdir -p "$(dirname "$GO_COVERAGE_PROFILE")"
+            go test -buildvcs=false -count=1 ./... -covermode=atomic -coverprofile="$GO_COVERAGE_PROFILE"
+            owner_profile=coverage/owners.out
           else
             if ((${#compile_packages[@]})); then
               go test -buildvcs=false -count=1 "${compile_packages[@]}"
             fi
           fi
           if ((${#owners[@]})); then
-            sh scripts/check-go-coverage.sh --packages "${owners[@]}"
+            GO_COVERAGE_PROFILE="$owner_profile" sh scripts/check-go-coverage.sh --packages "${owners[@]}"
             go vet -buildvcs=false "${owners[@]}"
           fi
 
@@ -141,6 +146,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p coverage
+          if [[ -f coverage/go.out ]] && grep -q 'scripts/ci/impactcmd/' coverage/go.out; then
+            echo 'classifier coverage is already in the full-tree profile'
+            exit 0
+          fi
           go test -buildvcs=false ./scripts/ci/impactcmd -count=1 -covermode=atomic -coverprofile=coverage/impact.out
           if [[ -f coverage/go.out ]]; then
             tail -n +2 coverage/impact.out >> coverage/go.out
