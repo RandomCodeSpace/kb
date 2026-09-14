@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -764,5 +765,20 @@ func TestHardDeleteRequiresCancelledTask(t *testing.T) {
 				t.Fatalf("comments = %+v, %v", comments, err)
 			}
 		})
+	}
+}
+
+func TestAddTaskWarnsAboutDefaults(t *testing.T) {
+	cs := connect(t)
+	var bare taskJSON
+	callOK(t, cs, "add_task", map[string]any{"title": "Bare", "project": testProject}, &bare)
+	want := []string{"assumed status todo; pass it explicitly", "assumed priority low; pass it explicitly", "assumed effort S; pass it explicitly"}
+	if bare.Effort != "S" || !reflect.DeepEqual(bare.Warnings, want) {
+		t.Fatalf("bare = %+v", bare)
+	}
+	var sized taskJSON
+	callOK(t, cs, "add_task", map[string]any{"title": "Sized", "project": testProject, "status": "todo", "prio": 3, "effort": "M"}, &sized)
+	if sized.Effort != "M" || sized.Warnings != nil {
+		t.Fatalf("sized = %+v", sized)
 	}
 }

@@ -87,7 +87,7 @@ booleans except `title`, `status`, `prio`, `project`, `position`, timestamps.
 | ------ | ----------------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
 | GET    | `/api/meta`                   |                                                                                                         | `{"version", "projects": [..], "labels": [..], "statuses": [..]}` |
 | GET    | `/api/tasks`                  | `?status=&q=&tag=a&tag=b&project=`                                                                      | `{"tasks": [task…]}` in board order             |
-| POST   | `/api/tasks`                  | `{title, desc?, status?, blocked?, prio?, due?, effort?, tags?, checks?, emoji?, project?}`             | 201 `task`                                      |
+| POST   | `/api/tasks`                  | `{title, desc?, status?, blocked?, prio?, due?, effort?, tags?, checks?, emoji?, project?}` (effort defaults to `S`) | 201 `task`                                      |
 | GET    | `/api/tasks/{ref}`            |                                                                                                         | `{"task", "comments": [..], "links": {..}}`     |
 | PATCH  | `/api/tasks/{ref}`            | `{title?, desc?, blocked?, prio?, due?, effort?, tags?, checks?, emoji?, project?, status?, index?, force?}` — pointer semantics, omitted = unchanged | `task` |
 | POST   | `/api/tasks/{ref}/move`       | `{status, index?, force?}`                                                                              | `task` (409 when guard refuses)                 |

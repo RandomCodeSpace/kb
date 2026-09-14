@@ -32,6 +32,10 @@ func TestViewRendersDashForMissingEffort(t *testing.T) {
 	if _, _, code := runCmd(t, "add", "Dated", "--due", "2026-09-01", "--data", dir); code != 0 {
 		t.Fatal("seed add failed")
 	}
+	// A new task always gets an effort; only legacy cards lack one.
+	if _, _, code := runCmd(t, "update", "1", "--effort", "", "--data", dir); code != 0 {
+		t.Fatal("clearing effort failed")
+	}
 	out, _, code := runCmd(t, "view", "1", "--data", dir)
 	if code != 0 || !strings.Contains(out, "due: 2026-09-01   effort: -") {
 		t.Fatalf("view output:\n%s", out)

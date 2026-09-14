@@ -60,6 +60,28 @@ var PrioNames = map[int]string{
 // ValidPrio reports whether p is one of the three priorities.
 func ValidPrio(p int) bool { return p >= PrioHigh && p <= PrioLow }
 
+// DefaultEffort is the estimate a new task takes when none is given. Effort
+// is mandatory on every card; the default keeps older callers working, and
+// every surface warns when it was assumed rather than chosen.
+const DefaultEffort = "S"
+
+// NewTaskDefaults names the fields a new task leaves unset that the store
+// fills in, each as "field value", so callers can warn which values were
+// assumed rather than chosen.
+func NewTaskDefaults(t Task) []string {
+	var out []string
+	if t.Status == "" {
+		out = append(out, "status "+string(StatusTodo))
+	}
+	if t.Prio == 0 {
+		out = append(out, "priority "+PrioNames[PrioDefault])
+	}
+	if t.Effort == "" {
+		out = append(out, "effort "+DefaultEffort)
+	}
+	return out
+}
+
 // NormalizePrio folds any value the three-value scale does not name onto
 // PrioLow. It is the read-side counterpart of the schema v10 migration: a
 // legacy 4 meant low before the collapse and means low after it, and an unset

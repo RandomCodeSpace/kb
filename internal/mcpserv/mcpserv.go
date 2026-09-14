@@ -98,7 +98,7 @@ func newServer(st *store.Store, user, version string) *mcp.Server {
 	}, k.listTasks)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "add_task",
-		Description: "Add a new task to the kanban board. title and project are required; status defaults to \"todo\", prio to 3 (low), and blocked to false. Every task belongs to exactly one project and there is no default, so the call fails without project; a project::<name> label in tags must agree with it. Returns the created task including its id.",
+		Description: "Add a new task to the kanban board. title and project are required; status defaults to \"todo\", prio to 3 (low), effort to \"S\", and blocked to false. Every default the call relied on comes back in warnings, so pass status, prio, and effort explicitly instead of letting them default. Every task belongs to exactly one project and there is no default, so the call fails without project; a project::<name> label in tags must agree with it. Returns the created task including its id.",
 	}, k.addTask)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "update_task",
@@ -167,6 +167,9 @@ type taskJSON struct {
 	Checks  []check  `json:"checks,omitempty"`
 	// UpdatedAt is RFC3339 UTC, the same rendering as the web API's updatedAt.
 	UpdatedAt string `json:"updatedAt" jsonschema:"RFC3339 time of the last change to the task"`
+	// Warnings is set by add_task only: one entry per field whose value was
+	// assumed because the call left it out.
+	Warnings []string `json:"warnings,omitempty" jsonschema:"defaults the call relied on (add_task only); pass those fields explicitly to silence"`
 }
 
 func toTaskJSON(t board.Task) taskJSON {
@@ -227,7 +230,7 @@ type addTaskInput struct {
 	Blocked bool     `json:"blocked,omitempty" jsonschema:"true when the task is blocked by something else; default false"`
 	Prio    int      `json:"prio,omitempty" jsonschema:"priority 1 high, 2 medium, 3 low; default 3"`
 	Due     string   `json:"due,omitempty" jsonschema:"due date as YYYY-MM-DD"`
-	Effort  string   `json:"effort,omitempty" jsonschema:"effort estimate: S, M, or L"`
+	Effort  string   `json:"effort,omitempty" jsonschema:"effort estimate: S, M, or L; mandatory on every task, defaults to S with a warning when omitted"`
 	Tags    []string `json:"tags,omitempty" jsonschema:"labels, plain (backend) or scoped (type::bug)"`
 	Checks  []check  `json:"checks,omitempty" jsonschema:"checklist items"`
 	Emoji   string   `json:"emoji,omitempty" jsonschema:"single emoji shown on the card"`
@@ -428,11 +431,16 @@ func (k *kb) addTask(_ context.Context, _ *mcp.CallToolRequest, in addTaskInput)
 		return nil, taskJSON{}, err
 	}
 	t.Tags = tags
+	defaults := board.NewTaskDefaults(t)
 	created, err := k.st.AddTask(k.user, t)
 	if err != nil {
 		return nil, taskJSON{}, err
 	}
-	return nil, toTaskJSON(created), nil
+	out := toTaskJSON(created)
+	for _, d := range defaults {
+		out.Warnings = append(out.Warnings, "assumed "+d+"; pass it explicitly")
+	}
+	return nil, out, nil
 }
 
 func (k *kb) updateTask(_ context.Context, _ *mcp.CallToolRequest, in updateTaskInput) (*mcp.CallToolResult, taskJSON, error) {
