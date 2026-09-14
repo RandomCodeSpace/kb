@@ -13,7 +13,7 @@ func (a *app) cmdBackup(args []string) int {
 	fs, data := a.newFlagSet("backup")
 	asJSON := fs.Bool("json", false, "print the backup destination as JSON")
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 1 {

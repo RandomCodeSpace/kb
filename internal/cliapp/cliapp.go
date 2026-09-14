@@ -30,8 +30,19 @@ const jsonFlagUsage = "print the affected task as JSON"
 
 const usageText = `usage: kb <command> [flags]
 
+quick start:
+  kb project create website --json
+  kb add "Build landing page" -p website --json
+  kb list -p website --json
+  kb help add                    command usage, flags, and examples
+  kb help project create         create a project without a task
+
+Use kb help <command> or kb <command> --help for command-specific help.
+Flags follow the command, and may appear before or after its arguments.
+Quote titles and descriptions that contain spaces. Help never opens the database.
+
 commands:
-  add "title"            add a task
+  add "title" -p <name>  add a task to the named project
   list                   list tasks
   view <id>              show one task in full, comments included
   update <id>            patch a task (only provided flags change)
@@ -44,7 +55,8 @@ commands:
                          (requires --yes)
   backup <dir>           copy the entire data directory to a new directory;
                          close every running kb process first
-  project list           list every project with its task count
+  project create <name>  create an empty project; safe to repeat
+  project list           list saved projects, including those with zero tasks
   users                  list board owners and their task counts (local
                          database only; --json for machine output)
   link <a> blocks <b>    record that task a blocks task b (also accepts
@@ -72,6 +84,9 @@ common flags (every command):
                  command-specific; see README "CLI JSON and exit codes".
 
 projects:
+  Use kb project create <name> to save an empty project. Existing projects
+  are left unchanged. add -p <name> also creates a project implicitly.
+  Names are case-sensitive: no whitespace, leading '#', or '::'.
   Every task carries exactly one project, stored as the scoped label
   project::<name>. kb add refuses to invent one: name the project with
   -p <name> (or --project) on every add. There is no stored default and
@@ -131,6 +146,12 @@ task ids:
   and kb done '#12' are the same task). UUID prefixes still work, but a
   digits-only id always means the number. --json exposes both ("seq" and
   "id").
+
+automation:
+  --json writes command-specific JSON to stdout; errors go to stderr.
+  Read the returned seq or id for later commands; do not guess task numbers.
+  Exit codes: 0 success/help, 1 operational failure, 2 invalid arguments,
+  3 missing entity, 4 refused operation or state conflict. No command prompts.
 `
 
 // Run executes one kb CLI invocation. args starts with the subcommand,
@@ -145,8 +166,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "help", "-h", "--help":
-		fmt.Fprint(stdout, usageText)
-		return 0
+		return a.cmdHelp(rest)
 	case "add":
 		return a.cmdAdd(rest)
 	case "list":
@@ -210,12 +230,12 @@ func (a *app) usageErr(err error) int {
 
 // parseResult maps a flag-parse error to an exit code; done reports whether
 // the command should stop with code.
-func (a *app) parseResult(err error) (code int, done bool) {
+func (a *app) parseResult(err error, fs *flag.FlagSet) (code int, done bool) {
 	if err == nil {
 		return 0, false
 	}
 	if errors.Is(err, flag.ErrHelp) {
-		fmt.Fprint(a.stdout, usageText)
+		a.writeCommandHelp(strings.TrimPrefix(fs.Name(), "kb "), fs)
 		return 0, true
 	}
 	return a.usageErr(err), true
@@ -254,6 +274,7 @@ func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 func (a *app) newFlagSet(name string) (fs *flag.FlagSet, data *string) {
 	fs = flag.NewFlagSet("kb "+name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
 	data = fs.String("data", "", "data directory (default $KB_DATA or ~/.local/share/kb)")
 	return fs, data
 }
@@ -474,7 +495,7 @@ func (a *app) cmdAdd(args []string) int {
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	force := fs.Bool("force", false, "finish despite open checklist items or a blocked flag")
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 1 {
@@ -537,12 +558,10 @@ func outputList(be *localBackend, filter store.TaskFilter, all, asJSON bool, std
 // cmdUsers lists every board owner in the local database with their task
 // count. It deliberately has no --user flag: the listing is global.
 func (a *app) cmdUsers(args []string) int {
-	fs := flag.NewFlagSet("kb users", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	data := fs.String("data", "", "data directory (default $KB_DATA or ~/.local/share/kb)")
+	fs, data := a.newFlagSet("users")
 	jsonF := fs.Bool("json", false, "print users as JSON")
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 0 {
@@ -587,7 +606,7 @@ func (a *app) cmdList(args []string) int {
 	allF := fs.Bool("all", false, "include cancelled tasks")
 	jsonF := fs.Bool("json", false, "print full tasks as JSON")
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 0 {
@@ -712,7 +731,7 @@ func (a *app) cmdUpdate(args []string) int {
 	force := fs.Bool("force", false, forceFlagUsage)
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 1 {
@@ -744,7 +763,7 @@ func (a *app) cmdMove(args []string) int {
 	force := fs.Bool("force", false, forceFlagUsage)
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 2 {
@@ -762,7 +781,7 @@ func (a *app) cmdDone(args []string) int {
 	force := fs.Bool("force", false, forceFlagUsage)
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 1 {
@@ -777,7 +796,7 @@ func (a *app) cmdCancel(args []string) int {
 	fs, data := a.newFlagSet("cancel")
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 1 {
@@ -791,7 +810,7 @@ func (a *app) cmdRestore(args []string) int {
 	fs, data := a.newFlagSet("restore")
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 1 {
@@ -833,7 +852,7 @@ func (a *app) cmdRm(args []string) int {
 	yes := fs.Bool("yes", false, "confirm deletion")
 	jsonF := fs.Bool("json", false, jsonFlagUsage)
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 1 {

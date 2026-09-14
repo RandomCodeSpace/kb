@@ -28,6 +28,24 @@ func newStore(t *testing.T) *Store {
 	return s
 }
 
+func TestEnsureLabelPreservesRecencyAndNamespace(t *testing.T) {
+	s := newStore(t)
+	for _, label := range []string{"project::web", "project::api", "project::web"} {
+		if err := s.EnsureLabel("u", label); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := s.Labels("u"); err != nil || !reflect.DeepEqual(got, []string{"project::api", "project::web"}) {
+		t.Fatalf("labels = %v, %v", got, err)
+	}
+	if got, err := s.Labels("other"); err != nil || len(got) != 0 {
+		t.Fatalf("other namespace = %v, %v", got, err)
+	}
+	if tasks, err := s.ListTasks("u", ""); err != nil || len(tasks) != 0 {
+		t.Fatalf("label creation wrote tasks = %v, %v", tasks, err)
+	}
+}
+
 func sptr(s string) *string                  { return &s }
 func iptr(i int) *int                        { return &i }
 func tags(v ...string) *[]string             { return &v }
