@@ -259,8 +259,9 @@
   .switch[aria-checked="true"] { background: var(--t-accent); }
   .switch[aria-checked="true"]::after { transform: translateX(14px); }
 
-  /* chips: 20px outlined tags. Plain label = dot + name. Scoped label = dot +
-     scope in the hue + value in ink. --h is the hue in degrees. */
+  /* chips: 20px soft-fill tags. Plain label = dot + name on the hue tint.
+     Scoped label = two-tone, GitLab style: scope on the solid hue, value on
+     the tint. --h is the hue in degrees. */
   .chip {
     display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 7px; max-width: 100%;
     border-radius: var(--radius-sm); font-size: 11px; line-height: 16px; font-weight: 500; white-space: nowrap;
@@ -269,23 +270,20 @@
   .chip > span { overflow: hidden; text-overflow: ellipsis; }
   .chip-dot::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: 9999px; background: var(--dot, var(--t-fg-3)); }
   [style*="--h:"] { --hue: hsl(var(--h) 52% 46%); --hue-tint: hsl(var(--h) 52% 46% / 0.10); --dot: var(--hue); }
-  .chip-scoped { gap: 0; overflow: hidden; }
-  .chip-scoped::before { content: ""; width: 6px; height: 6px; flex: none; margin-right: 4px; border-radius: 9999px; background: var(--hue); }
-  /* label chips (data-tag) are filled with their hue's tint; the hue also lives
-     in the dot and, for a scoped label, in the scope key */
+  .chip-scoped { gap: 0; padding: 0; overflow: hidden; }
+  /* label chips (data-tag) are filled with their hue's tint so a plain label and a
+     scoped label read as the same object; the scoped one carries a solid key */
   .chip[data-tag] { background: var(--hue-tint); color: var(--t-fg); }
-  .chip-scoped .k { color: var(--hue); font-weight: 600; }
-  .chip-scoped .k::after { content: "::"; color: var(--t-fg-3); font-weight: 400; margin-left: 1px; }
-  .chip-scoped .v { color: var(--t-fg); overflow: hidden; text-overflow: ellipsis; }
+  .chip-scoped .k { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; background: var(--hue); color: var(--t-hue-fg); font-weight: 600; }
+  .chip-scoped .v { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; color: var(--t-fg); overflow: hidden; text-overflow: ellipsis; }
   .chip-scoped .v:empty { display: none; }
-  .chip-scoped .v:empty + .x, .chip-scoped .k:has(+ .v:empty)::after { content: none; }
   button.chip { cursor: pointer; transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), color 160ms var(--ease-out), box-shadow 160ms var(--ease-out); }
   button.chip:hover { background: var(--t-raised); color: var(--t-fg); }
   button.chip[aria-pressed="true"] { background: var(--t-accent-soft); color: var(--t-fg); }
   button.chip[data-tag]:hover { background: color-mix(in srgb, var(--hue) 22%, var(--t-card)); }
   button.chip[data-tag][aria-pressed="true"] { background: var(--hue); color: var(--t-hue-fg); }
-  button.chip[data-tag][aria-pressed="true"]::before, button.chip[data-tag][aria-pressed="true"] .k, button.chip[data-tag][aria-pressed="true"] .k::after, button.chip[data-tag][aria-pressed="true"] .v { color: var(--t-hue-fg); background: var(--t-hue-fg); }
-  button.chip[data-tag][aria-pressed="true"] .k, button.chip[data-tag][aria-pressed="true"] .k::after, button.chip[data-tag][aria-pressed="true"] .v { background: transparent; }
+  button.chip[data-tag][aria-pressed="true"]::before { background: var(--t-hue-fg); }
+  button.chip-scoped[aria-pressed="true"] .v { color: var(--t-hue-fg); }
   .chip-tone { --tone: var(--t-fg-2); color: var(--tone); background: color-mix(in srgb, var(--tone), transparent 88%); }
   /* "mono" chips (dates, effort, source kinds) keep the sans face at chip size:
      JetBrains Mono at 11px reads a size larger than Inter beside it. Tabular
@@ -293,6 +291,7 @@
   .chip-mono { font-variant-numeric: tabular-nums; letter-spacing: 0; }
   .chip .x { display: inline-flex; width: 16px; height: 16px; margin-right: -3px; flex: none; align-items: center; justify-content: center; border-radius: 4px; color: var(--t-fg-3); }
   .chip .x:hover { background: var(--t-raised); color: var(--t-fg); }
+  .chip-scoped .x { margin: 0 2px 0 -3px; }
   .chip.enter { animation: chip-in 160ms var(--ease-out); }
   .chip.leave { animation: chip-out 160ms var(--ease-out) forwards; pointer-events: none; }
   @keyframes chip-in { from { opacity: 0; transform: scale(0.9); } }

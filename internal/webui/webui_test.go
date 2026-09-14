@@ -34,7 +34,7 @@ func TestStaticServing(t *testing.T) {
 		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 			t.Fatalf("%s: Content-Type %q", path, ct)
 		}
-		if rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Header().Get("Cache-Control") != "" {
+		if rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Header().Get("Cache-Control") != "no-cache" || rec.Header().Get("ETag") == "" {
 			t.Fatalf("%s: headers %v", path, rec.Header())
 		}
 	}
@@ -121,6 +121,39 @@ func TestStaticHandlerEdgeCases(t *testing.T) {
 	missing.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("no index: %d", rec.Code)
+	}
+}
+
+// Embedded assets have no mtime, so a content ETag plus no-cache is what
+// keeps a browser from holding an old app.js across releases.
+func TestStaticAssetsRevalidate(t *testing.T) {
+	files := fstest.MapFS{
+		"index.html": {Data: []byte("<html>x</html>")},
+		"app.js":     {Data: []byte("js")},
+	}
+	h := newStaticHandlerFS(files)
+	for _, p := range []string{"/app.js", "/", "/some/route"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
+		etag := rec.Header().Get("ETag")
+		if rec.Code != http.StatusOK || etag == "" || rec.Header().Get("Cache-Control") != "no-cache" {
+			t.Fatalf("%s: %d etag=%q cache-control=%q", p, rec.Code, etag, rec.Header().Get("Cache-Control"))
+		}
+		req := httptest.NewRequest("GET", p, nil)
+		req.Header.Set("If-None-Match", etag)
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotModified {
+			t.Fatalf("%s with matching ETag: %d, want 304", p, rec.Code)
+		}
+	}
+	changed := newStaticHandlerFS(fstest.MapFS{"index.html": {Data: []byte("<html>y</html>")}, "app.js": {Data: []byte("js2")}})
+	rec := httptest.NewRecorder()
+	changed.ServeHTTP(rec, httptest.NewRequest("GET", "/app.js", nil))
+	before := httptest.NewRecorder()
+	h.ServeHTTP(before, httptest.NewRequest("GET", "/app.js", nil))
+	if rec.Header().Get("ETag") == before.Header().Get("ETag") {
+		t.Fatal("ETag did not change with the content")
 	}
 }
 

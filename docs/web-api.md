@@ -37,6 +37,9 @@ explicitly started listener: nothing else in `kb` opens a port.
 - Mutating requests must send `Content-Type: application/json`. Otherwise 415.
 - Request bodies are capped at 1 MiB.
 - No CORS headers are ever emitted.
+- The embedded UI assets (`/`, `/app.js`, `/app.css`, …) carry a content
+  `ETag` with `Cache-Control: no-cache`, so a browser revalidates on every
+  load and picks up a new build without a hard refresh.
 - Responses set `Cache-Control: no-store` on `/api/`, and
   `X-Content-Type-Options: nosniff` and
   `Content-Security-Policy: frame-ancestors 'none'` everywhere.
