@@ -103,7 +103,8 @@ card flags (add and update):
   --status s     todo, doing, done, or cancelled
   --prio p       high, medium, or low (default low). 1, 2, and 3 also work
   --due date     due date, YYYY-MM-DD
-  --effort e     effort: S, M, or L
+  --effort e     effort: S, M, or L (default S). add warns on stderr about
+                 every default it assumed: status, prio, and effort
   --emoji e      leading emoji
   --tag t        tag (repeat for several)
   --check text   checklist item (repeat for several). Prefix "x " to add it
@@ -520,9 +521,13 @@ func (a *app) cmdAdd(args []string) int {
 				return err
 			}
 		}
+		defaults := board.NewTaskDefaults(t)
 		it, err := be.add(t)
 		if err != nil {
 			return err
+		}
+		if len(defaults) > 0 {
+			fmt.Fprintf(a.stderr, "kb: warning: %s assumed %s; pass --status, --prio, and --effort to choose\n", displayID(it), strings.Join(defaults, ", "))
 		}
 		if *jsonF {
 			return writeJSONItem(a.stdout, it)

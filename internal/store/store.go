@@ -657,6 +657,9 @@ func prepareNewTask(t board.Task) (board.Task, error) {
 		return board.Task{}, fmt.Errorf("store: invalid status %q", t.Status)
 	}
 	t.Prio = board.NormalizePrio(t.Prio)
+	if t.Effort == "" {
+		t.Effort = board.DefaultEffort
+	}
 	if err := ValidateTaskFields(t); err != nil {
 		return board.Task{}, err
 	}

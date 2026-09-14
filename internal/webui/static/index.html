@@ -3,9 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="light dark">
-<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f3ef">
-<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f110f">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#ffffff">
 <title>kb</title>
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/logo-180.png">
@@ -13,7 +12,6 @@
 <script>
 try {
   var s = JSON.parse(localStorage.getItem('kb-web-settings') || '{}');
-  if (s.theme === 'light' || s.theme === 'dark') document.documentElement.dataset.theme = s.theme;
   if (s.density === 'compact') document.documentElement.dataset.density = 'compact';
 } catch (e) {}
 </script>
@@ -21,7 +19,7 @@ try {
 <body class="flex h-full flex-col">
 <a class="skip" href="#board">Skip to board</a>
 
-<header class="flex h-12 flex-none items-center gap-1 border-b border-line bg-surface px-2 md:px-3" style="padding-top: env(safe-area-inset-top); height: calc(49px + env(safe-area-inset-top))">
+<header class="flex h-12 flex-none items-center gap-1 border-b border-line bg-canvas px-2 md:px-3" style="padding-top: env(safe-area-inset-top); height: calc(49px + env(safe-area-inset-top))">
   <a href="#/" class="mr-1 flex h-8 items-center gap-2 rounded-md px-1" aria-label="kb board">
     <img src="/logo.svg" class="size-5" width="20" height="20" alt="">
     <span class="text-13 font-semibold leading-none" aria-hidden="true">kb</span>
@@ -41,7 +39,7 @@ try {
   </button>
   <button type="button" id="filters-toggle" class="btn btn-ghost btn-icon phone-only relative" aria-label="Search and filters" aria-expanded="false" aria-controls="filters">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M4 8h8M6 12h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>
-    <span id="filter-count" class="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 font-mono text-[10px] font-semibold text-on-accent" hidden></span>
+    <span id="filter-count" class="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-sm bg-accent px-1 font-mono text-[10px] font-semibold text-on-accent" hidden></span>
   </button>
   <button type="button" id="palette-btn" class="btn btn-ghost btn-icon" data-tip="Commands  Ctrl K" aria-label="Command palette" aria-haspopup="dialog">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5.5 6 8l-3 2.5M8 11h5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -57,9 +55,6 @@ try {
   <button type="button" id="settings-btn" class="btn btn-ghost btn-icon phone-hide" aria-label="Settings" data-tip="Settings  s" aria-haspopup="dialog">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6l1 1.7 1.9-.4.6 1.9 1.9.6-.4 1.9 1.2 1.5-1.2 1.5.4 1.9-1.9.6-.6 1.9-1.9-.4-1 1.7-1-1.7-1.9.4-.6-1.9-1.9-.6.4-1.9L1.8 8 3 6.5l-.4-1.9 1.9-.6.6-1.9 1.9.4z"/></svg>
   </button>
-  <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon phone-hide" aria-label="Toggle theme" data-tip="Theme">
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 2.5v11A5.5 5.5 0 0 0 8 2.5z" fill="currentColor"/></svg>
-  </button>
   <button type="button" id="help-btn" class="btn btn-ghost btn-icon phone-hide tip-left" data-tip="Keyboard  ?" aria-label="Keyboard help">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M6.2 6.4a1.9 1.9 0 1 1 2.6 1.8c-.5.2-.8.5-.8 1v.3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/><circle cx="8" cy="11.3" r=".8" fill="currentColor"/></svg>
   </button>
@@ -68,8 +63,6 @@ try {
 
 <section id="filters" class="filters flex flex-none items-center gap-2 overflow-hidden border-b border-line bg-canvas px-3" aria-label="Search and filters">
   <div id="quick" class="seg seg-sm flex-none" role="group" aria-label="Quick filters"></div>
-  <span class="mx-1 h-4 w-px flex-none bg-line phone-hide" aria-hidden="true"></span>
-  <div id="labels" class="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-1 pr-6 [scrollbar-width:none] [mask-image:linear-gradient(90deg,#000_calc(100%-24px),transparent)] phone:flex-wrap phone:overflow-visible phone:[mask-image:none]" role="group" aria-label="Label filter"></div>
   <div id="active" class="flex flex-none items-center gap-1.5 empty:hidden phone:flex-wrap" aria-label="Active filters"></div>
   <button type="button" id="clear-filters" class="btn btn-ghost btn-sm flex-none" data-tip="Clear filters (X)" hidden>Clear</button>
   <span id="result-count" class="num ml-auto flex-none text-12 text-fg-3"></span>
@@ -206,6 +199,7 @@ try {
         <span class="label-11 mb-1 block">Checklist <span class="font-normal normal-case tracking-normal text-fg-3">one per line, prefix <code>x </code> when done</span></span>
         <textarea name="checks" class="input font-mono text-12" rows="3" placeholder="x reproduce locally&#10;write regression test"></textarea>
       </label>
+      <p id="edit-defaults" class="field-msg is-warn sm:col-span-2" role="status"></p>
     </div>
     <footer class="dialog-foot">
       <span class="phone-hide text-12 text-fg-3"><kbd class="kbd">Ctrl</kbd> <kbd class="kbd">Enter</kbd> saves</span>

@@ -685,3 +685,22 @@ func TestBlankCheckCannotBeMixedWithItems(t *testing.T) {
 		t.Fatalf("refused writes changed board: %+v", tasks)
 	}
 }
+
+func TestAddWarnsAboutDefaults(t *testing.T) {
+	dir := localEnv(t)
+	_, stderr, code := runCmd(t, "add", "Bare", "--data", dir, "-p", "web")
+	if code != 0 {
+		t.Fatalf("add: code=%d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "warning: #1 assumed status todo, priority low, effort S") {
+		t.Fatalf("stderr=%q", stderr)
+	}
+	tasks := listJSON(t, "--data", dir)
+	if len(tasks) != 1 || tasks[0].Effort != "S" {
+		t.Fatalf("tasks=%+v", tasks)
+	}
+	_, stderr, code = runCmd(t, "add", "Sized", "--data", dir, "-p", "web", "--status", "todo", "--prio", "low", "--effort", "m")
+	if code != 0 || strings.Contains(stderr, "assumed") {
+		t.Fatalf("explicit add: code=%d stderr=%q", code, stderr)
+	}
+}

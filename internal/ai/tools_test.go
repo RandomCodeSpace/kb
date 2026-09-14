@@ -1056,7 +1056,7 @@ func TestUpdateTaskTool(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Task after refusals: %v", err)
 		}
-		if after.Title != "Untouched" || after.Prio != 3 || after.Due != "" || after.Effort != "" || len(after.Checks) != 0 {
+		if after.Title != "Untouched" || after.Prio != 3 || after.Due != "" || after.Effort != board.DefaultEffort || len(after.Checks) != 0 {
 			t.Fatalf("refused updates still landed: %+v", after)
 		}
 	})

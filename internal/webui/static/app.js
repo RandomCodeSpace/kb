@@ -15,6 +15,9 @@ const STATUSES = ['todo', 'doing', 'done', 'cancelled'];
 const STATUS_LABEL = { todo: 'Todo', doing: 'Doing', done: 'Done', cancelled: 'Cancelled' };
 const PRIO_LABEL = { 1: 'High', 2: 'Medium', 3: 'Low' };
 const EFFORTS = ['S', 'M', 'L'];
+// Effort is mandatory. A card that names none takes DEFAULT_EFFORT, and every
+// surface says so, so nobody mistakes an assumed value for a chosen one.
+const DEFAULT_EFFORT = 'S';
 const EASE = 'cubic-bezier(0.2, 0, 0, 1)';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -482,10 +485,13 @@ function splitLabel(tag, allowEmpty = false) {
   return value || allowEmpty ? { scope: tag.slice(0, i), value } : { scope: '', value: tag };
 }
 // Deterministic 12-hue wheel, hashed from the scope name so every type::* shares a hue.
+// Twelve label hues, spaced for contrast and skipping the violet band so a
+// label never reads as the accent or as purple chrome.
+const LABEL_HUES = [0, 18, 36, 55, 80, 110, 140, 165, 190, 210, 230, 345];
 function hueOf(name) {
   let h = 2166136261;
   for (let i = 0; i < name.length; i++) { h ^= name.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
-  return (h % 12) * 30;
+  return LABEL_HUES[h % LABEL_HUES.length];
 }
 const labelHue = (tag) => { const { scope } = splitLabel(tag); return hueOf(scope || tag); };
 // One value per scope: adding type::feature drops type::bug.
@@ -605,7 +611,7 @@ const mdInline = (text) => renderMarkdown(text, { mode: 'inline' });
 const SETTINGS_KEY = 'kb-web-settings';
 function defaultSettings() {
   return {
-    theme: 'system', density: 'comfortable',
+    density: 'comfortable',
     show: { seq: true, emoji: true, desc: true, tags: true, due: true, effort: true, checks: true, comments: true },
     hideEmpty: false, showCancelled: false, wip: {}, sort: 'updated', collapsed: {}, project: '', v: 3,
   };
@@ -630,13 +636,11 @@ function saveSettings() {
 }
 function applySettings(rerender = true) {
   const root = document.documentElement;
-  if (settings.theme === 'light' || settings.theme === 'dark') root.dataset.theme = settings.theme; else delete root.dataset.theme;
   if (settings.density === 'compact') root.dataset.density = 'compact'; else delete root.dataset.density;
   state.cardEpoch = (state.cardEpoch || 0) + 1;
   saveSettings();
   if (rerender && state.loaded) render();
 }
-const currentTheme = () => (settings.theme === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : settings.theme);
 
 /* ============================== state ============================== */
 const state = {
@@ -648,19 +652,19 @@ const state = {
   detail: null, detailJSON: '', detailData: null, detailPending: null, commentCounts: {},
   editing: null, editSnapshot: '', paletteIndex: 0, paletteItems: [],
   mode: 'stream', stream: null, streamFails: 0, helloSeen: false, refreshTimer: 0, pollTimer: 0,
-  actions: [], projects: [], shipped: null, ai: null, drift: {},
+  actions: [], projects: [], ai: null, drift: {},
 };
 // The selected project is this browser's alone: the server keeps no active
 // project, so every card created here names state.project in the request.
 const ALL_PROJECTS = '::all'; // client-side pseudo-project, like the TUI's "all" scope
 const dom = {
   board: $('#board'), detail: $('#detail'),
-  labels: $('#labels'), quick: $('#quick'), active: $('#active'), resultCount: $('#result-count'), stats: $('#stats'),
+  quick: $('#quick'), active: $('#active'), resultCount: $('#result-count'), stats: $('#stats'),
   search: $('#search'), searchBtn: $('#search-btn'), searchDot: $('#search-dot'), searchDialog: $('#search-dialog'), searchClear: $('#search-clear'), searchSyntax: $('#search-syntax'), searchCount: $('#search-count'), projectBtn: $('#project-btn'), projectName: $('#project-name'), projectMenu: $('#project-menu'),
   clear: $('#clear-filters'), banner: $('#banner'), conn: $('#conn'), connDot: $('#conn-dot'), version: $('#version'),
   toasts: $('#toasts'), live: $('#live'), segments: $('#segments'), filters: $('#filters'), scrim: $('#filters-scrim'), filterCount: $('#filter-count'),
   bulkbar: $('#bulkbar'), display: $('#display'),
-  editDialog: $('#edit-dialog'), editForm: $('#edit-form'), editTitle: $('#edit-title'), editDesc: $('#edit-desc'), editLabels: $('#edit-labels'), editEffort: $('#edit-effort'),
+  editDialog: $('#edit-dialog'), editForm: $('#edit-form'), editTitle: $('#edit-title'), editDesc: $('#edit-desc'), editLabels: $('#edit-labels'), editEffort: $('#edit-effort'), editDefaults: $('#edit-defaults'),
   detailDialog: $('#detail-dialog'), detailSeq: $('#detail-seq'), detailTitle: $('#detail-title'), detailBody: $('#detail-body'), detailActions: $('#detail-actions'),
   helpDialog: $('#help-dialog'), helpBody: $('#help-body'), palette: $('#palette'), paletteInput: $('#palette-search'), paletteList: $('#palette-list'),
   editSimilar: $('#edit-similar'), editAI: $('#edit-ai'),
@@ -801,7 +805,6 @@ async function refreshMeta() {
     const meta = await api('GET', '/api/meta');
     state.meta = Object.assign({ projects: [], labels: [] }, meta);
     renderHeader();
-    renderLabels();
   } catch (err) { /* polling reports connectivity */ }
 }
 // The project list the CLI and the TUI agree on, with per-project counts.
@@ -821,10 +824,7 @@ async function refreshAIStatus() {
   try { state.ai = await api('GET', '/api/ai/status'); } catch (err) { state.ai = { configured: false }; }
   return state.ai;
 }
-async function refreshShipped() {
-  try { state.shipped = await api('GET', '/api/shipped'); renderStats(); } catch (err) { /* the tally stays stale */ }
-}
-// One beat of the DONE column's own hue, then a fresh shipped-today tally.
+// One beat of the DONE column's own hue.
 function celebrateShip() {
   const head = cols.done && cols.done.col.querySelector('.col-head');
   if (head && dur(1)) {
@@ -833,7 +833,6 @@ function celebrateShip() {
     head.classList.add('shipped');
     setTimeout(() => head.classList.remove('shipped'), 1000);
   }
-  refreshShipped();
 }
 function invalidate() {
   state.etag = null;
@@ -1073,16 +1072,11 @@ function renderStats() {
     type: 'button', class: 'btn btn-ghost btn-sm px-1.5 font-normal text-fg-2' + (quick && state.quick.has(quick) ? ' btn-on' : ''), 'aria-pressed': quick ? (state.quick.has(quick) ? 'true' : 'false') : null,
     title: quick ? `Filter: ${quickById(quick).label}` : null, onclick: quick ? () => toggleQuick(quick) : null, disabled: !quick,
   }, el('span', { class: 'num font-medium text-fg' }, n), label);
-  const shipped = state.shipped ? state.shipped.count : null;
-  dom.stats.replaceChildren(item(open, 'open'), item(week, 'this week', 'week'), item(blocked, 'blocked', 'blocked'),
-    ...(shipped === null ? [] : [el('span', { class: 'mx-0.5 h-4 w-px bg-line', 'aria-hidden': 'true' }),
-      el('span', { class: 'flex h-7 items-center gap-1 px-1.5 text-fg-2', title: shipped ? `Cards moved to Done today: ${(state.shipped.seqs || []).map((s) => '#' + s).join(' ')}` : 'No cards have reached Done today' },
-        el('span', { class: 'num font-medium text-fg' }, shipped), 'shipped today')]));
+  dom.stats.replaceChildren(item(open, 'open'), item(week, 'this week', 'week'), item(blocked, 'blocked', 'blocked'));
 }
 
 /* ============================== render: filters ============================== */
 function renderFilters() {
-  renderLabels();
   dom.quick.replaceChildren(...QUICK.map((q) => el('button', { type: 'button', class: 'seg-btn', 'aria-pressed': state.quick.has(q.id) ? 'true' : 'false', onclick: () => toggleQuick(q.id) }, q.label)));
   const chips = [];
   const removable = (label, onRemove, cls) => el('span', { class: 'chip ' + (cls || '') }, el('span', {}, label), el('button', { type: 'button', class: 'x', 'aria-label': `Remove filter ${label}`, onclick: onRemove }, icon('x', 10)));
@@ -1111,8 +1105,7 @@ function renderResultCount() {
 }
 // The label pool is scoped like the board: with one project active it holds
 // only the labels that project's cards carry, so another project's vocabulary
-// never leaks into the filter row or the picker. All projects use the store's
-// full list.
+// never leaks into the picker. All projects use the store's full list.
 function allLabels() {
   const labels = state.project === ALL_PROJECTS ? (state.meta.labels || []).filter((l) => !isProjectTag(l) && !isProvenanceTag(l)) : [];
   for (const tag of state.tags) if (!labels.includes(tag)) labels.push(tag);
@@ -1120,19 +1113,6 @@ function allLabels() {
   for (const t of pool) for (const tag of shownTags(t)) if (!labels.includes(tag)) labels.push(tag);
   return labels.sort((a, b) => a.localeCompare(b));
 }
-// Label filter row: scoped labels grouped under a scope header (click = any scope::*), plain labels after.
-function renderLabels() {
-  const { scopes, plain } = groupLabels(allLabels());
-  const nodes = [];
-  for (const [scope, tags] of scopes) {
-    nodes.push(el('div', { class: 'flex items-center gap-1', role: 'group', 'aria-label': `${scope} labels` },
-      el('button', { type: 'button', class: 'scope-head', style: `--h:${hueOf(scope)}`, 'aria-pressed': state.scopes.has(scope) ? 'true' : 'false', title: `Any ${scope}::*`, onclick: () => toggleScope(scope) }, scope),
-      ...tags.map((tag) => chipEl(tag, { short: true, pressed: state.tags.has(tag), onclick: () => toggleTag(tag) }))));
-  }
-  nodes.push(...plain.map((tag) => chipEl(tag, { pressed: state.tags.has(tag), onclick: () => toggleTag(tag) })));
-  dom.labels.replaceChildren(...nodes);
-}
-
 /* ============================== render: board ============================== */
 function buildBoard() {
   for (const status of STATUSES) {
@@ -1183,7 +1163,7 @@ function priorityIcon(prio) {
 }
 function progressRing(done, total) {
   const c = 2 * Math.PI * 5;
-  return el('span', { class: 'chip ring' + (done === total ? ' complete' : ''), title: `${done} of ${total} checklist items done` },
+  return el('span', { class: 'chip ring' + (done === total ? ' complete' : done > 0 ? ' pending' : ''), title: `${done} of ${total} checklist items done` },
     svg('svg', { viewBox: '0 0 14 14', 'aria-hidden': 'true' }, svg('circle', { class: 'track', cx: 7, cy: 7, r: 5 }), svg('circle', { class: 'fill', cx: 7, cy: 7, r: 5, 'stroke-dasharray': c.toFixed(2), 'stroke-dashoffset': (c * (1 - done / total)).toFixed(2), 'stroke-linecap': 'round' })),
     el('span', { class: 'num' }, `${done}/${total}`));
 }
@@ -2054,9 +2034,9 @@ function renderDetail(data) {
   const prioSel = el('select', { class: 'input w-auto', 'aria-label': 'Priority', onchange: (e) => save({ prio: Number(e.target.value) }, `#${task.seq} priority ${PRIO_LABEL[e.target.value]}`) },
     ...[1, 2, 3].map((p) => el('option', { value: p, selected: (task.prio || 3) === p }, PRIO_LABEL[p])));
   const dueInput = el('input', { type: 'date', class: 'input num w-auto', 'aria-label': 'Due date', value: task.due || '', onchange: (e) => save({ due: e.target.value }, e.target.value ? `#${task.seq} due ${e.target.value}` : `#${task.seq} due date cleared`) });
-  const effortSeg = el('div', { class: 'seg seg-sm', role: 'group', 'aria-label': 'Effort' }, ...[['', '—'], ...EFFORTS.map((x) => [x, x])].map(([v, label]) => el('button', {
-    type: 'button', class: 'seg-btn num', 'aria-pressed': (task.effort || '') === v ? 'true' : 'false', onclick: () => { if ((task.effort || '') !== v) save({ effort: v }, v ? `#${task.seq} effort ${v}` : `#${task.seq} effort cleared`); },
-  }, label)));
+  const effortSeg = el('div', { class: 'seg seg-sm', role: 'group', 'aria-label': 'Effort' }, ...EFFORTS.map((v) => el('button', {
+    type: 'button', class: 'seg-btn num', 'aria-pressed': (task.effort || '') === v ? 'true' : 'false', onclick: () => { if ((task.effort || '') !== v) save({ effort: v }, `#${task.seq} effort ${v}`); },
+  }, v)));
   const labelsBox = el('div', { class: 'w-full' });
   labelEditor(labelsBox, { tags: userTags(task), onChange: (tags) => save({ tags }, `Labels saved on #${task.seq}`) });
   const blockedSwitch = el('button', { type: 'button', role: 'switch', class: 'switch', 'aria-checked': task.blocked ? 'true' : 'false', 'aria-label': 'Blocked', onclick: () => mutate(() => setBlocked(task, !task.blocked), task.blocked ? `#${task.seq} unblocked` : `#${task.seq} marked blocked`).then((out) => { if (out) loadDetail(state.detail, true); }) });
@@ -2341,10 +2321,27 @@ function readForm() {
   };
 }
 function renderEffortSeg(value) {
-  dom.editEffort.dataset.value = value || '';
-  dom.editEffort.replaceChildren(...[['', 'None'], ...EFFORTS.map((x) => [x, x])].map(([v, label]) => el('button', {
-    type: 'button', class: 'seg-btn', role: 'radio', 'aria-checked': (value || '') === v ? 'true' : 'false', onclick: () => renderEffortSeg(v),
-  }, label)));
+  value = value || DEFAULT_EFFORT;
+  dom.editEffort.dataset.value = value;
+  dom.editEffort.replaceChildren(...EFFORTS.map((v) => el('button', {
+    type: 'button', class: 'seg-btn', role: 'radio', 'aria-checked': value === v ? 'true' : 'false', onclick: () => { renderEffortSeg(v); renderEditDefaults(); },
+  }, v)));
+}
+// The values the form still holds by default rather than by choice. A new card
+// reports status, priority and effort; an existing card only an effort it
+// never had, which saving will fill in.
+function editDefaults() {
+  const form = readForm();
+  if (state.editing) return !state.editing.effort && form.effort === DEFAULT_EFFORT ? [`effort ${DEFAULT_EFFORT}`] : [];
+  const out = [];
+  if (form.status === 'todo') out.push('status Todo');
+  if (form.prio === 3) out.push('priority Low');
+  if (form.effort === DEFAULT_EFFORT) out.push(`effort ${DEFAULT_EFFORT}`);
+  return out;
+}
+function renderEditDefaults() {
+  const used = editDefaults();
+  dom.editDefaults.textContent = used.length ? `Defaults in use: ${used.join(', ')}. Pick each on purpose or save to accept them.` : '';
 }
 function openEdit(task, preset = {}) {
   state.editing = task || null;
@@ -2365,6 +2362,7 @@ function openEdit(task, preset = {}) {
   dom.editLabels.firstElementChild.classList.add('input', 'h-auto', 'min-h-8', 'py-0');
   dom.editTitle.textContent = task ? `Edit #${task.seq}` : 'New task';
   state.editSnapshot = JSON.stringify(readForm());
+  renderEditDefaults();
   showDialog(dom.editDialog);
   mountEditAI();
   mountEditSimilar();
@@ -2379,6 +2377,7 @@ async function requestCloseEdit() {
 async function saveEdit() {
   const form = readForm();
   if (!form.title) { toast('Add a title before saving', 'error'); dom.editForm.elements.title.focus(); return; }
+  const assumed = editDefaults();
   const save = $('#edit-save');
   save.disabled = true;
   save.textContent = 'Saving…';
@@ -2412,7 +2411,8 @@ async function saveEdit() {
     state.editSnapshot = JSON.stringify(readForm());
     closeDialog(dom.editDialog);
     renderBoard();
-    toast(state.editing ? `Saved #${saved.seq} ${saved.title}` : `Created #${saved.seq} ${saved.title}`, 'ok');
+    const done = state.editing ? `Saved #${saved.seq} ${saved.title}` : `Created #${saved.seq} ${saved.title}`;
+    if (assumed.length) toast(`${done}. Assumed ${assumed.join(', ')}`, 'warn', { life: 6000 }); else toast(done, 'ok');
     if (state.detail) loadDetail(state.detail, true);
     invalidate();
   } catch (err) {
@@ -2474,6 +2474,8 @@ function renderComposer(status, open = false) {
         input.value = '';
         refresh();
         renderBoard();
+        const assumed = [p.prio ? '' : 'priority Low', p.effort ? '' : `effort ${DEFAULT_EFFORT}`].filter(Boolean);
+        if (assumed.length) toast(`Created #${saved.seq}. Assumed ${assumed.join(', ')}; use !prio and ~effort to choose`, 'warn', { life: 6000 });
         announce(`Created #${saved.seq}`);
         cols[status].body.scrollTop = cols[status].body.scrollHeight;
         invalidate();
@@ -2509,7 +2511,6 @@ function paletteCommands() {
   }
   add('View', 'Keyboard shortcuts', () => showDialog(dom.helpDialog), '?', 'help');
   add('View', 'Display options', () => toggleDisplay(true), 'd');
-  add('View', `Switch to ${currentTheme() === 'dark' ? 'light' : 'dark'} theme`, toggleTheme, '', 'dark light theme');
   add('View', `Density: ${settings.density === 'compact' ? 'comfortable' : 'compact'}`, () => { settings.density = settings.density === 'compact' ? 'comfortable' : 'compact'; applySettings(); }, '', 'compact comfortable');
   add('View', `${settings.showCancelled ? 'Hide' : 'Show'} cancelled column`, () => { settings.showCancelled = !settings.showCancelled; applySettings(); }, '', 'column');
   add('View', `${settings.hideEmpty ? 'Show' : 'Hide'} empty columns`, () => { settings.hideEmpty = !settings.hideEmpty; applySettings(); });
@@ -2590,7 +2591,6 @@ function renderDisplay() {
   const props = [['seq', '#seq'], ['emoji', 'Emoji'], ['desc', 'Description'], ['tags', 'Labels'], ['due', 'Due'], ['effort', 'Effort'], ['checks', 'Checklist'], ['comments', 'Comments']];
   dom.display.replaceChildren(
     el('div', { class: 'mb-1 flex h-8 items-center' }, el('h3', { class: 'text-14 font-semibold' }, 'Display'), el('button', { type: 'button', class: 'btn btn-ghost btn-sm btn-icon ml-auto', 'aria-label': 'Close', onclick: () => toggleDisplay(false) }, icon('x', 14))),
-    seg('Theme', [['light', 'Light'], ['dark', 'Dark'], ['system', 'System']], settings.theme, (v) => { settings.theme = v; }),
     seg('Density', [['comfortable', 'Comfortable'], ['compact', 'Compact']], settings.density, (v) => { settings.density = v; }),
     head('Card properties'),
     el('div', { class: 'grid grid-cols-2 gap-x-3' }, ...props.map(([key, label]) => check(label, () => settings.show[key], (v) => { settings.show[key] = v; }))),
@@ -2618,10 +2618,6 @@ function toggleDisplay(open = dom.display.hidden) {
     btn.setAttribute('aria-expanded', 'false');
     if (dom.display.contains(document.activeElement) || document.activeElement === document.body) btn.focus();
   }
-}
-function toggleTheme() {
-  settings.theme = currentTheme() === 'dark' ? 'light' : 'dark';
-  applySettings(false);
 }
 
 /* ============================== ask: one modal for confirmations and short prompts ============================== */
@@ -3552,8 +3548,7 @@ function setFiltersOpen(open) {
 function focusSearch() { openSearch(); }
 function focusLabels() {
   if (phoneMQ.matches) { setFiltersOpen(true); return; }
-  const first = dom.labels.querySelector('button');
-  if (first) first.focus(); else openPalette();
+  openPalette();
 }
 const isTyping = (target) => !!(target && target.closest && target.closest('input, textarea, select, [contenteditable="true"]'));
 
@@ -3678,7 +3673,6 @@ function bind() {
   dom.clear.addEventListener('click', clearFilters);
   $('#new-task').addEventListener('click', () => openEdit(null));
   $('#help-btn').addEventListener('click', () => showDialog(dom.helpDialog));
-  $('#theme-toggle').addEventListener('click', toggleTheme);
   $('#display-btn').addEventListener('click', () => toggleDisplay());
   $('#settings-btn').addEventListener('click', () => openSettings());
   $('#palette-btn').addEventListener('click', openPalette);
@@ -3689,6 +3683,7 @@ function bind() {
   dom.paletteInput.addEventListener('input', renderPalette);
 
   dom.editForm.addEventListener('submit', (e) => { e.preventDefault(); saveEdit(); });
+  dom.editForm.addEventListener('change', renderEditDefaults);
   dom.editForm.addEventListener('keydown', (e) => {
     if (!(e.ctrlKey || e.metaKey)) return;
     if (e.shiftKey && e.key === 'Enter') {
@@ -3753,6 +3748,5 @@ async function init() {
   startLive();
   refreshActions();
   refreshAIStatus();
-  refreshShipped();
 }
 init();

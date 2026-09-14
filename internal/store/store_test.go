@@ -1234,3 +1234,21 @@ func TestDirectTaskWritesRejectBlankChecks(t *testing.T) {
 		t.Fatalf("rejected writes changed board: %+v", tasks)
 	}
 }
+
+func TestAddTaskDefaultsEffort(t *testing.T) {
+	s := newStore(t)
+	created, err := s.AddTask("alice", board.Task{Title: "card"})
+	if err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	if created.Effort != board.DefaultEffort {
+		t.Errorf("effort = %q, want %q", created.Effort, board.DefaultEffort)
+	}
+	explicit, err := s.AddTask("alice", board.Task{Title: "sized", Effort: "L"})
+	if err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	if explicit.Effort != "L" {
+		t.Errorf("effort = %q, want L", explicit.Effort)
+	}
+}

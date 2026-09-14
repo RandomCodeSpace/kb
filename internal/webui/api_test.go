@@ -242,7 +242,7 @@ func TestAddTask(t *testing.T) {
 		t.Fatalf("tags = %s", tags)
 	}
 	defaults := addTask(t, h, map[string]any{"title": "bare"})
-	if defaults["status"] != "todo" || defaults["prio"] != 3.0 {
+	if defaults["status"] != "todo" || defaults["prio"] != 3.0 || defaults["effort"] != "S" {
 		t.Fatalf("defaults = %v", defaults)
 	}
 	explicit := addTask(t, h, map[string]any{"title": "elsewhere", "tags": []string{"project::side"}})
