@@ -5,7 +5,9 @@ package webui
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -158,6 +160,12 @@ func browserCommand(goos, url string) (string, []string) {
 
 // staticHandler serves the embedded UI. Unknown paths fall back to
 // index.html so a bookmarked client-side route still loads the app.
+//
+// Embedded files have no modification time, so without help browsers cache
+// them heuristically and keep an old app.css or app.js across releases.
+// Every asset therefore carries a content ETag and Cache-Control: no-cache:
+// the browser revalidates on each load and gets a 304 until the build
+// changes.
 type staticHandler struct {
 	files fs.FS
 	index []byte
@@ -165,6 +173,12 @@ type staticHandler struct {
 	// when its path equals one of them, so the served name always comes from
 	// the embed, never from the request.
 	names []string
+	etags map[string]string
+}
+
+func contentETag(data []byte) string {
+	sum := sha256.Sum256(data)
+	return `"` + hex.EncodeToString(sum[:8]) + `"`
 }
 
 func newStaticHandler() *staticHandler {
@@ -174,11 +188,17 @@ func newStaticHandler() *staticHandler {
 
 func newStaticHandlerFS(files fs.FS) *staticHandler {
 	index, _ := fs.ReadFile(files, "index.html")
-	h := &staticHandler{files: files, index: index}
+	h := &staticHandler{files: files, index: index, etags: map[string]string{}}
+	if index != nil {
+		h.etags["index.html"] = contentETag(index)
+	}
 	entries, _ := fs.ReadDir(files, ".")
 	for _, e := range entries {
 		if !e.IsDir() && e.Name() != "index.html" {
 			h.names = append(h.names, e.Name())
+			if data, err := fs.ReadFile(files, e.Name()); err == nil {
+				h.etags[e.Name()] = contentETag(data)
+			}
 		}
 	}
 	return h
@@ -186,14 +206,22 @@ func newStaticHandlerFS(files fs.FS) *staticHandler {
 
 func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requested := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+	w.Header().Set("Cache-Control", "no-cache")
 	for _, name := range h.names {
 		if name == requested {
+			w.Header().Set("ETag", h.etags[name])
 			http.ServeFileFS(w, r, h.files, name)
 			return
 		}
 	}
 	if h.index == nil {
 		http.Error(w, "index.html is not embedded", http.StatusNotFound)
+		return
+	}
+	etag := h.etags["index.html"]
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
