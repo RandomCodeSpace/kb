@@ -29,7 +29,7 @@ const (
 )
 
 const projectFlagName = "p"
-const projectFlagUsage = "project for this task (required on add)"
+const projectFlagUsage = "project name: required on add, filter on list, move on update"
 
 // ErrNoProject is the refusal every mandatory-project path shares. The project
 // is always spelled on the command: there is no ambient default to fall back
@@ -197,12 +197,27 @@ func BackfillProjects(st ProjectBackfiller, user string) (int, error) {
 
 // --- kb project ---
 
-const projectUsage = `usage: kb project list
+const projectUsage = `usage: kb project <command> [flags]
 
-  kb project list         list every project on the board with task counts
+  kb project create <name>  create an empty project; safe to repeat
+  kb project list           list saved projects with task counts, including empty ones
 
-A task's project is always named on the command that creates it: kb add
--p <name>. There is no stored default and no environment override.
+Names are case-sensitive, cannot contain whitespace or "::", and cannot
+start with '#'. Surrounding whitespace is trimmed.
+
+Examples:
+  kb project create website --json
+  kb add "Build landing page" -p website --json
+  kb list -p website --json
+  kb project list --json
+
+create saves a project label without creating a task or choosing a default.
+Existing projects are left unchanged. add -p also creates a project implicitly.
+Always pass -p <name> on add; there is no stored or environment default.
+Projects remain in the CLI list after their last task is removed.
+The terminal and web project lists show projects once they contain tasks.
+
+Use kb help project create or kb help project list for flags and JSON output.
 `
 
 func (a *app) cmdProject(args []string) int {
@@ -212,6 +227,8 @@ func (a *app) cmdProject(args []string) int {
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
+	case "create":
+		return a.cmdProjectCreate(rest)
 	case "list":
 		return a.cmdProjectList(rest)
 	case "help", "-h", "--help":
@@ -220,6 +237,34 @@ func (a *app) cmdProject(args []string) int {
 	}
 	fmt.Fprintf(a.stderr, "kb: unknown project subcommand %q\n\n%s", sub, projectUsage)
 	return 2
+}
+
+func (a *app) cmdProjectCreate(args []string) int {
+	fs, data := a.newFlagSet("project create")
+	jsonF := fs.Bool("json", false, "print an object with the project name as JSON")
+	pos, err := parseInterleaved(fs, args)
+	if code, done := a.parseResult(err, fs); done {
+		return code
+	}
+	if len(pos) != 1 {
+		return a.usageErr(errors.New("project create needs exactly one <name> argument; usage: kb project create <name> [--data dir] [--json]"))
+	}
+	name, err := ValidateProjectName(pos[0])
+	if err != nil {
+		return a.usageErr(err)
+	}
+	return a.withLocal(*data, func(be *localBackend) error {
+		if err := be.st.EnsureLabel(be.user, projectLabel(name)); err != nil {
+			return err
+		}
+		if *jsonF {
+			return writeSingleJSON(a.stdout, struct {
+				Project string `json:"project"`
+			}{Project: name})
+		}
+		_, err := fmt.Fprintf(a.stdout, "project %s is ready\n", name)
+		return err
+	})
 }
 
 // projectCountJSON is one row of kb project list --json.
@@ -232,7 +277,7 @@ func (a *app) cmdProjectList(args []string) int {
 	fs, data := a.newFlagSet("project list")
 	jsonF := fs.Bool("json", false, "print projects as JSON")
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 0 {
@@ -243,7 +288,11 @@ func (a *app) cmdProjectList(args []string) int {
 		if err != nil {
 			return err
 		}
-		rows := projectCounts(items)
+		labels, err := be.st.Labels(be.user)
+		if err != nil {
+			return err
+		}
+		rows := projectCounts(items, labels...)
 		if *jsonF {
 			return writeSingleJSON(a.stdout, rows)
 		}
@@ -255,8 +304,12 @@ func (a *app) cmdProjectList(args []string) int {
 // projectCounts tallies tasks per project name, cancelled ones included. A
 // task carrying several project labels — only possible on a board a foreign
 // writer touched — counts once per label.
-func projectCounts(items []item) []projectCountJSON {
+func projectCounts(items []item, labels ...string) []projectCountJSON {
 	counts := map[string]int{}
+	registered, _ := SplitProjectTags(labels)
+	for _, name := range registered {
+		counts[name] = 0
+	}
 	for _, it := range items {
 		named, _ := SplitProjectTags(it.task.Tags)
 		for _, name := range named {

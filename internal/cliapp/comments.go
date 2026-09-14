@@ -46,6 +46,8 @@ func (a *app) cmdComment(args []string) int {
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
+	case "help", "-h", "--help":
+		return a.cmdHelp([]string{"comment"})
 	case "add":
 		return a.cmdCommentAdd(rest)
 	case "list":
@@ -61,7 +63,7 @@ func (a *app) cmdCommentAdd(args []string) int {
 	author := fs.String("author", "", "comment author (defaults to the board namespace)")
 	jsonF := fs.Bool("json", false, "print the comment as JSON")
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 2 {
@@ -88,7 +90,7 @@ func (a *app) cmdCommentList(args []string) int {
 	fs, data := a.newFlagSet("comment list")
 	jsonF := fs.Bool("json", false, "print comments as JSON")
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 1 {
@@ -122,7 +124,7 @@ func (a *app) cmdCommentRm(args []string) int {
 	yes := fs.Bool("yes", false, "confirm deletion")
 	jsonF := fs.Bool("json", false, "print the deleted comment as JSON")
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 1 {

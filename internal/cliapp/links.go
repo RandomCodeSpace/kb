@@ -11,7 +11,7 @@ func (a *app) cmdLink(args []string) int {
 	fs, data := a.newFlagSet("link")
 	jsonF := fs.Bool("json", false, "print both linked tasks as JSON")
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 3 {
@@ -46,7 +46,7 @@ func (a *app) cmdUnlink(args []string) int {
 	fs, data := a.newFlagSet("unlink")
 	jsonF := fs.Bool("json", false, "print the removal result as JSON")
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 2 {

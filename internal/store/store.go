@@ -1195,6 +1195,21 @@ func (s *Store) FilterTasks(user string, f TaskFilter) ([]board.Task, error) {
 	return queryTasks(s.db, query, args...)
 }
 
+// EnsureLabel saves a label without requiring a task. Repeating the call leaves
+// an existing label and its recency unchanged.
+func (s *Store) EnsureLabel(user, label string) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		var exists bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM labels WHERE user = ? AND label = ?)`, user, label).Scan(&exists); err != nil {
+			return fmt.Errorf("store: find label: %w", err)
+		}
+		if exists {
+			return nil
+		}
+		return s.upsertLabels(tx, user, []string{label})
+	})
+}
+
 // Labels returns the user's distinct labels, most recently used first.
 func (s *Store) Labels(user string) ([]string, error) {
 	rows, err := s.db.Query(`SELECT label FROM labels WHERE user = ? ORDER BY last_used DESC, label`, user)

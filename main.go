@@ -28,6 +28,15 @@ commands:
   version    print the kb version
   web        open the local board in a browser (binds 127.0.0.1 only)
   help       task CLI reference
+
+quick start:
+  kb project create website --json
+  kb add "Build landing page" -p website --json
+  kb list -p website --json
+
+Use kb help <command> for task command arguments, flags, and examples.
+Use kb help project create to create a project without creating a task.
+Other modes accept --help, for example kb web --help.
 `
 
 func main() {

@@ -298,6 +298,64 @@ func TestProjectListCounts(t *testing.T) {
 	}
 }
 
+func TestProjectCreatePersistsWithoutTasks(t *testing.T) {
+	dir := noProjectEnv(t)
+	for range 2 {
+		out, stderr, code := runCmd(t, "project", "create", " web ", "--data", dir, "--json")
+		var result struct {
+			Project string `json:"project"`
+		}
+		err := json.Unmarshal([]byte(out), &result)
+		if code != 0 || stderr != "" || err != nil || result.Project != "web" {
+			t.Fatalf("create: code=%d out=%q stderr=%q", code, out, stderr)
+		}
+	}
+	if tasks := listJSON(t, "--data", dir); len(tasks) != 0 {
+		t.Fatalf("project creation wrote tasks: %+v", tasks)
+	}
+	assertCount := func(want int) {
+		t.Helper()
+		out, stderr, code := runCmd(t, "project", "list", "--data", dir, "--json")
+		var rows []projectCountJSON
+		if err := json.Unmarshal([]byte(out), &rows); code != 0 || err != nil || len(rows) != 1 || rows[0] != (projectCountJSON{Project: "web", Tasks: want}) {
+			t.Fatalf("project list: code=%d out=%q stderr=%q err=%v", code, out, stderr, err)
+		}
+	}
+	assertCount(0)
+	for _, args := range [][]string{
+		{"add", "First task", "-p", "web", "--tag", "ordinary"},
+		{"project", "create", "web"},
+	} {
+		if _, stderr, code := runCmd(t, append(args, "--data", dir)...); code != 0 {
+			t.Fatalf("%v: code=%d stderr=%q", args, code, stderr)
+		}
+	}
+	assertCount(1)
+	if tasks := listJSON(t, "--data", dir); len(tasks) != 1 || tasks[0].Seq != 1 || tasks[0].Title != "First task" {
+		t.Fatalf("creation changed task identity or contents: %+v", tasks)
+	}
+	if _, stderr, code := runCmd(t, "rm", "1", "--yes", "--data", dir); code != 0 {
+		t.Fatalf("rm: code=%d stderr=%q", code, stderr)
+	}
+	assertCount(0)
+}
+
+func TestProjectCreateRejectsInvalidInputBeforeOpeningStore(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "unused")
+	for _, args := range [][]string{
+		{}, {""}, {"bad name"}, {"#bad"}, {"a::b"}, {"one", "two"}, {"web", "--unknown"},
+	} {
+		cmd := append([]string{"project", "create", "--data", dir}, args...)
+		var out, stderr bytes.Buffer
+		if code := Run(cmd, &out, &stderr); code != 2 || out.Len() != 0 {
+			t.Errorf("%v: code=%d out=%q stderr=%q", args, code, out.String(), stderr.String())
+		}
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("invalid creation opened storage: %v", err)
+	}
+}
+
 func TestProjectNameValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name, want string

@@ -227,13 +227,26 @@ use the same data as the terminal and browser views.
 <summary>Command-line example</summary>
 
 ```sh
+kb project create personal --json
 kb add "Plan the autumn road trip" -p personal --prio high --tag travel
 kb list -p personal
 kb move 1 doing
 kb done 1
 ```
 
-Run `kb help` for the complete command reference.
+Create an empty project with `kb project create <name>`. Repeating the command
+leaves the existing project unchanged. `kb project list` includes empty projects
+and keeps projects after their last task is removed. The terminal and browser
+project lists show a project once it contains tasks.
+
+Project names are case-sensitive and cannot contain whitespace or `::`, or start
+with `#`. Surrounding whitespace is trimmed. Every `kb add` needs `-p <name>`;
+it can also create the project implicitly. There is no default project.
+
+Run `kb help` for the complete command reference. Use `kb help project create`,
+`kb help add`, or `kb add --help` for command-specific arguments, supported flags,
+examples, and JSON output. Flags go after the command and can appear before or
+after positional arguments. Help does not open the database.
 
 </details>
 
@@ -262,6 +275,7 @@ strings.
 | `comment add`, `comment rm` | One comment |
 | `comment list` | Array of comments |
 | `project list` | Array of objects with `project` and `tasks` |
+| `project create` | Object with `project`; the same result if the project already exists |
 | `users` | Array of objects with `user` and `tasks` |
 | `backup` | Object with absolute destination `path` and `requiresExternalSecret` boolean |
 | `version` | Object with `version` and optional `revision` and `modified` |

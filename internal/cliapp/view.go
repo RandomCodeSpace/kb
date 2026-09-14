@@ -25,7 +25,7 @@ func (a *app) cmdView(args []string) int {
 	fs, data := a.newFlagSet("view")
 	jsonF := fs.Bool("json", false, "print the task and its comments as JSON")
 	pos, err := parseInterleaved(fs, args)
-	if code, done := a.parseResult(err); done {
+	if code, done := a.parseResult(err, fs); done {
 		return code
 	}
 	if len(pos) != 1 {
