@@ -35,7 +35,7 @@ test('load board, create and move a task, and update a second browser over SSE',
   await todo.click();
   const detail = page.locator('#detail-dialog');
   const moved = page.waitForResponse(response => response.url().endsWith('/move') && response.request().method() === 'POST');
-  await detail.getByRole('group', { name: 'Status', exact: true }).getByRole('button', { name: 'Doing', exact: true }).click();
+  await detail.getByRole('radiogroup', { name: 'Status', exact: true }).getByRole('radio', { name: 'Doing', exact: true }).click();
   expect((await moved).ok()).toBeTruthy();
   await expect(observer.locator('.col[data-status="doing"] .card').filter({ hasText: 'Browser smoke task' })).toBeVisible({ timeout: 4000 });
   await expect(observer.locator('.col[data-status="todo"] .card')).toHaveCount(0);

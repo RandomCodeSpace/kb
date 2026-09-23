@@ -378,9 +378,12 @@ jobs:
         with:
           node-version: 24.15.0
 
-      - name: Check committed stylesheet
+      - name: Lint UI and check committed assets
         if: needs.impact.outputs.web_smoke == 'true'
-        run: sh scripts/build-web-css.sh --check
+        run: |
+          npm ci --prefix internal/webui --ignore-scripts
+          npm run lint --prefix internal/webui
+          npm run build:check --prefix internal/webui
 
       - name: Test browser task flows
         if: needs.impact.outputs.web_smoke == 'true'

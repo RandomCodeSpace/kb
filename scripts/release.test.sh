@@ -206,6 +206,7 @@ cat >"$fake_bin/npm" <<'FAKE_NPM'
 set -euo pipefail
 printf '%s\n' "npm $*" >>"$FAKE_GO_LOG"
 [[ ${1:-} != test ]] || exit "${FAKE_BROWSER_STATUS:-0}"
+[[ "$*" != 'run build:check --prefix internal/webui' ]] || exit "${FAKE_BUNDLE_STATUS:-0}"
 FAKE_NPM
 cat >"$fake_bin/npx" <<'FAKE_NPX'
 #!/usr/bin/env bash
@@ -239,12 +240,6 @@ cat >"$source_repo/scripts/check-go-coverage.sh" <<'FAKE_COVERAGE'
 printf 'selected owner coverage ran\n'
 exit "${FAKE_COVERAGE_STATUS:-0}"
 FAKE_COVERAGE
-cat >"$source_repo/scripts/build-web-css.sh" <<'FAKE_CSS'
-#!/usr/bin/env sh
-[ "$1" = --check ] || exit 64
-printf 'stylesheet check ran\n'
-exit "${FAKE_CSS_STATUS:-0}"
-FAKE_CSS
 cp "$repo_root/scripts/ci/impact.sh" "$source_repo/scripts/ci/impact.sh"
 printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.3.md"
 printf '# Notes\n\nVerified release.\n' >"$source_repo/docs/releases/v1.2.4.md"
@@ -368,14 +363,15 @@ git -C "$source_repo" show-ref --verify --quiet refs/tags/v1.2.3 && fail 'covera
 [[ ! -e $test_root/gh.log ]] || fail 'coverage failure invoked gh'
 
 FAKE_WEB_SMOKE=1 release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/browser.out"
-assert_contains 'stylesheet check ran' "$test_root/browser.out"
+assert_contains 'npm ci --prefix internal/webui --ignore-scripts' "$test_root/go.log"
+assert_contains 'npm run build:check --prefix internal/webui' "$test_root/go.log"
 assert_contains 'npm ci --prefix internal/webui/e2e' "$test_root/go.log"
 assert_contains 'npx playwright install chromium' "$test_root/go.log"
 assert_contains 'npm test' "$test_root/go.log"
-for gate in css browser; do
+for gate in bundle browser; do
   gate_status=0
-  if [[ $gate == css ]]; then
-    FAKE_WEB_SMOKE=1 FAKE_CSS_STATUS=8 release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/web-failure.out" 2>&1 || gate_status=$?
+  if [[ $gate == bundle ]]; then
+    FAKE_WEB_SMOKE=1 FAKE_BUNDLE_STATUS=8 release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/web-failure.out" 2>&1 || gate_status=$?
   else
     FAKE_WEB_SMOKE=1 FAKE_BROWSER_STATUS=8 release v1.2.3 docs/releases/v1.2.3.md --dry-run >"$test_root/web-failure.out" 2>&1 || gate_status=$?
   fi

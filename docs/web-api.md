@@ -132,9 +132,16 @@ Embedded from `internal/webui/static/` via `embed.FS`: `index.html`, `app.css`,
 `app.js`, plus the vendored `marked.min.js` and `purify.min.js` (see
 `static/VENDOR.md`). `app.css` is generated: edit
 `internal/webui/tailwind/app.css` and run `sh scripts/build-web-css.sh`
-(`--check` verifies the committed output). No bundler, runtime script CDN, or
-external font request. Fonts use locally installed Inter / JetBrains Mono
-when available, then the existing system font fallbacks. Served at `/` with
+(`--check` verifies the committed output). `app.js` is generated too: the
+board is a React application built from `internal/webui/src/` with shadcn/ui
+components (see `internal/webui/README.md`). After changing it, run `npm ci`,
+`npm run lint`, and `npm run build` in `internal/webui`; `npm run build:check`
+verifies both generated assets. Dependency license notices are served as
+`app.LICENSE.txt`. Go builds use the committed assets and do not require
+Node.js. There is no runtime script CDN or external font request.
+Inter and JetBrains Mono are self-hosted: the latin and
+latin-ext subsets ship as top-level `.woff2` files beside `app.css` (see
+`static/VENDOR.md`); other scripts fall back to the system fonts. Served at `/` with
 `Content-Type` by extension. Unknown paths under `/` fall back to
 `index.html`; `/api/*` never falls back.
 

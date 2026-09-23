@@ -56,6 +56,12 @@
 # Web UI browser smoke artifacts.
 /internal/webui/e2e/node_modules/
 /internal/webui/e2e/test-results/
+/internal/webui/node_modules/
+
+# Local design-agent context (impeccable skill).
+/PRODUCT.md
+/DESIGN.md
+/.impeccable/
 
 !/docs/releases/v1.12.0.md
 !/docs/releases/v1.12.1.md
