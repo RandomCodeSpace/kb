@@ -1,1 +1,4 @@
 *.golden -text
+# Generated web bundle and its license notices: whitespace comes from bundled sources.
+internal/webui/static/app.js -whitespace
+internal/webui/static/app.LICENSE.txt -whitespace

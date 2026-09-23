@@ -301,8 +301,11 @@ else
 fi
 
 if [[ $web_smoke == true ]]; then
-  sh scripts/build-web-css.sh --check
   command -v npm >/dev/null 2>&1 || die 'required command not found: npm'
+  # The binary embeds the committed bundle, so go install needs no Node.
+  # Fail when app.js, app.css, or the fonts differ from a fresh build.
+  npm ci --prefix internal/webui --ignore-scripts
+  npm run build:check --prefix internal/webui
   npm ci --prefix internal/webui/e2e
   (
     cd internal/webui/e2e
